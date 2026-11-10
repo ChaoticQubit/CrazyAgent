@@ -1,4 +1,6 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, caused, failure};
+use super::{
+    BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, caused, failure, uncaused,
+};
 use crazyagent::engine::owner::{OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::master_session::{
     MasterCursor, MasterOwnerAction, MasterSessionView, MasterTurnPage,
@@ -41,6 +43,14 @@ pub struct MasterTurns {
     pub revision: String,
     pub config_id: String,
     pub page: MasterTurnPage,
+}
+
+/// The refusal of a default master open: an engine version mismatch when one of the open's
+/// reads hit it, so the page says restart, else `master_open_unavailable`, which the page
+/// answers with its pick-a-pool prompt (PROTO-SKEW-MASTER-OPEN). Input: the reason
+/// `default_master_open` gave. Output: the error.
+pub(super) fn open_failure(reason: &str) -> BridgeError {
+    uncaused("master_open_unavailable", reason)
 }
 
 impl NativeBridge {
@@ -188,7 +198,7 @@ impl NativeBridge {
         let project_id = self.master_project(ticket)?;
         let action = crazyagent::tui::default_master_open(self.controller()?, &project_id)
             .await
-            .map_err(|_| failure("master_open_unavailable"))?;
+            .map_err(|reason| open_failure(&reason))?;
         self.apply_master(ticket, action, generation).await
     }
 
@@ -392,7 +402,7 @@ impl NativeBridge {
         let project_id = self.master_project(ticket)?;
         let opened = crazyagent::tui::default_master_open(self.controller()?, &project_id)
             .await
-            .map_err(|_| failure("master_open_unavailable"))?;
+            .map_err(|reason| open_failure(&reason))?;
         let MasterOwnerAction::Open {
             project_id,
             expected_config_id,

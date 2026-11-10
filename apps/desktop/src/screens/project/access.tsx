@@ -1,4 +1,4 @@
-import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ToolCacheScope } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolCacheScope } from "../../api-projects";
 import { Switch } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -15,8 +15,8 @@ export const FULL_ACCESS_IDE = "The IDE runs with your user's permissions. The p
  * but not what a Full access agent started outside its terminal. */
 export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
-/** What saving a new level, hooks or network choice does to the project's open IDE, the same in the TUI. */
-export const POLICY_RESTARTS_IDE = "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
+/** What saving a new level, hooks, agent folders or network choice does to the project's open IDE, the same in the TUI. */
+export const POLICY_RESTARTS_IDE = "Changing the level, the IDE hooks switch or the agent folders choice below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
 
 /** What turning a toolchain off does to work already running: the engine stops each agent, research job and master turn its sandbox granted it to. */
 export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
@@ -49,6 +49,20 @@ export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: stri
 /** Why the network choice has no effect under Full access. */
 export const NETWORK_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so this choice does not apply.";
 
+/** The agent folders choice's name, the same in the TUI. */
+export const IDE_AGENT_FILES = "IDE changes in agent folders";
+
+/** What each agent folders choice lets the IDE, its terminals and its tasks do in agent folders
+ * at Sandboxed and Own branch (DEC-124), the same in the TUI. */
+export const IDE_AGENT_FILES_CHOICES: { choice: IdeAgentFiles; label: string; help: string }[] = [
+  { choice: "allow_all", label: "Allow all changes", help: "The IDE, its terminals and its tasks may edit, delete and rename files in agent folders." },
+  { choice: "no_delete_or_rename", label: "No delete or rename", help: "Files in agent folders can be edited, Edit anyway included, but not deleted or renamed. Tools that delete as they go, such as cargo clean, fail there." },
+  { choice: "read_only", label: "Read only", help: "Nothing in the IDE may write in agent folders, Edit anyway included." },
+];
+
+/** Why the agent folders choice has no effect under Full access, the same in the TUI. */
+export const AGENT_FILES_IGNORED_UNDER_FULL = "Full access runs the IDE without a sandbox, so this choice does not apply.";
+
 /** Names a network choice as the owner sees it. Input: the choice. Output: the label. */
 export function networkLabel(network: AgentNetwork): string {
   return NETWORK_CHOICES.find((choice) => choice.network === network)?.label ?? network;
@@ -69,10 +83,11 @@ export const TOOL_CACHE_IGNORED_UNDER_FULL = "Full access runs agents without a 
 
 /** The policy Save sends: the level, the network choice, a choice only for each toolchain
  * whose switch differs from the project's own use, so the others keep following the project,
- * the IDE hooks switch and the tool cache choice. Inputs: the engine's view, the chosen level
- * and network, one switch per view toolchain, the IDE hooks switch and the tool cache choice,
- * the saved one when left out. Output: the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, toolCache: ToolCacheScope = view.tool_cache): AgentPolicy {
+ * the IDE hooks switch, the agent folders choice and the tool cache choice. Inputs: the
+ * engine's view, the chosen level and network, one switch per view toolchain, the IDE hooks
+ * switch, the agent folders choice and the tool cache choice, the saved one when left out.
+ * Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, ideAgentFiles: IdeAgentFiles, toolCache: ToolCacheScope = view.tool_cache): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
   return {
     access,
@@ -80,6 +95,7 @@ export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNe
     toolchains: view.toolchains.flatMap((row, index) => row.used === allowed[index] ? [] : [{ toolchain: row.toolchain, allowed: allowed[index] }]),
     ide_git_hooks: ideGitHooks,
     tool_cache: toolCache,
+    ide_agent_files: ideAgentFiles,
   };
 }
 
@@ -169,6 +185,27 @@ export function ToolCacheChoices({ name, value, access, onChange }: {
     </div>
     <p className="pj-help">{TOOL_CACHE_CLEAN}</p>
     {access === "full" && <p className="pj-note" role="note">{TOOL_CACHE_IGNORED_UNDER_FULL}</p>}
+  </fieldset>;
+}
+
+/** The agent folders choice as radio cards, with a note when Full access makes it moot. Inputs:
+ * the radio group name, the chosen choice, the chosen access level and the change handler.
+ * Output: the fieldset. */
+export function IdeAgentFilesChoices({ name, value, access, onChange }: {
+  name: string; value: IdeAgentFiles; access: AgentAccess; onChange: (choice: IdeAgentFiles) => void;
+}) {
+  return <fieldset className="pj-field">
+    <legend>{IDE_AGENT_FILES}</legend>
+    <div className="pj-radio-cards" role="radiogroup" aria-label={IDE_AGENT_FILES}>
+      {IDE_AGENT_FILES_CHOICES.map((choice) => <label className={`pj-radio-card ${value === choice.choice ? "selected" : ""}`} key={choice.choice}>
+        <input type="radio" name={name} value={choice.choice} checked={value === choice.choice} onChange={() => onChange(choice.choice)} />
+        <span className="pj-radio-body">
+          <strong>{choice.label}</strong>
+          <span className="pj-secondary">{choice.help}</span>
+        </span>
+      </label>)}
+    </div>
+    {access === "full" && <p className="pj-note" role="note">{AGENT_FILES_IGNORED_UNDER_FULL}</p>}
   </fieldset>;
 }
 

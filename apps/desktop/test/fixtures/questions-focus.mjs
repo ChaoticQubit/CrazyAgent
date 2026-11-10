@@ -59,11 +59,12 @@ export async function openAnswer() {
   return document.activeElement === box;
 }
 
-/** Where the keyboard is. Output: the focused element's tag name, and its words when it is a row. */
+/** Where the keyboard is. Output: the focused element's tag name, its words when it is a row
+ * and its words when it is a button. */
 export function where() {
   const active = document.activeElement;
   const tag = active.tagName.toLowerCase();
-  return { tag, row: tag === "li" ? active.textContent : null };
+  return { tag, row: tag === "li" ? active.textContent : null, label: tag === "button" ? active.textContent.trim() : null };
 }
 
 /** The answer box's text. Output: the text. */

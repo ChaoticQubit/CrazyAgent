@@ -305,7 +305,7 @@ async function teamSave(status: Pick<TeamStatus, "settings_version">, send: (ver
  * team again. Inputs: the project id, the team status and a reload. Output: the row. */
 export function OnSwitchSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const { busy, note, run } = useChange(reload);
-  const [shown, hold] = useHeld<SwitchMode>(switchMode(status));
+  const [shown, hold] = useHeld<SwitchMode>(switchMode(status), Object.is, status);
 
   const chooseSwitch = (mode: SwitchMode) => run(() => teamSave(status, (version) => setOnHarnessSwitch(projectId, mode, version), "the On harness switch setting"), () => hold(mode));
 
@@ -330,7 +330,7 @@ function masterIdleWords(status: TeamStatus): string {
  * id, the team status and a reload. Output: the row. */
 export function MasterIdleSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const { busy, note, change } = useChange(reload);
-  const [shown, hold] = useHeld<MasterIdleStop>(status.master_idle_stop ?? "fifteen_minutes");
+  const [shown, hold] = useHeld<MasterIdleStop>(status.master_idle_stop ?? "fifteen_minutes", Object.is, status);
 
   const choose = (choice: MasterIdleStop) => change(() => setMasterIdleStop(projectId, choice), "the master idle stop setting", () => hold(choice));
 
@@ -349,7 +349,7 @@ export function MasterIdleSetting({ projectId, status, reload }: { projectId: st
  * terminal. Output: the row. */
 export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: { projectId: string; status: TeamStatus; reload: () => void; liveHarness: boolean }) {
   const { busy, note, change } = useChange(reload);
-  const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on");
+  const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on", Object.is, status);
 
   const choose = (on: boolean) => change(() => setMasterLiveTerminal(projectId, on), "the Live terminal setting", () => hold(on ? "on" : "off"));
 
@@ -365,7 +365,7 @@ export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: 
  * master's settings. Inputs: the project id, the team status and a reload. Output: the row. */
 export function ReaskSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const { busy, note, change } = useChange(reload);
-  const [reask, hold] = useHeld<"off" | "on">(status.reask_empty_reply === false ? "off" : "on");
+  const [reask, hold] = useHeld<"off" | "on">(status.reask_empty_reply === false ? "off" : "on", Object.is, status);
 
   const chooseReask = (choice: "off" | "on") => change(() => setReaskEmptyReply(projectId, choice === "on"), "the empty reply setting", () => hold(choice));
 
@@ -498,24 +498,24 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [find, setFind] = useState("");
   const { busy, note, setNote, run, change } = useChange(reload);
   const saved: Limits = { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
-  const [checked, holdWarm] = useHeld(status.keep_warm);
-  const [shown, holdLimits] = useHeld(saved, sameLimits);
-  const [listed, holdFinished] = useHeld<"hide" | "show">(status.show_finished === true ? "show" : "hide");
-  const [depth, holdDepth] = useHeld(status.sub_agent_depth ?? DEPTH_DEFAULT);
-  const [lands, holdLands] = useHeld<ChildLanding>(status.child_landing ?? "lead");
-  const [branchMode, holdBranchMode] = useHeld<BranchMode>(status.agent_branches ?? "named");
-  const [spread, holdSpread] = useHeld<"off" | "on">(status.spread_accounts === true ? "on" : "off");
-  const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off");
-  const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits");
-  const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on");
-  const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off");
-  const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT);
-  const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses));
-  const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates));
-  const [tokenBudget, holdTokenBudget] = useHeld(capValue(status.token_budget));
-  const [backgroundShown, holdBackground] = useHeld(backgroundChoice(status), sameBackground);
-  const [masterBranchSaved, holdMasterBranch] = useHeld(status.master_branch ?? null);
-  const [landOnSaved, holdLandOn] = useHeld(status.land_on ?? null);
+  const [checked, holdWarm] = useHeld(status.keep_warm, Object.is, status);
+  const [shown, holdLimits] = useHeld(saved, sameLimits, status);
+  const [listed, holdFinished] = useHeld<"hide" | "show">(status.show_finished === true ? "show" : "hide", Object.is, status);
+  const [depth, holdDepth] = useHeld(status.sub_agent_depth ?? DEPTH_DEFAULT, Object.is, status);
+  const [lands, holdLands] = useHeld<ChildLanding>(status.child_landing ?? "lead", Object.is, status);
+  const [branchMode, holdBranchMode] = useHeld<BranchMode>(status.agent_branches ?? "named", Object.is, status);
+  const [spread, holdSpread] = useHeld<"off" | "on">(status.spread_accounts === true ? "on" : "off", Object.is, status);
+  const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off", Object.is, status);
+  const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits", Object.is, status);
+  const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on", Object.is, status);
+  const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off", Object.is, status);
+  const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT, Object.is, status);
+  const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses), Object.is, status);
+  const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates), Object.is, status);
+  const [tokenBudget, holdTokenBudget] = useHeld(capValue(status.token_budget), Object.is, status);
+  const [backgroundShown, holdBackground] = useHeld(backgroundChoice(status), sameBackground, status);
+  const [masterBranchSaved, holdMasterBranch] = useHeld(status.master_branch ?? null, Object.is, status);
+  const [landOnSaved, holdLandOn] = useHeld(status.land_on ?? null, Object.is, status);
   const graceTyped = backgroundShown.mode === "grace" ? graceText ?? String(backgroundShown.secs) : null;
   const words = findWords(find);
   const kept = matchingGroups(find);

@@ -91,3 +91,8 @@ export async function seen(command, times, ms) {
 export function stale() {
   return document.querySelector(".tw-stale")?.textContent ?? null;
 }
+
+/** The note the Agents toolbar shows under its row, or null. Output: the text. */
+export function note() {
+  return document.querySelector("[role=alert]")?.textContent ?? null;
+}

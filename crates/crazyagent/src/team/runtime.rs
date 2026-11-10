@@ -10335,12 +10335,20 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
+/// The owner's line for a Codex launch refused because skills an earlier run locked into its
+/// home could not be removed (CTX-M1 r2 I3).
+const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
+     its Codex home, so CrazyAgent could not remove them and Codex would have loaded them";
+
 /// The owner's line for an agent whose harness could not start: a command that would hold
-/// an MCP secret names its server and secret, any other refusal names its plain code.
-/// Input: the launch error. Output: the line.
+/// an MCP secret names its server and secret, skills left in a Codex home say so, and any
+/// other refusal names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
+        None if problem.0 == crate::launch_context::SKILLS_KEPT => {
+            with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
+        }
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }
@@ -10965,15 +10973,30 @@ fn expose_graph(root: &Path, worktree: &Path, hidden: &[PathBuf]) {
 
 /// Whether git keeps the graph folder out of a worktree's changes, by one of its usual
 /// spellings: the last line about it in the worktree's `.gitignore` decides, and with none
-/// there the repository's `info/exclude` does, a clone's own where `.git` is a folder and
-/// the project repository's, which the engine writes, for a linked worktree. Takes the
-/// project folder and the worktree. Returns the answer; an unreadable file names nothing.
+/// there the repository's `info/exclude` does: a clone's own where `.git` is a folder, and
+/// for a linked worktree the one of the nearest folder above it in the project whose `.git`
+/// is a folder, so an own-clone lead's teammates follow the clone's file (DEC123B-L2), else
+/// the project repository's, which the engine writes. Takes the project folder and the
+/// worktree. Returns the answer; an unreadable file names nothing.
 #[cfg(unix)]
 fn ignores_graph(root: &Path, worktree: &Path) -> bool {
     let git = worktree.join(".git");
+    let repository = |folder: &&Path| {
+        std::fs::symlink_metadata(folder.join(".git")).is_ok_and(|metadata| metadata.is_dir())
+    };
     let exclude = match std::fs::symlink_metadata(&git) {
         Ok(metadata) if metadata.is_dir() => Some(git.join("info").join("exclude")),
-        Ok(metadata) if metadata.is_file() => Some(root.join(".git").join("info").join("exclude")),
+        Ok(metadata) if metadata.is_file() => Some(
+            worktree
+                .ancestors()
+                .skip(1)
+                .take_while(|folder| folder.starts_with(root))
+                .find(repository)
+                .unwrap_or(root)
+                .join(".git")
+                .join("info")
+                .join("exclude"),
+        ),
         _ => None,
     };
     match plain_text(&worktree.join(".gitignore"))

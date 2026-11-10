@@ -282,3 +282,12 @@ test("a team agent or task that closed on a launch code shows the engine line wi
   assert.match(runtime, /with_code\("The sub-agent stopped unexpectedly", cause\)/, "and the code a task stopped on");
   assert.doesNotMatch(runtime, /"The agent could not start \(\{\}\)"/, "and never quotes raw launch text");
 });
+
+test("an agent start refused for skills left in its Codex home says what happened", () => {
+  const sentence = client.errorMessage({ code: "launch_context_skills_kept" });
+  assert.equal(sentence, "The agent could not start: an earlier run locked skills into its Codex home, so CrazyAgent could not remove them and Codex would have loaded them.");
+  const runtime = production(join(ENGINE, "team/runtime.rs"));
+  const worded = runtime.match(/const SKILLS_KEPT_PROBLEM: &str = "((?:[^"\\]|\\\n)*)";/);
+  assert.ok(worded, "the team start line words the refusal");
+  assert.equal(sentence, `${worded[1].replace(/\\\n\s*/g, "")}.`, "the desktop and the team panels give the same sentence");
+});

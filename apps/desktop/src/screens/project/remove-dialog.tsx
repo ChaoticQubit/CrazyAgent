@@ -1,8 +1,22 @@
+import type { ReactNode } from "react";
 import type { RemovalPreview } from "../../api-projects";
 import { Button } from "../../ui";
 import { displayText } from "../conversation";
 
 export type RemoveChoice = "dashboard" | "everything";
+
+/** A project name cut to one line with an ellipsis, its whole text in the hover and the page, so
+ * a name up to the 255-byte bound cannot push the dialog's buttons out of view. Input: the name
+ * as shown. Output: the span. */
+function ClippedName({ name }: { name: string }) {
+  return <span className="pj-remove-clip" title={name}>{name}</span>;
+}
+
+/** The remove dialog's title, the project name cut to one line inside it. Input: the name as
+ * shown. Output: the title. */
+export function removeTitle(name: string): ReactNode {
+  return <>Remove <ClippedName name={name} /> from CrazyAgent?</>;
+}
 
 const LOSS_WORDS: Record<string, string> = {
   cleanup_worktree_dirty: "has uncommitted edits",
@@ -131,7 +145,7 @@ export function RemoveDialogView({ preview, choice, typed, pending, onChoice, on
         </li>)}</ul>
         : <p className="pj-secondary">No agent is running and no work is unlanded.</p>}
       <label className="pj-field">
-        <span className="pj-label pj-remove-name">Type {displayText(preview.name)} to confirm</span>
+        <span className="pj-label pj-remove-name">Type <span className="pj-mono">{displayText(preview.name)}</span> to confirm</span>
         <input className="pj-input" aria-label="Type the project name" value={typed} disabled={pending} autoComplete="off" spellCheck={false} onChange={(event) => onTyped(event.currentTarget.value)} />
       </label>
     </>}

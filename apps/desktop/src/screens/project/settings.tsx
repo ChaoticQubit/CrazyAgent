@@ -3,9 +3,9 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ProjectCatalog, RemovalPreview, StoredSetup, ToolCacheScope } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
-import { AccessLevels, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { AccessLevels, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -17,7 +17,7 @@ import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamVali
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
-import { RemoveDialogView, deleteReady } from "./remove-dialog";
+import { RemoveDialogView, deleteReady, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
 import { SessionContext, useHeld, useLoad } from "../../state";
@@ -181,7 +181,7 @@ export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | 
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState("");
   const status = data.team.result?.kind === "ok" ? data.team.result.value : null;
-  const [shown, hold] = useHeld<SwitchApply | null>(status === null ? null : applyMode(status));
+  const [shown, hold] = useHeld<SwitchApply | null>(status === null ? null : applyMode(status), Object.is, status);
   if (status === null) return null;
   const choose = async (mode: SwitchApply) => {
     const settled = hold(mode);
@@ -251,7 +251,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <p>Remove {displayText(data.name)} from CrazyAgent? {displayText(line)}</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
-    <Dialog open={confirming} title={`Remove ${displayText(data.name)} from CrazyAgent?`} onClose={() => setConfirming(false)} busy={busy} wide>
+    <Dialog open={confirming} title={removeTitle(displayText(data.name))} onClose={() => setConfirming(false)} busy={busy} wide>
       {preview === undefined
         ? <p className="pj-muted" role="status">Reading what removing would do...</p>
         : <>
@@ -522,6 +522,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [toolCache, setToolCache] = useState<ToolCacheScope>("shared");
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [ideGitHooks, setIdeGitHooks] = useState(false);
+  const [ideAgentFiles, setIdeAgentFiles] = useState<IdeAgentFiles>("allow_all");
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
@@ -533,6 +534,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     setToolCache(next.tool_cache);
     setAllowed(next.toolchains.map((row) => row.allowed));
     setIdeGitHooks(next.ide_git_hooks);
+    setIdeAgentFiles(next.ide_agent_files);
   }
   useEffect(() => {
     let live = true;
@@ -548,14 +550,14 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, toolCache));
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache));
     setBusy(false);
     if (saved.fresh) seed(saved.fresh);
     setNote(saved.note);
     if (saved.note === "") data.notify(accessSaved(access));
   }
 
-  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
@@ -568,6 +570,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
+    {view && <IdeAgentFilesChoices name="ps-agent-files" value={ideAgentFiles} access={access} onChange={setIdeAgentFiles} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
       onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>

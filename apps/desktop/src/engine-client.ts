@@ -321,6 +321,7 @@ export function errorMessage(error: unknown): string {
     agent_restart_limit: "This agent was restarted too many times. Start it again from its project.",
     agent_launch_failed: "The agent could not start. Check its harness and account, then restart it.",
     launch_secret_in_command: "The agent could not start: one of this project's MCP secrets is part of its launch command, so it cannot be kept hidden. Replace that secret in Plugins.",
+    launch_context_skills_kept: "The agent could not start: an earlier run locked skills into its Codex home, so CrazyAgent could not remove them and Codex would have loaded them.",
     agent_spec_invalid: "This agent's saved settings are unreadable. Start it again from its project.",
     agent_registry_unavailable: "CrazyAgent can't read its agent list. Restart CrazyAgent.",
     agent_root_unsafe: "CrazyAgent's state folder is not private. Restart CrazyAgent after fixing its permissions.",

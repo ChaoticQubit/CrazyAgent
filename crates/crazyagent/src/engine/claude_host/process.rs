@@ -3,7 +3,7 @@ use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::harnesses::leftovers::{LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -49,8 +49,7 @@ struct PendingInput {
 struct Process {
     child: Child,
     warden: Option<Warden>,
-    unconfined: bool,
-    token: LineageToken,
+    follower: Option<Follower>,
     group: Pid,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
@@ -162,13 +161,15 @@ pub(super) fn run(
     };
     assert!(child.id() > 1);
     group.store(child.id(), Ordering::Release);
+    let follower = sandbox
+        .is_unconfined()
+        .then(|| Follower::start(child.id(), Some(token)));
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,
         child,
         warden,
-        unconfined: sandbox.is_unconfined(),
-        token,
+        follower,
         profile: Some(profile),
         stdin: None,
         stdout: None,
@@ -540,13 +541,12 @@ impl Process {
 
     /// Ends the harness and everything it left in its group, then releases the account
     /// lease. At Full access no warden reaches processes that left the group, so the
-    /// harness's lineage is found before the kill and checked after it; while some still
-    /// run, the turn ends with their code and the lease stays held until they end or the
-    /// owner signs the account out. Takes nothing; records the run's last status.
+    /// harness's lineage, followed from its start, is taken before the kill and checked after
+    /// it; while some still run, the turn ends with their code and the lease stays held until
+    /// they end or the owner signs the account out. Takes nothing; records the run's last
+    /// status.
     fn cleanup(&mut self) {
-        let lineage = self
-            .unconfined
-            .then(|| Lineage::of(self.child.id(), Some(self.token.clone())));
+        let lineage = self.follower.take().map(Follower::stop);
         self.report.send_replace(Status {
             phase: Phase::Closing,
             fault: self.fault,

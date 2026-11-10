@@ -102,6 +102,10 @@ pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
 
+/// Why a sandbox that protects agent folders does not start on Linux or Windows: only
+/// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
+pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -808,6 +812,8 @@ pub struct ProjectSandbox {
     setup: Option<TeammatesSetup>,
     tool_cache: Option<(PathBuf, bool)>,
     lead_branch: Option<String>,
+    adds_worktrees: bool,
+    agent_files: Option<policy::AgentFilesRule>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -884,6 +890,8 @@ impl ProjectSandbox {
             setup: None,
             tool_cache: None,
             lead_branch: None,
+            adds_worktrees: false,
+            agent_files: None,
         })
     }
 
@@ -1051,6 +1059,16 @@ impl ProjectSandbox {
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
         Ok(self)
+    }
+
+    /// Lets git create a checkout's `.git` link in the project's worktrees folders and the
+    /// `gitdir` and `commondir` files of its admin folder, which no other profile may plant
+    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Only the engine's own worktree-add step installs it,
+    /// and its callers confine and reinstall the profile before any agent runs.
+    /// Output: the sandbox with that exemption.
+    pub(crate) fn adding_worktrees(mut self) -> Self {
+        self.adds_worktrees = true;
+        self
     }
 
     /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder
@@ -1433,6 +1451,15 @@ impl ProjectSandbox {
         }
         self.hidden.push(folder.to_path_buf());
         Ok(self)
+    }
+
+    /// Holds the project's agent folders choice in this sandbox (DEC-124): a Sandboxed IDE
+    /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
+    /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
+    /// changes. Input: the rule. Output: the sandbox.
+    pub fn protect_agent_files(mut self, rule: policy::AgentFilesRule) -> Self {
+        self.agent_files = Some(rule);
+        self
     }
 
     /// Keeps one file or folder inside a granted root out of the agent's reach, read and
@@ -1924,7 +1951,7 @@ impl ProjectSandbox {
         }
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (subpath \"{project}/.git/sequencer\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
@@ -2000,6 +2027,11 @@ impl ProjectSandbox {
         text.push_str(&teammates);
         let answers = self.answers_denies();
         text.push_str(&answers);
+        let agent_files = self
+            .agent_files
+            .map(|rule| rule.seatbelt(&self.project_root))
+            .unwrap_or_default();
+        text.push_str(&agent_files);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -2022,6 +2054,9 @@ impl ProjectSandbox {
         }
         if !answers.is_empty() {
             last.push(answers);
+        }
+        if !agent_files.is_empty() {
+            last.push(agent_files);
         }
         assert!(
             denies_follow_write_allows(&text, &last),
@@ -2101,7 +2136,10 @@ impl ProjectSandbox {
     /// No agent may move the project folder, the git worktrees folders or a worktree, which
     /// would carry protected files out of their denied paths and back. A worktree's `.git`
     /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
-    /// does, but never rewritten or removed, and no `config.worktree` may be written. No link
+    /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
+    /// teammates' setup), since the owner's `git worktree repair` would point a real
+    /// checkout at an admin folder planted with them; they are never rewritten or removed,
+    /// and no `config.worktree` may be written. No link
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
     /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
@@ -2119,8 +2157,13 @@ impl ProjectSandbox {
         let mut moves = format!(
             "(deny file-write-unlink\n  (literal \"{project}\")\n  (regex #\"^{pattern}/{git}/{worktrees}$\")\n  (regex #\"^{pattern}(/{state})?/{worktrees}$\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
         );
+        let create = if self.adds_worktrees || self.setup.is_some() {
+            ""
+        } else {
+            " file-write-create"
+        };
         let mut links = format!(
-            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
+            "(deny file-write-unlink file-write-data{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
             any_case("commondir"),
             any_case("gitdir")
         );
@@ -2164,8 +2207,10 @@ impl ProjectSandbox {
     /// writable working tree, which the owner's own unsandboxed git (its terminal or the
     /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
     /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
-    /// below a writable working tree, except that tree's own top-level `.git` and the
-    /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
+    /// below a writable working tree, except that tree's own top-level `.git` and, only in a
+    /// profile built by [`Self::adding_worktrees`], the engine's worktree links, which any
+    /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
+    /// The project's own `.git` and each worktree's own `.git` sit
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
     /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
     /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
@@ -2193,7 +2238,12 @@ impl ProjectSandbox {
         }
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
-        let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        let mut exempt = String::new();
+        if self.adds_worktrees {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))"
+            ));
+        }
         if let Some(clone) = &self.clone {
             exempt.push_str(&format!(
                 "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
@@ -2219,7 +2269,7 @@ impl ProjectSandbox {
             text.matches("(regex #\"^/").count()
                 == working.len()
                     + other.len()
-                    + 1
+                    + usize::from(self.adds_worktrees)
                     + usize::from(self.clone.is_some())
                     + usize::from(self.setup.is_some())
         );
@@ -2501,6 +2551,13 @@ impl InstalledSandbox {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if sandbox
+            .agent_files
+            .is_some_and(|rule| rule.choice != policy::IdeAgentFiles::AllowAll)
+        {
+            return Err(SandboxError::Unavailable(AGENT_FILES_NEED_SEATBELT.into()));
         }
         #[cfg(target_os = "windows")]
         {
@@ -2797,7 +2854,7 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
 /// only other letters that fold to ASCII; those two are spelled as groups, so each matches
 /// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
-fn any_case(text: &str) -> String {
+pub(crate) fn any_case(text: &str) -> String {
     regex_escape(text)
         .chars()
         .map(|character| {

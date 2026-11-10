@@ -167,7 +167,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     const access = draft.access ?? NEW_PROJECT_ACCESS;
     if (access !== "sandboxed") {
       const read = await loadAgentPolicy(id);
-      const saved = read.kind === "ok" ? await saveAgentPolicy(id, { access, network: "open", toolchains: [], ide_git_hooks: false }, read.value.version, nextGeneration()) : read;
+      const saved = read.kind === "ok" ? await saveAgentPolicy(id, { access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }, read.value.version, nextGeneration()) : read;
       const state = saved.kind === "ok" ? receiptState(saved.value) : null;
       if (state?.kind !== "applied") {
         const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";

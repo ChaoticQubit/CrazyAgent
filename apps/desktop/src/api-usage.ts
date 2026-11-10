@@ -15,6 +15,7 @@ export interface UsageRow {
   runs: number;
   last_ms: number;
   not_reported_by?: string | null;
+  project?: string | null;
 }
 
 export interface DayTokens {

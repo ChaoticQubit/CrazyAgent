@@ -2351,6 +2351,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
             },
             bench.generation,
         )

@@ -263,7 +263,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         catch_up_main: true,
     };
 
-    let held = lock_only(&home).unwrap();
+    let held = lock_only(&home, "codex").unwrap();
     assert_eq!(
         context
             .install("codex", &home, false)
@@ -273,7 +273,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         "an install waits for the held home"
     );
     assert_eq!(
-        lock_only(&home).err().map(|error| error.0),
+        lock_only(&home, "codex").err().map(|error| error.0),
         Some("launch_home_busy".to_owned()),
         "a second hold waits for the held home"
     );
@@ -290,7 +290,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         "model = \"kept\"\n"
     );
     assert!(
-        lock_only(&home).is_ok(),
+        lock_only(&home, "codex").is_ok(),
         "the ended hold still kept its home busy"
     );
 }
@@ -687,14 +687,28 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
     }
 }
 
-/// CTX-M1 r1: when the planted `skills/.system` cannot be moved away even after its flags
-/// are cleared, here because the agent filled the folder the engine moves it to with a
-/// file it made immutable, the Codex launch is refused with an ordinary error rather than
-/// started with the planted system skills.
+/// The user immutable flag in a macOS `st_flags` word.
+#[cfg(target_os = "macos")]
+const USER_IMMUTABLE: u32 = 0x0000_0002;
+
+/// Whether one path, read without following a link, carries the user immutable flag.
+/// Input: the path. Output: false also when nothing is there.
+#[cfg(target_os = "macos")]
+fn immutable(path: &Path) -> bool {
+    rustix::fs::lstat(path).is_ok_and(|stat| stat.st_flags & USER_IMMUTABLE != 0)
+}
+
+/// team-19 r1 M1, CTX-M1 r2 I3: a folder an agent left in its home under the name the
+/// engine once parked skills at, holding a file made immutable, is left as it is by the next
+/// Codex launch, which releases nothing at a name the agent can swap. When `skills` itself
+/// cannot be moved away, here because a Full access agent denied new folders and removals in
+/// its own home with an ACL the engine leaves alone, the Codex launch is refused with an
+/// ordinary error rather than started with the planted system skills.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
     let home = directory.path().canonicalize().unwrap().join("codex");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
     let context = AgentContext {
@@ -718,7 +732,6 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     fs::create_dir(&parked).unwrap();
     let held = parked.join("held");
     fs::write(&held, "held\n").unwrap();
-    let _unlocked = Unlocked(vec![held.clone()]);
     assert!(
         chflags("uchg", &held),
         "the parked folder's file is immutable"
@@ -727,10 +740,357 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     let relaunch = context.install("codex", &home, true);
 
     assert_eq!(
-        relaunch.err().map(|problem| problem.0),
-        Some("launch_context_skills_kept".to_owned()),
+        relaunch.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "a folder the agent left in its home is no refusal"
+    );
+    assert!(
+        immutable(&held),
+        "the launch released a file at a name the agent can swap"
+    );
+    assert!(!planted.exists(), "the planted system skills are removed");
+    drop(relaunch);
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("SKILL.md"), "planted again\n").unwrap();
+    assert!(
+        chmod(
+            &["+a", "everyone deny add_subdirectory,delete_child"],
+            &home
+        ),
+        "the home denies new folders and removals"
+    );
+
+    let hold = lock_only(&home, "codex");
+
+    assert_eq!(
+        hold.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned()),
         "a launch that keeps the planted system skills is refused"
     );
+    assert!(
+        planted.exists(),
+        "the refusal leaves the skills it could not move"
+    );
+}
+
+/// CTXM1-R2-L1: a context-less Codex launch, which only holds the home, still removes what
+/// an earlier run left in Codex's own `skills/.system` and the engine's skill copies, so Codex
+/// installs its system skills fresh; a Claude Code hold leaves the `skills` folder as it was.
+#[cfg(unix)]
+#[test]
+fn a_context_less_codex_hold_removes_planted_system_skills() {
+    for (harness, removed) in [("codex", true), ("claude-code", false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap().join("codex");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let planted = home
+            .join("skills")
+            .join(CODEX_SYSTEM_SKILLS)
+            .join("planted");
+        let copies = home.join("skills").join(STATE).join("copied");
+        fs::create_dir_all(&planted).unwrap();
+        fs::create_dir_all(&copies).unwrap();
+        fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+
+        let held = lock_only(&home, harness).unwrap();
+
+        assert_eq!(
+            planted.exists(),
+            !removed,
+            "{harness}: planted system skills"
+        );
+        assert_eq!(copies.exists(), !removed, "{harness}: earlier skill copies");
+        assert!(
+            home.join("skills").is_dir(),
+            "{harness}: the skills folder stays"
+        );
+        drop(held);
+    }
+}
+
+/// Runs the system's `chmod` on one path, as an agent would. Inputs: the arguments before the
+/// path and the path. Output: whether `chmod` succeeded.
+#[cfg(target_os = "macos")]
+fn chmod(arguments: &[&str], path: &Path) -> bool {
+    crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args(arguments)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .is_ok_and(|done| done.success())
+}
+
+/// Clears every flag, ACL and mode a test set under one folder when dropped, so the temporary
+/// folder can always be deleted, whatever the test asserted. Holds the folder.
+#[cfg(target_os = "macos")]
+struct Unpinned(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unpinned {
+    fn drop(&mut self) {
+        let _ = crate::spawn_gate::status(
+            std::process::Command::new("/usr/bin/chflags")
+                .args(["-R", "-P", "nouchg,nouappnd"])
+                .arg(&self.0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        );
+        let _ = chmod(&["-R", "-P", "-N"], &self.0);
+        let _ = chmod(&["-R", "-P", "u+rwX"], &self.0);
+    }
+}
+
+/// CTX-M1 residual (rv-secreview r2 I3): an earlier run that pinned Codex's own
+/// `skills/.system` with an ACL denying its removal or a mode without write, or left a folder
+/// without write or an immutable file inside it, never refuses the next Codex launches in that
+/// home: each launch clears what pins the folder, moves it away and removes it, parking nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn pinned_codex_system_skills_never_refuse_the_next_launches() {
+    for pin in ["acl", "mode", "inner mode", "inner flag"] {
+        let directory = tempfile::tempdir().unwrap();
+        let _unpinned = Unpinned(directory.path().to_path_buf());
+        let home = directory.path().canonicalize().unwrap().join("codex");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let context = AgentContext {
+            plugins: LaunchPlugins::default(),
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: true,
+            off_tools: Vec::new(),
+            native_team: None,
+            relay: None,
+            model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
+            catch_up_main: true,
+        };
+        let system = home.join("skills").join(CODEX_SYSTEM_SKILLS);
+        for launch in 1..=2 {
+            let planted = system.join("planted");
+            fs::create_dir_all(&planted).unwrap();
+            fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+            let pinned = match pin {
+                "acl" => chmod(&["+a", "everyone deny delete"], &system),
+                "mode" => chmod(&["0500"], &system),
+                "inner mode" => chmod(&["0500"], &planted),
+                _ => chflags("uchg", &planted.join("SKILL.md")),
+            };
+            assert!(pinned, "{pin}: launch {launch} pins the planted skills");
+
+            let relaunch = context.install("codex", &home, true);
+
+            assert_eq!(
+                relaunch.as_ref().err().map(|problem| problem.0.as_str()),
+                None,
+                "{pin}: launch {launch} is refused"
+            );
+            assert!(
+                !system.exists(),
+                "{pin}: launch {launch} leaves the planted system skills for Codex to load"
+            );
+            drop(relaunch);
+            for folder in [&home, &directory.path().canonicalize().unwrap()] {
+                let parked: Vec<String> = fs::read_dir(folder)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .filter(|name| name.starts_with(&format!(".{STATE}-")))
+                    .collect();
+                assert!(
+                    parked.is_empty(),
+                    "{pin}: launch {launch} parks {parked:?} in {}",
+                    folder.display()
+                );
+            }
+        }
+    }
+}
+
+/// Lists folders with the system's `ls`, numeric owners, modes and ACL entries included, to
+/// tell whether anything changed them. Input: the folders. Output: the listing text.
+#[cfg(target_os = "macos")]
+fn listed(folders: &[&Path]) -> String {
+    let mut command = std::process::Command::new("/bin/ls");
+    command
+        .arg("-ledn")
+        .args(folders)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let output = crate::spawn_gate::output(&mut command).unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// team-19 r1 M1: a `skills` link a sandboxed agent planted in its Codex home, naming a
+/// folder outside the home with skills, an ACL and a mode of its own, is moved out of the
+/// home by the next launch, which leaves a real `skills` folder, and neither the launch nor
+/// its cleanup changes the folder the link names. What the engine moves out it releases only
+/// beside the home, in the agent's engine folder, where the agent cannot write.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
+    let agents = crate::sandbox::test_agent::TestAgent::new();
+    let outside = agents.peer.join("skills");
+    let _unpinned = Unpinned(outside.clone());
+    let system = outside.join(CODEX_SYSTEM_SKILLS);
+    fs::create_dir_all(system.join("planted")).unwrap();
+    fs::write(system.join("planted").join("SKILL.md"), "planted\n").unwrap();
+    assert!(chmod(&["+a", "everyone deny delete"], &system));
+    assert!(chmod(&["0500"], &outside));
+    let before = listed(&[&outside, &system]);
+    let skills = agents.home.join("skills");
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: String::new(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
+    };
+    agents.shell(&format!(
+        "ln -s '{}' '{}'",
+        outside.display(),
+        skills.display()
+    ));
+
+    let installed = context.install("codex", &agents.home, false).unwrap();
+
+    assert!(
+        fs::symlink_metadata(&skills).is_ok_and(|metadata| metadata.is_dir()),
+        "the launch keeps the link Codex would load skills through"
+    );
+    assert_eq!(
+        listed(&[&outside, &system]),
+        before,
+        "the launch changed the folder the link names"
+    );
+    drop(installed);
+    assert_eq!(
+        listed(&[&outside, &system]),
+        before,
+        "cleanup changed the folder the link names"
+    );
+    assert!(system.join("planted").join("SKILL.md").exists());
+    let beside = agents.home.parent().unwrap();
+    let parked: Vec<String> = fs::read_dir(beside)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with(&format!(".{STATE}-")))
+        .collect();
+    assert!(parked.is_empty(), "cleanup left {parked:?} beside the home");
+    assert!(
+        !agents
+            .run(&format!("mkdir '{}'", beside.join("probe").display()))
+            .status
+            .success(),
+        "the agent can write beside its home, where the engine releases skills"
+    );
+}
+
+/// team-19 r1 (rv-code L1): an owner's file an agent hard-linked into Codex's `skills/.system`
+/// before the owner made it immutable keeps its flag through the next Codex launches, which
+/// release no file with a second link, still start and leave nothing for Codex to load.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    let system = home.join("skills").join(CODEX_SYSTEM_SKILLS);
+    fs::create_dir_all(system.join("planted")).unwrap();
+    fs::hard_link(&owner, system.join("planted").join("SKILL.md")).unwrap();
+    assert!(
+        chflags("uchg", &owner),
+        "the owner makes the file immutable"
+    );
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
+    };
+
+    for launch in 1..=2 {
+        let relaunch = context.install("codex", &home, true);
+
+        assert_eq!(
+            relaunch.as_ref().err().map(|problem| problem.0.as_str()),
+            None,
+            "launch {launch} is refused"
+        );
+        assert!(
+            immutable(&owner),
+            "launch {launch} cleared the owner's flag through the agent's link"
+        );
+        assert!(
+            !system.exists(),
+            "launch {launch} leaves the linked file for Codex to load"
+        );
+        drop(relaunch);
+    }
+}
+
+/// team-19 r1 (rv-secreview L1): a Codex launch through `install` whose earlier skills, Codex's
+/// own system skills or the engine's copies, cannot be moved out of the home, here because a
+/// Full access agent denied removals in its own home with an ACL the engine leaves alone, is
+/// refused with an ordinary error and leaves them where they are.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() {
+    for entry in [CODEX_SYSTEM_SKILLS, STATE] {
+        let directory = tempfile::tempdir().unwrap();
+        let _unpinned = Unpinned(directory.path().to_path_buf());
+        let home = directory.path().canonicalize().unwrap().join("codex");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let planted = home.join("skills").join(entry).join("planted");
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+        assert!(
+            chmod(&["+a", "everyone deny delete_child"], &home),
+            "{entry}: the home denies removals"
+        );
+        let context = AgentContext {
+            plugins: LaunchPlugins::default(),
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: true,
+            off_tools: Vec::new(),
+            native_team: None,
+            relay: None,
+            model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
+            catch_up_main: true,
+        };
+
+        let launch = context.install("codex", &home, true);
+
+        assert_eq!(
+            launch.as_ref().err().map(|problem| problem.0.as_str()),
+            Some(SKILLS_KEPT),
+            "{entry}: a launch that keeps earlier skills is refused"
+        );
+        assert!(
+            planted.exists(),
+            "{entry}: the refusal leaves the skills it could not move"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -774,19 +1134,25 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
 
     assert!(
         !agents
-            .run(&format!("rm -f '{}'", skills.display()))
+            .run(&format!(
+                "mv '{}' '{}.moved'",
+                skills.display(),
+                skills.display()
+            ))
             .status
             .success(),
         "the agent cannot move or remove its skills entry once it is there (LL-2)"
     );
-    fs::remove_file(&skills).unwrap();
+    remove(&skills);
+    assert!(fs::symlink_metadata(&skills).is_err());
     let installed = context.install("codex", &agents.home, false).unwrap();
     agents.shell(&plant);
     drop(installed);
     assert!(marker.exists(), "cleanup followed a link planted mid-run");
     assert_eq!(fs::read_to_string(&marker).unwrap(), "peer");
 
-    fs::remove_file(&skills).unwrap();
+    remove(&skills);
+    assert!(fs::symlink_metadata(&skills).is_err());
     fs::create_dir_all(skills.join(STATE).join("old")).unwrap();
     let installed = context.install("codex", &agents.home, false).unwrap();
     assert!(!skills.join(STATE).exists(), "real copies were left behind");

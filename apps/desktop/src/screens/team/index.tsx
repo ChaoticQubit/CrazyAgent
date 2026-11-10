@@ -182,6 +182,20 @@ export const GRAPH_UNREAD: GraphState = { shown: undefined, stale: null, gone: f
 
 const PROJECT_GONE = ["project_missing", "project_setup_missing"];
 
+const OPEN_ALL_GONE = "Nothing to open: this project was removed.";
+
+/** What Open all terminals does with its fresh reads: no window and a note when the team read
+ * finds the project removed, so no window opens only to shut again; else the wall windows the
+ * team needs at the Terminals per window read now, or the given one when that read failed, and
+ * the count shown when the team read failed. Inputs: the two reads, the given Terminals per
+ * window and the count shown. Output: the windows to open and the note, or null. */
+export function openAllPlan(graph: Result<TeamGraph>, setting: Result<PerWindow>, perWindow: PerWindow, shown: number): { windows: number; note: string | null } {
+  if (graph.kind === "error" && PROJECT_GONE.includes(graph.code)) return { windows: 0, note: OPEN_ALL_GONE };
+  const windows = graph.kind === "ok" ? wallPages(graph.value.nodes, setting.kind === "ok" ? setting.value : perWindow).length : shown;
+  if (!(Number.isSafeInteger(windows) && windows >= 0)) throw new Error(`Open all needs a whole number of windows: ${windows}`);
+  return { windows, note: null };
+}
+
 /** Takes one graph read into the view. A failed read after a good one keeps the good graph,
  * so an open terminal and its unsent prompt stay, and says why the refresh failed; before
  * any good read the failure is what the view shows. A read that says the project is no longer
@@ -223,7 +237,7 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * read and has agents, what `asks` the owner and the `pool`), then `tools` and Open all
  * terminals, which reads the team and its Terminals per window again, so an older read closes
  * no window the team still needs, opens the terminal wall windows, perWindow terminals each,
- * and says why under the row when they could not open. Inputs: the project id and name, the
+ * and says why under the row when they could not open or the project was removed. Inputs: the project id and name, the
  * terminals per window, the drawn team or null while it is not read, the team line and the
  * row's parts. Output: the row and its note. */
 export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, asks, pool, tools }: {
@@ -238,9 +252,12 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
 
   async function openAll(shown: number) {
     const [graph, setting] = await Promise.all([loadTeamGraph(projectId), loadTerminalsPerWindow(projectId)]);
-    const windows = graph.kind === "ok" ? wallPages(graph.value.nodes, setting.kind === "ok" ? setting.value : perWindow).length : shown;
-    if (windows === 0) return;
-    setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
+    const plan = openAllPlan(graph, setting, perWindow, shown);
+    if (plan.windows === 0) {
+      if (plan.note !== null) setNote(plan.note);
+      return;
+    }
+    setNote(wallNote(await openTerminalWindows(projectId, name, plan.windows, true)));
   }
 
   const working = line !== null && team !== null && team.nodes.some((node) => node.kind !== "master") ? graphSummary(team) : null;

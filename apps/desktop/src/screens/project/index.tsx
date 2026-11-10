@@ -268,16 +268,18 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const working = team ? team.agents.filter((agent) => agent.status === "working").length : 0;
   const meta = headMeta(data, policy.kind === "ok" ? accessSummary(policy.value) : null, checkout.kind === "ok" ? checkout.value.checked_out : null);
 
-  return <div className="pj pj-project" ref={root}>
+  return <div className={`pj pj-project${active === "conversation" ? " pj-fixed" : ""}`} ref={root}>
     <ProjectHead title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
       about={setup?.about ?? ""} meta={meta} working={working} questions={questions} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
-    <RecoveryBanner key={projectId} project={projectId} />
-    <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
-    {ideHideProblem && <p className="ide-problem" role="alert">{ideHideProblem}</p>}
-    {active !== review && <WaitingChanges projectId={projectId} place={review} />}
-    <ImportMoveBanner projectId={projectId} version={importMoves} />
-    <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
+    <div className="pj-banners">
+      <RecoveryBanner key={projectId} project={projectId} />
+      <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
+      {ideHideProblem && <p className="ide-problem" role="alert">{ideHideProblem}</p>}
+      {active !== review && <WaitingChanges projectId={projectId} place={review} />}
+      <ImportMoveBanner projectId={projectId} version={importMoves} />
+      <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
+    </div>
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}

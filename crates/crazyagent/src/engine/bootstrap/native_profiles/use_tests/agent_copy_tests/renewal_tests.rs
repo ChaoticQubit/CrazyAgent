@@ -241,6 +241,39 @@ fn a_sign_in_or_sign_out_never_runs_beside_a_renewal_that_outlived_its_lease() {
     }
 }
 
+/// RETIRE-UNLOCK-L1: a renewal refused after it took its shared lease on the account, here
+/// because the profile's home was swapped so the use no longer verifies, holds nothing once
+/// it returns, so a sign-out after the turn is not refused as in use.
+#[test]
+fn a_renewal_refused_after_its_lease_lock_leaves_the_account_free_for_a_sign_out() {
+    let mut case = UseCase::new();
+    let lease = execution(&mut case);
+    let swapped = case.profile().join("home-swapped");
+    std::fs::rename(case.home(), &swapped).unwrap();
+    std::fs::create_dir(case.home()).unwrap();
+    let refused = lease
+        .renewal(agent_copy::Harness::Codex, &case.root.path().join("codex"))
+        .err()
+        .map(|error| error.0);
+    assert!(refused.is_some(), "a use whose home was swapped is refused");
+    drop(lease);
+    std::fs::remove_dir(case.home()).unwrap();
+    std::fs::rename(&swapped, case.home()).unwrap();
+    let signing_out = case.recapture().acquire_use_within(
+        &case.host,
+        &case.binding,
+        &request_id("sign-out"),
+        1,
+        purpose(2),
+        Some(Duration::from_millis(200)),
+    );
+    assert!(
+        signing_out.is_ok(),
+        "{refused:?} left the account held: {:?}",
+        signing_out.err()
+    );
+}
+
 const RENEWING_ROOT: &str = "CRAZYAGENT_TEST_RENEWING_ROOT";
 
 /// Runs one Codex renewal of the profile under `RENEWING_ROOT` as an engine process of its

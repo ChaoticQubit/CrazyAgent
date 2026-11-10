@@ -342,6 +342,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
             },
         )
         .unwrap();
@@ -442,6 +443,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -565,6 +567,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
@@ -9756,6 +9759,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12102,6 +12106,7 @@ fn agent_at_level_running(
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12325,6 +12330,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12382,6 +12388,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -12433,6 +12440,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12581,6 +12589,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -21629,6 +21638,50 @@ fn the_project_graph_is_copied_only_where_real_git_ignores_graphify_out() {
     }
 }
 
+/// DEC123B-L2: a teammate of an own-clone lead is a linked worktree of the lead's clone, so
+/// the clone's `info/exclude` decides whether it gets the graph, not the project
+/// repository's, in either direction.
+#[test]
+fn an_own_clone_leads_teammate_follows_the_clones_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = published_graph(&base);
+    let project_exclude = project.join(".git").join("info").join("exclude");
+    std::fs::create_dir_all(project_exclude.parent().unwrap()).unwrap();
+    let teammate = |lead: &str, exclude: &str| -> PathBuf {
+        let clone = project
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join("worktrees")
+            .join(lead);
+        std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();
+        std::fs::write(clone.join(".git").join("info").join("exclude"), exclude).unwrap();
+        let mate = clone.join(crate::agent_git::TEAMMATES_FOLDER).join("mate");
+        std::fs::create_dir_all(&mate).unwrap();
+        std::fs::write(
+            mate.join(".git"),
+            format!("gitdir: {}/.git/worktrees/mate\n", clone.display()),
+        )
+        .unwrap();
+        mate
+    };
+
+    std::fs::write(&project_exclude, ".crazyagent/\n").unwrap();
+    let ignored = teammate("agent-1", "/.worktrees/\n/graphify-out/\n");
+    expose_graph(&project, &ignored, &[]);
+    assert!(
+        copied(&ignored),
+        "the clone's exclude keeps the graph out of its teammate's changes"
+    );
+
+    std::fs::write(&project_exclude, ".crazyagent/\ngraphify-out/\n").unwrap();
+    let tracked = teammate("agent-2", "/.worktrees/\n");
+    expose_graph(&project, &tracked, &[]);
+    assert!(
+        !tracked.join(GRAPH_FOLDER).exists(),
+        "the project repository's exclude does not decide for a clone's teammate"
+    );
+}
+
 /// A worktree whose repository's exclude keeps the graph out of git gets its copy: an own
 /// clone by its own exclude, a linked worktree by the project repository's, which the
 /// engine writes; a `.gitignore` line taking the graph back wins (DEC-123).
@@ -22038,6 +22091,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
+                    ide_agent_files: Default::default(),
                 },
             )
             .unwrap();
@@ -25124,6 +25178,18 @@ fn an_agent_refused_for_an_mcp_secret_in_its_command_names_the_server_and_the_se
     assert_eq!(
         start_problem(&LaunchError("launch_deadline".into(), None)),
         "The agent could not start. (launch_deadline)"
+    );
+}
+
+/// CTX-M1 residual (rv-secreview r2 I3): a Codex launch refused because skills an earlier run
+/// locked into its home could not be removed says so in words, with its code kept.
+#[test]
+fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("launch_context_skills_kept".into(), None)),
+        "The agent could not start: an earlier run locked skills into its Codex home, so \
+         CrazyAgent could not remove them and Codex would have loaded them. \
+         (launch_context_skills_kept)"
     );
 }
 

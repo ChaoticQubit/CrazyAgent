@@ -1,6 +1,7 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::ide::workspace::tests::{Agent, Case, add_project};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy, IdeAgentFiles};
 use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
 use std::process::{Command, Stdio};
@@ -235,4 +236,53 @@ fn owner_edit_is_refused_outside_a_running_agent_of_the_project() {
         .unwrap()
     );
     assert_eq!(edits(&case), 2);
+}
+
+/// DEC-124: while the project's agent folders are Read only below Full access, "Edit anyway"
+/// is refused before anything is recorded or unlocked, since the IDE could not save the
+/// file. No delete or rename and Allow all changes keep it, and so does Full access, where
+/// the choice does not apply.
+#[test]
+fn edit_anyway_is_refused_while_agent_folders_are_read_only_below_full_access() {
+    let mut case = Case::new();
+    let working = case.agent("sub", "working");
+    let save = |access, choice| {
+        let policy = AgentPolicy {
+            access,
+            ide_agent_files: choice,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&case.db, case.project.as_str(), &policy).unwrap();
+    };
+    let edit_anyway = |path: &str| {
+        edit(
+            &case.root,
+            None,
+            &case.project,
+            &team(working.id),
+            path,
+            now(),
+        )
+    };
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        save(access, IdeAgentFiles::ReadOnly);
+        assert_eq!(
+            edit_anyway("src/lib.rs").unwrap_err().0,
+            "ide_agent_files_read_only"
+        );
+    }
+    assert_eq!(edits(&case), 0);
+    for (path, access, choice) in [
+        (
+            "a.rs",
+            AgentAccess::Sandboxed,
+            IdeAgentFiles::NoDeleteOrRename,
+        ),
+        ("b.rs", AgentAccess::OwnBranch, IdeAgentFiles::AllowAll),
+        ("c.rs", AgentAccess::Full, IdeAgentFiles::ReadOnly),
+    ] {
+        save(access, choice);
+        assert!(!edit_anyway(path).unwrap(), "{access:?} {choice:?}");
+    }
+    assert_eq!(edits(&case), 3);
 }

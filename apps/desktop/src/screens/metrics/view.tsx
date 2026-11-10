@@ -161,6 +161,19 @@ function projectLabel(filter: MetricsFilter | undefined, id: string): string {
   return id === REMOVED_PROJECTS ? REMOVED_LABEL : displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
 }
 
+/** The By pool table, which needs only the usage read: each pool's tokens, runs and when it
+ * was last used. Inputs: the usage read, now and the filter. Output: the first column's head,
+ * the own columns' heads, the rows and no Project column. */
+function poolTable(usage: UsageReport, nowMs: number, filter: MetricsFilter | undefined): { head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean } {
+  return {
+    head: "Pool", extra: ["Runs", "Last used"], projectColumn: false,
+    rows: usage.pools.map((row) => ({
+      key: row.key, name: filter?.limits.pools.get(row.key) ?? row.key, tokens: row.tokens, cost_nanos: row.cost_nanos,
+      notReportedBy: row.not_reported_by, extra: [String(row.runs), agoText(row.last_ms, nowMs)],
+    })),
+  };
+}
+
 /** The breakdown's rows and own columns for one choice. The app page (with a filter) adds By
  * project, names each agent's harnesses and accounts and each account's and harness's
  * projects, and shows a Project column on agents and runs across every project; the project
@@ -182,15 +195,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
       rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
     };
   }
-  if (by === "pool") {
-    return {
-      head: "Pool", extra: ["Runs", "Last used"], projectColumn,
-      rows: usage.pools.map((row) => ({
-        key: row.key, name: filter?.limits.pools.get(row.key) ?? row.key, tokens: row.tokens, cost_nanos: row.cost_nanos,
-        notReportedBy: row.not_reported_by, extra: [String(row.runs), agoText(row.last_ms, nowMs)],
-      })),
-    };
-  }
+  if (by === "pool") return poolTable(usage, nowMs, filter);
   if (by === "run") {
     return {
       head: "Run", extra: ["Agent", "Ended", "Result"], projectColumn,
@@ -231,7 +236,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Agent", extra: ["Harness", "Account"], projectColumn,
       rows: metrics.agents.map((row) => ({
-        key: `${row.project}/${row.agent}`, usageKey: row.agent, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens, cost_nanos: row.cost_nanos,
+        key: `${row.project}/${row.agent}`, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens, cost_nanos: row.cost_nanos,
         extra: [listed(row.harnesses, row.more_harnesses, harness), listed(row.accounts, row.more_accounts, account)],
       })),
     };
@@ -257,31 +262,25 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
 
 type BreakdownParts = ReturnType<typeof breakdownRows>;
 
-/** Whether two token counts match in every part. Inputs: the two counts. Output: the answer. */
-function sameTokens(one: Tokens, other: Tokens): boolean {
-  return one.input === other.input && one.output === other.output && one.cache_read === other.cache_read && one.cache_write === other.cache_write;
-}
-
 /** Adds what only the usage read knows to the app page's rows: when each was last used, its
  * runs when asked, and which harness ran for it without reporting usage. An agent's usage row
- * adds up every project, so its Runs and Last used stay blank unless it is plainly that row's
- * alone: no other row has the key and the tokens match. A usage row the metrics read has no
- * row for stays listed when its harness reported nothing. Inputs: the table, the usage rows,
- * whether to add Runs, the namer and now. Output: the table with its added columns. */
-function withUsage(table: BreakdownParts, used: UsageRow[], runs: boolean, name: (key: string) => string, nowMs: number): BreakdownParts {
-  const byKey = new Map(used.map((row) => [row.key, row]));
-  const keyOf = (row: BreakdownRow) => row.usageKey ?? row.key;
-  const rowsOfKey = new Map<string, number>();
-  for (const row of table.rows) rowsOfKey.set(keyOf(row), (rowsOfKey.get(keyOf(row)) ?? 0) + 1);
-  const isAlone = (row: BreakdownRow, match: UsageRow) => row.usageKey === undefined || (rowsOfKey.get(row.usageKey) === 1 && sameTokens(match.tokens, row.tokens));
+ * counts one project, so it meets the row of that project and key, and one key used in several
+ * projects keeps each project's own Runs and Last used. A usage row the metrics read has no row
+ * for stays listed when its harness reported nothing. Inputs: the table, the usage rows,
+ * whether to add Runs, the namer, the project namer and now. Output: the table with its added
+ * columns. */
+function withUsage(table: BreakdownParts, used: UsageRow[], runs: boolean, name: (key: string) => string, project: (key: string) => string, nowMs: number): BreakdownParts {
+  const keyOf = (row: UsageRow) => typeof row.project === "string" ? `${row.project}/${row.key}` : row.key;
+  const byKey = new Map(used.map((row) => [keyOf(row), row]));
   const cells = (row: UsageRow | undefined) => [...(runs ? [row ? String(row.runs) : ""] : []), row ? agoText(row.last_ms, nowMs) : ""];
   const kept = table.rows.map((row) => {
-    const match = byKey.get(keyOf(row));
-    return { ...row, notReportedBy: match?.not_reported_by, extra: [...row.extra, ...cells(match && isAlone(row, match) ? match : undefined)] };
+    const match = byKey.get(row.key);
+    return { ...row, notReportedBy: match?.not_reported_by, extra: [...row.extra, ...cells(match)] };
   });
-  const listed = new Set(table.rows.map(keyOf));
-  const added = used.filter((row) => row.not_reported_by && !listed.has(row.key)).map((row) => ({
-    key: row.key, name: name(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, notReportedBy: row.not_reported_by,
+  const listed = new Set(table.rows.map((row) => row.key));
+  const added = used.filter((row) => row.not_reported_by && !listed.has(keyOf(row))).map((row) => ({
+    key: keyOf(row), name: name(row.key), project: table.projectColumn && typeof row.project === "string" ? project(row.project) : undefined,
+    tokens: row.tokens, cost_nanos: row.cost_nanos, notReportedBy: row.not_reported_by,
     extra: [...table.extra.map(() => ""), ...cells(row)],
   }));
   const columns = [...table.extra, ...(runs ? ["Runs"] : []), "Last used"];
@@ -293,9 +292,9 @@ function withUsage(table: BreakdownParts, used: UsageRow[], runs: boolean, name:
 function appRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, names: MetricsNames, nowMs: number, filter: MetricsFilter): BreakdownParts {
   const table = breakdownRows(by, projectId, usage, metrics, null, names, nowMs, filter);
   const project = (key: string) => projectLabel(filter, key);
-  if (by === "project") return withUsage(table, usage.projects, false, project, nowMs);
-  if (by === "agent") return withUsage(table, usage.agents, true, (key) => agentLabel(key, project), nowMs);
-  if (by === "account") return withUsage(table, usage.accounts, true, (key) => rowName(names.accounts, key), nowMs);
+  if (by === "project") return withUsage(table, usage.projects, false, project, project, nowMs);
+  if (by === "agent") return withUsage(table, usage.agents, true, (key) => agentLabel(key, project), project, nowMs);
+  if (by === "account") return withUsage(table, usage.accounts, true, (key) => rowName(names.accounts, key), project, nowMs);
   return table;
 }
 
@@ -371,6 +370,23 @@ function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: st
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
     {(usage.health ?? []).map((item) => <Notice key={item.step} tone={item.recovered_ms === null ? "warn" : "info"}>{healthText(item, nowMs)}</Notice>)}
     <PartialNotice homes={usage.partial_homes} />
+  </>;
+}
+
+/** What the app page keeps from the usage read alone while the metrics read fails: the usage
+ * notices, each account's limits with the next accounts, By pool, the lines changed and the
+ * tokens by day. Inputs: the usage read, the filter, the names, now and the viewer's offset. */
+function UsageOnly({ usage, filter, names, nowMs, offset }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; offset: number }) {
+  const pools = poolTable(usage, nowMs, filter);
+  return <>
+    <AppNotices usage={usage} failure={filter.limits.failure} nowMs={nowMs} />
+    <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
+    {filter.limits.next}
+    <div className="mx-panels">
+      <TokenPanel title="By pool" rows={pools.rows} money={usage.money}><BreakdownTable by="pool" {...pools} total={usage.total} money={usage.money} /></TokenPanel>
+      <LinesPanel rows={usage.lines} name={(key) => projectLabel(filter, key)} />
+    </div>
+    <DaysPanel days={usage.days} offset={offset} />
   </>;
 }
 
@@ -482,7 +498,9 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   }
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{head}{kept}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    const error = failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />;
+    if (filter && usage.kind === "ok") return <div className="stack mx-page">{head}{error}<UsageOnly usage={usage.value} filter={filter} names={names} nowMs={nowMs} offset={offset} /></div>;
+    return <div className="stack">{head}{kept}{error}</div>;
   }
   if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{head}{kept}<Skeleton shape="card" count={3} /></div>;
   const empty = headlineTokens(usage.value.total) === 0 && usage.value.lines.length === 0 && (usage.value.not_reported_by ?? []).length === 0;

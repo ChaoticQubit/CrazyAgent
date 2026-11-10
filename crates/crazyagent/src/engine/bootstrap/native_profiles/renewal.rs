@@ -118,13 +118,14 @@ impl NativeProfileUse {
             return Err(failure("native_profile_credential_unavailable"));
         }
         take_lock(&lease.file, FlockOperation::NonBlockingLockShared).map_err(unavailable)?;
+        let lease = HeldLock(lease.file);
         Ok(Renewal {
             harness,
             executable: executable.to_path_buf(),
             managed: self.profile_path()?,
             home: clone(&self.home.file)?,
             profile: clone(&self.profile.file)?,
-            _lease: Some(HeldLock(lease.file)),
+            _lease: Some(lease),
         })
     }
 }

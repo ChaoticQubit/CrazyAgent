@@ -168,6 +168,15 @@ export function questionsTitle(read: InboxState): string {
   return count > 0 ? `Questions for you (${count})` : "Questions for you";
 }
 
+/** Whether a row read after the drawer opened may take the keyboard: only while the owner has
+ * not put it anywhere, so it is on nothing, the page, the drawer itself or the drawer's head,
+ * where a drawer with no field starts it on Close. Inputs: the focused element and the drawer.
+ * Output: true when the row may take it. */
+export function keyboardFree(active: Element | null, drawer: Element | null): boolean {
+  if (active === null || active === drawer || active === active.ownerDocument.body) return true;
+  return drawer !== null && drawer.contains(active) && active.closest(".dialog-head") !== null;
+}
+
 /** The owner's Questions inbox, in the drawer the Agents toolbar opens (Q14, Q14b): the open
  * questions agents put to the owner, most urgent first, each with its urgency, the assumption
  * a low one carries on with, Answer and Open terminal while the asker runs; then the agents
@@ -175,8 +184,9 @@ export function questionsTitle(read: InboxState): string {
  * in the Agents tab's one terminal panel. The drawer's title names it. Opened from a toast,
  * the keyboard starts on the first question (most urgent first) or the first agent waiting in
  * its terminal, once that row is read. That happens once and never takes the keyboard off a
- * field the owner is using in the drawer: a drawer that opens with the row already read starts
- * on it through data-autofocus, and later reads leave the keyboard where the owner put it.
+ * field or button the owner is using in the drawer: a drawer that opens with the row already
+ * read starts on it through data-autofocus, and later reads leave the keyboard where the owner
+ * put it.
  * Inputs: the project id, the inbox read the toolbar counts from with its reload, the open
  * action and the row kind to focus. Output: the section. */
 export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }: {
@@ -191,7 +201,7 @@ export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }
   useEffect(() => {
     if (focus === null || focused.current || target.current === null) return;
     focused.current = true;
-    if (!document.activeElement?.matches("input, textarea, select")) target.current.focus();
+    if (keyboardFree(document.activeElement, target.current.closest("dialog"))) target.current.focus();
   });
   const shown = read.shown;
   if (shown === undefined) return <section className="tg-events" aria-busy="true" aria-label="Questions for you"><Skeleton shape="card" /></section>;
