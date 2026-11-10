@@ -77,7 +77,7 @@
     "submenus": [
       {
         "id": "crazyagent.terminalLevels",
-        "title": "New terminal at access level",
+        "label": "New terminal at access level",
         "icon": "$(shield)"
       }
     ],

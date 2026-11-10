@@ -163,6 +163,7 @@ async function atLevel(t, level, shared) {
 
     if (level.access === "full") {
       await t.test("Full access: the terminal is the owner's login shell and git knows the owner", async () => {
+        await ide.until("the Full access shell's prompt", `document.querySelector(".part.panel .terminal-command-decoration") !== null`);
         const said = await ran("level-shell.txt", `ps -o command= -p $$; git config user.name; git config user.email`);
         assert.match(said.split("\n")[0], /\s-[a-z]*l\b/, said);
         assert.ok(said.split("\n").includes(OWNER_NAME), said);

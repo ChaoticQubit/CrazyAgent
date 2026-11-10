@@ -359,6 +359,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("CRAZYAGENT_IDE_CAPABILITY_FILE", "/private/tmp/forged"),
         ("CRAZYAGENT_IDE_SOCKET", "/private/tmp/forged.sock"),
         ("CRAZYAGENT_IDE_LOCKED_FILE", "/private/tmp/forged-locks"),
+        ("CRAZYAGENT_IDE_ACCESS", "full"),
         ("CODEX_HOME", "/private/tmp/codex"),
         ("GIT_ASKPASS", "/private/tmp/askpass"),
         ("NODE_OPTIONS", "--require /private/tmp/evil.js"),
@@ -430,6 +431,7 @@ fn server_env_holds_only_allowlisted_names() {
     assert!(seen.contains(&("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules")));
     assert!(seen.iter().all(|(name, _)| {
         env::allowed(std::ffi::OsStr::new(name))
+            || *name == env::ACCESS_VARIABLE
             || *name == env::CAPABILITY_VARIABLE
             || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
