@@ -2429,11 +2429,11 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     );
 }
 
-/// AGENT-REF-ALLOW-NARROW (rv-secreview land-19 note 1): a clone lead on a branch of a
-/// teammate branch's shape, `crazyagent/<task>--<name>` as a sub-agent's is, keeps it from
-/// its teammates, whose Lands=Lead tip it is. A teammate still commits on its own
-/// `<lead's branch>--<name>`, but never writes the lead's branch, its reflog or lock, nor
-/// another task's teammate branch.
+/// AGENT-REF-ALLOW-NARROW, a tightening: a clone lead's teammates write only the refs of
+/// `<lead's branch>--<name>` teammate branches. The lead's branch has a teammate branch's
+/// shape here only to pin the rule, since a native lead is master-started on
+/// `crazyagent/<task>`. A teammate commits on its own branch, but never writes the lead's
+/// branch, its reflog or lock, nor another task's teammate branch.
 #[test]
 fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
     use std::os::unix::fs::PermissionsExt;
