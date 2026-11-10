@@ -2427,6 +2427,186 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     );
 }
 
+/// AGENT-REF-ALLOW-NARROW (rv-secreview land-19 note 1): a clone lead on a branch of a
+/// teammate branch's shape, `crazyagent/<task>--<name>` as a sub-agent's is, keeps it from
+/// its teammates, whose Lands=Lead tip it is. A teammate still commits on its own
+/// `<lead's branch>--<name>`, but never writes the lead's branch, its reflog or lock, nor
+/// another task's teammate branch.
+#[test]
+fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let task = "crazyagent/write-the-page--lead";
+    let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
+    assert!(switched.status.success(), "{switched:?}");
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_clone(&clone)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let (lead_profile, teammates_profile) = (
+        case.profiles.join("lead.sb"),
+        case.profiles.join("teammates.sb"),
+    );
+    let greet = clone
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let added = run(
+        &lead,
+        &lead_profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&clone),
+            quoted(&greet)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    let committed = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "cd {} && printf 'hello\\n' > greet.txt && {AGENT_GIT} add greet.txt && {AGENT_GIT} -c user.name=greet -c user.email=greet@local -c core.hooksPath=/dev/null commit -q -m greet",
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "a teammate commits on its own branch: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let git = clone.join(".git");
+    let (heads, logs) = (
+        git.join("refs").join("heads"),
+        git.join("logs").join("refs").join("heads"),
+    );
+    for file in [heads.join(task), logs.join(task)] {
+        let before = fs::read(&file).unwrap();
+        let output = run(
+            &teammates,
+            &teammates_profile,
+            &format!("printf 'x\\n' >> {}", quoted(&file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        heads.join(format!("{task}.lock")),
+        heads.join("crazyagent").join("other-task--x"),
+        logs.join("crazyagent").join("other-task--x"),
+    ] {
+        write_refused(
+            &teammates,
+            &teammates_profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
+/// AGENT-REF-ALLOW-NARROW: the engine's setup git for a linked lead's native teammates
+/// writes the refs of that lead's own teammate branches, `<lead's branch>--<name>`, and
+/// nothing else under `crazyagent/`: not the lead's branch when it has a teammate branch's
+/// shape, its reflog or lock, nor another task's teammate branch.
+#[test]
+fn the_teammates_setup_git_writes_only_its_lead_s_teammate_branches() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let lead_worktree = worktrees.join("agent-1");
+    let task = "crazyagent/write-the-page--lead";
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            task,
+            lead_worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let setup = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_teammates_setup(&lead_worktree)
+        .unwrap();
+    let profile = case.profiles.join("setup.sb");
+    let greet = lead_worktree
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let made = run(
+        &setup,
+        &profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&lead_worktree),
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        made.status.success(),
+        "the setup git adds a teammate's worktree: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let git = case.project.join(".git");
+    let (heads, logs) = (
+        git.join("refs").join("heads"),
+        git.join("logs").join("refs").join("heads"),
+    );
+    assert!(heads.join(format!("{task}--greet")).is_file());
+    for file in [heads.join(task), logs.join(task)] {
+        let before = fs::read(&file).unwrap();
+        let output = run(
+            &setup,
+            &profile,
+            &format!("printf 'x\\n' >> {}", quoted(&file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        heads.join(format!("{task}.lock")),
+        heads.join("crazyagent").join("other-task--x"),
+        logs.join("crazyagent").join("other-task--x"),
+    ] {
+        write_refused(
+            &setup,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
 /// OP-9b (plan step 2): a native lead in a linked worktree (the Sandboxed default) has
 /// teammates who write only the teammates' folder of the lead's worktree, where the engine
 /// made each one's linked worktree. The engine commits their turns, so they never write the
