@@ -14,6 +14,7 @@ pub(super) const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const USAGE_CODES: &[&str] = &[
     "usage_limits_invalid",
     "usage_outcome_unknown",
+    "usage_recount_not_ready",
     "usage_reply_bounds",
     "usage_request_bounds",
     "usage_request_invalid",

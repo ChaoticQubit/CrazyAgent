@@ -805,7 +805,8 @@ fn read_opened_with(
                 limits = observed.or(limits);
             }
         }
-        if let Some(tools) = tools.as_deref_mut() {
+        let already_filed = progress.offset + consumed <= progress.filed_to;
+        if let Some(tools) = tools.as_deref_mut().filter(|_| !already_filed) {
             let called = match format {
                 Format::Claude => claude_tools(&value),
                 Format::Codex => codex_tools(&value),

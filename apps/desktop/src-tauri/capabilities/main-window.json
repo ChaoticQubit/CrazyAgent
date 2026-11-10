@@ -213,6 +213,7 @@
     "allow-desktop-usage-refresh",
     "allow-desktop-usage-notices",
     "allow-desktop-usage-set-money",
+    "allow-desktop-usage-decide-recount",
     "allow-desktop-usage-set-reset",
     "allow-desktop-ide-extension-asks",
     "allow-desktop-ide-extension-approve",

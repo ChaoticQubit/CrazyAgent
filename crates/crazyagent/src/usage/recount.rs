@@ -2,7 +2,7 @@ use super::capture::{
     self, Added, Attribution, Format, Messages, ROW_TOKENS_MAX, Tokens, all_records, clamp,
     count_usages, recount_read,
 };
-use super::storage;
+use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -582,18 +582,90 @@ pub fn status(db: &Connection) -> Result<Option<RecountStatus>, EngineError> {
     }))
 }
 
+const COPY_KEPT_MS: i64 = 30 * 24 * HOUR_MS;
+
+/// The records of the sessions the recount replaces.
+const REWOUND: &str = "SELECT f.path,f.progress FROM usage_recount_files f JOIN usage_recount_homes h ON h.home=f.home
+    WHERE EXISTS (SELECT 1 FROM usage_recount_sessions s
+        WHERE s.project=h.project AND s.agent=h.agent AND s.session=f.session)";
 const OLD_COUNTING: &str = "These numbers still use the old counting.";
 const KEPT_COUNTING: &str = "Older numbers use the old counting, because you chose Keep old numbers. New work uses the new counting.";
 
-pub fn counting_notice(_: &Connection) -> Result<Option<String>, EngineError> {
-    Ok(None)
+/// The sentence the usage pages show about how their numbers were counted. Input: the store.
+/// Output: the sentence, None once the numbers are the new counting's or there was nothing
+/// to compare.
+pub fn counting_notice(db: &Connection) -> Result<Option<String>, EngineError> {
+    Ok(match state(db)?.as_deref() {
+        None | Some("running" | "ready") => Some(OLD_COUNTING.to_owned()),
+        Some("kept") => Some(KEPT_COUNTING.to_owned()),
+        _ => None,
+    })
 }
 
-pub fn decide(_: &Connection, _: bool, _: i64) -> Result<(), EngineError> {
-    Ok(())
+/// Applies the owner's choice, once. Use new replaces the rows of each session read to its
+/// end, keeps a copy of them, sets their records back to what the recount read and forgets
+/// only the keys the live scan took from those records since, so a line written since is read
+/// again and counts once. Each record remembers how far the live scan had filed turns and
+/// tools. Keep old leaves every row. Inputs: the store, the choice and the time. Output: done,
+/// or `usage_recount_not_ready`.
+pub fn decide(db: &Connection, use_new: bool, now_ms: i64) -> Result<(), EngineError> {
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    if state(&tx)?.as_deref() != Some("ready") {
+        return Err(failure("usage_recount_not_ready"));
+    }
+    if use_new {
+        tx.execute_batch(&format!(
+            "DROP TABLE IF EXISTS usage_tokens_before_recount;
+             CREATE TABLE usage_tokens_before_recount AS SELECT t.* FROM usage_tokens t WHERE {COVERED};
+             DELETE FROM usage_tokens AS t WHERE {COVERED};
+             INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,model,
+                input,output,cache_read,cache_write,cost_nanos)
+             SELECT hour_ms,kind,project,pool,account,agent,harness,session,model,
+                input,output,cache_read,cache_write,cost_nanos FROM usage_recount_rows r WHERE {STAGED}
+             ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
+                input=MIN(input+excluded.input,{max}),output=MIN(output+excluded.output,{max}),
+                cache_read=MIN(cache_read+excluded.cache_read,{max}),
+                cache_write=MIN(cache_write+excluded.cache_write,{max}),
+                cost_nanos=MIN(cost_nanos+excluded.cost_nanos,{max});
+             DELETE FROM usage_messages
+                WHERE id IN (SELECT l.id FROM usage_recount_live l JOIN ({REWOUND}) w ON w.path=l.path)
+                AND id NOT IN (SELECT id FROM usage_recount_messages);
+             UPDATE usage_messages SET (input,output,cache_read,cache_write,web)=
+                (SELECT m.input,m.output,m.cache_read,m.cache_write,m.web
+                 FROM usage_recount_messages m WHERE m.id=usage_messages.id)
+                WHERE id IN (SELECT l.id FROM usage_recount_live l JOIN ({REWOUND}) w ON w.path=l.path)
+                AND id IN (SELECT id FROM usage_recount_messages);
+             INSERT INTO usage_files (path,progress)
+             SELECT w.path,json_set(w.progress,'$.filed_to',COALESCE(json_extract(u.progress,'$.offset'),0))
+             FROM ({REWOUND}) w LEFT JOIN usage_files u ON u.path=w.path WHERE true
+             ON CONFLICT(path) DO UPDATE SET progress=excluded.progress;",
+            max = ROW_TOKENS_MAX
+        ))
+        .map_err(storage)?;
+    }
+    tx.execute_batch(CLEAR_STAGING).map_err(storage)?;
+    tx.execute(
+        "UPDATE usage_recount SET state=?1,decided_ms=?2 WHERE singleton=1",
+        params![if use_new { "used" } else { "kept" }, now_ms],
+    )
+    .map_err(storage)?;
+    tx.commit().map_err(storage)
 }
 
-pub(super) fn forget_copy(_: &Connection, _: i64) -> Result<(), EngineError> {
+/// Drops the copy of the replaced rows once it is past its age. Inputs: the store and the
+/// time. Output: done, or `usage_unavailable`.
+pub(super) fn forget_copy(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
+    let due: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM usage_recount WHERE state='used' AND decided_ms<=?1)",
+            [now_ms - COPY_KEPT_MS],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if due {
+        db.execute_batch("DROP TABLE IF EXISTS usage_tokens_before_recount")
+            .map_err(storage)?;
+    }
     Ok(())
 }
 

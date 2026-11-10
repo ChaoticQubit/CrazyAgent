@@ -204,12 +204,69 @@ pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
     }
 }
 
-fn recount_lines(_: &RecountStatus, _: bool) -> Vec<Line<'static>> {
-    Vec::new()
+/// The recount offer, shown until the owner chooses. Inputs: the comparison and whether
+/// dollars are shown. Output: its lines.
+fn recount_lines(status: &RecountStatus, priced: bool) -> Vec<Line<'static>> {
+    let money = |text: String| {
+        if priced {
+            format!("  {text}")
+        } else {
+            String::new()
+        }
+    };
+    let mut lines = vec![
+        Line::raw("We recounted your history."),
+        Line::raw(format!(
+            "Old  {} tokens  {} cache read{}",
+            compact(status.old.headline()),
+            compact(status.old.cache_read),
+            money("Not estimated".to_owned())
+        )),
+        Line::raw(format!(
+            "New  {} tokens  {} cache read{}",
+            compact(status.new.headline()),
+            compact(status.new.cache_read),
+            money(money_text(status.new_cost_nanos))
+        )),
+        Line::raw(format!(
+            "{} sessions recounted, {} keep their old numbers because their transcripts are gone or could not be read to the end.",
+            status.sessions_recounted, status.sessions_kept_old
+        )),
+        Line::raw("Recounted sessions count under the account their agent last used."),
+    ];
+    if status.homes_partial > 0 {
+        lines.push(Line::raw(format!(
+            "{} agent folders held more than one pass reads, and part of their history keeps its old numbers.",
+            status.homes_partial
+        )));
+    }
+    if priced {
+        lines.push(Line::raw("New dollars cover recounted sessions only. Sessions that keep their old numbers have no estimate."));
+    }
+    lines.push(Line::raw(
+        "Press n to use the new numbers, o to keep the old ones.",
+    ));
+    lines
 }
 
-fn recount_head(_: &UsageReport, _: usize) -> Vec<Line<'static>> {
-    Vec::new()
+/// The lines above the usage rows: how the numbers were counted and, until the owner chooses,
+/// the recount offer, each wrapped to the screen. Inputs: the report and the width. Output:
+/// the lines.
+fn recount_head(report: &UsageReport, limit: usize) -> Vec<Line<'static>> {
+    let priced = report.money.settings.prices != PriceSource::Off;
+    report
+        .counting_notice
+        .iter()
+        .map(|notice| Line::raw(notice.clone()))
+        .chain(
+            report
+                .recount
+                .iter()
+                .flat_map(|status| recount_lines(status, priced)),
+        )
+        .flat_map(|line| wrap(&line.to_string(), limit.max(8)))
+        .map(Line::raw)
+        .collect()
 }
 
 fn refusal(code: &str) -> &'static str {
@@ -582,6 +639,13 @@ impl UsagePage {
             .is_some_and(|(_, report)| report.money.settings.prices != PriceSource::Off)
     }
 
+    /// Whether the page is offering the recount. Output: the answer.
+    fn offers_recount(&self) -> bool {
+        self.report
+            .as_ref()
+            .is_some_and(|(_, report)| report.recount.is_some())
+    }
+
     fn reload(&mut self, ctx: &mut Ctx) {
         if self.waiting {
             return;
@@ -624,7 +688,17 @@ impl UsagePage {
                 Line::raw("Press r to try again."),
             ],
             (_, Some((range, report))) => {
-                summary(report, *range, &Names::of(ctx), now_ms, offset, limit, ctx)
+                let mut shown = recount_head(report, limit);
+                shown.extend(summary(
+                    report,
+                    *range,
+                    &Names::of(ctx),
+                    now_ms,
+                    offset,
+                    limit,
+                    ctx,
+                ));
+                shown
             }
             _ => vec![
                 title,
@@ -712,6 +786,8 @@ impl Screen for UsagePage {
                     send(ctx, SettingsJob::SetMoney(settings));
                 }
             }
+            Key::Char('n') if self.offers_recount() => send(ctx, SettingsJob::DecideRecount(true)),
+            Key::Char('o') if self.offers_recount() => send(ctx, SettingsJob::DecideRecount(false)),
             _ => return Flow::Ignored,
         }
         Flow::Handled
@@ -727,6 +803,11 @@ impl Screen for UsagePage {
             Some(SettingsEvent::UsageRefreshed(Err(code))) => {
                 ctx.say(Message::error("Could not check limits.", refusal(code)))
             }
+            Some(SettingsEvent::RecountDecided(Ok(()))) => self.reload(ctx),
+            Some(SettingsEvent::RecountDecided(Err(code))) => ctx.say(Message::error(
+                "Could not apply that choice.",
+                refusal(code),
+            )),
             Some(SettingsEvent::MoneySet(Ok(()))) => self.reload(ctx),
             Some(SettingsEvent::MoneySet(Err(code))) => ctx.say(Message::error(
                 "Could not change the setting.",

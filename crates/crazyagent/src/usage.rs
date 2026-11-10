@@ -257,9 +257,10 @@ pub const REMOVED_PROJECTS: &str = "<removed>";
 /// Moves a removed project's usage to `REMOVED_PROJECTS`: its token rows add into the rows
 /// already kept there for the same hour and run, its unreported marks and seen sessions keep
 /// the latest time, its turn rows add into the rows kept there for the same hour and agent,
-/// its runs and cuts keep counting there, and an open recount's staged rows, homes and
-/// sessions follow them. A table this store lacks is skipped. Inputs: the owner's
-/// transaction and the project. Output: Ok, or the store failure.
+/// its runs and cuts keep counting there, an open recount's staged rows, homes and
+/// sessions follow them, and its rows in the copy Use new kept are deleted. A table this
+/// store lacks is skipped. Inputs: the owner's transaction and the project. Output: Ok, or
+/// the store failure.
 pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
     assert_ne!(project, REMOVED_PROJECTS);
     let has = |table: &str| -> Result<bool, EngineError> {
@@ -340,6 +341,13 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
             )
             .map_err(storage)?;
         }
+    }
+    if has("usage_tokens_before_recount")? {
+        db.execute(
+            "DELETE FROM usage_tokens_before_recount WHERE project=?1",
+            [project],
+        )
+        .map_err(storage)?;
     }
     if has("usage_recount_sessions")? {
         db.execute(

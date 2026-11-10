@@ -1,7 +1,7 @@
 use super::capture::{Attribution, Format, Tokens};
 use super::health::{StepHealth, health};
 use super::money::{MoneyView, PriceSource};
-use super::recount::RecountStatus;
+use super::recount::{self, RecountStatus};
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -579,8 +579,11 @@ pub fn report(
         health: health(db)?,
         partial_homes,
         money,
-        recount: None,
-        counting_notice: None,
+        recount: match project {
+            None => recount::status(db)?,
+            Some(_) => None,
+        },
+        counting_notice: recount::counting_notice(db)?,
     })?;
     if report.money.settings.prices == PriceSource::Off {
         report
@@ -590,6 +593,9 @@ pub fn report(
             .chain(report.accounts.iter_mut())
             .chain(report.agents.iter_mut())
             .for_each(|row| row.cost_nanos = 0);
+        if let Some(status) = &mut report.recount {
+            status.new_cost_nanos = 0;
+        }
     }
     assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);

@@ -88,6 +88,17 @@ export interface MoneyView {
   unpriced_tokens: number;
 }
 
+/** The one comparison the owner sees: totals as they stand and as they would be, and how many
+ * sessions each side covers. */
+export interface RecountStatus {
+  old: Tokens;
+  new: Tokens;
+  new_cost_nanos: number;
+  sessions_recounted: number;
+  sessions_kept_old: number;
+  homes_partial: number;
+}
+
 export interface UsageReport {
   since_ms: number | null;
   total: Tokens;
@@ -104,6 +115,8 @@ export interface UsageReport {
   health?: StepHealth[];
   partial_homes: number;
   money: MoneyView;
+  recount?: RecountStatus | null;
+  counting_notice?: string | null;
 }
 
 export interface MetricsBucket {
@@ -168,6 +181,7 @@ export interface Metrics {
 
 const REFUSALS: Record<string, string> = {
   usage_limits_invalid: "That reset time isn't valid. Pick a time in the future.",
+  usage_recount_not_ready: "This recount was already decided. Reload the page.",
   usage_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
   usage_request_invalid: "The engine didn't accept this usage request. Reload the page and try again.",
   usage_unavailable: "Usage isn't available in this engine yet.",
@@ -238,6 +252,12 @@ export function refreshUsage(): Promise<Result<void>> {
 /** Stores the owner's main number and price source. Input: the settings. Output: done. */
 export function setMoney(settings: MoneySettings): Promise<Result<void>> {
   return call<void>("desktop_usage_set_money", { settings });
+}
+
+/** Applies the owner's choice of the recount, once. Input: whether to use the new numbers.
+ * Output: done. */
+export function decideRecount(useNew: boolean): Promise<Result<void>> {
+  return call<void>("desktop_usage_decide_recount", { useNew });
 }
 
 /** Sets or clears the owner's manual reset time of one account's window. Inputs: the

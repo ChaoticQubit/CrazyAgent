@@ -3,7 +3,7 @@ import { listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type MoneySettings, type MoneyView, type Tokens, type UsageReport } from "../../api-usage";
+import { decideRecount, loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type MoneySettings, type MoneyView, type RecountStatus, type Tokens, type UsageReport } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
 import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -361,6 +361,31 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total, money
   </Panel>;
 }
 
+/** The once-only offer: old and new side by side and the two choices. Inputs: the comparison,
+ * the money view and what to do once chosen. Output: the panel. */
+function RecountPanel({ status, money, onDone }: { status: RecountStatus; money: MoneyView; onDone: () => void }) {
+  const priced = money.settings.prices !== "off";
+  const row = (name: string, tokens: Tokens, cost: string) => <tr>
+    <th scope="row">{name}</th>
+    <td className="num">{compactCount(headlineTokens(tokens))}</td>
+    <td className="num">{compactCount(tokens.cache_read)}</td>
+    {priced && <td className="num">{cost}</td>}
+  </tr>;
+  const choose = (useNew: boolean) => void decideRecount(useNew).then(onDone);
+  return <Panel title="We recounted your history">
+    <table className="pj-table mx-table">
+      <thead><tr><th scope="col" /><th scope="col" className="num">Tokens</th><th scope="col" className="num">Cache read</th>{priced && <th scope="col" className="num">{COST_LABEL}</th>}</tr></thead>
+      <tbody>{row("Old", status.old, "Not estimated")}{row("New", status.new, dollarText(status.new_cost_nanos))}</tbody>
+    </table>
+    <p>{status.sessions_recounted} sessions recounted. {status.sessions_kept_old} keep their old numbers because their transcripts are gone or could not be read to the end.{status.homes_partial > 0 ? ` ${status.homes_partial} agent folders held more than one pass reads, and part of their history keeps its old numbers.` : ""} Recounted sessions count under the account their agent last used.</p>
+    {priced && <p>New dollars cover recounted sessions only. Sessions that keep their old numbers have no estimate.</p>}
+    <div className="pj-row">
+      <button type="button" className="btn primary" onClick={() => choose(true)}>Use new numbers</button>
+      <button type="button" className="btn" onClick={() => choose(false)}>Keep old numbers</button>
+    </div>
+  </Panel>;
+}
+
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
  * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
@@ -420,6 +445,8 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
   return <div className="stack mx-page">
     {head}
+    {usage.value.counting_notice && <p role="status">{usage.value.counting_notice}</p>}
+    {usage.value.recount && <RecountPanel status={usage.value.recount} money={usage.value.money} onDone={onRetry} />}
     <Tiles usage={usage.value} metrics={metrics.value} />
     <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} money={usage.value.money} />
     <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} money={usage.value.money} />
