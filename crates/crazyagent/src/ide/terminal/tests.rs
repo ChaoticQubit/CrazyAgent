@@ -373,6 +373,52 @@ fn the_sandboxed_terminal_cannot_commit() {
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
+/// Plants with `script` in a Sandboxed terminal of a fresh repository, `@OWNER@` naming a
+/// folder of the owner's outside the project, then runs the owner's own `git worktree
+/// prune`, which a commit also runs as maintenance. Inputs: whether the repository has a
+/// `.git/worktrees` folder and the script. Output: what the terminal printed and how many of
+/// the owner's two files are still there.
+#[cfg(target_os = "macos")]
+fn plant_then_prune(worktrees: bool, script: &str) -> (String, usize) {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    if worktrees {
+        std::fs::create_dir(case.folder.join(".git").join("worktrees")).unwrap();
+    }
+    let owner = case.folder.parent().unwrap().join("owner-files");
+    let files = [owner.join("keep.txt"), owner.join("sub").join("keep.txt")];
+    std::fs::create_dir_all(owner.join("sub")).unwrap();
+    for file in &files {
+        std::fs::write(file, "owner file\n").unwrap();
+    }
+    let output = in_terminal(&case, &script.replace("@OWNER@", &quoted(&owner)));
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    setup_git(&case.folder, &["worktree", "prune"]);
+    (said, files.iter().filter(|file| file.is_file()).count())
+}
+
+/// A Sandboxed terminal cannot make `.git/worktrees`, or an entry in it, a link, in any
+/// letter case, while it still makes a real admin folder there as `git worktree add` does.
+/// Git's `worktree prune` empties the folder such a link names, outside the project
+/// (SECAUDIT-WORKTREE-ADMIN-PLANT).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_cannot_link_git_worktrees_to_a_folder_the_owners_prune_empties() {
+    let (said, kept) = plant_then_prune(false, "ln -s @OWNER@ .git/worktrees; echo folder=$?");
+    assert!(said.contains("folder=1"), "{said}");
+    assert_eq!(kept, 2, "{said}");
+    let (said, kept) = plant_then_prune(
+        true,
+        "ln -s @OWNER@ .git/worktrees/planted; echo admin=$?; \
+         ln -s @OWNER@ .git/WORKTREES/cased; echo cased=$?; \
+         mkdir .git/worktrees/real; echo real=$?",
+    );
+    for code in ["admin=1", "cased=1", "real=0"] {
+        assert!(said.contains(code), "{code}: {said}");
+    }
+    assert_eq!(kept, 2, "{said}");
+}
+
 /// Runs a confined IDE terminal's pane as the host would, pins that its shell then starts,
 /// and answers what it says first, which is printed inside the pane because the pane host
 /// repaints the terminal as it attaches and wipes anything written from outside. Inputs: the
