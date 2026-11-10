@@ -1,6 +1,6 @@
 use super::ProjectSandbox;
 use super::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -280,24 +280,22 @@ fn agent_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
     rustix::fs::openat(parent, name, OPEN_FOLDER, Mode::empty()).map_err(|_| "tool_cache_link")
 }
 
-/// Puts the uv marker in one cache bucket: makes `.git` as a link to exactly `/dev/null`
-/// when missing and accepts one that is already that link. A file, a folder or a link to
-/// anything else there fails closed. Input: the open bucket. Output: Ok, else
-/// `tool_cache_marker_unexpected` or `tool_cache_marker_unmade`.
+/// Puts the uv marker in one cache bucket: makes `.git` as a link to exactly `/dev/null`,
+/// or finds one an earlier or a parallel launch made, and then accepts what is there only
+/// as that link, so launches racing on one Shared key all get the marker (T8 r1 L1). A
+/// file, a folder or a link to anything else there fails closed. Input: the open bucket.
+/// Output: Ok, else `tool_cache_marker_unexpected` or `tool_cache_marker_unmade`.
 fn marker(bucket: &OwnedFd) -> Result<(), &'static str> {
-    match rustix::fs::statat(bucket, MARKER, AtFlags::SYMLINK_NOFOLLOW) {
-        Err(Errno::NOENT) => rustix::fs::symlinkat(MARKER_TARGET, bucket, MARKER)
-            .map_err(|_| "tool_cache_marker_unmade"),
-        Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
-            let target = rustix::fs::readlinkat(bucket, MARKER, Vec::new())
-                .map_err(|_| "tool_cache_marker_unexpected")?;
-            if target.as_bytes() == MARKER_TARGET.as_bytes() {
-                Ok(())
-            } else {
-                Err("tool_cache_marker_unexpected")
-            }
-        }
-        _ => Err("tool_cache_marker_unexpected"),
+    match rustix::fs::symlinkat(MARKER_TARGET, bucket, MARKER) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(_) => return Err("tool_cache_marker_unmade"),
+    }
+    let target = rustix::fs::readlinkat(bucket, MARKER, Vec::new())
+        .map_err(|_| "tool_cache_marker_unexpected")?;
+    if target.as_bytes() == MARKER_TARGET.as_bytes() {
+        Ok(())
+    } else {
+        Err("tool_cache_marker_unexpected")
     }
 }
 

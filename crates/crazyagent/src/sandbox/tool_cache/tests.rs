@@ -202,6 +202,40 @@ fn a_second_launch_with_the_same_uv_does_not_prime_and_remakes_a_moved_marker() 
     );
 }
 
+/// T8 r1 L1: launches racing on one Shared key after an agent moved a bucket away all get
+/// uv's marker: one makes the link and the others find it, so none ends with
+/// `tool_cache_marker_unmade` and runs uv with no cache.
+#[test]
+fn launches_racing_on_one_key_all_get_the_marker() {
+    const ROUNDS: usize = 20;
+    const LAUNCHES: usize = 8;
+    let runtime = Runtime::new("");
+    let bucket = runtime.prepare().unwrap().root.join(UV).join("sdists-v10");
+    for round in 0..ROUNDS {
+        std::fs::rename(&bucket, bucket.with_file_name(format!("moved-{round}"))).unwrap();
+        let start = std::sync::Barrier::new(LAUNCHES);
+        let ended: Vec<Result<Prepared, &'static str>> = std::thread::scope(|scope| {
+            let launches: Vec<_> = (0..LAUNCHES)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        runtime.prepare()
+                    })
+                })
+                .collect();
+            launches
+                .into_iter()
+                .map(|launch| launch.join().unwrap())
+                .collect()
+        });
+        assert!(ended.iter().all(Result::is_ok), "round {round}: {ended:?}");
+        assert_eq!(
+            std::fs::read_link(bucket.join(MARKER)).unwrap(),
+            Path::new(MARKER_TARGET)
+        );
+    }
+}
+
 /// T8 C4: a uv binary that changed since the record primes again.
 #[test]
 fn a_changed_uv_primes_again() {
