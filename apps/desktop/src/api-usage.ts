@@ -49,7 +49,7 @@ export interface LimitWindow {
 
 export type WindowKind = "five_hour" | "weekly";
 
-export type UsageStep = "poll" | "team" | "runs";
+export type UsageStep = "poll" | "team" | "runs" | "recount";
 
 export interface StepHealth {
   step: UsageStep;

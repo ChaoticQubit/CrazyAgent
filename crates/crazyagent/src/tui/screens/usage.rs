@@ -187,6 +187,7 @@ pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
             "Counting research run tokens",
             "research token totals may be low",
         ),
+        UsageStep::Recount => ("Recounting history", "the comparison may arrive later"),
     };
     let times = match health.panics {
         1 => "once".to_owned(),

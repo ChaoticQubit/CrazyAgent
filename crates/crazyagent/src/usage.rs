@@ -12,11 +12,13 @@ pub mod metrics;
 pub mod money;
 pub mod poll;
 pub mod prices;
+pub mod recount;
 pub mod report;
 mod rules;
 pub mod service;
 pub mod turns;
 
+pub use recount::RecountStatus;
 pub use rules::THIRD_PARTY_NOTICES;
 
 pub const PLAN_BYTES_MAX: usize = 64;
@@ -256,8 +258,9 @@ pub const REMOVED_PROJECTS: &str = "<removed>";
 /// Moves a removed project's usage to `REMOVED_PROJECTS`: its token rows add into the rows
 /// already kept there for the same hour and run, its unreported marks and seen sessions keep
 /// the latest time, its turn rows add into the rows kept there for the same hour and agent,
-/// and its runs and cuts keep counting there. A table this store lacks is skipped. Inputs:
-/// the owner's transaction and the project. Output: Ok, or the store failure.
+/// its runs and cuts keep counting there, and an open recount's staged rows, homes and
+/// sessions follow them. A table this store lacks is skipped. Inputs: the owner's
+/// transaction and the project. Output: Ok, or the store failure.
 pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
     assert_ne!(project, REMOVED_PROJECTS);
     let has = |table: &str| -> Result<bool, EngineError> {
@@ -275,6 +278,20 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
                 "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
                  SELECT hour_ms,kind,?2,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos
                  FROM usage_tokens WHERE project=?1
+                 ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
+                 input=MIN(input+excluded.input,{max}), output=MIN(output+excluded.output,{max}),
+                 cache_read=MIN(cache_read+excluded.cache_read,{max}),
+                 cache_write=MIN(cache_write+excluded.cache_write,{max}),
+                 cost_nanos=MIN(cost_nanos+excluded.cost_nanos,{max})",
+                max = capture::ROW_TOKENS_MAX
+            ),
+        ),
+        (
+            "usage_recount_rows",
+            format!(
+                "INSERT INTO usage_recount_rows(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+                 SELECT hour_ms,kind,?2,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos
+                 FROM usage_recount_rows WHERE project=?1
                  ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
                  input=MIN(input+excluded.input,{max}), output=MIN(output+excluded.output,{max}),
                  cache_read=MIN(cache_read+excluded.cache_read,{max}),
@@ -316,7 +333,7 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
                 .map_err(storage)?;
         }
     }
-    for table in ["usage_runs", "usage_cut"] {
+    for table in ["usage_runs", "usage_cut", "usage_recount_homes"] {
         if has(table)? {
             db.execute(
                 &format!("UPDATE {table} SET project=?2 WHERE project=?1"),
@@ -324,6 +341,18 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
             )
             .map_err(storage)?;
         }
+    }
+    if has("usage_recount_sessions")? {
+        db.execute(
+            "UPDATE OR IGNORE usage_recount_sessions SET project=?2 WHERE project=?1",
+            params![project, REMOVED_PROJECTS],
+        )
+        .map_err(storage)?;
+        db.execute(
+            "DELETE FROM usage_recount_sessions WHERE project=?1",
+            [project],
+        )
+        .map_err(storage)?;
     }
     Ok(())
 }
@@ -336,10 +365,12 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     add_columns(db, "weekly_polled_resets_ms", ADD_POLLED)?;
     add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
+    health::upgrade(db)?;
     db.execute_batch(health::SCHEMA).map_err(storage)?;
     db.execute_batch(report::SCHEMA).map_err(storage)?;
     db.execute_batch(money::SCHEMA).map_err(storage)?;
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
+    db.execute_batch(recount::SCHEMA).map_err(storage)?;
     capture::count_rows(db)
 }
 

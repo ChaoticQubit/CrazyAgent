@@ -1,6 +1,7 @@
-use super::capture::{Attribution, Format, RunKind, scan_agent_home, scan_runs};
+use super::capture::{Attribution, Format, RunKind, run_attribution, scan_agent_home, scan_runs};
 use super::health::{UsageStep, clear, record_panic, record_recovered};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
+use super::recount;
 use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
@@ -21,6 +22,8 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(5);
 pub const POLL_EVERY_MS: i64 = 10 * 60 * 1000;
 const STOPPED_SCAN_MS: i64 = 10 * 60 * 1000;
 const AGENTS_PER_SCAN_MAX: i64 = 256;
+const RECOUNT_AGENTS_MAX: i64 = 8 * 1024;
+const RECOUNT_RUNS_MAX: i64 = 8 * 1024;
 const STEP_PANICKED: &str = "usage_step_panicked";
 const PANIC_PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
 const PANIC_DOUBLINGS_MAX: u32 = 8;
@@ -225,7 +228,132 @@ impl Usage {
             |project, account| pool_of(&access, project, account),
             now_ms,
         )?;
-        self.completed(UsageStep::Runs, now_ms)
+        self.completed(UsageStep::Runs, now_ms)?;
+        self.guarded_recount(|usage| usage.recount(&access, now_ms), now_ms)
+    }
+
+    /// Runs the recount's part of a step. A panic is counted against the recount and returns
+    /// done, so that the live scan's pace does not double for it; the file being read has
+    /// already been charged a try. Inputs: the part and the time. Output: done, or the store's
+    /// failure.
+    fn guarded_recount(
+        &mut self,
+        part: impl FnOnce(&Usage) -> Result<(), EngineError>,
+        now_ms: i64,
+    ) -> Result<(), EngineError> {
+        self.doing = UsageStep::Recount;
+        let usage = &*self;
+        match guarded(|| part(usage)) {
+            Some(code) if code == STEP_PANICKED => {
+                self.unrecovered.insert(UsageStep::Recount);
+                record_panic(&self.db, UsageStep::Recount, now_ms)
+            }
+            Some(code) => Err(EngineError(code)),
+            None => self.completed(UsageStep::Recount, now_ms),
+        }
+    }
+
+    /// Starts the once-only recount, then reads one bounded part of it each step. Inputs: the
+    /// live access and the time. Output: done, or the store's failure.
+    fn recount(&self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+        if !recount::started(&self.db)? {
+            recount::begin(&self.db, &self.recount_homes(access)?, now_ms)?;
+        }
+        recount::step(&self.db, recount::BYTES_PER_STEP, now_ms)?;
+        Ok(())
+    }
+
+    /// Lists the homes the upkeep already scans. A store without team tables has only its
+    /// runs; any other failure returns, so the once-only recount starts on a later step.
+    /// Input: the live access. Output: the homes, or the store's failure.
+    fn recount_homes(&self, access: &ModelAccess) -> Result<Vec<recount::Home>, EngineError> {
+        let mut homes = Vec::new();
+        let has_team: bool = self
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_agents')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if has_team {
+            let mut statement = self
+                .db
+                .prepare(
+                    "SELECT id,project,role,harness,connection FROM team_agents
+                     WHERE role<>'teammate' ORDER BY id DESC LIMIT ?1",
+                )
+                .map_err(storage)?;
+            let rows: Vec<(i64, String, String, String, Option<String>)> = statement
+                .query_map([RECOUNT_AGENTS_MAX], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?;
+            for (id, project, role, harness, connection) in rows {
+                let Some(format) = Format::of(&harness) else {
+                    continue;
+                };
+                homes.push(recount::Home {
+                    path: self
+                        .team
+                        .join("agents")
+                        .join(format!("agent-{id}"))
+                        .join("home"),
+                    format,
+                    attribution: team_attribution(
+                        id,
+                        &project,
+                        role == "master",
+                        &harness,
+                        connection.as_deref(),
+                        access,
+                    ),
+                    removed: false,
+                });
+            }
+        }
+        let mut runs = self
+            .db
+            .prepare("SELECT home,kind,project,account,agent,harness FROM usage_runs ORDER BY started_ms DESC LIMIT ?1")
+            .map_err(storage)?;
+        let rows: Vec<(String, String, String, String, String, String)> = runs
+            .query_map([RECOUNT_RUNS_MAX], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?;
+        for (home, kind, project, account, agent, harness) in rows {
+            let resolve =
+                |project: &str, account: &CredentialRef| pool_of(access, project, account);
+            let removed = project == super::REMOVED_PROJECTS;
+            if let Some((format, attribution)) =
+                run_attribution(&kind, project, account, agent, harness, &resolve)
+            {
+                homes.push(recount::Home {
+                    path: PathBuf::from(home),
+                    format,
+                    attribution,
+                    removed,
+                });
+            }
+        }
+        Ok(homes)
     }
 
     /// Marks a part that panicked earlier as working again once it completes, writing only
