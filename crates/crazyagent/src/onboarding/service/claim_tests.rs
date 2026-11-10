@@ -128,6 +128,44 @@ fn a_waiting_onboarding_step_halts_a_refresh_build() {
 
 #[cfg(unix)]
 #[test]
+fn a_mapping_rechecking_its_account_pause_never_halts_a_refresh_build() {
+    let database = database();
+    let running = || false;
+    waiting_to_map(&database, "rechecking", 1);
+    pause(&database, "rechecking", i64::MAX);
+    database
+        .execute(
+            "UPDATE onboarding SET updated_ms=?1 WHERE project='rechecking'",
+            [now_ms() - PAUSE_RECHECK_MS],
+        )
+        .unwrap();
+    assert!(
+        !gives_way(&database, &running)(),
+        "a pause recheck waits one build"
+    );
+    assert_eq!(
+        claimed(&database).as_deref(),
+        Some("rechecking"),
+        "the claim still rechecks it"
+    );
+
+    waiting_to_map(&database, "ended", 2);
+    pause(&database, "ended", now_ms() + 60 * 60 * 1000);
+    assert!(!gives_way(&database, &running)());
+    database
+        .execute(
+            "UPDATE onboarding SET mapping_reason=?1 WHERE project='ended'",
+            [(now_ms() - 1).to_string()],
+        )
+        .unwrap();
+    assert!(
+        gives_way(&database, &running)(),
+        "a pause that ended halts the build"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_project_with_no_onboarding_row_gets_its_main_graph_refreshed() {
     let database = database();
     database

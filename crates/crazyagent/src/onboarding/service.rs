@@ -686,19 +686,21 @@ fn graphs_wanted(database: &Connection) -> bool {
     main_graph::wanted(switch, std::env::consts::OS)
 }
 
-/// Whether an onboarding step waits to be claimed ([`CLAIMABLE`]). Takes the worker's
-/// database. Returns the answer; a table that cannot be read counts as no step waiting,
-/// since the claim then fails too.
+/// Whether a new or ready onboarding step waits to be claimed ([`CLAIMABLE`]): a graph step,
+/// or a mapping with no account pause or one whose pause has ended. The pause recheck
+/// cut-off is bound to the smallest time, so a mapping that only rechecks its pause every
+/// [`PAUSE_RECHECK_MS`] never halts a refresh and waits one build instead. Takes the
+/// worker's database. Returns the answer; a table that cannot be read counts as no step
+/// waiting, since the claim then fails too.
 #[cfg(unix)]
 fn step_waits(database: &Connection) -> bool {
-    let now = now_ms();
     database
         .query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM onboarding o WHERE {CLAIMABLE})"),
             params![
                 crate::project_setup::FIRST_REVISION as i64,
-                now,
-                now - PAUSE_RECHECK_MS
+                now_ms(),
+                i64::MIN
             ],
             |row| row.get::<_, bool>(0),
         )
