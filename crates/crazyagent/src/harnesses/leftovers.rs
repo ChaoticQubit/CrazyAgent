@@ -1,7 +1,6 @@
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-#[cfg(unix)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -32,6 +31,13 @@ pub const UNLISTED: &str = "unknown, the process list could not be read";
 /// (SECAUDIT-SETSID-LEFTOVER r2 L2).
 #[cfg(unix)]
 const FOLLOW_GAP: Duration = FOLLOW_EVERY.saturating_mul(2);
+/// How often a [`Follower`] takes the shared table: half of [`FOLLOW_EVERY`], so with tables
+/// up to [`FOLLOW_EVERY`] old, the last one it took and its stop's own read lie within
+/// [`FOLLOW_GAP`] while those two reads take under a second together.
+#[cfg(unix)]
+const FOLLOWER_PACE: Duration = Duration::from_secs(1);
+#[cfg(unix)]
+const _: () = assert!(2 * FOLLOWER_PACE.as_nanos() == FOLLOW_EVERY.as_nanos());
 const TOKEN_BYTES: usize = 16;
 /// The most bytes of an environment listing a stop reads, line by line, keeping of each line
 /// that holds its token only the first `KEPT_FIELDS` fields.
@@ -608,6 +614,110 @@ impl Lineage {
     #[cfg(not(unix))]
     fn refresh(&mut self) -> Result<(), Unstopped> {
         Err(Unstopped::Uncertain)
+    }
+}
+
+/// Where a [`Follower`]'s lineage stands: its first read still running, read, or taken by the
+/// stop.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum Following {
+    Reading,
+    Read(Result<Lineage, Unstopped>),
+    Taken,
+}
+
+/// A Full access headless run's processes, followed from its start on a thread of its own,
+/// since such a run has no poll that could follow them while it waits (SETSID-L2): the thread
+/// takes the first read, then the engine's shared table every [`FOLLOWER_PACE`], so a process
+/// that later leaves the run's session and loses its parent stays known. The lineage sits
+/// under a lock taken only to apply a table, so a stop never waits for a read in flight.
+/// Holds the leader, the launch's token, the lineage and the sender whose drop ends the thread.
+pub(crate) struct Follower {
+    leader: u32,
+    token: Option<LineageToken>,
+    lineage: Arc<Mutex<Following>>,
+    _wake: std::sync::mpsc::Sender<()>,
+}
+
+impl Follower {
+    /// Starts following a Full access run from its first read on a thread of its own. When no
+    /// thread starts, or no table is read here, the stop reads the lineage itself. Inputs: the
+    /// run's leader, whose id is also its session's, and the launch's token. Output: the
+    /// follower.
+    pub(crate) fn start(leader: u32, token: Option<LineageToken>) -> Self {
+        let lineage = Arc::new(Mutex::new(Following::Reading));
+        let (wake, woken) = std::sync::mpsc::channel();
+        #[cfg(unix)]
+        {
+            let followed = Arc::clone(&lineage);
+            let first = token.clone();
+            let _ = std::thread::Builder::new()
+                .name("full-access-follow".into())
+                .spawn(move || follow_run(leader, first, &followed, &woken));
+        }
+        #[cfg(not(unix))]
+        drop(woken);
+        Self {
+            leader,
+            token,
+            lineage,
+            _wake: wake,
+        }
+    }
+
+    /// Ends the follow and takes the lineage for the stop, with the stop's own read before the
+    /// group is killed ([`Lineage::before_stop`]). It never waits for a read the thread has in
+    /// flight: while the first read is not in, the stop reads the lineage itself. Blocks up to
+    /// two table reads. Input: the follower. Output: the lineage, or why it cannot be read.
+    pub(crate) fn stop(self) -> Result<Lineage, Unstopped> {
+        let taken = std::mem::replace(&mut *following(&self.lineage), Following::Taken);
+        let mut lineage = match taken {
+            Following::Read(read) => read?,
+            Following::Reading | Following::Taken => Lineage::of(self.leader, self.token)?,
+        };
+        lineage.before_stop();
+        Ok(lineage)
+    }
+}
+
+/// Locks a follower's lineage, also after a panic of the thread that held it. Input: the
+/// lock. Output: the guard.
+fn following(lineage: &Mutex<Following>) -> MutexGuard<'_, Following> {
+    lineage.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Takes a follower's first read, then the shared table every [`FOLLOWER_PACE`] until its
+/// stop. Each read runs with no lock held, and the lock is taken only to apply it. Ends at
+/// the stop, or once the first read found no lineage. Inputs: the leader, the token, the
+/// lineage's lock and the receiver the stop disconnects. Output: none.
+#[cfg(unix)]
+fn follow_run(
+    leader: u32,
+    token: Option<LineageToken>,
+    lineage: &Mutex<Following>,
+    woken: &std::sync::mpsc::Receiver<()>,
+) {
+    let first = Lineage::of(leader, token);
+    {
+        let mut slot = following(lineage);
+        if !matches!(*slot, Following::Reading) {
+            return;
+        }
+        *slot = Following::Read(first);
+    }
+    while woken.recv_timeout(FOLLOWER_PACE) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+        let Some(read) = shared_rows() else {
+            continue;
+        };
+        let mut slot = following(lineage);
+        let Following::Read(Ok(followed)) = &mut *slot else {
+            return;
+        };
+        followed.noted(
+            read.as_ref()
+                .map(|(at, rows)| (*at, rows.as_slice()))
+                .map_err(|_| ()),
+        );
     }
 }
 

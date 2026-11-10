@@ -1,5 +1,5 @@
 use super::interactive::KEY_FILE;
-use super::leftovers::{LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
@@ -1370,13 +1370,13 @@ impl Driver {
 /// A running harness process driven through its headless interface.
 /// The process leads its own process group, and a harness on pipes has a warden in its
 /// sandbox, so stop reaches every descendant, those in their own sessions included.
-/// `uncertain` is set once its warden did not confirm that sandbox empty.
+/// `uncertain` is set once its warden did not confirm that sandbox empty; `follower` follows a
+/// Full access run's processes, which no warden reaches, from its start to its stop.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
-    unconfined: bool,
-    token: LineageToken,
+    follower: Option<Follower>,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1501,12 +1501,14 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
+        let follower = request
+            .unconfined
+            .then(|| Follower::start(child.id(), Some(token)));
         let mut session = Self {
             child,
             warden,
             uncertain: false,
-            unconfined: request.unconfined,
-            token,
+            follower,
             stdin,
             lines,
             driver,
@@ -1606,14 +1608,13 @@ impl Session {
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
     /// run's warden, when it has one, stop every process left in its sandbox. A Full access
-    /// run has no warden, so the processes found in its lineage before the kill, and those
-    /// carrying its launch's token, are checked after it. Output: the leader's exit code when
-    /// it exited normally, [`Unstopped::Uncertain`] when a warden did not confirm that its
-    /// sandbox is empty, or [`Unstopped::Left`] naming what a Full access run left running.
+    /// run has no warden, so the processes its lineage followed from the start up to the kill,
+    /// and those carrying its launch's token, are checked after it. Output: the leader's exit
+    /// code when it exited normally, [`Unstopped::Uncertain`] when a warden did not confirm
+    /// that its sandbox is empty, or [`Unstopped::Left`] naming what a Full access run left
+    /// running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
-        let lineage = self
-            .unconfined
-            .then(|| Lineage::of(self.process_group(), Some(self.token.clone())));
+        let lineage = self.follower.take().map(Follower::stop);
         let code = self.stop_group();
         assert!(self.stopped && self.warden.is_none());
         if self.uncertain {
