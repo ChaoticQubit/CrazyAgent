@@ -5,6 +5,7 @@ import { mountTab, sceneRead, settle, wordsOf } from "./settings-tab.mjs";
 export * from "./settings-tab.mjs";
 
 const FAILURE = { code: "engine_failed" };
+const APPLIED = { pending: false, outcome: "applied", rejection: null };
 let timers = [];
 const say = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
 const member = (index, kind = "chatgpt") => ({ id: `acct-${index}`, kind, provider: "chatgpt", status: "signed_in", status_label: "Signed in" });
@@ -29,7 +30,7 @@ const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS)
 const SCHEDULE = { strategy: "use_it_or_lose_it", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
 const reading = (used_percent) => (used_percent === null ? null : { used_percent, resets_at_ms: null });
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
-const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limit(0, 79), limit(1, 100)] };
+const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limit(0, 79), limit(1, 100)], mixed: [limit(2, 80), limit(1, 100)] };
 
 /** Answers one engine command for a scene. Inputs: the scene and the command. Output: the
  * answer, a failure thrown, or a read that never lands. */
@@ -43,13 +44,13 @@ function answer(scene, command) {
   }
   if (command === "desktop_account_schedule") return failing(scene.schedule ?? "ok", { ok: SCHEDULE });
   if (command === "desktop_account_ranking") return failing(scene.ranking ?? "ok", RANKINGS);
-  if (command === "desktop_set_account_schedule") return null;
+  if (command === "desktop_set_account_schedule") return APPLIED;
   if (command === "desktop_usage_report") {
     const limits = failing(scene.limits ?? "ok", LIMITS);
     return limits instanceof Promise ? limits : { limits };
   }
   if (scene.edits === "ok" && command === "desktop_inspect_model_access") return { ticket: "ticket", record: { kind: "pool", pool: { id: "pool-spare", name: "Spare", members: ["acct-3"] } } };
-  if (scene.edits === "ok" && command === "desktop_edit_model_access") return null;
+  if (scene.edits === "ok" && command === "desktop_edit_model_access") return APPLIED;
   if (command === "desktop_inspect_model_access" || command === "desktop_model_access_page") throw FAILURE;
   throw `Command ${command} not found`;
 }

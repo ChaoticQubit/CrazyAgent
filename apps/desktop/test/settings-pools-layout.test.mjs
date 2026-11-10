@@ -9,6 +9,7 @@ const EDIT_MAIN = 'button[aria-label="Edit pool Main pool"]';
 
 const read = (page) => page.evaluate("Fixture.sections()");
 const say = (page) => page.evaluate("Fixture.text()");
+const pane = (page) => page.evaluate("Fixture.wordsOf('.pool-detail')");
 const items = (page) => page.evaluate("Fixture.poolItems()");
 const rows = (page) => page.evaluate("Fixture.orderRows()");
 const commandCount = async (page, name) => (await page.evaluate("Fixture.commands()")).filter((command) => command === name).length;
@@ -87,7 +88,7 @@ test("a not signed in row reads why and links to its own sign-in, and no other r
 });
 
 test("with no ready account the pane says so and still lists the held ones", async () => {
-  const seen = await onPools({ ranking: "none" }, async (page) => ({ says: await say(page), rows: await rows(page) }));
+  const seen = await onPools({ ranking: "none" }, async (page) => ({ says: await pane(page), rows: await rows(page) }));
   assert.ok(seen.says.includes("No account can take work now."), seen.says);
   assert.deepEqual(seen.rows.map((row) => row.spoken), ["Held", "Held", "Held"]);
 });
@@ -106,7 +107,7 @@ for (const [scene, words, absent] of [
   [{ limits: "missing" }, ["Account 2"], "No usage read yet"],
 ]) {
   test(`the pane keeps its state for ${JSON.stringify(scene)}`, async () => {
-    const seen = await onPools(scene, async (page) => ({ says: await say(page), items: await items(page) }));
+    const seen = await onPools(scene, async (page) => ({ says: await pane(page), items: await items(page) }));
     for (const part of words) assert.ok(seen.says.includes(part), `${part} in ${seen.says}`);
     assert.ok(!seen.says.includes(absent), seen.says);
     assert.equal(seen.items.length, 2, "the list stays when one read of the pane fails");
@@ -134,7 +135,7 @@ test("with the schedule not read, a row keeps its harness and drops only the pla
 });
 
 test("a pool with no accounts says how to add one", async () => {
-  const says = await onPools({ pools: "hollow", ranking: "bare" }, say);
+  const says = await onPools({ pools: "hollow", ranking: "bare" }, pane);
   assert.ok(says.includes("No accounts yet. Use Edit pool to put one in this pool."), says);
   assert.ok(!says.includes("No accounts to rank yet."), says);
 });
@@ -425,7 +426,7 @@ test("Get ready for agents reaches the engine and says which account is not read
 
 for (const theme of ["light", "dark"]) {
   test(`the pool list and every row part read at 4.5 to 1 in ${theme}`, async () => {
-    const seen = await onPools({ ranking: "held", limits: "near" }, async (page) => {
+    const seen = await onPools({ ranking: "held", limits: "mixed" }, async (page) => {
       const read = {};
       for (const selector of [".pool-item-count", ".pool-item.on .pool-item-label", ".pool-item-about", ".pool-pos", ".pool-row.held .pool-pos", ".pool-plan", ".pool-why", ".pool-row.held .pool-why", ".pool-why a", ".pool-limit.near", ".pool-limit.full", ".pool-limit-none", ".pool-held-head", ".pool-order p"]) {
         read[selector] = await page.evaluate(`Fixture.contrast(${JSON.stringify(selector)})`);
