@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -291,13 +292,15 @@ impl Tmux {
     /// The process the kernel names as the listener bound at this host's socket, read from a
     /// raw connection, never a tmux client, so no reply of the server decides it. A link
     /// swapped in at the path reaches a listener bound under another name, so the name the
-    /// kernel gives the peer must be the socket's own. Output: its pid, or none when nothing
+    /// kernel gives the peer must be the socket's own. tmux binds the whole address, so that
+    /// name is padded with zero bytes after its end. Output: its pid, or none when nothing
     /// there answers or the listener is bound elsewhere.
     fn server_pid(&self) -> Option<u32> {
         let socket = self.address().ok()?;
         let stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
         let peer = stream.peer_addr().ok()?;
-        if peer.as_pathname() != Some(socket.as_path()) {
+        let named = peer.as_pathname()?.as_os_str().as_bytes();
+        if named.split(|byte| *byte == 0).next()? != socket.as_os_str().as_bytes() {
             return None;
         }
         crate::team::caller::peer_pid(&stream).filter(|pid| *pid > 1)
