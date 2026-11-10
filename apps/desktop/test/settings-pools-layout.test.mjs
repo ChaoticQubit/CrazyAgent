@@ -81,6 +81,14 @@ test("held accounts come after the held line with no number, in the ranking's or
   assert.equal(seen.rows[2].why, "Never use. You pinned it.");
 });
 
+test("a sign-in that needs a check is held with no number, says why and links to its own sign-in", async () => {
+  const seen = await onPools({ ranking: "unconfirmed" }, rows);
+  assert.deepEqual(seen.map((row) => [row.number, row.spoken, row.name, row.held]), [["1", "Position 1", "Account 2", false], ["-", "Held", "Account 1", true]]);
+  assert.equal(seen[1].why, "Its sign-in needs a check before agents can use it. Sign in");
+  assert.deepEqual(seen[1].link, { href: "#/settings/accounts?action=sign_in&account=acct-1", label: "Sign in Account 1" });
+  assert.equal(seen[0].link, null);
+});
+
 test("a not signed in row reads why and links to its own sign-in, and no other row has the link", async () => {
   const seen = await onPools({ ranking: "held" }, rows);
   assert.equal(seen[1].why, "Not signed in. Agents skip it until you sign in again. Sign in");

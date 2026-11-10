@@ -28,7 +28,8 @@ const SPARE_ORDER = { pool: "pool-spare", strategy: "balanced", accounts: [ranke
 const READY_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(0, next({ kind: "least_used" })), ranked(1, next({ kind: "more_used" }))];
 const HELD_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(1, { kind: "not_signed_in" }), ranked(0, { kind: "never_use" })];
 const NONE_ROWS = [ranked(1, { kind: "not_signed_in" }), ranked(0, { kind: "never_use" }), ranked(2, { kind: "five_hour_cap", until_ms: null })];
-const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], bare: [] };
+const UNCONFIRMED_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(1, { kind: "sign_in_unconfirmed" })];
+const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], unconfirmed: [order(UNCONFIRMED_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], bare: [] };
 const SCHEDULE = { strategy: "use_it_or_lose_it", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
 const reading = (used_percent) => (used_percent === null ? null : { used_percent, resets_at_ms: null });
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
