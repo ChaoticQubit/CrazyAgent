@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub const DAYS_MIN: u16 = 1;
@@ -64,6 +64,10 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+fn invalid() -> EngineError {
+    error("cleanup_settings_invalid")
+}
+
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
 #[cfg(any(unix, test))]
@@ -78,7 +82,20 @@ pub(crate) fn save(
     connection: &Connection,
     settings: &CleanupSettings,
 ) -> Result<Outcome, EngineError> {
-    let _ = (connection, settings);
+    if !(DAYS_MIN..=DAYS_MAX).contains(&settings.days) {
+        return Err(invalid());
+    }
+    let serde_json::Value::String(mode) = serde_json::to_value(settings.mode).map_err(error)?
+    else {
+        return Err(invalid());
+    };
+    let stored = connection
+        .execute(
+            "INSERT INTO agent_cleanup_settings(singleton,mode,days) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET mode=excluded.mode, days=excluded.days",
+            rusqlite::params![mode, settings.days],
+        )
+        .map_err(error)?;
+    assert_eq!(stored, 1);
     Ok(Outcome::Applied)
 }
 
@@ -87,8 +104,23 @@ pub(crate) fn save(
 /// `cleanup_settings_invalid` for a stored value this engine does not know, so the sweep
 /// removes nothing rather than act on a guess.
 pub fn load(connection: &Connection) -> Result<CleanupSettings, EngineError> {
-    let _ = connection;
-    Ok(CleanupSettings::default())
+    let stored: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT mode,days FROM agent_cleanup_settings WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((mode, days)) = stored else {
+        return Ok(CleanupSettings::default());
+    };
+    let mode = serde_json::from_value(serde_json::Value::String(mode)).map_err(|_| invalid())?;
+    let days = u16::try_from(days)
+        .ok()
+        .filter(|days| (DAYS_MIN..=DAYS_MAX).contains(days))
+        .ok_or_else(invalid)?;
+    Ok(CleanupSettings { mode, days })
 }
 
 /// The owner read of the finished agents setting. Input: the open transaction. Output: the

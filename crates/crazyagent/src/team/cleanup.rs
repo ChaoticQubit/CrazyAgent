@@ -1,5 +1,4 @@
 use super::{AGENT_COLUMNS, AgentRole, TeamAgent, agent_row};
-use crate::cleanup_settings::CleanupSettings;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -9,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub const RECLAIMABLE_MAX: usize = 32;
-pub const CANDIDATES_MAX: usize = 2 * RECLAIMABLE_MAX;
+const CANDIDATES_MAX: usize = 2 * RECLAIMABLE_MAX;
 const DISK_ENTRIES_MAX: usize = 200_000;
 const LOSSES_MAX: usize = 256;
 
@@ -28,8 +27,6 @@ pub struct FinishedAgent {
     pub stopped_ms: Option<i64>,
     pub bytes: u64,
     pub counted_all: bool,
-    #[serde(default)]
-    pub kept: Option<String>,
 }
 
 /// What one removal did: the agents whose worktree, folder and profile are gone, in the
@@ -522,35 +519,10 @@ pub fn finished(
             stopped_ms: agent.stopped_ms,
             bytes: worktree.saturating_add(folder),
             counted_all: all_worktree && all_folder,
-            kept: None,
         });
     }
     assert!(found.len() <= RECLAIMABLE_MAX);
     Ok(found)
-}
-
-/// What one sweep pass did. Red stub: the rows fail until the sweep is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Swept {
-    pub removed: Vec<i64>,
-    pub after: i64,
-    pub failures: Vec<String>,
-}
-
-/// Red stub of the engine's own cleanup pass: removes nothing. Inputs: the store, the
-/// setting, where the last pass stopped and the time now. Output: an empty pass.
-pub fn sweep(
-    db: &Connection,
-    settings: &CleanupSettings,
-    after: i64,
-    now_ms: i64,
-) -> Result<Swept, EngineError> {
-    let _ = (db, settings, after, now_ms);
-    Ok(Swept {
-        removed: Vec::new(),
-        after: 0,
-        failures: Vec::new(),
-    })
 }
 
 /// Removes the owner's chosen finished agents in the order asked: every agent is checked

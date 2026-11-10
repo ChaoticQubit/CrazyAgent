@@ -3,6 +3,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use super::{lock, parse, read, routed, Routed};
     use crazyagent_desktop::bridge::BridgeError;
     use crazyagent::accounts::AccountDraft;
+    use crazyagent::cleanup_settings::CleanupSettings;
     use crazyagent::config::ModelAccessEdit;
     use crazyagent::coord::settings::CoordSettings;
     use crazyagent::coord::settings::Delivery;
@@ -20,7 +21,6 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::projects_home::AddMode;
     use crazyagent::projects_home::AddOverride;
     use crazyagent::protocol::ProjectSpec;
-    use crazyagent::cleanup_settings::CleanupSettings;
     use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
     use crazyagent::team::TerminalsPerWindow;

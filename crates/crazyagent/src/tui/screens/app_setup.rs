@@ -1233,7 +1233,6 @@ impl Screen for AppSetup {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
             }
-            AppSetupEvent::Cleanup(_) | AppSetupEvent::CleanupSet(_) => {}
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
                     self.github = Load::Ready(github.clone());
