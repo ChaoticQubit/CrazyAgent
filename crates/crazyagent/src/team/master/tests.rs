@@ -2935,6 +2935,66 @@ fn set_state(fixture: &Fixture, id: &crate::landing::ChangeSetId) -> crate::land
         .state
 }
 
+/// What the master reads of Changes is what the owner reads there: the same names, the same
+/// state words with the conflicting files, and the same count of sets waiting for the owner,
+/// which leaves out a set its agent is updating (HB-S5-J).
+#[cfg(target_os = "macos")]
+#[test]
+fn inspect_work_reads_changes_as_the_owner_does() {
+    let mut fixture = Fixture::new();
+    known_project(&fixture);
+    let (repo, _remote) = project_repo(&fixture);
+    let (_, ready) = finished_harness(&fixture, &repo, "ready", "ready-task", "ready\n");
+    let (_, clash) = finished_harness(&fixture, &repo, "clash", "clash-task", "clash\n");
+    let (_, fixing) = finished_harness(&fixture, &repo, "fixing", "fixing-task", "fixing\n");
+    let (_, handed) = finished_harness(&fixture, &repo, "handed", "handed-task", "handed\n");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    for (id, state, conflicts, waiting) in [
+        (&clash, "conflict", r#"["README"]"#, 0),
+        (&fixing, "updating", r#"["notes.txt"]"#, 0),
+        (&handed, "updating", "[]", 1),
+    ] {
+        db.execute(
+            "UPDATE landing_change_sets SET state=?2, conflicts=?3, waiting=?4 WHERE id=?1",
+            params![id.as_str(), state, conflicts, waiting],
+        )
+        .unwrap();
+    }
+
+    let (inspected, refused) = as_master(&mut fixture, "inspect_work", json!({}));
+
+    assert!(!refused, "{inspected}");
+    let listed = crate::landing::list(&db, &ProjectId::new(PROJECT).unwrap()).unwrap();
+    assert_eq!(listed.len(), 4);
+    assert!(listed.iter().all(|set| set.number.is_some()), "{listed:#?}");
+    let lines: Vec<String> = listed
+        .iter()
+        .map(|set| {
+            let state = if set.id == ready {
+                "waiting for review"
+            } else if set.id == clash {
+                "conflicts with the owner's branch: README"
+            } else if set.id == fixing {
+                "its agent is fixing conflicts with main: notes.txt"
+            } else {
+                assert_eq!(set.id, handed);
+                "updated, waiting for its agent"
+            };
+            format!(
+                "- {}, +{} -{}, {state}",
+                crate::landing::change_set_name(set),
+                set.added,
+                set.removed
+            )
+        })
+        .collect();
+    let expected = format!(
+        "Change sets open in Changes, 2 waiting for the owner:\n{}",
+        lines.join("\n")
+    );
+    assert!(inspected.ends_with(&expected), "{inspected}\n{expected}");
+}
+
 /// With "Ask me before merging" on, the master's merge lands nothing: the change set stays
 /// in Changes and the owner gets one notification. Off, it lands on the Master's branch as
 /// one commit under the owner's own git identity, pushes nothing, notes it for the owner
