@@ -1778,7 +1778,7 @@ fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
     );
     assert_eq!(
         code(end(2, Finish::ReviewReady, "Again.", sub)),
-        "coord_transfer_refused"
+        "coord_work_review_ready"
     );
     assert_eq!(
         code(end(2, Finish::Complete, "Mine.", other)),
