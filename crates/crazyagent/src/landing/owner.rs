@@ -1,7 +1,7 @@
 use super::clone;
 use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
-use super::git::{Repo, failure};
+use super::git::{Repo, Writes, failure};
 use super::store::{self, Intent, Record};
 use super::{
     AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
@@ -266,10 +266,27 @@ fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), Eng
 /// Where an Accept writes: the owner's checked-out branch through the owner's checkout, a
 /// branch checked out nowhere as its ref alone, or an agent's own branch through that
 /// agent's linked worktree.
-enum Target {
+pub(super) enum Target {
     Checkout,
     Ref,
-    Agent(flow::Agent),
+    Agent(Box<flow::Agent>),
+}
+
+/// The checkout an Accept fills and the code it refuses with: the owner's, or an agent's
+/// linked worktree confined to itself, since its agent may still be changing it. Inputs:
+/// the target and the owner's repository. Output: the checkout and its code, none for a ref
+/// alone, or what confining the worktree reported.
+pub(super) fn filled_checkout(
+    target: &Target,
+    owner: &Repo,
+) -> Result<Option<(Repo, &'static str)>, EngineError> {
+    Ok(match target {
+        Target::Checkout => Some((owner.clone(), "changes_owner_dirty")),
+        Target::Ref => None,
+        Target::Agent(agent) => {
+            Some((agent.repo.confined(Writes::WorkTree)?, "changes_agent_busy"))
+        }
+    })
 }
 
 /// Finds the worktree, other than the owner's checkout, that has a branch checked out.
@@ -344,7 +361,7 @@ fn landing_target(
     if agent.branch() != Some(name) {
         return Err(failure("changes_target_checked_out"));
     }
-    Ok((reference, tip, Target::Agent(agent)))
+    Ok((reference, tip, Target::Agent(Box::new(agent))))
 }
 
 /// The branch the master works on and merges harnesses into (DEC-100), with its tip: the
@@ -1266,12 +1283,8 @@ fn accept_held(
     if stopped(Step::Recorded) {
         return Err(failure("changes_git_failed"));
     }
-    let written = match &target {
-        Target::Checkout => Some((&owner, "changes_owner_dirty")),
-        Target::Ref => None,
-        Target::Agent(agent) => Some((&agent.repo, "changes_agent_busy")),
-    };
-    if let Some((checkout, refused)) = written
+    let written = filled_checkout(&target, &owner)?;
+    if let Some((checkout, refused)) = &written
         && checkout
             .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
             .code
@@ -1306,12 +1319,7 @@ fn accept_held(
             .is_ok(),
     };
     if !moved {
-        let checkout = match &target {
-            Target::Checkout => Some(&owner),
-            Target::Ref => None,
-            Target::Agent(agent) => Some(&agent.repo),
-        };
-        if let Some(checkout) = checkout
+        if let Some((checkout, _)) = &written
             && checkout.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
         {
             let _ = checkout.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);

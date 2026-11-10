@@ -13355,6 +13355,49 @@ fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
     (case, lead, second)
 }
 
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: the step an
+/// Accept fills an agent's worktree through writes nothing outside that worktree, where the
+/// same step on the owner's checkout still can.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
+    let (case, lead, _) = read_tree_attempt("known\n");
+    let repository =
+        git::Repo::open(&case.repo, &case.repo.join(".git"), Some(&case.repo)).unwrap();
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Sub,
+        &case.repo,
+        &lead.worktree,
+        &lead.git_dir,
+    )
+    .unwrap();
+    let outside = case.home.join("outside");
+    let prefix = format!("--prefix={}/", outside.display());
+    let args = ["checkout-index", "-a", "-f", prefix.as_str()];
+
+    let target = owner::Target::Agent(Box::new(agent));
+    let (confined, refused) = owner::filled_checkout(&target, &repository)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused, "changes_agent_busy");
+    confined.exec(&args, None, &[], 4096).unwrap();
+    assert!(
+        std::fs::symlink_metadata(outside.join("README")).is_err(),
+        "the step wrote outside the agent's worktree"
+    );
+
+    let (plain, refused) = owner::filled_checkout(&owner::Target::Checkout, &repository)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused, "changes_owner_dirty");
+    assert_eq!(plain.exec(&args, None, &[], 4096).unwrap().code, 0);
+    assert!(
+        outside.join("README").is_file(),
+        "the owner's checkout was confined"
+    );
+}
+
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree: a folder of a lead's worktree
 /// swapped for a link while its worker's set lands writes nothing outside the worktree, and
 /// the same landing with no swap still fills the worktree under the confined step.
