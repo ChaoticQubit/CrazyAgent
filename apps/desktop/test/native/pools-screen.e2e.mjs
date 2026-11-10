@@ -64,9 +64,11 @@ function lineup(ready, held = [SIGNED_OUT]) {
   return [...ready.map(([name, why], at) => [String(at + 1), name, why]), ...held.map(([name, why]) => ["-", name, why])];
 }
 
-/** Writes usage rows into the fixture engine's own store, as a poll of each account would.
+/** Writes usage rows into the fixture engine's own store, as a poll of each account would. A
+ * usage report comes first, because this fixture makes the limits table only on a usage read.
  * Input: [name, weekly percent, ms until the weekly reset] rows. Output: none. */
-function seedUsage(rows) {
+async function seedUsage(rows) {
+  await command("desktop_usage_report", { projectId: null, sinceMs: null, offsetMinutes: 0 });
   const now = Date.now();
   const store = new DatabaseSync(join(dirname(process.env.CRAZYAGENT_DESKTOP_SOCKET), "engine.db"));
   try {
@@ -230,7 +232,7 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     const signedOut = await command("desktop_add_account", { draft: { provider: "claude", method: "subscription", name: SIERRA }, key: null });
     assert.notEqual(signedOut.status, "signed_in", "a new subscription is not signed in");
     ids[SIERRA] = signedOut.id;
-    seedUsage(USAGE);
+    await seedUsage(USAGE);
     assert.deepEqual((await accounts()).map((account) => account.name).sort(), [ALPHA, BRAVO, CHARLIE, SIERRA]);
     await settingsTab("Pools");
     await until(() => says("main .empty-state h2", "No pools yet"), UI_MS, "Pools did not open empty");
