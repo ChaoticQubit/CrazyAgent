@@ -69,6 +69,8 @@ impl Case {
         git_in(&home, &repo, &["commit", "-q", "-m", "Start"]);
         let db = crate::landing::open(&engine).unwrap();
         super::super::initialize(&db).unwrap();
+        crate::storage::initialize_authority_schemas(&db).unwrap();
+        crate::ide::workspace::tests::add_project(&db, "project-1", &repo);
         Self {
             _tmp: tmp,
             home,
@@ -158,6 +160,26 @@ impl Case {
                 ],
             )
             .unwrap();
+    }
+
+    /// Points an agent's worktree record somewhere else, as a database row an older engine
+    /// or a tamper wrote would, with that worktree's start recorded so nothing but where it
+    /// sits keeps it. Inputs: the agent, the repository, the worktree and its git folder.
+    fn repoint(&self, id: i64, repository: &Path, worktree: &Path, git_dir: &Path) {
+        crate::landing::record_worktree_start(&self.db, repository, worktree, git_dir).unwrap();
+        let changed = self
+            .db
+            .execute(
+                "UPDATE team_worktrees SET repository=?2, worktree=?3, git_dir=?4 WHERE agent=?1",
+                params![
+                    id,
+                    repository.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
     }
 
     fn in_agent(&self, id: i64, args: &[&str]) -> String {
@@ -684,6 +706,117 @@ fn a_graph_copy_never_keeps_an_own_clone() {
     assert_eq!(case.remove(&[1]), removed(&[1]));
     assert!(!case.worktree(1).exists() && !case.base_known(1));
     assert!(case.history_kept(1));
+}
+
+/// DEC-123 rv-code L2: when the project tracks its graph folder, a file left inside it is the
+/// agent's work like any other untracked file, so the list, the removal and the sweep all
+/// keep the agent as dirty, and no list offers an agent a removal then refuses.
+#[test]
+fn a_file_left_inside_a_tracked_graph_folder_keeps_the_agent_in_the_list_the_removal_and_the_sweep()
+{
+    let case = Case::new();
+    write(
+        &case.repo.join("graphify-out/graph.json"),
+        b"{\"nodes\": []}\n",
+    );
+    git_in(&case.home, &case.repo, &["add", "graphify-out/graph.json"]);
+    git_in(
+        &case.home,
+        &case.repo,
+        &["commit", "-q", "-m", "Track the graph"],
+    );
+    for id in [1, 2] {
+        case.agent(id, "sub", "stopped");
+    }
+    write(
+        &case.worktree(2).join("graphify-out/extra.json"),
+        b"left behind\n",
+    );
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.held(), [(2, "cleanup_worktree_dirty".to_owned())]);
+    assert_eq!(case.remove(&[2]), refused("cleanup_worktree_dirty"));
+    assert!(case.kept(2));
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 1, 0, NOW),
+        swept(&[1], 0)
+    );
+    assert!(case.worktree(2).join("graphify-out/extra.json").is_file());
+    assert!(case.kept(2));
+}
+
+/// DEC-123 rv-secreview L1: a worktree record the database points anywhere but straight
+/// inside the project's own worktrees folder, or at another repository, is never removed:
+/// the list keeps it, a removal refuses it and the sweep leaves it, its folder untouched.
+#[test]
+fn a_record_pointing_outside_the_projects_worktrees_folder_or_repository_is_never_removed() {
+    let case = Case::new();
+    for id in [1, 2, 3] {
+        case.agent(id, "sub", "stopped");
+    }
+    let outside = case.repo.parent().unwrap().join("outside").join("agent-2");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    git_in(
+        &case.home,
+        &case.repo,
+        &[
+            "worktree",
+            "move",
+            case.worktree(2).to_str().unwrap(),
+            outside.to_str().unwrap(),
+        ],
+    );
+    case.repoint(2, &case.repo, &outside, &case.git_dir(2));
+    let other = case.repo.parent().unwrap().join("other");
+    std::fs::create_dir(&other).unwrap();
+    git_in(
+        &case.home,
+        &other,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(
+        &case.home,
+        &other,
+        &[
+            "-c",
+            "user.name=Other Owner",
+            "-c",
+            "user.email=other@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Start",
+        ],
+    );
+    let foreign = crate::projects_home::state_folder(&other)
+        .join("worktrees")
+        .join("agent-3");
+    git_in(
+        &case.home,
+        &other,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            foreign.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    case.repoint(3, &other, &foreign, &other.join(".git/worktrees/agent-3"));
+    let invalid = "cleanup_worktree_invalid".to_owned();
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.held(), [(3, invalid.clone()), (2, invalid)]);
+    assert_eq!(case.remove(&[2]), refused("cleanup_worktree_invalid"));
+    assert_eq!(case.remove(&[3]), refused("cleanup_worktree_invalid"));
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 1, 0, NOW),
+        swept(&[1], 0)
+    );
+    assert!(outside.join("README").is_file());
+    assert!(foreign.join(".git").is_file());
+    assert!(case.known(2) && case.known(3));
+    assert!(case.retiring().is_empty());
 }
 
 /// The owner's list of finished agents to remove names one whose name a running sub-agent

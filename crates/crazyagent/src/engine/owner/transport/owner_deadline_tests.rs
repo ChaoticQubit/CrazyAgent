@@ -184,6 +184,8 @@ fn finished_agent(engine_root: &Path, repo: &Path, home: &Path, project: &Projec
     );
     let db = crate::landing::open(engine_root).unwrap();
     crate::team::initialize(&db).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::ide::workspace::tests::add_project(&db, project.as_str(), repo);
     crate::landing::record_worktree_start(&db, repo, &worktree, &git_dir).unwrap();
     let team = engine_root.join("team");
     let cache = team
