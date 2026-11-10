@@ -537,7 +537,7 @@ fn live_native_lead_splits_teammates_into_mates_server() {
             files
                 .into_iter()
                 .map(|file| {
-                    let bytes = std::fs::metadata(&file).map_or(0, |found| found.len());
+                    let bytes = std::fs::symlink_metadata(&file).map_or(0, |found| found.len());
                     (file, bytes)
                 })
                 .collect()
@@ -695,12 +695,18 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
 }
 
 /// Every file under `root`, at most `depth` folders down and `FILES_MAX` in all, read by
-/// the test from outside every sandbox. Inputs: the folder and the depth. Output: the files.
+/// the test from outside every sandbox. No link is followed: a linked root or folder is
+/// never opened and a linked entry is never listed, so an agent's link in its home cannot
+/// point the failure printout at files outside it. Inputs: the folder and the depth.
+/// Output: the plain files.
 fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
     const FILES_MAX: usize = 4096;
     let mut found = Vec::new();
     let mut folders = vec![(root.to_path_buf(), 0)];
     while let Some((folder, level)) = folders.pop() {
+        if !std::fs::symlink_metadata(&folder).is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
