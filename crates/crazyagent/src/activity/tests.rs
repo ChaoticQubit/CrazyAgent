@@ -781,6 +781,79 @@ fn backfilled_accepts_read_as_yours_and_name_a_numbered_set_by_its_number() {
     );
 }
 
+/// rv-secreview land-16 L1: a set whose stored prompt carries a right-to-left override is
+/// backfilled with it shown as an escape, never as the raw character.
+#[test]
+fn a_backfilled_accept_shows_a_hidden_character_in_the_prompt_as_an_escape() {
+    let (_folder, db) = db();
+    let worker = agent(&db, "sub");
+    let (id, prompt) = ("cs-r", "Fix \u{202E}txt.exe");
+    db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES (?1,?2,'sub',?3,?4,'/r',?5,'/g','b','h','accepted','succeeded','t',?6,2,1,0,'[]',1,2000)",
+            params![
+                id,
+                PROJECT,
+                worker.to_string(),
+                format!("Sub-agent {worker}"),
+                format!("/w/{id}"),
+                prompt
+            ],
+    )
+    .unwrap();
+    backfill(&db, &project()).unwrap();
+    let texts: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec![format!(
+            "You accepted the changes of Sub-agent {worker}: Fix \\u202etxt.exe"
+        )]
+    );
+    assert!(!texts[0].contains('\u{202E}'));
+}
+
+/// rv-secreview land-16 L1: a backfill on a store from before the message column names the set
+/// by its prompt.
+#[test]
+fn a_backfill_on_a_store_without_the_message_column_names_the_set_by_its_prompt() {
+    let (_folder, db) = db();
+    db.execute_batch("ALTER TABLE landing_change_sets DROP COLUMN message;")
+        .unwrap();
+    let worker = agent(&db, "sub");
+    let (id, prompt) = ("cs-p", "Change cs-p");
+    db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES (?1,?2,'sub',?3,?4,'/r',?5,'/g','b','h','accepted','succeeded','t',?6,2,1,0,'[]',1,2000)",
+            params![
+                id,
+                PROJECT,
+                worker.to_string(),
+                format!("Sub-agent {worker}"),
+                format!("/w/{id}"),
+                prompt
+            ],
+    )
+    .unwrap();
+    backfill(&db, &project()).unwrap();
+    let texts: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec![format!(
+            "You accepted the changes of Sub-agent {worker}: Change cs-p"
+        )]
+    );
+}
+
 /// MOCKC-R1-S1: a backfilled Accept names its set by the words a live Accept row uses: the
 /// set's message before its prompt, and "Changes from <agent>" when it has neither, never the
 /// prompt alone (rv-code L2).
