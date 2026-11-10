@@ -595,10 +595,12 @@ impl ProjectPage {
     }
 
     /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab: at most one read out at a time, at most one every
+    /// the Conversation tab, and once on any tab before the first read, so the first entry to
+    /// that tab knows Live terminal: at most one read out at a time, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
-        if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
+        let wanted = self.screen.tab == Tab::Conversation || matches!(self.screen.team, Load::Idle);
+        if self.covered || !wanted || ctx.link != Link::Ready {
             return;
         }
         let now = now_ms();
