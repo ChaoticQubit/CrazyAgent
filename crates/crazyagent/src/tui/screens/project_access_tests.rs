@@ -221,6 +221,7 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
     assert!(words(&rows[switch..].join(" ")).contains(IDE_GIT_HOOKS_LINE));
     assert_eq!(IDE_GIT_HOOKS, "IDE git runs the project's hooks");
     assert!(IDE_GIT_HOOKS_LINE.contains("never signed"));
+    assert!(!IDE_GIT_HOOKS_LINE.contains("Sandboxed terminal"));
     assert_eq!(edit.key(key(KeyCode::Char(' '))), AccessKey::Handled);
     assert!(edit.ide_git_hooks);
     assert_eq!(edit.allowed, [true, false]);

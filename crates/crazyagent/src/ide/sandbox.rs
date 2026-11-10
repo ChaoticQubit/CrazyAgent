@@ -141,12 +141,7 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
     ));
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
-    let index = grants.root.join(".git").join("index");
-    text.push_str(&format!(
-        "(allow file-write*\n  (literal \"{}\")\n  (literal \"{}.lock\"))\n",
-        index.display(),
-        index.display()
-    ));
+    text.push_str(&crate::sandbox::git_index_allow(grants.root));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
