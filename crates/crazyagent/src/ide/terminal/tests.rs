@@ -921,3 +921,129 @@ fn the_extension_declares_it_runs_in_restricted_mode() {
         json!(true)
     );
 }
+
+/// The command palette offers the terminal menu's levels with the menu's state and words. It
+/// drops a greyed command rather than greying it, so a level above the project's is its own
+/// palette command, titled as the menu's greyed row, that only says to raise project access.
+#[test]
+fn the_palette_offers_the_menus_levels_and_words() {
+    let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
+    assert_eq!(name, "package.json");
+    let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    let contributes = &manifest["contributes"];
+    let category = "New terminal at access level";
+    assert_eq!(contributes["submenus"][0]["label"], json!(category));
+    let command = |id: &str| {
+        contributes["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["command"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is not contributed"))
+    };
+    for (id, title) in [
+        ("crazyagent.terminal.sandboxed", "Sandboxed"),
+        ("crazyagent.terminal.ownBranch", "Own branch"),
+        ("crazyagent.terminal.full", "Full access"),
+        (
+            "crazyagent.terminal.ownBranchAbove",
+            "Own branch - Raise project access to use this",
+        ),
+        (
+            "crazyagent.terminal.fullAbove",
+            "Full access - Raise project access to use this",
+        ),
+    ] {
+        assert_eq!(
+            command(id),
+            json!({"command": id, "title": title, "category": category})
+        );
+    }
+    for (raise, above) in [
+        (
+            "crazyagent.terminal.ownBranchRaise",
+            "crazyagent.terminal.ownBranchAbove",
+        ),
+        (
+            "crazyagent.terminal.fullRaise",
+            "crazyagent.terminal.fullAbove",
+        ),
+    ] {
+        assert_eq!(command(raise)["enablement"], json!("false"));
+        assert_eq!(command(raise)["title"], command(above)["title"]);
+    }
+    let menu = contributes["menus"]["crazyagent.terminalLevels"]
+        .as_array()
+        .unwrap();
+    let menu_when = |id: &str| {
+        menu.iter()
+            .find(|entry| entry["command"] == json!(id))
+            .map(|entry| entry["when"].clone())
+            .unwrap_or_else(|| panic!("{id} is not in the menu"))
+    };
+    let palette = contributes["menus"]["commandPalette"].as_array().unwrap();
+    let palette_when = |id: &str| {
+        palette
+            .iter()
+            .filter(|entry| entry["command"] == json!(id))
+            .map(|entry| entry["when"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(menu_when("crazyagent.terminal.sandboxed"), json!(null));
+    assert!(palette_when("crazyagent.terminal.sandboxed").is_empty());
+    for (shown, in_menu) in [
+        (
+            "crazyagent.terminal.ownBranch",
+            "crazyagent.terminal.ownBranch",
+        ),
+        (
+            "crazyagent.terminal.ownBranchAbove",
+            "crazyagent.terminal.ownBranchRaise",
+        ),
+        ("crazyagent.terminal.full", "crazyagent.terminal.full"),
+        (
+            "crazyagent.terminal.fullAbove",
+            "crazyagent.terminal.fullRaise",
+        ),
+    ] {
+        assert_eq!(palette_when(shown), [menu_when(in_menu)], "{shown}");
+    }
+    assert_eq!(
+        palette_when("crazyagent.terminal.ownBranchAbove"),
+        [json!("crazyagent.ideAccess == sandboxed")]
+    );
+    assert_eq!(
+        palette_when("crazyagent.terminal.fullAbove"),
+        [json!("crazyagent.ideAccess != full")]
+    );
+    for raise in [
+        "crazyagent.terminal.ownBranchRaise",
+        "crazyagent.terminal.fullRaise",
+    ] {
+        assert_eq!(palette_when(raise), [json!("false")], "{raise}");
+    }
+    assert!(
+        menu.iter()
+            .all(|entry| !entry["command"].as_str().unwrap().ends_with("Above"))
+    );
+    let embedded = |wanted: &str| {
+        crate::ide::bridge::EXTENSION_FILES
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap()
+    };
+    assert!(
+        embedded("out/pty.js")
+            .contains(r#"exports.ABOVE_PROJECT = "Raise project access to use this";"#)
+    );
+    let terminal = embedded("out/terminal.js");
+    for above in [
+        "crazyagent.terminal.ownBranchAbove",
+        "crazyagent.terminal.fullAbove",
+    ] {
+        assert!(terminal.contains(&format!("{above:?}")), "{above}");
+    }
+    assert!(terminal.contains("showInformationMessage(pty_js_1.ABOVE_PROJECT)"));
+}
