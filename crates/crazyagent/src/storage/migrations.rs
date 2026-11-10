@@ -65,12 +65,12 @@ pub(crate) const STEPS: &[Step] = &[
         run: nest_team_agents,
     },
     Step {
-        to: 9,
+        to: 10,
         run: usage_counts_by_model,
     },
 ];
 
-/// Step 9 (CODEBURN-COUNT): usage rows gain the model and estimated dollars. A database that
+/// Step 10 (CODEBURN-COUNT): usage rows gain the model and estimated dollars. A database that
 /// never opened the usage store gets the new shape when the store first opens.
 /// Input: the open upgrade transaction. Output: done, or the store's failure.
 fn usage_counts_by_model(tx: &Transaction<'_>) -> Result<(), EngineError> {

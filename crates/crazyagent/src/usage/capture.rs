@@ -1456,7 +1456,7 @@ pub(super) fn filed_model<'a>(
     })
 }
 
-/// Step 9 of the engine database: usage rows gain the model and their estimated dollars, the
+/// Step 10 of the engine database: usage rows gain the model and their estimated dollars, the
 /// spellings of one harness become one row, and the message a transcript was counting moves
 /// to `usage_messages`. A store already in the new shape only gets what it lacks.
 /// Input: the open upgrade transaction. Output: done, or `usage_unavailable`.

@@ -964,10 +964,10 @@ fn migration_8_adds_parent_to_team_tasks_and_agents() {
     assert_eq!(tables, 0, "the step makes no team table of its own");
 }
 
-/// Step 9 through the real upgrade: an old usage store keeps every total under the new shape,
+/// Step 10 through the real upgrade: an old usage store keeps every total under the new shape,
 /// and a database that never opened the usage store is stamped with no usage table made.
 #[test]
-fn step_9_gives_usage_rows_a_model_through_the_upgrade() {
+fn step_10_gives_usage_rows_a_model_through_the_upgrade() {
     let root = Root::new();
     let mut db = root.connection();
     db.execute_batch(
@@ -1005,7 +1005,7 @@ fn step_9_gives_usage_rows_a_model_through_the_upgrade() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(shaped, "step 9 gave the rows a model");
+    assert!(shaped, "step 10 gave the rows a model");
     let totals: Vec<(String, String, [i64; 4])> = db
         .prepare(
             "SELECT harness,model,input,output,cache_read,cache_write FROM usage_tokens ORDER BY harness",
