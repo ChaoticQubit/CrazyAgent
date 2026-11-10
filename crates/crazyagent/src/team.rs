@@ -58,8 +58,9 @@ pub const LIMIT_CHOICES_SECS: [u32; 5] = [1800, 3600, 7200, 14_400, 28_800];
 /// How long an idle sub-agent may wait for work before it stops, in seconds: 2 min, 10 min
 /// and 1 h. Never stopping is the other choice, stored as zero.
 pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
-/// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
-/// stopped while that work still runs, and no owner setting changes it.
+/// How long the owner's 15 min choice keeps an idle master once its work is done, in seconds:
+/// the engine's idle bound, of which the 1 h choice counts four. It is never stopped while
+/// that work still runs.
 pub const MASTER_IDLE_STOP_SECS: u32 = 900;
 
 /// How many of the engine's master idle bounds the 1 h choice keeps a master for.
@@ -3167,6 +3168,10 @@ pub struct TeamStatus {
     pub live_master: Option<bool>,
     #[serde(default)]
     pub live_problem: Option<String>,
+    /// Whether the line above is the one an idle stop left, so the master view offers Start
+    /// again. Never set while the live master is on.
+    #[serde(default)]
+    pub live_idle_stopped: bool,
     #[serde(default)]
     pub settings_version: u64,
     pub min_agents: u8,
@@ -4790,6 +4795,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
+    let live_idle_stopped =
+        live_master == Some(false) && live_problem.as_deref().is_some_and(master::idle_stopped);
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
     let limited = caps::read(connection, project)?;
@@ -4833,6 +4840,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         terminals_per_window: terminals_per_window(connection, project)?,
         live_master,
         live_problem,
+        live_idle_stopped,
         settings_version: settings_version(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,

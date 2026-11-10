@@ -171,6 +171,7 @@ fn team() -> TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
+        live_idle_stopped: false,
         settings_version: 7,
         min_agents: 1,
         max_agents: 4,
