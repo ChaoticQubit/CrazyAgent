@@ -17481,6 +17481,89 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     );
 }
 
+/// OP9B-C5: when the lead's change set cannot be recorded after its teammates' work landed
+/// on its task branch, the lead is not told to finish over work the owner cannot see yet, and
+/// the engine records it again at a later pass while the lead stays idle, instead of leaving
+/// the owner's record stale until the lead's next turn; then the lead is told once.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_s_record_of_landed_teammate_work_is_tried_again_until_it_is_kept() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::team::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+        [PROJECT],
+    )
+    .unwrap();
+    let bulk = linked.worktree.join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for index in 0..101 {
+        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
+    }
+    let finish_again = |fixture: &Fixture| {
+        linked
+            .notes(fixture)
+            .into_iter()
+            .filter(|note| note.contains("finish it again"))
+            .count()
+    };
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let landed = linked.tip(&linked.branch);
+    assert_ne!(
+        landed, start,
+        "greet's work landed on the lead's task branch"
+    );
+    assert!(
+        crate::landing::open_change_set(&db, &linked.worktree)
+            .unwrap()
+            .is_none(),
+        "the lead's record of the landed work is refused"
+    );
+    assert_eq!(
+        finish_again(&fixture),
+        0,
+        "the lead is told to finish over work the owner cannot see"
+    );
+    std::fs::remove_dir_all(&bulk).unwrap();
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let lead = crate::landing::open_change_set(&db, &linked.worktree)
+        .unwrap()
+        .expect("a later pass records the landed work for the owner");
+    assert_eq!(
+        (lead.head.as_str(), lead.base.as_str()),
+        (landed.as_str(), start.as_str())
+    );
+    assert_eq!(
+        finish_again(&fixture),
+        1,
+        "the lead is told once it is kept"
+    );
+}
+
 /// OP-9b step 5 (leader 17:32, answer a): a resting teammate's change set that conflicts
 /// with its idle linked lead's task branch stays on `<task branch>--<name>`, the lead's
 /// branch is left as it was and the lead is told the files once, not at every pass.
