@@ -229,7 +229,8 @@ fn flag_unreported(
     let mut left_out: Vec<(&str, Option<&str>)> = Vec::new();
     for (key, of, _, _) in &marks {
         let named = (key.as_str(), of.as_deref());
-        let listed = rows.iter().any(|row| names(row, named.0, named.1)) || left_out.contains(&named);
+        let listed =
+            rows.iter().any(|row| names(row, named.0, named.1)) || left_out.contains(&named);
         if !listed && left_out.len() < ROWS_MAX {
             left_out.push(named);
         }
