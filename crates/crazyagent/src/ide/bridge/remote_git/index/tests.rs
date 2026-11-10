@@ -105,6 +105,17 @@ impl Case {
         assert!(done.status.success(), "{done:?}");
     }
 
+    /// Makes one path's entry as new as the index, so the next writer of the index re-checks
+    /// it against the file. Input: the path. Output: none.
+    fn make_racy(&self, path: &str) {
+        let modified = fs::metadata(self.project.join(path))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let index = fs::File::options().write(true).open(self.index()).unwrap();
+        index.set_modified(modified).unwrap();
+    }
+
     /// Whether the index holds no modification time for a path. Input: the path. Output:
     /// the answer.
     fn stat_is_empty(&self, path: &str) -> bool {
@@ -447,7 +458,8 @@ fn a_refresh_changes_only_stat_data() {
 }
 
 /// A refresh runs nothing from the project: a planted `.gitattributes` naming a filter and
-/// a post-index-change hook leave no marker, where an ordinary refresh runs both.
+/// a post-index-change hook leave no marker, where an ordinary refresh runs both. The marks
+/// are cleared after the setup's own git writes the index, since that writer runs both.
 #[test]
 fn a_refresh_runs_no_filter_and_no_hook() {
     let case = Case::new();
@@ -467,16 +479,89 @@ fn a_refresh_runs_no_filter_and_no_hook() {
         &["config", "filter.evil.clean", filter.to_str().unwrap()],
     );
     fs::write(case.project.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    let clear = || {
+        for mark in [&filter_mark, &hook_mark] {
+            if mark.exists() {
+                fs::remove_file(mark).unwrap();
+            }
+        }
+    };
     case.zero_stat("a.txt");
+    clear();
 
     refresh(&case.project);
     assert!(!filter_mark.exists(), "the project's filter ran");
     assert!(!hook_mark.exists(), "the project's hook ran");
 
     case.zero_stat("a.txt");
+    clear();
     ok(&case.project, None, &["update-index", "-q", "--refresh"]);
     assert!(filter_mark.exists(), "the control ran no filter");
     assert!(hook_mark.exists(), "the control ran no hook");
+}
+
+/// The exec limit of a refresh, seen in the one trace its write limit leaves: a filter that
+/// rewrites what it reads would make the entry look changed and leave its stat data unsaved.
+/// The refresh never starts it, so the file hashes as itself and the stat data is saved.
+#[test]
+fn a_refresh_starts_no_filter_that_would_rewrite_the_file() {
+    let case = Case::new();
+    let filter = case.project.join("filter.sh");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nwhile read -r line; do :; done\necho rewritten\n",
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    ok(
+        &case.project,
+        None,
+        &["config", "filter.evil.clean", filter.to_str().unwrap()],
+    );
+    fs::write(case.project.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    case.zero_stat("a.txt");
+    assert!(case.stat_is_empty("a.txt"));
+
+    refresh(&case.project);
+    assert!(
+        !case.stat_is_empty("a.txt"),
+        "the refresh started the project's filter"
+    );
+}
+
+/// A writer of the index re-checks an entry as new as the index through the project's
+/// filter, and a filter marked required ends that writer if it cannot start. The apply
+/// looks at no work tree file, so the stage lands and the filter never starts, where an
+/// ordinary writer runs it on the same entry. The refresh fails on it and the stage stands.
+#[test]
+fn a_stage_lands_past_a_required_filter_on_a_racy_entry() {
+    let case = Case::new();
+    fs::write(case.project.join("a.txt"), "changed\n").unwrap();
+    let work = case.seed("401");
+    ok(&case.project, Some(&work), &["add", "a.txt"]);
+    let marks = case.engine.join("marks");
+    fs::create_dir(&marks).unwrap();
+    let mark = marks.join("filter");
+    let filter = case.project.join("filter.sh");
+    marking_script(&filter, &mark);
+    for (key, value) in [
+        ("filter.evil.clean", filter.to_str().unwrap()),
+        ("filter.evil.required", "true"),
+    ] {
+        ok(&case.project, None, &["config", key, value]);
+    }
+    fs::write(case.project.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    case.make_racy("b.txt");
+
+    let outcome = case.carried("401");
+    assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.stderr, "");
+    assert!(!mark.exists(), "the project's filter ran");
+    assert_eq!(case.staged(), "a.txt\n");
+
+    case.make_racy("b.txt");
+    case.zero_stat("a.txt");
+    assert!(mark.exists(), "the control found no racy entry");
 }
 
 /// A refresh hung on a tracked-path FIFO ends at its limit, TERM first, so git removes its

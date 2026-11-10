@@ -1411,12 +1411,13 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
     );
     let git = crate::research::runner::sandboxed_git();
     if git != Path::new("/usr/bin/git") {
-        assert!(
-            fs::read_to_string(&shim)
-                .unwrap()
-                .ends_with(&format!("exec '{}' \"$@\"\n", git.display())),
-            "the shim runs the engine's resolved git"
-        );
+        let text = fs::read_to_string(&shim).unwrap();
+        for run in [
+            format!("  exec '{}' \"$@\"\n", git.display()),
+            format!("GIT_INDEX_FILE=\"$work\" '{}' \"$@\"\n", git.display()),
+        ] {
+            assert!(text.contains(&run), "the shim runs the engine's git: {run}");
+        }
     }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
@@ -1682,9 +1683,9 @@ fn source_control_works_through_the_private_index() {
 
     fs::write(s.root.join("a.txt"), "changed\n").unwrap();
     staged(&["add", "a.txt"]);
-    assert_eq!(s.status(), "M  a.txt");
+    assert_eq!(s.status(), "M  a.txt\n");
     staged(&["reset", "-q", "HEAD", "--", "a.txt"]);
-    assert_eq!(s.status(), "M a.txt");
+    assert_eq!(s.status(), " M a.txt\n");
 
     fs::write(s.root.join("partial"), "part\n").unwrap();
     let oid = setup(&s.root, &["hash-object", "-w", "partial"]);
@@ -1695,10 +1696,10 @@ fn source_control_works_through_the_private_index() {
         "--cacheinfo",
         &format!("100644,{},a.txt", oid.trim()),
     ]);
-    assert_eq!(s.status(), "MM a.txt");
+    assert_eq!(s.status(), "MM a.txt\n");
 
     staged(&["commit", "-q", "-m", "ide"]);
-    assert_eq!(s.status(), "M a.txt");
+    assert_eq!(s.status(), " M a.txt\n");
     assert_eq!(
         setup(&s.root, &["show", "HEAD:a.txt"]),
         "part\n",
@@ -1715,7 +1716,7 @@ fn source_control_works_through_the_private_index() {
     let (merged, said) = s.git(&["merge", "other"]);
     assert!(!merged, "the merge conflicts: {said}");
     assert!(s.no_private_files());
-    assert_eq!(s.status(), "UU a.txt");
+    assert_eq!(s.status(), "UU a.txt\n");
     assert_eq!(
         setup(&s.root, &["ls-files", "-u"]).lines().count(),
         3,
