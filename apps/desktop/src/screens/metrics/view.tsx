@@ -9,6 +9,7 @@ import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../u
 import { displayText } from "../conversation";
 import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
 import { HARNESS_NAMES } from "../team/coordination";
+import { Activities, Models, ToolsOverTime } from "./activity";
 import { COST_LABEL, Figure, dollarText, dollarsBeside, figure, unpricedNote } from "./money";
 import "../project/projects.css";
 import "./metrics.css";
@@ -392,7 +393,8 @@ function RecountPanel({ status, money, onDone }: { status: RecountStatus; money:
 }
 
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
- * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
+ * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart,
+ * the panels by model, by activity with the first-try rate and of tools over time, and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
  * share of tokens. With a filter (the app page) it also picks a project and breaks down by
  * project. Every figure leads with the number the owner chose and every dollar carries its
@@ -448,12 +450,16 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   }
   if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{head}<Skeleton shape="card" count={3} /></div>;
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
+  const label = (startMs: number, bucketMs: number) => barLabel(startMs, bucketMs, offset);
   return <div className="stack mx-page">
     {head}
     {usage.value.counting_notice && <p role="status">{usage.value.counting_notice}</p>}
     {usage.value.recount && <RecountPanel status={usage.value.recount} money={usage.value.money} onDone={onRetry} />}
     <Tiles usage={usage.value} metrics={metrics.value} />
     <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} money={usage.value.money} />
+    <Models rows={metrics.value.models} money={usage.value.money} />
+    <Activities rows={metrics.value.activity} since={metrics.value.activity_since_ms} label={label} />
+    <ToolsOverTime rows={metrics.value.tools} since={metrics.value.tools_since_ms} bucketMs={metrics.value.bucket_ms} label={label} />
     <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} money={usage.value.money} />
     {unpricedNote(usage.value.money) && <p className="muted">{unpricedNote(usage.value.money)}</p>}
     {usage.value.money.as_of && <p className="muted">Prices as of {usage.value.money.as_of}. Off hides every dollar. Tokens keep counting.</p>}

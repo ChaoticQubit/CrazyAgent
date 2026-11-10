@@ -241,3 +241,39 @@ test("CB-E8 history fills the activity chart through the recount", OPTIONS, asyn
     await me.capture("metrics-activity-history");
   });
 });
+
+/** Writes a synthetic Codex transcript with one user turn that edits. Inputs: the engine root,
+ * the transcript id and the time its lines carry. Output: none. */
+function editingTurn(runtime, id, at = new Date().toISOString()) {
+  const agent = onStore(runtime, (store) => store.prepare("SELECT id FROM team_agents WHERE harness='codex' ORDER BY id DESC LIMIT 1").get().id);
+  const folder = join(runtime, "team", "agents", `agent-${agent}`, "home", "sessions", "2026", "11", "09");
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const usage = { input_tokens: 10, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 11 };
+  const lines = [
+    { timestamp: at, type: "session_meta", payload: { id } },
+    { timestamp: at, type: "turn_context", payload: { model: "gpt-5" } },
+    { timestamp: at, type: "event_msg", payload: { type: "user_message", message: "add a page" } },
+    { timestamp: at, type: "response_item", payload: { type: "function_call", name: "apply_patch", arguments: "{}" } },
+    { timestamp: at, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage, last_token_usage: usage }, rate_limits: null } },
+    { timestamp: at, type: "event_msg", payload: { type: "task_complete" } },
+  ];
+  writeFileSync(join(folder, `rollout-2026-11-09T02-00-00-${id}.jsonl`), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, { mode: 0o600 });
+}
+
+test("CB-E7 by model, by activity and the first-try rate show on the page", OPTIONS, async (t) => {
+  await onEngine(t, "ca-activity-", async ({ projects, runtime, me, page }) => {
+    assert.equal(await handOff(me, page, projects[0], runtime), "done");
+    editingTurn(runtime, "cb-a");
+    await me.click("Metrics", ".app-nav a.nav-item");
+    const panelText = () => page.evaluate(`document.querySelector(".mx-page").innerText`);
+    await eventually("the activity panel", async () => (await panelText()).includes("By activity"));
+    const text = await panelText();
+    assert.match(text, /By model/u);
+    assert.match(text, /gpt-5/u);
+    assert.match(text, /Feature/u);
+    assert.match(text, /100% of 1 editing turn worked first try/u);
+    assert.match(text, /Tools over time/u);
+    assert.match(text, /apply_patch/u);
+    await me.capture("metrics-activity");
+  });
+});

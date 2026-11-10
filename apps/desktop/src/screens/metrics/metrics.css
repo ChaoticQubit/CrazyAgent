@@ -28,3 +28,7 @@
 .mx-money { gap: var(--space-2); }
 .mx-credit { font-size: 12px; color: var(--text-3); }
 .mx-credit pre { max-height: 240px; overflow: auto; white-space: pre-wrap; font: 11px/16px var(--mono); }
+.mx-models .num, .mx-activity .num, .mx-tools-time .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.mx-models tbody th { white-space: normal; overflow-wrap: anywhere; }
+.mx-tools-time td { overflow-wrap: anywhere; }
+.mx-first-try, .mx-tools-note { margin: var(--space-2) 0 0; color: var(--text-2); font-size: 13px; }

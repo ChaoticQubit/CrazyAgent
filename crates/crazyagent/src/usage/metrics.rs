@@ -106,11 +106,21 @@ pub struct ToolBucket {
     pub count: u64,
 }
 
+/// One activity's turns over the range.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityRow {
+    pub activity: String,
+    pub turns: u64,
+    pub edit_turns: u64,
+    pub first_try_turns: u64,
+}
+
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
 /// now, and done or failed in the range; the merges in the range, those into main and those
 /// undone; the tokens chart in bars of `bucket_ms`; the breakdown by run, project, agent,
-/// account, harness and model, each with its estimated dollars; and the tool calls per bar
-/// with the hour that counting began.
+/// account, harness and model, each with its estimated dollars; the tool calls per bar with
+/// the hour that counting began; and the turns per activity with the hour that counting began.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -137,6 +147,10 @@ pub struct Metrics {
     pub tools: Vec<ToolBucket>,
     #[serde(default)]
     pub tools_since_ms: Option<i64>,
+    #[serde(default)]
+    pub activity: Vec<ActivityRow>,
+    #[serde(default)]
+    pub activity_since_ms: Option<i64>,
 }
 
 /// The chart bar width for a range: two hours for up to a day, a day for up to eight days,
@@ -608,7 +622,7 @@ fn agents(
 /// Reads each model's tokens and dollars, largest dollars first, or largest tokens first with
 /// prices off so the order keeps no hidden dollars. Inputs: the store, the project, the range
 /// start and the price source. Output: at most `ROWS_MAX` rows, or `usage_unavailable`.
-fn models(
+pub(super) fn models(
     db: &Connection,
     project: Option<&str>,
     since_ms: i64,
@@ -705,6 +719,43 @@ fn tools(
     Ok((rows, since))
 }
 
+/// Reads each activity's turns, largest first, and when that counting began for the project.
+/// Inputs: the store, the project and the range start. Output: at most `ROWS_MAX` rows and the
+/// earliest hour held, or `usage_unavailable`.
+pub(super) fn activity(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<(Vec<ActivityRow>, Option<i64>), EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT activity,SUM(turns),SUM(edit_turns),SUM(first_try_turns) FROM usage_activity
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
+             GROUP BY activity ORDER BY SUM(turns) DESC,activity LIMIT ?3",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
+            Ok(ActivityRow {
+                activity: row.get(0)?,
+                turns: count(row.get(1)?),
+                edit_turns: count(row.get(2)?),
+                first_try_turns: count(row.get(3)?),
+            })
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let since = db
+        .query_row(
+            "SELECT MIN(hour_ms) FROM usage_activity WHERE ?1 IS NULL OR project=?1",
+            params![project],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    Ok((rows, since))
+}
+
 /// Totals the range's dollars and the headline tokens that have no price. Inputs: the
 /// store, the project and the range start. Output: nanodollars and tokens.
 pub(super) fn money_totals(
@@ -748,8 +799,8 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
 /// `ROWS_MAX` runs, the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
-/// headline, the models by dollars, and the most-used tools of the newest bars (`tools`), fewer
-/// of each when they would not fit one reply (`fit`).
+/// headline, the models by dollars, the most-used tools of the newest bars (`tools`), fewer of
+/// each when they would not fit one reply (`fit`), and the turns per activity (`activity`).
 /// Inputs: the store, the project, the range start and now. Output: the metrics;
 /// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
@@ -772,6 +823,7 @@ pub fn read(
     project_merges(db, project, since_ms, &mut projects)?;
     let prices = super::money::read(db)?.prices;
     let (tool_rows, tools_since_ms) = tools(db, project, since_ms, bucket_ms)?;
+    let (activity_rows, activity_since_ms) = activity(db, project, since_ms)?;
     let mut metrics = fit(Metrics {
         running,
         tasks_waiting,
@@ -790,10 +842,13 @@ pub fn read(
         models: models(db, project, since_ms, prices)?,
         tools: tool_rows,
         tools_since_ms,
+        activity: activity_rows,
+        activity_since_ms,
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
     assert!(metrics.tools.len() <= TOOL_ROWS_MAX);
+    assert!(metrics.activity.len() <= ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
     assert!(metrics.projects.len() <= ROWS_MAX && metrics.agents.len() <= ROWS_MAX);
     assert!(metrics.agents.iter().all(|row| {

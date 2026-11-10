@@ -26,7 +26,7 @@ const usage = {
   money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 },
 };
 const metrics = {
-  running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, merges: 19, merges_into_main: 5, merges_undone: 1, bucket_ms: 2 * HOUR,
+  running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, merges: 19, merges_into_main: 5, merges_undone: 1, bucket_ms: 2 * HOUR, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null,
   series: [{ start_ms: SINCE, tokens: tokens(100, 50, 20, 999) }],
   runs: [
     { project: "alpha", agent: "team-8", session: "rollout-abc", task: 142, title: "Calendar API endpoints", status: "running", last_ms: NOW - 5 * MINUTE, tokens: ALPHA },

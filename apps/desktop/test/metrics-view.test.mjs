@@ -34,7 +34,7 @@ const usage = (patch = {}) => ({
   money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
 const metrics = (patch = {}) => ({
-  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR,
+  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null,
   series: [
     { start_ms: SINCE, tokens: tokens({ input: 100, cache_write: 50, output: 20, cache_read: 999 }) },
     { start_ms: SINCE + 4 * HOUR, tokens: tokens({ input: 300, cache_write: 10, output: 40 }) },
@@ -279,4 +279,71 @@ test("the old-counting notice shows above the tiles and only when the report has
   assert.ok(shown.indexOf(sentence) < shown.indexOf('class="mx-tiles"'), "above the tiles");
   assert.doesNotMatch(text(render()), /old counting/u);
   assert.doesNotMatch(text(render({ usage: { kind: "ok", value: usage({ counting_notice: null }) } })), /old counting/u);
+});
+
+const turn = (activity, turns, edit_turns, first_try_turns) => ({ activity, turns, edit_turns, first_try_turns });
+const panels = (patch = {}, usagePatch = {}) => render({
+  usage: { kind: "ok", value: usage(usagePatch) },
+  metrics: { kind: "ok", value: metrics({
+    models: [{ model: "gpt-5", tokens: tokens({ input: 1200 }), cost_nanos: 0 }, { model: "", tokens: tokens({ input: 900 }), cost_nanos: 0 }],
+    activity: [turn("build_deploy", 5, 2, 1), turn("coding", 4, 4, 3)],
+    activity_since_ms: SINCE,
+    tools: [{ start_ms: SINCE + 2 * HOUR, tool: "Edit", count: 12 }, { start_ms: SINCE + 2 * HOUR, tool: "Bash", count: 3 }, { start_ms: SINCE, tool: "Read", count: 1500 }],
+    tools_since_ms: SINCE,
+    ...patch,
+  }) },
+});
+
+test("the page shows models, activities, the first-try rate and tools over time", () => {
+  const shown = text(panels());
+  for (const words of ["By model", "gpt-5", "Model not recorded", "By activity", "Build/deploy", "Coding", "67% of 6 editing turns worked first try", "Tools over time", `Since ${view.barLabel(SINCE, DAY, 0)}`]) assert.ok(shown.includes(words), words);
+  assert.equal(shown.split("Since ").length - 1, 2);
+  assert.ok(shown.indexOf("By model") < shown.indexOf("By activity"));
+  assert.ok(shown.indexOf("By activity") < shown.indexOf("Tools over time"));
+});
+
+test("tools over time has one row per bar, newest first and most-used first", () => {
+  const markup = panels();
+  const table = markup.slice(markup.indexOf("mx-tools-time"));
+  const rows = table.slice(0, table.indexOf("</table>")).split("<tr>").slice(2).map((row) => text(row).trim());
+  assert.deepEqual(rows, [`${view.barLabel(SINCE + 2 * HOUR, 2 * HOUR, 0)} Edit 12, Bash 3`, `${view.barLabel(SINCE, 2 * HOUR, 0)} Read 1.5K`]);
+});
+
+test("a range with nothing counted shows none of the three panels", () => {
+  const shown = text(render());
+  assert.ok(shown.includes("Tokens over time"));
+  for (const words of ["By model", "By activity", "Tools over time"]) assert.ok(!shown.includes(words), words);
+});
+
+test("no first-try sentence shows when no turn edited", () => {
+  const shown = text(panels({ activity: [turn("git", 9, 0, 0)] }));
+  assert.ok(shown.includes("Git"));
+  assert.ok(!shown.includes("worked first try"));
+});
+
+test("hidden characters in model and tool names show as escapes", () => {
+  const markup = panels({ models: [{ model: "gpt‮5", tokens: tokens({ input: 1 }), cost_nanos: 0 }], tools: [{ start_ms: SINCE, tool: "Ed​it", count: 1 }] });
+  assert.ok(text(markup).includes("By model"));
+  assert.ok(text(markup).includes("Tools over time"));
+  assert.ok(!markup.includes("‮"));
+  assert.ok(!markup.includes("​"));
+});
+
+test("the model table's head says what its number is", () => {
+  const head = (money) => {
+    const markup = panels({}, { money });
+    const start = markup.indexOf("<thead>", markup.indexOf("mx-models"));
+    return text(markup.slice(start, markup.indexOf("</thead>", start))).trim();
+  };
+  const view_ = (main, prices) => ({ settings: { main_number: main, prices }, shown: main, as_of: prices === "off" ? null : "2026-11-08", cost_nanos: 0, unpriced_tokens: 0 });
+  assert.equal(head(view_("dollars", "bundled")), "Model Estimated cost at API prices");
+  assert.equal(head(view_("tokens", "bundled")), "Model Tokens Estimated cost at API prices");
+  assert.equal(head(view_("tokens", "off")), "Model Tokens");
+});
+
+test("tools over time says a time shows at most its eight most-used tools", () => {
+  const note = "Each time shows at most its 8 most-used tools.";
+  const eight = Array.from({ length: 8 }, (_, n) => ({ start_ms: SINCE, tool: `T${n}`, count: 8 - n }));
+  assert.ok(text(panels({ tools: eight })).includes(note));
+  assert.ok(!text(panels()).includes(note));
 });

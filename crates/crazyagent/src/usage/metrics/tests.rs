@@ -2122,3 +2122,56 @@ fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
         ["big", "small"]
     );
 }
+
+#[test]
+fn activity_rows_are_read_largest_first() {
+    let (_directory, db) = database();
+    db.execute_batch(
+        "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns) VALUES
+            (3600000,'alpha','t','m','coding',2,2,1),
+            (3600000,'alpha','t','n','coding',1,1,1),
+            (3600000,'beta','t','m','git',5,0,0);",
+    )
+    .unwrap();
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(metrics.activity_since_ms, Some(3_600_000));
+    assert_eq!(
+        metrics
+            .activity
+            .iter()
+            .map(|row| (
+                row.activity.as_str(),
+                row.turns,
+                row.edit_turns,
+                row.first_try_turns
+            ))
+            .collect::<Vec<_>>(),
+        vec![("git", 5, 0, 0), ("coding", 3, 3, 2)]
+    );
+}
+
+#[test]
+fn activity_keeps_to_the_project_and_range_and_says_when_that_project_began() {
+    let (_directory, db) = database();
+    db.execute_batch(
+        "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns) VALUES
+            (0,'beta','t','m','git',1,0,0),
+            (3600000,'alpha','t','m','coding',1,1,1),
+            (10800000,'alpha','t','m','testing',4,4,0),
+            (10800000,'beta','t','m','git',7,0,0);",
+    )
+    .unwrap();
+    let scoped = read(&db, Some(&alpha()), 7_200_000, 14_400_000).unwrap();
+    assert_eq!(scoped.activity_since_ms, Some(3_600_000));
+    assert_eq!(
+        scoped
+            .activity
+            .iter()
+            .map(|row| row.activity.as_str())
+            .collect::<Vec<_>>(),
+        ["testing"]
+    );
+    let other = ProjectId::new("gamma").unwrap();
+    let none = read(&db, Some(&other), 0, 14_400_000).unwrap();
+    assert_eq!((none.activity.len(), none.activity_since_ms), (0, None));
+}
