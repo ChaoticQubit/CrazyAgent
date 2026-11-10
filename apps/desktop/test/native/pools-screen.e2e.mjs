@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import { closedPort } from "./e2e-harness.mjs";
 import { click, finishWelcome, says, selectPool, settingsTab, shot, shown, texts, toasts, type, until } from "./settings-steps.mjs";
 import { accounts, command } from "./trial4-accounts.mjs";
@@ -327,8 +328,8 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     await click(option(`Pin for ${ALPHA}`, "None"));
     await rowsAre(lineup(ORDERS.balanced.rows), ORDERS.balanced.value);
     assert.equal((await planOf(ALPHA)).pin, null);
-    const expected = JSON.stringify({ control: `pin:${ids[ALPHA]}`, words: "None", checked: "true" });
-    await until(async () => JSON.stringify(await focused()) === expected, UI_MS, `the keyboard did not stay on the pin: ${expected}`);
+    const expected = { control: `pin:${ids[ALPHA]}`, words: "None", checked: "true" };
+    await until(async () => isDeepStrictEqual(await focused(), expected), UI_MS, `the keyboard did not stay on the pin: ${JSON.stringify(expected)}`);
   });
 
   it("Never use holds the row with no number, and None returns it", async () => {
