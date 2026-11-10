@@ -1897,15 +1897,25 @@ fn line_cells(node: &GraphNode, glyphs: &Glyphs) -> (usize, usize) {
 }
 
 /// Says whether a live action stays on its agent's own line: the status word keeps its place
-/// and at least the action's first word shows. Inputs: the node, the action's words, the
-/// glyphs and the cells left after the row's prefix. Output: true to show it there, cut to
-/// fit.
-fn live_fits(node: &GraphNode, label: &str, glyphs: &Glyphs, room: usize) -> bool {
+/// and at least the action's first word shows, or all of it for a wait on the owner, whose
+/// last words say who it waits on. Inputs: the node, its edge, the action's words, the glyphs
+/// and the cells left after the row's prefix. Output: true to show it there, cut to fit.
+fn live_fits(
+    node: &GraphNode,
+    edge: &RelationEdge,
+    label: &str,
+    glyphs: &Glyphs,
+    room: usize,
+) -> bool {
     let (head, word) = line_cells(node, glyphs);
     let lead = 3 + width(glyphs.dot);
     let first = label.split(' ').next().unwrap_or(label);
-    let least = (lead + width(label)).min(lead + width(first) + width(glyphs.ellipsis));
-    head + word + least <= room
+    let least = if matches!(edge.live, Some(LiveAction::WaitingOn { owner: true })) {
+        width(label)
+    } else {
+        width(label).min(width(first) + width(glyphs.ellipsis))
+    };
+    head + word + lead + least <= room
 }
 
 /// The live action an agent's detail row shows because it did not fit on the agent's own
@@ -1920,21 +1930,22 @@ fn moved_action(
     let edge = &graph.relations[relation_of(graph, node)?];
     edge.live.as_ref()?;
     let label = edge_label(edge);
-    (!live_fits(node, &label, glyphs, room)).then_some(label)
+    (!live_fits(node, edge, &label, glyphs, room)).then_some(label)
 }
 
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
 /// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
 /// when the Delivery setting leaves it no way to get messages, each wrapped to the width
-/// left after the prefix so the words are never cut. Inputs: the rows, the node, the
-/// prefix, the row width and a live action that did not fit on the agent's own line.
-/// Output: none; rows are appended.
+/// left after the prefix so the words are never cut. A live action that did not fit on the
+/// agent's own line goes first on the account row, or as the first note with no account row.
+/// Inputs: the rows, the node, the prefix, the row width and that action. Output: none; rows
+/// are appended.
 fn detail_row(
     out: &mut Vec<TreeRow>,
     node: &GraphNode,
     prefix: String,
     width: usize,
-    live: Option<String>,
+    mut live: Option<String>,
 ) {
     if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
@@ -1943,7 +1954,7 @@ fn detail_row(
             body: Body::Detail {
                 account: node.account.clone(),
                 branch: node.branch.clone(),
-                live,
+                live: live.take(),
             },
         });
     }
@@ -1953,8 +1964,9 @@ fn detail_row(
     let hookless = node
         .hookless
         .then(|| format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS));
-    for words in hookless
+    for words in live
         .into_iter()
+        .chain(hookless)
         .chain(node.message_note.as_deref().map(plain))
     {
         out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
@@ -1982,9 +1994,9 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx, room: usize) -> Line<'stati
             let (head, word) = line_cells(node, glyphs);
             let live = edge
                 .filter(|edge| edge.live.is_some())
-                .map(edge_label)
-                .filter(|label| live_fits(node, label, glyphs, room))
-                .map(|label| {
+                .map(|edge| (edge, edge_label(edge)))
+                .filter(|(edge, label)| live_fits(node, edge, label, glyphs, room))
+                .map(|(_, label)| {
                     assert!(
                         head + word < room,
                         "a live action needs cells beside the status"
