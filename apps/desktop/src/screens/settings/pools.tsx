@@ -19,6 +19,10 @@ export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add a
 /** How often the page reads the order and the limits again, in milliseconds. */
 const REREAD_MS = 60_000;
 
+/** The range the page asks usage for, in milliseconds. It reads only the limits, which the range
+ * does not touch, so a short range spares a scan of all history on every read. */
+const LIMITS_RANGE_MS = 3_600_000;
+
 /** Describes how many pool members are ready: "3 ready, 1 not signed in", or "No accounts".
  * Input: the members. Output: the line. */
 export function poolReadiness(members: PoolMember[]): string {
@@ -392,7 +396,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const [accounts] = useLoad(listAccounts, [], "accounts");
   const [schedule, rereadSchedule] = useLoad(accountSchedule, [], "account-schedule");
   const [ranking, rerank] = useLoad(accountRanking, [], "account-ranking");
-  const [usage, rereadUsage] = useLoad(() => loadUsage(null, offsetMinutes(new Date()), null), [], "pool-usage");
+  const [usage, rereadUsage] = useLoad(() => loadUsage(Date.now() - LIMITS_RANGE_MS, offsetMinutes(new Date()), null), [], "pool-usage");
   const [selected, setSelected] = useState<string>();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [editing, setEditing] = useState<{ id?: string; opened?: PoolBase } | undefined>(creating ? {} : undefined);
