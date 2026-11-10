@@ -276,6 +276,7 @@ fn refusal(code: &str) -> &'static str {
         "usage_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. Press r to read again."
         }
+        "usage_recount_not_ready" => "This recount was already decided. Press r to read again.",
         other => plain(other),
     }
 }
