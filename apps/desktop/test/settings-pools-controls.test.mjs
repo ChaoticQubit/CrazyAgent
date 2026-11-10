@@ -271,6 +271,15 @@ test("a refusal stays in the window with the page scrolled down to the last row"
   assert.equal(seen.inView, true);
 });
 
+test("reaching the last row of a long pool scrolls the page pane and never the window itself", async () => {
+  const seen = await onPools({ pools: "full", ranking: "full" }, async (page) => {
+    await press(page, PIN("Account 14"), "Never use");
+    return page.evaluate(`({ spare: document.documentElement.scrollHeight - document.documentElement.clientHeight, moved: document.documentElement.scrollTop, pane: document.getElementById("main").scrollTop })`);
+  });
+  assert.ok(seen.pane > 0, "the last row needs a scroll");
+  assert.deepEqual({ spare: seen.spare, moved: seen.moved }, { spare: 0, moved: 0 });
+});
+
 test("a change made after a refusal takes the refusal away", async () => {
   const seen = await onPools({ refuse: "account_schedule_full", refuseAt: 1 }, async (page) => {
     await press(page, PIN("Account 0"), "Never use");
