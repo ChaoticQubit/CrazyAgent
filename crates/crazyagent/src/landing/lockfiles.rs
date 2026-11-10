@@ -190,8 +190,11 @@ fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// time for each set and at most `RUNNING_PER_REPOSITORY_MAX` for a repository, past which
 /// none starts; a set already being rewritten counts as started. When it ends without
 /// landing, `after` gets the set and whether another regeneration may start: false after a
-/// refusal, which hands the clash to the agent, true after the set or main moved. Inputs:
-/// the store, the set, its clashing paths and what runs after. Output: whether one runs now.
+/// refusal, which hands the clash to the agent, true after the set or main moved. A clash
+/// in a `uv.lock` never starts one and goes straight to the agent, logged by its plain code:
+/// uv writes a `.git` marker into every cache it makes, `--no-cache` included, which the
+/// sandbox's nested-git rule refuses in every folder the tool may write. Inputs: the store,
+/// the set, its clashing paths and what runs after. Output: whether one runs now.
 pub(super) fn regenerate_later(
     db: &Connection,
     record: &Record,
@@ -204,6 +207,10 @@ pub(super) fn regenerate_later(
         || paths.iter().any(|path| program_for(path).is_none())
         || !current(db, record)?
     {
+        return Ok(false);
+    }
+    if paths.iter().any(|path| program_for(path) == Some("uv")) {
+        eprintln!("landing_regenerate_skipped code=uv_cache_git_marker_refused");
         return Ok(false);
     }
     let Some(runtime) = runtime_of(db) else {
