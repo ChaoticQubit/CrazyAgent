@@ -13569,6 +13569,33 @@ fn an_agent_commit_and_an_edit_elsewhere_after_a_reset_moved_the_files_gets_no_r
     );
 }
 
+/// LAND-2-R2-L1: a file staged after the agent's commit took what the reset moved does not
+/// make that commit any less its own. Each path goes back only where HEAD does not hold it,
+/// so the staged file stays and no reversal of the commit is staged.
+#[test]
+fn an_agent_commit_and_a_file_staged_after_a_reset_moved_the_files_gets_no_reversal() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        commit_the_index(&home, &worktree);
+        write(&worktree.join("later.txt"), "later\n");
+        git_in(&home, &worktree, &["add", "later.txt"]);
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["status", "--porcelain"]),
+        "A  later.txt\n",
+        "the engine staged a reversal of the agent's commit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        case.agent(&["show", "HEAD:README"]),
+        "the file stays at what the agent committed"
+    );
+}
+
 /// Land-2 r1 F1: a commit made before the files moved holds none of them, so they still go
 /// back under it, or the next turn would post the reset as the agent's change.
 #[test]
