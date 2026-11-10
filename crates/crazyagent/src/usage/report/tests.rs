@@ -553,6 +553,50 @@ fn harness_without_reader_reports_not_reported_never_zero() {
     assert_eq!(rows, 5, "a refused mark writes nothing");
 }
 
+/// METRICS-AGENT-RUNS: an agent key that counted in two projects lists once per project, each
+/// row with only that project's tokens, runs and last use, and only the project whose run had
+/// no reader flags it, so the app page can fill Runs and Last used on each project's row.
+#[test]
+fn an_agent_key_used_in_two_projects_lists_once_per_project() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    for (project, session, input, at) in [
+        ("alpha", "a", 70, MIDNIGHT + HOUR),
+        ("beta", "b", 30, MIDNIGHT + 3 * HOUR),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        append(
+            &home.path().join(format!("projects/f/{session}.jsonl")),
+            &line(session, input, 1),
+        );
+        let agent = who(project, None, "claude-1", "onboarding", RunKind::Agent);
+        scan_home(&db, home.path(), Format::Claude, &agent, at).unwrap();
+    }
+    let opencode = readerless("beta", "onboarding", "opencode", RunKind::Agent);
+    mark_unreported(&db, &opencode, MIDNIGHT + 4 * HOUR).unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
+    let rows: Vec<(&str, u64, u64, i64)> = all
+        .agents
+        .iter()
+        .map(|row| (row.key.as_str(), row.tokens.input, row.runs, row.last_ms))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("onboarding", 70, 1, MIDNIGHT + HOUR),
+            ("onboarding", 30, 1, MIDNIGHT + 4 * HOUR),
+        ]
+    );
+    assert_eq!(
+        flagged(&all.agents),
+        [
+            ("onboarding", 70, None),
+            ("onboarding", 30, Some("OpenCode")),
+        ]
+    );
+}
+
 #[test]
 fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
     let root = tempfile::tempdir().unwrap();
