@@ -1919,6 +1919,54 @@ fn model_rows_shrink_with_the_others_to_fit_one_reply() {
 }
 
 #[test]
+fn tool_rows_shrink_with_the_others_to_fit_one_reply() {
+    let row = ToolBucket {
+        tool: "t".repeat(crate::usage::report::REPORT_BYTES_MAX),
+        ..ToolBucket::default()
+    };
+    let fitted = fit(Metrics {
+        tools: vec![row; 2],
+        ..Metrics::default()
+    });
+    assert!(fitted.is_ok());
+    assert_eq!(fitted.unwrap().tools.len(), 0);
+}
+
+#[test]
+fn tools_are_read_per_bar_and_per_project() {
+    let (_directory, db) = database();
+    crate::coord::ensure(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,hookless) VALUES
+            (1,'alpha','sub','codex',1,'running',1,1,0),
+            (2,'beta','sub','codex',1,'running',1,1,0);
+         INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES
+            (3600000,1,'Edit',3),(3600000,2,'Edit',5),(7200000,1,'Bash',2);",
+    )
+    .unwrap();
+    let all = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(all.tools_since_ms, Some(3_600_000));
+    assert_eq!(
+        all.tools
+            .iter()
+            .filter(|row| row.tool == "Edit")
+            .map(|row| row.count)
+            .sum::<u64>(),
+        8
+    );
+    let alpha = ProjectId::new("alpha").unwrap();
+    let one = read(&db, Some(&alpha), 0, 7_200_000).unwrap();
+    assert_eq!(
+        one.tools
+            .iter()
+            .filter(|row| row.tool == "Edit")
+            .map(|row| row.count)
+            .sum::<u64>(),
+        3
+    );
+}
+
+#[test]
 fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
     use crate::usage::money::{self, MainNumber, MoneySettings};
     let (_directory, db) = database();

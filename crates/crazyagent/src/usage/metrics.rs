@@ -95,10 +95,20 @@ pub struct ModelRow {
     pub cost_nanos: i64,
 }
 
+/// Tool calls in one chart bar.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolBucket {
+    pub start_ms: i64,
+    pub tool: String,
+    pub count: u64,
+}
+
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
 /// now, and done or failed in the range; the merges in the range, those into main and those
-/// undone; the tokens chart in bars of `bucket_ms`; and the breakdown by run, project, agent,
-/// account, harness and model, each with its estimated dollars.
+/// undone; the tokens chart in bars of `bucket_ms`; the breakdown by run, project, agent,
+/// account, harness and model, each with its estimated dollars; and the tool calls per bar
+/// with the hour that counting began.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -121,6 +131,10 @@ pub struct Metrics {
     pub harnesses: Vec<GroupRow>,
     #[serde(default)]
     pub models: Vec<ModelRow>,
+    #[serde(default)]
+    pub tools: Vec<ToolBucket>,
+    #[serde(default)]
+    pub tools_since_ms: Option<i64>,
 }
 
 /// The chart bar width for a range: two hours for up to a day, a day for up to eight days,
@@ -706,6 +720,8 @@ pub fn read(
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
         models: models(db, project, since_ms, prices)?,
+        tools: Vec::new(),
+        tools_since_ms: None,
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);

@@ -2947,6 +2947,12 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
                 params![ended, NOW],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES (0,?1,'graphify',1)",
+                [ended],
+            )
+            .unwrap();
         settings::write(&connection, project, &CoordSettings::default()).unwrap();
         settings::set_mode(
             &connection,
@@ -3019,7 +3025,7 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
             )
             .unwrap()
     };
-    for table in ["coord_activity", "coord_tool_use"] {
+    for table in ["coord_activity", "coord_tool_use", "coord_tool_hours"] {
         assert!(!kept(table, ended), "{table}");
         assert!(kept(table, live), "a live agent keeps its {table}");
         assert!(

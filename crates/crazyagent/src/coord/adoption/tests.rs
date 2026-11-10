@@ -654,3 +654,69 @@ fn a_hookless_agent_gets_the_counts_flags_and_reminders_of_one_with_hooks() {
         "an agent without hooks gets one reminder per flag too"
     );
 }
+
+#[test]
+fn a_tool_call_is_also_counted_in_its_hour() {
+    let (_root, db, project) = database();
+    let agent = agent_row(&db, &project, "running", true, NOW, false);
+    const HOUR: i64 = 3_600_000;
+    crate::coord::record_tool(&db, agent, "Edit", 2 * HOUR + 5).unwrap();
+    crate::coord::record_tool(&db, agent, "Edit", 2 * HOUR + 9).unwrap();
+    crate::coord::record_tool(&db, agent, "Edit", 3 * HOUR).unwrap();
+    let rows: Vec<(i64, i64)> = db
+        .prepare("SELECT hour_ms,count FROM coord_tool_hours WHERE agent=?1 ORDER BY hour_ms")
+        .unwrap()
+        .query_map([agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows, vec![(2 * HOUR, 2), (3 * HOUR, 1)]);
+    let counted: i64 = db
+        .query_row("SELECT rows FROM coord_tool_hours_rows", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(counted, 2, "a repeat in its hour adds no row to the cap");
+}
+
+#[test]
+fn past_its_caps_a_tool_call_is_left_out_of_the_chart_only() {
+    let (_root, db, project) = database();
+    let agent = agent_row(&db, &project, "running", true, NOW, false);
+    const HOUR: i64 = 3_600_000;
+    for index in 0..crate::coord::TOOLS_PER_HOUR_MAX {
+        crate::coord::record_tool(&db, agent, &format!("tool-{index}"), HOUR).unwrap();
+    }
+    crate::coord::record_tool(&db, agent, "one-more", HOUR).unwrap();
+    let held: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM coord_tool_hours WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, crate::coord::TOOLS_PER_HOUR_MAX);
+    crate::coord::record_tool(&db, agent, "tool-0", HOUR).unwrap();
+    let repeated: i64 = db
+        .query_row(
+            "SELECT count FROM coord_tool_hours WHERE tool='tool-0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repeated, 2, "a tool the hour already holds still counts");
+    db.execute(
+        "UPDATE coord_tool_hours_rows SET rows=?1",
+        [crate::coord::TOOL_HOURS_MAX],
+    )
+    .unwrap();
+    crate::coord::record_tool(&db, agent, "tool-0", 2 * HOUR).unwrap();
+    let later: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM coord_tool_hours WHERE hour_ms=?1",
+            [2 * HOUR],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(later, 0);
+}

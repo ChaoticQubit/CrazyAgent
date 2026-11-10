@@ -15,6 +15,10 @@ const AWAY_MS: i64 = 60 * 60_000;
 const AGENTS_SHOWN_MAX: usize = 256;
 const QUESTIONS_SHOWN_MAX: usize = 100;
 const UNREAD_SCAN_MAX: usize = 4096;
+/// The most different tools one agent keeps rows for in one hour.
+pub(crate) const TOOLS_PER_HOUR_MAX: i64 = 64;
+/// The most rows the tools chart keeps.
+pub(crate) const TOOL_HOURS_MAX: i64 = 1 << 20;
 
 const _: () =
     assert!(LIVE_MS < IDLE_MS && IDLE_MS < AWAY_MS && super::adoption::UNGROUNDED_MS < IDLE_MS);
