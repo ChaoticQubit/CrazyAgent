@@ -19370,51 +19370,58 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
 
 /// S4B-B1: a native lead taken over and then stopped is proven gone like any other pane.
 /// One whose pane process ignores terminate is not confirmed, so the worker reports the
-/// cleanup uncertain instead of a clean stop.
+/// cleanup uncertain instead of a clean stop, followed by the cause the lead ended for when
+/// it had one, as a first order without the signed-in account.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-    let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
-    let agent = AgentId::team(id).unwrap();
-    let adoption = Adoption {
-        host: host.clone(),
-        agent: agent.clone(),
-        record,
-        limits: LaunchLimits::default(),
-        live: false,
-        managed: Some(Managed {
-            home: fixture.base.join(format!("lead-home-{id}")),
-            executable: PathBuf::from("/bin/sh"),
-        }),
-        access: AgentAccess::Sandboxed,
-        toolchains: Some(Vec::new()),
-        network: crate::sandbox::policy::AgentNetwork::Open,
-        proxy: None,
-        task_start: None,
-    };
-    let (orders, ordered) = channel();
-    let (reports, _reported) = channel();
-    orders.send(Order::Stop).unwrap();
+    let uncertain = with_code(
+        crate::sandbox::warden::CLEANUP_UNCERTAIN,
+        Some(crate::harnesses::leftovers::UNCERTAIN),
+    );
+    for (first, expected) in [
+        (Order::Stop, uncertain.clone()),
+        (
+            Order::Start("Your brief".into(), None),
+            format!("{uncertain} The native lead was taken over without its signed-in account"),
+        ),
+    ] {
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let agent = AgentId::team(id).unwrap();
+        let adoption = Adoption {
+            host: host.clone(),
+            agent: agent.clone(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join(format!("lead-home-{id}")),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
+            network: crate::sandbox::policy::AgentNetwork::Open,
+            proxy: None,
+            task_start: None,
+        };
+        let (orders, ordered) = channel();
+        let (reports, _reported) = channel();
+        orders.send(first).unwrap();
 
-    let problem = native_adopted(
-        adoption,
-        &ordered,
-        &reports,
-        &AtomicBool::new(false),
-        &AtomicBool::new(false),
-        &AtomicBool::new(false),
-    );
-    assert_eq!(
-        problem,
-        Some(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(crate::harnesses::leftovers::UNCERTAIN),
-        ))
-    );
-    assert!(!host.alive().unwrap().contains(&agent));
+        let problem = native_adopted(
+            adoption,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(problem, Some(expected));
+        assert!(!host.alive().unwrap().contains(&agent));
+    }
 }
 
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
@@ -22436,6 +22443,19 @@ fn a_lead_hears_who_stopped_its_sub_agent_and_nothing_of_a_stop_it_made() {
     team.shutdown().unwrap();
 }
 
+/// Calls `stop_unmanaged` until it reports the stops whose ends it handed over, at most
+/// `WAIT`. Input: the runtime. Output: the first stops it reports, or none at the deadline.
+fn stopped_unmanaged(team: &mut TeamRuntime) -> Vec<(i64, ProjectId, crate::team::StoppedBy)> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let stopped = team.stop_unmanaged().unwrap();
+        if !stopped.is_empty() || Instant::now() >= deadline {
+            return stopped;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A native teammate a stop ends keeps the reason of who stopped it, and the stop reports
 /// who made it (HB-S5-B).
 #[cfg(target_os = "macos")]
@@ -22475,7 +22495,7 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
             )
             .unwrap();
         assert_eq!(
-            team.stop_unmanaged().unwrap(),
+            stopped_unmanaged(&mut team),
             vec![(mate, fixture.setup.project_id.clone(), by)],
             "{maker}"
         );
@@ -22492,7 +22512,8 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
 
 /// S4B-B1: a native teammate a stop ends is proven gone like any other pane. One whose
 /// pane process ignores terminate is not confirmed, so its row says the cleanup is
-/// uncertain, and its pane is still closed.
+/// uncertain, and its pane is still closed. S4B-B1-L1: that end waits seconds on the pane,
+/// so the tick hands it over and returns at once; the row is marked once it finished.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
@@ -22517,7 +22538,18 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
         )
         .unwrap();
 
-    assert_eq!(team.stop_unmanaged().unwrap().len(), 1);
+    let started = Instant::now();
+    assert_eq!(
+        team.stop_unmanaged().unwrap(),
+        Vec::new(),
+        "the tick waited for the pane's end"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the tick took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(stopped_unmanaged(&mut team).len(), 1);
     let error: Option<String> = fixture
         .connection
         .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
