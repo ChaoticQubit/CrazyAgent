@@ -797,6 +797,7 @@ pub struct ProjectSandbox {
     answers: Option<PathBuf>,
     setup: Option<TeammatesSetup>,
     lead_branch: Option<String>,
+    adds_worktrees: bool,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -872,6 +873,7 @@ impl ProjectSandbox {
             answers: None,
             setup: None,
             lead_branch: None,
+            adds_worktrees: false,
         })
     }
 
@@ -1039,6 +1041,16 @@ impl ProjectSandbox {
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
         Ok(self)
+    }
+
+    /// Lets git create a checkout's `.git` link in the project's worktrees folders and the
+    /// `gitdir` and `commondir` files of its admin folder, which no other profile may plant
+    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Only the engine's own worktree-add step installs it,
+    /// and its callers confine and reinstall the profile before any agent runs.
+    /// Output: the sandbox with that exemption.
+    pub(crate) fn adding_worktrees(mut self) -> Self {
+        self.adds_worktrees = true;
+        self
     }
 
     /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder
@@ -1855,7 +1867,7 @@ impl ProjectSandbox {
         }
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (subpath \"{project}/.git/sequencer\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
@@ -2032,7 +2044,10 @@ impl ProjectSandbox {
     /// No agent may move the project folder, the git worktrees folders or a worktree, which
     /// would carry protected files out of their denied paths and back. A worktree's `.git`
     /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
-    /// does, but never rewritten or removed, and no `config.worktree` may be written. No link
+    /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
+    /// teammates' setup), since the owner's `git worktree repair` would point a real
+    /// checkout at an admin folder planted with them; they are never rewritten or removed,
+    /// and no `config.worktree` may be written. No link
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
     /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
@@ -2050,8 +2065,13 @@ impl ProjectSandbox {
         let mut moves = format!(
             "(deny file-write-unlink\n  (literal \"{project}\")\n  (regex #\"^{pattern}/{git}/{worktrees}$\")\n  (regex #\"^{pattern}(/{state})?/{worktrees}$\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
         );
+        let create = if self.adds_worktrees || self.setup.is_some() {
+            ""
+        } else {
+            " file-write-create"
+        };
         let mut links = format!(
-            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
+            "(deny file-write-unlink file-write-data{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
             any_case("commondir"),
             any_case("gitdir")
         );
@@ -2095,8 +2115,10 @@ impl ProjectSandbox {
     /// writable working tree, which the owner's own unsandboxed git (its terminal or the
     /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
     /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
-    /// below a writable working tree, except that tree's own top-level `.git` and the
-    /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
+    /// below a writable working tree, except that tree's own top-level `.git` and, only in a
+    /// profile built by [`Self::adding_worktrees`], the engine's worktree links, which any
+    /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
+    /// The project's own `.git` and each worktree's own `.git` sit
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
     /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
     /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
@@ -2121,7 +2143,12 @@ impl ProjectSandbox {
         }
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
-        let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        let mut exempt = String::new();
+        if self.adds_worktrees {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))"
+            ));
+        }
         if let Some(clone) = &self.clone {
             exempt.push_str(&format!(
                 "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
@@ -2147,7 +2174,7 @@ impl ProjectSandbox {
             text.matches("(regex #\"^/").count()
                 == working.len()
                     + other.len()
-                    + 1
+                    + usize::from(self.adds_worktrees)
                     + usize::from(self.clone.is_some())
                     + usize::from(self.setup.is_some())
         );
