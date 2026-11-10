@@ -1095,3 +1095,61 @@ async fn removing_a_project_takes_its_tool_cache_and_keeps_one_another_project_u
     drop(owner);
     engine.stop().await;
 }
+
+/// T8-R2-N3: a tool cache record an earlier Remove from dashboard left unfinished, for a
+/// folder a project added again since names, never takes that project's cache: the next
+/// finish, here after another project's removal, checks the projects again, keeps the cache
+/// its agents use and clears the stale record, and still takes the removed project's cache.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_stale_tool_cache_record_never_takes_the_cache_of_a_project_added_again() {
+    use std::os::unix::fs::MetadataExt;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (_, folder) = project(&mut owner).await;
+    let (service, service_folder) = service(&mut owner, 2).await;
+    let cache = |of: &std::path::Path| {
+        crate::sandbox::tool_cache::project_folder(engine.root.path(), of.to_str().unwrap())
+    };
+    for of in [&folder, &service_folder] {
+        std::fs::create_dir_all(cache(of).join("sandboxed-worktree").join("uv")).unwrap();
+    }
+    let stale = format!(
+        "{}{}",
+        crate::projects_home::TOOL_CACHE_PREFIX,
+        cache(&folder).file_name().unwrap().to_str().unwrap()
+    );
+    let inode = i64::try_from(std::fs::symlink_metadata(cache(&folder)).unwrap().ino()).unwrap();
+    set(
+        &engine,
+        "INSERT INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+        rusqlite::params![stale, inode],
+    );
+    let removed = owner.remove_project(service, 3).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while (cache(&service_folder).exists()
+        || engine.rows("SELECT count(*) FROM projects_delete_files") > 0)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !cache(&service_folder).exists(),
+        "the removed project's cache goes"
+    );
+    assert!(
+        cache(&folder)
+            .join("sandboxed-worktree")
+            .join("uv")
+            .is_dir(),
+        "the cache a project added again uses stays"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_files"),
+        0,
+        "the stale record is cleared"
+    );
+    drop(owner);
+    engine.stop().await;
+}
