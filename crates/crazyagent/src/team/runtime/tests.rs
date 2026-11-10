@@ -25742,12 +25742,9 @@ fn a_refused_wait_cycle_note_loses_no_pair() {
             .collect::<Result<_, _>>()
             .unwrap()
     };
+    let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
-    team.tick().unwrap();
-    assert!(
-        team.claims_next.contains_key(&fixture.setup.project_id),
-        "the claims sweep ran"
-    );
+    team.tend_claims(&project);
     assert_eq!(notes("src/first.rs"), 0, "the store refused this note");
     for file in told() {
         assert_eq!(notes(&file), 1, "{file} is told only with its note");
@@ -25757,7 +25754,7 @@ fn a_refused_wait_cycle_note_loses_no_pair() {
         .execute_batch("DROP TRIGGER refuse_first;")
         .unwrap();
     team.claims_next.clear();
-    team.tick().unwrap();
+    team.tend_claims(&project);
     team.shutdown().unwrap();
     for (_, _, file) in pairs {
         assert_eq!(notes(file), 1, "the owner hears of {file} once");
