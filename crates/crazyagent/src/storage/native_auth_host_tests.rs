@@ -909,6 +909,7 @@ fn database_reopen_keeps_old_work_fenced_while_held_and_the_next_begin_recovers_
         "native_auth_host_busy",
     );
     assert_eq!(case.snapshot(), held);
+    let _child_being_started = probe.try_clone().unwrap();
     drop(probe);
     let (elsewhere, work) = fresh_work(
         case.begin(case.start("released-elsewhere", "connection-z"))
