@@ -11,7 +11,6 @@ const fixture = JSON.parse(readFileSync(new URL("./frames.json", import.meta.url
 const terminal = fixture.terminal;
 const bytes = (entry) => Buffer.from(entry.frame, "hex");
 const LIMIT = { timeout: 10_000 };
-const OPENED = "This terminal can't stage or commit. Use Source Control, or a Full access terminal.\r\n";
 
 test("the terminals the server hosts find the folder of the engine's git first on PATH", () => {
   const prepended = [];
@@ -67,7 +66,7 @@ test("the Sandboxed terminal opens, types, resizes and closes with the engine's 
     assert.equal((await peer.frame()).toString("hex"), terminal.requests[0].frame);
     pty.setDimensions({ columns: 120, rows: 40 });
     assert.equal((await peer.frame()).toString("hex"), terminal.requests[1].frame);
-    await until(() => seen.shown.join("") === `${OPENED}café ✓\r\n`);
+    await until(() => seen.shown.join("") === "café ✓\r\n");
     assert.ok(!seen.shown.join("").includes("�"));
     connection.write(end);
     await until(() => seen.closed === 1);
@@ -76,7 +75,7 @@ test("the Sandboxed terminal opens, types, resizes and closes with the engine's 
     pty.close();
     await gone;
     assert.equal(peer.left(), 0);
-    assert.equal(seen.shown.join(""), `${OPENED}café ✓\r\n`);
+    assert.equal(seen.shown.join(""), "café ✓\r\n");
     assert.equal(seen.closed, 1);
   });
 });

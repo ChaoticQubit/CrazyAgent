@@ -15,9 +15,6 @@ export const INPUT_BYTES_MAX = 4096;
 export const UNAVAILABLE =
   "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. \"IDE shell\" in the terminal menu runs inside the IDE's own sandbox instead.";
 
-/** What a Sandboxed terminal says when it opens: its sandbox keeps the project's git index. */
-export const NO_STAGING = "This terminal can't stage or commit. Use Source Control, or a Full access terminal.";
-
 /** What the terminal shows when the engine already runs its most Sandboxed terminals. */
 export const BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
 
@@ -179,7 +176,6 @@ export class SandboxedPty {
     if (this.#ended) return;
     if (!this.#attached && frame.kind === "ok") {
       this.#attached = true;
-      this.#wrote.fire(`${NO_STAGING}\r\n`);
     } else if (!this.#attached && frame.kind === "rejected") {
       this.#stop(String(frame.code));
     } else if (this.#attached && frame.kind === "output" && Array.isArray(frame.bytes)) {
