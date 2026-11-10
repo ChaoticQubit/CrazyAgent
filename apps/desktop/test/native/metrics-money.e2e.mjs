@@ -72,7 +72,7 @@ async function priced(t, prefix, steps) {
     await eventually("the engine counting the transcript", () => inputOf(runtime, session) === 1000);
     await me.click("Metrics", ".app-nav a.nav-item");
     await eventually("a priced figure", async () => (await figures(page)).some(([main]) => /^<?\$/u.test(main) && main !== "$0.00"));
-    await steps({ me, page });
+    await steps({ me, page, runtime });
   });
 }
 
@@ -88,6 +88,7 @@ test("CB-E1 Dollars leads and every figure carries the label", OPTIONS, async (t
     assert.equal(wrapped, 0, "every share percent stays on one line");
     const spill = await page.evaluate(`(() => { const wrap = document.querySelector(".mx-table-wrap"); return wrap.scrollWidth - wrap.clientWidth; })()`);
     assert.equal(spill, 0, "the breakdown table fits its panel");
+    await eventually("the credit's copyright line", () => page.evaluate(`document.querySelector(".mx-credit pre")?.textContent.includes("Copyright (c) 2026 AgentSeal") ?? false`));
     await me.capture("metrics-money-dollars");
   });
 });
@@ -124,5 +125,17 @@ test("CB-E4 Off shows no dollar anywhere", OPTIONS, async (t) => {
     });
     assert.doesNotMatch(await page.evaluate(`document.querySelector(".mx-page").innerText`), /\$\d/u);
     await me.capture("metrics-money-off");
+  });
+});
+
+test("A refused money switch says so on the page", OPTIONS, async (t) => {
+  await priced(t, "ca-money-5-", async ({ me, page, runtime }) => {
+    onStore(runtime, (store) => store.exec(`CREATE TRIGGER refuse_money_insert BEFORE INSERT ON usage_money BEGIN SELECT RAISE(ABORT, 'refused'); END;
+      CREATE TRIGGER refuse_money_update BEFORE UPDATE ON usage_money BEGIN SELECT RAISE(ABORT, 'refused'); END;`));
+    await me.click("Tokens", MAIN);
+    await eventually("the refusal on the page", () => page.evaluate(`document.querySelector(".mx-page [role=alert]")?.innerText.includes("Usage isn't available") ?? false`));
+    const shown = await figures(page);
+    assert.ok(shown.every(([main]) => /^<?\$/u.test(main)), JSON.stringify(shown));
+    await me.capture("metrics-money-refused");
   });
 });

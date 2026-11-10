@@ -263,3 +263,11 @@ test("a chart of under a cent repeats no axis figure", () => {
   const figures = [...shown.matchAll(/class="ax"[^>]*>([^<]*)</gu)].map((found) => found[1]).filter((figure) => figure.includes("$"));
   assert.deepEqual(figures, ["&lt;$0.01"]);
 });
+
+test("with Tokens leading the dollar's label is visible in the tile and the table heading", () => {
+  const markup = priced(bundled({ settings: { main_number: "tokens", prices: "bundled" }, shown: "tokens" }));
+  const tile = markup.slice(markup.indexOf('class="mx-tiles"'), markup.indexOf("Re-read from cache"));
+  assert.match(text(tile), /Estimated cost at API prices/u);
+  assert.match(markup, /<th scope="col" class="num">Tokens<small> Estimated cost at API prices<\/small><\/th>/u);
+  assert.doesNotMatch(text(priced(off())), /Estimated cost at API prices/u);
+});
