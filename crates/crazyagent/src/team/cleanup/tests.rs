@@ -980,9 +980,13 @@ fn an_older_master_is_listed_but_the_one_the_runtime_starts_again_is_not() {
     assert!(case.kept(1) && case.kept(3));
 }
 
+/// A worktree file the engine cannot delete, here one pinned at mode 000, which Clean up
+/// cannot open to clear its flags (T8-R2-F1), stops a removal part way: it says what it
+/// removed, and offers the rest again.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again() {
+    use std::os::unix::fs::PermissionsExt;
     let case = Case::new();
     for id in [1, 2, 3] {
         case.agent(id, "sub", "stopped");
@@ -990,6 +994,7 @@ fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again(
     let stuck = case.worktree(2).join("target/stuck.bin");
     write(&stuck, b"locked\n");
     let unlocked = Unlocked(stuck.clone());
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
     assert!(chflags("uchg", &stuck));
     assert_eq!(
         case.remove(&[1, 2, 3]),
@@ -1014,6 +1019,28 @@ fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again(
     assert!(case.retiring().is_empty());
     assert_eq!(case.listed(), [3]);
     drop(unlocked);
+}
+
+/// T8-R2-N4: a file an agent pinned (`chflags uchg`) and a folder it made append only in
+/// its worktree keep neither the worktree nor the agent from Clean up, as in its tool cache
+/// (T8 r1 L3).
+#[cfg(target_os = "macos")]
+#[test]
+fn clean_up_takes_a_worktree_its_agent_pinned_inside() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    let pinned = case.worktree(1).join("target/pinned.bin");
+    write(&pinned, b"pinned\n");
+    let _unlocked = Unlocked(pinned.clone());
+    assert!(chflags("uchg", &pinned));
+    let appending = case.worktree(1).join("target/appending");
+    write(&appending.join("log"), b"kept\n");
+    let _appending = Unappended(appending.clone());
+    assert!(chflags("uappnd", &appending));
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && case.history_kept(1));
+    assert!(case.retiring().is_empty());
+    assert_eq!(case.listed(), Vec::<i64>::new());
 }
 
 #[test]
@@ -1528,6 +1555,18 @@ struct Unlocked(PathBuf);
 impl Drop for Unlocked {
     fn drop(&mut self) {
         let _ = chflags("nouchg", &self.0);
+    }
+}
+
+/// Clears the user append-only flag on a test folder when dropped, so the temporary folder
+/// can always be deleted, whatever the test asserted. Holds the folder's path.
+#[cfg(target_os = "macos")]
+struct Unappended(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unappended {
+    fn drop(&mut self) {
+        let _ = chflags("nouappnd", &self.0);
     }
 }
 
