@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
@@ -336,6 +336,23 @@ export function MasterIdleSetting({ projectId, status, reload }: { projectId: st
     <Select id={`tg-master-idle-${projectId}`} label="Stop the master when idle after" value={shown} options={MASTER_IDLE_OPTIONS}
       onValue={(value) => { if (!busy && (value === "off" || value === "fifteen_minutes" || value === "one_hour")) void choose(value); }}
       helper="A master in a live terminal stops too, once no turn is open and you have no unsent line." />
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** The Live terminal setting as one row of the master's settings: on, the master runs in its
+ * own terminal; off, the area shows the conversation and a running live master ends at its next
+ * stop (DEC-117 Q4). Inputs: the project id, the team status and a reload. Output: the row. */
+export function LiveTerminalSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on");
+
+  const choose = (on: boolean) => change(() => setMasterLiveTerminal(projectId, on), "the Live terminal setting", () => hold(on ? "on" : "off"));
+
+  return <SettingRow label="Live terminal">
+    <span className="set-label" aria-hidden="true">Live terminal</span>
+    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
+    <span className="tg-terminal-note">You see and type into the master's own terminal.</span>
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }

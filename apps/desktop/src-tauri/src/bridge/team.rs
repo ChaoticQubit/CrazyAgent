@@ -493,6 +493,23 @@ impl NativeBridge {
         .await
     }
 
+    /// Saves a project's "Live terminal" setting: on lets its master run in a live terminal
+    /// (DEC-117 Q4). Takes the project id, the setting and the client generation. Returns the
+    /// actual commit receipt.
+    pub async fn team_master_live_terminal(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::MasterLiveTerminal { project_id, on },
+            generation,
+        )
+        .await
+    }
+
     /// Sets a project's "Reuse idle agents" setting: `off` starts a new agent for each new
     /// task, `on` lets an idle agent of the same lead take it (HB-S5-A). Takes the project
     /// id, the mode and the client generation. Returns the actual commit receipt, or
