@@ -596,6 +596,7 @@ fn server_git(
         &home.join("capability"),
         &home.join("owner.sock"),
         &home.join("locked-settings.json"),
+        AgentAccess::Sandboxed,
         Some(crate::ide::env::ServerGit {
             ceiling: &crate::ide::git::ceiling(root, older_agents).unwrap(),
             config: &home.join("gitconfig"),

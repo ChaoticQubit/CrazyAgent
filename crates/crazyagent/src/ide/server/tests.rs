@@ -383,7 +383,14 @@ fn server_env_holds_only_allowlisted_names() {
         ceiling,
         config: git_config,
     };
-    let built = env::server_env(source, capability, socket, locked, Some(git));
+    let built = env::server_env(
+        source,
+        capability,
+        socket,
+        locked,
+        AgentAccess::OwnBranch,
+        Some(git),
+    );
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -406,6 +413,7 @@ fn server_env_holds_only_allowlisted_names() {
         "/private/tmp/ide/project/capability",
     ));
     expected.push((env::SOCKET_VARIABLE, "/private/tmp/data/engine/owner.sock"));
+    expected.push((env::ACCESS_VARIABLE, "own_branch"));
     expected.push((
         crate::ide::settings::LOCKED_VARIABLE,
         "/private/tmp/ide/project/locked-settings.json",
@@ -2148,6 +2156,36 @@ fn a_launch_builds_its_profile_at_the_projects_level() {
     };
     assert!(!reaches(AgentAccess::Sandboxed, "at-sandboxed"));
     assert!(reaches(AgentAccess::OwnBranch, "at-own-branch"));
+}
+
+/// A launch tells the extension the project's saved level, in the words the terminal menu reads.
+#[test]
+fn a_launch_tells_the_extension_its_access_level() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let told = |level, name: &str| {
+        let id = project(name);
+        set_level(data.path(), &id, level);
+        let (built, _) = built_server(&servers, &id, &root);
+        built
+            .get_envs()
+            .find(|(variable, _)| *variable == env::ACCESS_VARIABLE)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    };
+    assert_eq!(
+        told(AgentAccess::Sandboxed, "told-sandboxed").as_deref(),
+        Some("sandboxed")
+    );
+    assert_eq!(
+        told(AgentAccess::OwnBranch, "told-own").as_deref(),
+        Some("own_branch")
+    );
+    assert_eq!(
+        told(AgentAccess::Full, "told-full").as_deref(),
+        Some("full")
+    );
 }
 
 /// Full access git is the owner's own: no forced key stops the project's hook or hides the

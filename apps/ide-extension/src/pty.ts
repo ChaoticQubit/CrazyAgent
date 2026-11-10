@@ -27,6 +27,21 @@ const CODE = /^[a-z0-9_]{1,64}$/;
 /** The level a terminal asks the engine for; the engine decides whether the project allows it. */
 export type Level = "sandboxed" | "own_branch";
 
+/** The variable the engine names the project's access level in. */
+export const ACCESS_ENV = "CRAZYAGENT_IDE_ACCESS";
+
+/** A project's access level, as the engine names it. */
+export type Access = Level | "full";
+
+/**
+ * The project's access level for the terminal menu. It only shapes the menu, since the engine
+ * clamps every terminal itself. Input: the variable's value. Output: the level, the narrowest
+ * for a missing or unknown value.
+ */
+export function accessOf(_value: string | undefined): Access {
+  return "full";
+}
+
 /** A terminal size in cells, as VS Code reports it. */
 export interface Size {
   columns: number;

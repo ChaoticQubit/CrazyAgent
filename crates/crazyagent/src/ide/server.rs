@@ -924,6 +924,7 @@ fn command(
             &info.capability_path,
             launch.socket,
             places.locked,
+            launch.policy.access,
             git,
         ))
         .env("TMPDIR", &places.tmp)

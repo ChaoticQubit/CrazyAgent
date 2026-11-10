@@ -16,10 +16,28 @@ import { BUILD_MS, FOLDER, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, WORKB
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const PANEL_TERMINAL = `document.querySelectorAll(".part.panel .xterm").length > 0`;
+const RAISE = "Raise project access to use this";
+const MENU_TITLE = "New terminal at access level";
+const DEEP = `const all = (root, selector) => [...root.querySelectorAll(selector), ...[...root.querySelectorAll("*")].filter((item) => item.shadowRoot).flatMap((item) => all(item.shadowRoot, selector))];`;
+const CENTRE = `const centre = (item) => { const box = item.getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; };`;
+const MENU_ACTION = `(() => {
+  ${DEEP} ${CENTRE}
+  const action = all(document, ".part.panel .action-item .action-label").find((item) => (item.getAttribute("aria-label") ?? item.title ?? "").includes(${JSON.stringify(MENU_TITLE)}));
+  return action ? centre(action) : null;
+})()`;
+const MENU_ROWS = `(() => {
+  ${DEEP} ${CENTRE}
+  const rows = all(document, ".monaco-menu .action-item").filter((item) => item.querySelector(".action-menu-item")).map((item) => ({
+    label: (item.querySelector(".action-label")?.textContent ?? "").trim(),
+    disabled: item.classList.contains("disabled") || item.querySelector(".disabled") !== null,
+    at: centre(item),
+  }));
+  return rows.length ? rows : null;
+})()`;
 const LEVELS = [
-  { access: "sandboxed", label: "Sandboxed", confined: true, report: ["net-no", "outside-no", "config-no", "hooks-no"] },
-  { access: "own_branch", label: "Own branch", confined: true, report: ["net-yes", "outside-no", "config-no", "hooks-no"] },
-  { access: "full", label: "Full access", confined: false, report: ["net-yes", "outside-yes", "config-yes", "hooks-yes"] },
+  { access: "sandboxed", label: "Sandboxed", confined: true, report: ["net-no", "outside-no", "config-no", "hooks-no"], menu: [["Sandboxed", false], [`Own branch - ${RAISE}`, true], [`Full access - ${RAISE}`, true]] },
+  { access: "own_branch", label: "Own branch", confined: true, report: ["net-yes", "outside-no", "config-no", "hooks-no"], menu: [["Sandboxed", false], ["Own branch", false], [`Full access - ${RAISE}`, true]] },
+  { access: "full", label: "Full access", confined: false, report: ["net-yes", "outside-yes", "config-yes", "hooks-yes"], menu: [["Sandboxed", false], ["Own branch", false], ["Full access", false]] },
 ];
 
 /** A git repository with one commit by the owner and a hooks folder. Input: the folder.
@@ -160,6 +178,23 @@ async function atLevel(t, level, shared) {
       const said = await ran(`level-${level.access}.txt`, probe(port, join(root, `outside-${level.access}`)));
       writeFileSync(join(evidence, `level-${level.access}.txt`), said);
       for (const word of level.report) assert.match(said, new RegExp(`^${word}$`, "m"), said);
+    });
+
+    await t.test(`${level.label}: the terminal menu offers each level and greys the higher ones`, async () => {
+      await keys.click(await ide.until("the terminal menu in the panel's title", MENU_ACTION));
+      const rows = await ide.until("the terminal menu's levels", MENU_ROWS);
+      await me.capture(`level-${level.access}-menu`);
+      assert.deepEqual(rows.map((row) => [row.label, row.disabled]), level.menu);
+      if (level.access !== "full") {
+        await keys.key("Escape");
+        return;
+      }
+      await keys.click(rows.find((row) => row.label === "Own branch").at);
+      await pause(SETTLE_MS);
+      if ((await page.evaluate(ide.rows))?.length) await ide.pick(FOLDER);
+      const said = await ran("level-menu.txt", probe(port, join(root, "outside-menu")));
+      writeFileSync(join(evidence, "level-menu.txt"), said);
+      for (const word of ["net-yes", "outside-no", "config-no", "hooks-no"]) assert.match(said, new RegExp(`^${word}$`, "m"), said);
     });
   });
 }

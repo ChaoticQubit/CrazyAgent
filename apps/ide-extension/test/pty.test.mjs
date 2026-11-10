@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { Engine, encodeFrame } from "../out/engine.js";
-import { BUSY, INPUT_BYTES_MAX, SandboxedPty, UNAVAILABLE, clampSize, gitFirstOnPath, stopped } from "../out/pty.js";
+import { BUSY, INPUT_BYTES_MAX, SandboxedPty, UNAVAILABLE, accessOf, clampSize, gitFirstOnPath, stopped } from "../out/pty.js";
 import { memoryStore, reading, withServer } from "./peer.mjs";
 
 const fixture = JSON.parse(readFileSync(new URL("./frames.json", import.meta.url), "utf8"));
@@ -140,6 +140,14 @@ test("sizes stay in the engine's bounds and stop reasons stay plain", () => {
   assert.equal(UNAVAILABLE, "This terminal is unavailable: this system has no qualified sandbox for it.");
   assert.equal(BUSY, "This terminal can't start: too many are open. Close one, then open a new terminal.");
   assert.equal(stopped("ide_terminal_above_project"), "Raise project access to use this");
+});
+
+test("the terminal menu reads the level the engine named, and the narrowest for anything else", () => {
+  assert.equal(accessOf("sandboxed"), "sandboxed");
+  assert.equal(accessOf("own_branch"), "own_branch");
+  assert.equal(accessOf("full"), "full");
+  assert.equal(accessOf(undefined), "sandboxed");
+  assert.equal(accessOf("root"), "sandboxed");
 });
 
 test("a terminal asks the engine for its profile's level and shows a refusal to raise access", LIMIT, async () => {
