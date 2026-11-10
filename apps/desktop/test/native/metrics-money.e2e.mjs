@@ -212,3 +212,20 @@ test("CB-E9 With prices Off the recount offer shows no dollar", OPTIONS, async (
     await me.capture("recount-offer-prices-off");
   });
 });
+
+test("A refused recount choice says so and keeps the offer", OPTIONS, async (t) => {
+  await onEngine(t, "ca-recount-refused-", async ({ projects, runtime, me, page }) => {
+    assert.equal(await handOff(me, page, projects[0], runtime), "done");
+    const session = transcript(runtime, "cb-f", 100);
+    await eventually("the engine counting the transcript", () => inputOf(runtime, session) === 100);
+    asBeforeTheRecount(runtime, session, 400);
+    await me.click("Metrics", ".app-nav a.nav-item");
+    await eventually("the recount being offered", () => offerShown(page));
+    onStore(runtime, (store) => store.exec("CREATE TRIGGER refuse_choice BEFORE UPDATE ON usage_recount BEGIN SELECT RAISE(ABORT, 'refused'); END;"));
+    await me.click("Use new numbers", ".mx-page button");
+    await eventually("the refusal on the page", () => page.evaluate(`document.querySelector(".mx-page [role=alert]")?.innerText.includes("Usage isn't available") ?? false`));
+    assert.equal(await offerShown(page), true, "the offer stays until a choice is applied");
+    assert.equal(inputOf(runtime, session), 400);
+    await me.capture("recount-refused");
+  });
+});
