@@ -51,6 +51,8 @@ fn view() -> PolicyView {
             },
         ],
         ide_git_hooks: false,
+        tool_cache: Default::default(),
+        tool_caches: Vec::new(),
         version: 0,
     }
 }
@@ -243,6 +245,17 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
     off.cursor = 4;
     assert_eq!(off.key(key(KeyCode::Left)), AccessKey::Handled);
     assert!(!off.policy().ide_git_hooks);
+}
+
+/// T8: the access box keeps the project's tool cache choice when it saves.
+#[test]
+fn the_access_box_keeps_the_tool_cache_choice_when_it_saves() {
+    let scope = crate::sandbox::policy::ToolCacheScope::PerAgent;
+    let edit = AccessEdit::of(&PolicyView {
+        tool_cache: scope,
+        ..view()
+    });
+    assert_eq!(edit.policy().tool_cache, scope);
 }
 
 #[test]

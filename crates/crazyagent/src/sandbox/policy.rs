@@ -209,7 +209,8 @@ pub struct ToolchainChoice {
 /// One project's agent policy as the owner saved it: the access level and the toolchain
 /// choices the owner made, which apply to the master, sub-agents and research jobs alike,
 /// and whether git in the IDE runs the project's own hooks in the Project section (Off
-/// unless the owner turned it on; a policy saved before the setting existed reads Off).
+/// unless the owner turned it on; a policy saved before the setting existed reads Off), and
+/// who shares the agents' tool cache (T8; a policy saved before that setting reads Shared).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -219,6 +220,8 @@ pub struct AgentPolicy {
     pub ide_git_hooks: bool,
     #[serde(default)]
     pub network: AgentNetwork,
+    #[serde(default)]
+    pub tool_cache: ToolCacheScope,
 }
 
 impl AgentPolicy {
@@ -268,6 +271,7 @@ impl AgentPolicy {
                 .collect(),
             ide_git_hooks: self.ide_git_hooks,
             network: self.network,
+            tool_cache: self.tool_cache,
         };
         assert!(pinned.validate().is_ok());
         pinned
@@ -312,6 +316,8 @@ impl AgentPolicy {
             toolchains,
             version,
             ide_git_hooks: self.ide_git_hooks,
+            tool_cache: self.tool_cache,
+            tool_caches: Vec::new(),
         }
     }
 
@@ -414,6 +420,18 @@ pub struct PolicyView {
     pub toolchains: Vec<ToolchainView>,
     pub version: u64,
     pub ide_git_hooks: bool,
+    #[serde(default)]
+    pub tool_cache: ToolCacheScope,
+    #[serde(default)]
+    pub tool_caches: Vec<ToolCacheView>,
+}
+
+/// One tool cache choice with the name shown to the owner (T8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCacheView {
+    pub scope: ToolCacheScope,
+    pub label: String,
 }
 
 /// One network choice with the name shown to the owner.
@@ -535,6 +553,41 @@ mod tests {
         assert_eq!(AgentNetwork::Open.sandbox(None), SandboxNetwork::Open);
     }
 
+    /// T8: a policy saved before the tool cache setting reads Shared, a pinned policy keeps
+    /// the owner's choice, a save names it, and the view lists every choice, the default
+    /// first.
+    #[test]
+    fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_every_choice() {
+        let old: AgentPolicy =
+            serde_json::from_str(r#"{"access":"sandboxed","toolchains":[]}"#).unwrap();
+        assert_eq!(old.tool_cache, ToolCacheScope::Shared);
+        let own = AgentPolicy {
+            tool_cache: ToolCacheScope::PerAgent,
+            ..AgentPolicy::default()
+        };
+        let folder = tempfile::tempdir().unwrap();
+        assert_eq!(
+            own.pinned(folder.path()).tool_cache,
+            ToolCacheScope::PerAgent
+        );
+        let saved = serde_json::to_string(&own).unwrap();
+        assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
+        let listed: Vec<(&str, &str)> = view
+            .tool_caches
+            .iter()
+            .map(|row| (row.scope.id(), row.label.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("shared", "Shared by agents with the same access"),
+                ("per_agent", "One per agent")
+            ]
+        );
+    }
+
     #[test]
     fn a_network_choice_is_wider_only_than_the_narrower_ones() {
         let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
@@ -597,6 +650,7 @@ mod tests {
                 })
                 .collect(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
             network: AgentNetwork::default(),
         };
         let sandboxed = chose(AgentAccess::Sandboxed, &[]);
@@ -706,6 +760,7 @@ mod tests {
                 allowed: false,
             }],
             ide_git_hooks: true,
+            tool_cache: Default::default(),
         };
         save(&connection, "p", &policy).unwrap();
         assert_eq!(load(&connection, "p").unwrap(), policy);

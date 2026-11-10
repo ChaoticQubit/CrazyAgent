@@ -136,6 +136,7 @@ impl AccessEdit {
             network: self.network,
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
+            tool_cache: Default::default(),
         };
         assert!(policy.validate().is_ok());
         policy

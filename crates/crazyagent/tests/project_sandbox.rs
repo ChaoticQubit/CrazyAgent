@@ -1,10 +1,12 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
+use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
     agent_env, tool_cache,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,6 +127,60 @@ fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
             .contains(&format!("(subpath \"{}\")", cache.root.display()))
     );
     assert!(with.writes(&cache.root.join("uv")) && !without.writes(&cache.root));
+}
+
+/// T8 C2 and R2: a launch's tool cache follows its policy, level and shape. Agents at one
+/// level writing the same kind of tree share one; the project folder, a linked worktree, a
+/// clone and a clone teammate never share at a level, nor do two levels; One per agent
+/// gives each agent its own; Full access gets none.
+#[test]
+fn a_launch_gets_the_tool_cache_of_its_policy_level_and_shape() {
+    let case = case();
+    let runtime = case.root.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let profile = case.profiles.join("grant.sb");
+    let granted = |policy: &AgentPolicy, shape: CacheShape, agent: &str| -> Option<PathBuf> {
+        let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+        let sandbox = tool_cache::grant(base, &runtime, &case.project, policy, shape, agent);
+        let store = command_env(&sandbox, &profile).remove("pnpm_config_store_dir")?;
+        Some(Path::new(&store).parent().unwrap().to_path_buf())
+    };
+    let at = |access, tool_cache| AgentPolicy {
+        access,
+        tool_cache,
+        ..AgentPolicy::default()
+    };
+    let shared = at(AgentAccess::Sandboxed, ToolCacheScope::Shared);
+    let worktree = granted(&shared, CacheShape::Worktree, "35").unwrap();
+    assert_eq!(
+        granted(&shared, CacheShape::Worktree, "52"),
+        Some(worktree.clone())
+    );
+    let mut roots = BTreeSet::from([worktree]);
+    for shape in [
+        CacheShape::ProjectRoot,
+        CacheShape::Clone,
+        CacheShape::Teammate,
+    ] {
+        assert!(roots.insert(granted(&shared, shape, "35").unwrap()));
+    }
+    let wider = at(AgentAccess::OwnBranch, ToolCacheScope::Shared);
+    assert!(roots.insert(granted(&wider, CacheShape::Worktree, "35").unwrap()));
+    let own = at(AgentAccess::Sandboxed, ToolCacheScope::PerAgent);
+    assert!(roots.insert(granted(&own, CacheShape::Worktree, "35").unwrap()));
+    assert!(roots.insert(granted(&own, CacheShape::Worktree, "52").unwrap()));
+    for scope in ToolCacheScope::ALL {
+        assert_eq!(
+            granted(&at(AgentAccess::Full, scope), CacheShape::Worktree, "35"),
+            None
+        );
+    }
+    assert_eq!(roots.len(), 7);
+    assert!(
+        roots
+            .iter()
+            .all(|root| root.starts_with(&runtime) && root.is_dir())
+    );
 }
 
 /// T8: a tool cache inside another root, or a second one, is refused.

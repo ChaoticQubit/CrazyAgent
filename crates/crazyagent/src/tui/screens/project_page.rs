@@ -358,6 +358,7 @@ impl ProjectPage {
                         access,
                         toolchains: Vec::new(),
                         ide_git_hooks: false,
+                        tool_cache: Default::default(),
                         network: crate::sandbox::policy::AgentNetwork::default(),
                     },
                 },

@@ -341,6 +341,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 network: crate::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                tool_cache: Default::default(),
             },
         )
         .unwrap();
@@ -440,6 +441,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
                 allowed: false,
             }],
             ide_git_hooks: false,
+            tool_cache: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -562,6 +564,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         access: AgentAccess::Sandboxed,
         toolchains: Vec::new(),
         ide_git_hooks: false,
+        tool_cache: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
@@ -9675,6 +9678,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
         },
     )
     .unwrap();
@@ -12020,6 +12024,7 @@ fn agent_at_level_running(
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
         },
     )
     .unwrap();
@@ -12242,6 +12247,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
         },
     )
     .unwrap();
@@ -12298,6 +12304,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
                 allowed: false,
             }],
             ide_git_hooks: false,
+            tool_cache: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -12348,6 +12355,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
         },
     )
     .unwrap();
@@ -12495,6 +12503,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
         },
     )
     .unwrap();
@@ -18908,6 +18917,48 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_wait() {
     runtime.shutdown().unwrap();
 }
 
+/// T8 C2: a confined sub-agent starts with the tool cache its project's policy, its level
+/// and its linked worktree give it, granted in its profile, and a Full access one with none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
+    use crate::sandbox::policy::{AgentPolicy, ToolCacheScope};
+    let fixture = Fixture::new(1);
+    let mut runtime = exiting_claude_runtime(&fixture);
+    let start = |access: AgentAccess, tool_cache: ToolCacheScope| {
+        let policy = AgentPolicy {
+            access,
+            tool_cache,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&fixture.connection, PROJECT, &policy).unwrap();
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+        let (_, plan, _) = runtime
+            .prepare(
+                &fixture.setup,
+                id,
+                AgentRole::Sub,
+                "claude-code",
+                true,
+                &endpoint_account(),
+                false,
+                Layout::Linked,
+            )
+            .unwrap();
+        std::fs::read_to_string(&plan.sandbox_profile).unwrap()
+    };
+    let shared = start(AgentAccess::Sandboxed, ToolCacheScope::Shared);
+    assert!(
+        shared.contains("/tool-cache/") && shared.contains("/sandboxed-worktree\")"),
+        "{shared}"
+    );
+    let own = start(AgentAccess::Sandboxed, ToolCacheScope::PerAgent);
+    assert!(own.contains("/sandboxed-agent-"), "{own}");
+    let full = start(AgentAccess::Full, ToolCacheScope::Shared);
+    assert!(!full.contains("/tool-cache/"), "{full}");
+    runtime.shutdown().unwrap();
+}
+
 /// Prepares one new Claude Code sub-agent with tools on an endpoint account, as the team
 /// starts it, and builds its pane command from the plan and the kept context the runtime
 /// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
@@ -21469,6 +21520,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     network: crate::sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
+                    tool_cache: Default::default(),
                 },
             )
             .unwrap();

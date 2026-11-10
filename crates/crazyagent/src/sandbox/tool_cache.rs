@@ -1,4 +1,5 @@
-use super::policy::{AgentAccess, ToolCacheScope};
+use super::ProjectSandbox;
+use super::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -127,6 +128,18 @@ fn plain_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Gives a launch's sandbox its tool cache (T8, not written yet). Output: the sandbox.
+pub fn grant(
+    sandbox: ProjectSandbox,
+    _runtime: &Path,
+    _project: &Path,
+    _policy: &AgentPolicy,
+    _shape: CacheShape,
+    _agent: &str,
+) -> ProjectSandbox {
+    sandbox
 }
 
 /// Makes, or finds, the tool cache `<project folder>/<key>` for one launch, with `uv` and
