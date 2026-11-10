@@ -250,6 +250,10 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   }, [on, data.team.at]);
 
   useEffect(() => {
+    if (on === true) asked.current = true;
+  }, [on]);
+
+  useEffect(() => {
     if (on !== true) return;
     const id = data.id;
     let stopped = false;

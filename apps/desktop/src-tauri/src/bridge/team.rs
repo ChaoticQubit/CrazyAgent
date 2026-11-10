@@ -5,8 +5,8 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, MasterLands, ReuseIdle, SwitchApply,
-    SwitchMode, TeamAction, TeamStatus, TerminalsPerWindow,
+    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, MasterIdleStop, MasterLands, ReuseIdle,
+    SwitchApply, SwitchMode, TeamAction, TeamStatus, TerminalsPerWindow,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -472,6 +472,25 @@ impl NativeBridge {
         let mode = CatchUpMain::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
         self.team_action(TeamAction::CatchUpMain { project_id, mode }, generation)
             .await
+    }
+
+    /// Saves a project's "Stop the master when idle after" choice: `off`, `fifteen_minutes`
+    /// or `one_hour` (DEC-117 Q4). Takes the project id, the choice and the client
+    /// generation. Returns the actual commit receipt, or `team_action_invalid` for any other
+    /// choice.
+    pub async fn team_master_idle_stop(
+        &mut self,
+        id: &str,
+        choice: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let choice = MasterIdleStop::named(choice).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(
+            TeamAction::MasterIdleStop { project_id, choice },
+            generation,
+        )
+        .await
     }
 
     /// Sets a project's "Reuse idle agents" setting: `off` starts a new agent for each new
