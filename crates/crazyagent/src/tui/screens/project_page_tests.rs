@@ -669,6 +669,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "uncommitted",
             "recovery",
             "setup",
+            "team graph",
             "jobs",
             "context",
             "memories"
@@ -4338,8 +4339,9 @@ async fn team_settings_make_a_harness_switch_carry_over_again() {
     assert_eq!(status.on_harness_switch, crate::team::SwitchMode::Carry);
     shows_once(&shown, "On harness switch  Carry over");
 }
-/// Pumps the shell until its top screen is the given place. Takes the shell, the connection
-/// and the place. Returns nothing; fails with the screen shown after 30 s.
+/// Refreshes and pumps the shell, as the run loop does, until its top screen is the given
+/// place. Takes the shell, the connection and the place. Returns nothing; fails with the
+/// screen shown after 30 s.
 async fn until_place(shell: &mut Shell, connection: &mut Connection, place: &Place) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while shell.place().as_ref() != Some(place) {
@@ -4348,6 +4350,7 @@ async fn until_place(shell: &mut Shell, connection: &mut Connection, place: &Pla
             "never opened {place:?}:\n{}",
             render(shell, 100, 40)
         );
+        shell.refresh();
         pump(shell, connection).await;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -4526,6 +4529,120 @@ async fn the_conversation_tab_of_a_live_master_is_its_terminal() {
         "an RCLI master keeps the console",
     )
     .await;
+}
+
+/// Saves Live terminal for a project as the desktop does. Inputs: the engine, the project and
+/// the choice. Output: none; fails unless the engine applied it.
+async fn desktop_live_terminal(engine: &Engine, project: &ProjectId, on: bool) {
+    let client = Client::new(
+        engine.root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut desktop) = OwnerController::attach_configured(client, OwnerClientKind::Desktop)
+        .await
+        .unwrap();
+    let action = crate::team::TeamAction::MasterLiveTerminal {
+        project_id: project.clone(),
+        on,
+    };
+    match desktop.team_action(action, 1).await.unwrap() {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            assert_eq!(
+                operation.result,
+                crate::engine::owner::OwnerResult::Applied,
+                "the Live terminal choice applies"
+            )
+        }
+        other => panic!("Live terminal not applied: {other:?}"),
+    }
+}
+
+/// Live terminal Off keeps the console on every Conversation entry, with no open, no bounce
+/// and no warning about the owner's own choice. A read showing On then opens the view while
+/// the entry stands, and a key typed on the tab withdraws it (DEC-117 Q4, OWNER-Q4-2-L2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversation_entry_under_live_terminal_off_keeps_the_console_and_says_nothing() {
+    const OFF: &str = "Live terminal is off for this project.";
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let conversation = Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab: ProjectTab::Conversation,
+    };
+    let master = Place::Master {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    desktop_live_terminal(&engine, &notes, false).await;
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&conversation);
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &conversation,
+        "Off keeps the console when the page opens",
+    )
+    .await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(!shown.contains(OFF), "no warning on open:\n{shown}");
+
+    shell.key(Key::ShiftRight);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &conversation,
+        "Off keeps the console when the tab is entered",
+    )
+    .await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(!shown.contains(OFF), "no warning on entry:\n{shown}");
+
+    desktop_live_terminal(&engine, &notes, true).await;
+    until_place(&mut shell, &mut connection, &master).await;
+
+    shell.key(Key::Esc);
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &conversation,
+        "Esc lands on the console",
+    )
+    .await;
+    desktop_live_terminal(&engine, &notes, false).await;
+    for _ in 0..5 {
+        stays_on(
+            &mut shell,
+            &mut connection,
+            &conversation,
+            "a read under Off, with the page already on the tab",
+        )
+        .await;
+    }
+    shell.key(Key::ShiftRight);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &conversation,
+        "entering again under Off",
+    )
+    .await;
+    shell.key(Key::Char('h'));
+    desktop_live_terminal(&engine, &notes, true).await;
+    for _ in 0..6 {
+        stays_on(
+            &mut shell,
+            &mut connection,
+            &conversation,
+            "a key typed on the tab withdraws the entry, so On opens nothing",
+        )
+        .await;
+    }
 }
 
 /// N-T1 B, Switch tabs: Shift-←→ in the master view move the project page one tab, so a

@@ -595,10 +595,12 @@ impl ProjectPage {
     }
 
     /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab: at most one read out at a time, at most one every
+    /// the Conversation tab, and once on any tab before the first read, so the first entry to
+    /// that tab knows Live terminal: at most one read out at a time, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
-        if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
+        let wanted = self.screen.tab == Tab::Conversation || matches!(self.screen.team, Load::Idle);
+        if self.covered || !wanted || ctx.link != Link::Ready {
             return;
         }
         let now = now_ms();
@@ -1262,10 +1264,11 @@ impl ProjectPage {
         self.offer_master(flow)
     }
 
-    /// Opens the master view on the Conversation tab just entered, once the stored plan is
-    /// read, when its master runs live (Codex or Claude Code), as the desktop shows that
-    /// master's terminal there; another master keeps the console.
-    /// Input: the flow so far. Output: that flow, or the master view.
+    /// Opens the master view on the Conversation tab just entered, once the stored plan and a
+    /// team read are in, when its master runs live (Codex or Claude Code) and Live terminal is
+    /// not Off, as the desktop shows that master's terminal there; another master keeps the
+    /// console. Off keeps the entry, so a read showing On opens the view until a key withdraws
+    /// it (DEC-117 Q4). Input: the flow so far. Output: that flow, or the master view.
     fn offer_master(&mut self, flow: Flow) -> Flow {
         if !matches!(flow, Flow::Handled)
             || !self.master_entry
@@ -1274,10 +1277,16 @@ impl ProjectPage {
         {
             return flow;
         }
-        self.master_entry = false;
         if !self.screen.live_master() {
+            self.master_entry = false;
             return flow;
         }
+        let unread = matches!(self.screen.team, Load::Idle | Load::Loading);
+        let off = (self.screen.team.ready()).is_some_and(|graph| !graph.master_live_terminal);
+        if unread || off {
+            return flow;
+        }
+        self.master_entry = false;
         self.covered = true;
         Flow::Open(Place::Master {
             id: self.screen.project.clone(),
@@ -1661,7 +1670,7 @@ impl Screen for ProjectPage {
                     Err(code) => Load::Failed(code.clone()),
                 };
                 self.redraw(ctx);
-                return Flow::Handled;
+                return self.offer_master(Flow::Handled);
             }
             Arrival::ProjectFiles {
                 project,

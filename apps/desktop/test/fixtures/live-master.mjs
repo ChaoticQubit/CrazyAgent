@@ -162,6 +162,13 @@ export function focusSwitch() {
   return field !== null && document.activeElement === field;
 }
 
+/** Reads the drawer's Live terminal row. Output: the switch's aria-disabled value and the
+ * row's text. */
+export function liveTerminalRow() {
+  const field = document.getElementById("tg-live-terminal-alpha");
+  return { disabled: field?.getAttribute("aria-disabled") ?? null, text: field?.closest(".set-row")?.textContent ?? "" };
+}
+
 /** Where the Master settings drawer and keyboard focus are. Output: whether the drawer is open
  * and the focused element's id and text. */
 export function focusState() {

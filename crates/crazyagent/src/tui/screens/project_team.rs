@@ -2130,6 +2130,10 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
+        if !master_runs_live(status) {
+            self.notice = Some(Notice::plain(NO_LIVE_TERMINAL));
+            return TeamReply::Handled;
+        }
         if self.changing.is_some() {
             self.notice = Some(Notice::problem(
                 "Still saving the last change. Try again in a moment.",
@@ -3146,6 +3150,8 @@ impl TeamView {
                 branch_words(status.agent_branches).to_owned(),
             ),
             setting("Max harnesses", cap_words(status.max_harnesses)),
+        ];
+        let live_terminal = master_runs_live(status).then(|| {
             setting(
                 "Live terminal",
                 if status.master_live_terminal {
@@ -3154,7 +3160,9 @@ impl TeamView {
                     "Off"
                 }
                 .to_owned(),
-            ),
+            )
+        });
+        let middle = [
             setting("Max teammates", cap_words(status.max_teammates)),
             setting(
                 "Spread accounts",
@@ -3222,7 +3230,13 @@ impl TeamView {
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
-        for item in settings.into_iter().chain(master_lands).chain(later) {
+        for item in settings
+            .into_iter()
+            .chain(live_terminal)
+            .chain(middle)
+            .chain(master_lands)
+            .chain(later)
+        {
             let used = match (left.width(), right.width()) {
                 (0, 0) => 0,
                 (0, taken) | (taken, 0) => taken + 2,
@@ -3588,9 +3602,30 @@ impl TeamView {
         if unseen {
             help.push(("s", "Seen"));
         }
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| !master_runs_live(status))
+        {
+            help.retain(|(key, _)| *key != "V");
+        }
         help.push(("Esc", "Back"));
         help
     }
+}
+
+/// What V says for a master with no live terminal, whose conversation already is the console.
+const NO_LIVE_TERMINAL: &str = "This master has no live terminal: its conversation is the console.";
+
+/// Says whether the project's master runs in a live terminal, which "Live terminal" governs
+/// (OWNER-Q4-2-L3). Input: the team status. Output: true for a master harness the engine reads
+/// as a terminal app.
+fn master_runs_live(status: &TeamStatus) -> bool {
+    status.harnesses.iter().any(|harness| {
+        harness.role == AgentRole::Master
+            && crate::harnesses::interactive::support(&harness.harness)
+                == crate::harnesses::interactive::Support::Terminal
+    })
 }
 
 /// Which cap on running agents a key moves.

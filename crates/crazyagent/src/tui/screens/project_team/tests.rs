@@ -2762,6 +2762,32 @@ fn capital_v_turns_live_terminal_off_and_on() {
     }
 }
 
+/// A master with no live terminal (RCLI) has nothing for "Live terminal" to turn on or off: V
+/// says so and changes nothing, and neither the settings strip nor the help offers it
+/// (OWNER-Q4-2-L3).
+#[test]
+fn capital_v_says_why_for_a_master_with_no_live_terminal() {
+    let mut shown = team();
+    let master = shown
+        .harnesses
+        .iter_mut()
+        .find(|harness| harness.role == crate::team::AgentRole::Master)
+        .expect("the fixture lists a master harness");
+    master.harness = "rcli".into();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(shown))));
+    assert_eq!(view.key(press(KeyCode::Char('V'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "This master has no live terminal: its conversation is the console."
+        ))
+    );
+    assert!(!shows(&view, "Live terminal"), "the strip leaves it out");
+    assert!(!view.help().contains(&("V", "Live terminal")));
+}
+
 /// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
 /// and then On, each with its plain notice (DEC-111).
 #[test]
