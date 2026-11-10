@@ -17537,6 +17537,370 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     );
 }
 
+/// OP9B-C5: when the lead's change set cannot be recorded after its teammates' work landed
+/// on its task branch, the lead is not told to finish over work the owner cannot see yet, and
+/// the engine records it again at a later pass while the lead stays idle, instead of leaving
+/// the owner's record stale until the lead's next turn; then the lead is told once.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_s_record_of_landed_teammate_work_is_tried_again_until_it_is_kept() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    let bulk = linked.teammate("greet").join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for index in 0..101 {
+        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
+    }
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::team::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+        [PROJECT],
+    )
+    .unwrap();
+    let finish_again = |fixture: &Fixture| {
+        linked
+            .notes(fixture)
+            .into_iter()
+            .filter(|note| note.contains("finish it again"))
+            .count()
+    };
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let landed = linked.tip(&linked.branch);
+    assert_ne!(
+        landed, start,
+        "greet's work landed on the lead's task branch"
+    );
+    assert!(
+        crate::landing::open_change_set(&db, &linked.worktree)
+            .unwrap()
+            .is_none(),
+        "the lead's record of the landed work is refused"
+    );
+    assert_eq!(
+        finish_again(&fixture),
+        0,
+        "the lead is told to finish over work the owner cannot see"
+    );
+    db.execute(
+        "UPDATE team_new_folder_limit SET files=1000 WHERE project=?1",
+        [PROJECT],
+    )
+    .unwrap();
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let lead = crate::landing::open_change_set(&db, &linked.worktree)
+        .unwrap()
+        .expect("a later pass records the landed work for the owner");
+    assert_eq!(
+        (lead.head.as_str(), lead.base.as_str()),
+        (landed.as_str(), start.as_str())
+    );
+    assert_eq!(
+        finish_again(&fixture),
+        1,
+        "the lead is told once it is kept"
+    );
+}
+
+/// team-20 r1 M1: a linked native teammate that stopped or failed before it rested leaves its
+/// edits in its own worktree, which no rest commits. The engine saves them on the teammate's
+/// own branch once, as at a rest, tells the lead once for each that they may be partial, and
+/// lands them on the idle lead's task branch, so no teammate set is left to hold Complete. A
+/// stopped row whose name a running teammate holds again is never saved over that teammate.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stopped_or_failed_linked_teammate_s_edits_are_saved_and_land_with_a_partial_note() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    std::fs::write(linked.teammate("check").join("check.txt"), "Checked.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "stopped");
+    linked.mark(&fixture, linked.id(&fixture, "check"), "failed");
+    let partial = |fixture: &Fixture| -> Vec<String> {
+        linked
+            .notes(fixture)
+            .into_iter()
+            .filter(|note| note.contains("may be partial"))
+            .collect()
+    };
+
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+
+    for (name, file) in [("greet", "hello.txt"), ("check", "check.txt")] {
+        let saved = linked.tip(&format!("{}--{name}", linked.branch));
+        assert_ne!(saved, start, "{name}'s edits are saved on its own branch");
+        assert_eq!(linked.files(&start, &saved), file);
+    }
+    let told = partial(&fixture);
+    assert_eq!(told.len(), 2, "the lead is told once for each: {told:?}");
+    for name in ["greet", "check"] {
+        assert_eq!(
+            told.iter().filter(|note| note.contains(name)).count(),
+            1,
+            "{told:?}"
+        );
+    }
+
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let landed = linked.tip(&linked.branch);
+    assert_eq!(linked.files(&start, &landed), "check.txt\nhello.txt");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    assert_eq!(
+        crate::landing::open_teammate_sets(&db, &linked.worktree, 8).unwrap(),
+        Vec::<String>::new(),
+        "no teammate set waits to land, so the lead's Complete is not held"
+    );
+
+    let again: i64 = {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES (?1,'teammate','claude-code',1,'working',9,9,?2,'%9')",
+                params![PROJECT, linked.lead],
+            )
+            .unwrap();
+        fixture.connection.last_insert_rowid()
+    };
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_teammate_names(agent,name) VALUES (?1,'greet')",
+            [again],
+        )
+        .unwrap();
+    let greet = linked.tip(&format!("{}--greet", linked.branch));
+    std::fs::write(linked.teammate("greet").join("again.txt"), "Again.\n").unwrap();
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    assert_eq!(
+        linked.tip(&format!("{}--greet", linked.branch)),
+        greet,
+        "a new greet works in that worktree now, so the stopped row's save is not run over it"
+    );
+    assert_eq!(partial(&fixture).len(), 2);
+}
+
+/// team-20 r2 R2-M1: a teammate that ended and whose save is refused gives up after
+/// `TEAMMATE_TURN_TRIES` passes, tells its lead once and keeps the cause for the lead's
+/// finish; once that finish asks for another save and the cause is gone, its edits wait as
+/// its change set, the lead hears they may be partial and the cause is cleared.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ended_teammate_s_refused_save_keeps_its_cause_and_is_tried_again_when_finish_asks() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::team::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+        [PROJECT],
+    )
+    .unwrap();
+    let bulk = linked.teammate("greet").join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for index in 0..101 {
+        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
+    }
+    let greet = linked.id(&fixture, "greet");
+    linked.mark(&fixture, greet, "stopped");
+    let told = |fixture: &Fixture, words: &str| -> Vec<String> {
+        linked
+            .notes(fixture)
+            .into_iter()
+            .filter(|note| note.contains(words))
+            .collect()
+    };
+    let cause = |fixture: &Fixture| -> Option<String> {
+        fixture
+            .connection
+            .query_row(
+                "SELECT save_refused FROM team_teammate_names WHERE agent=?1",
+                [greet],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten()
+    };
+    let set = || crate::landing::open_change_set(&db, &linked.teammate("greet")).unwrap();
+
+    for _ in 0..=TEAMMATE_TURN_TRIES {
+        team.record_teammate_turns(&linked.project, linked.lead)
+            .unwrap();
+    }
+
+    assert!(set().is_none(), "greet's save is refused");
+    let given_up = told(&fixture, "greet has ended, so ask the owner to look at it");
+    assert_eq!(given_up.len(), 1, "the lead is told once: {given_up:?}");
+    let kept = cause(&fixture);
+    assert!(
+        kept.as_deref().is_some_and(|code| !code.is_empty()),
+        "the cause is kept for the lead's finish: {kept:?}"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_teammate_names SET save_refused='' WHERE agent=?1",
+            [greet],
+        )
+        .unwrap();
+    db.execute(
+        "DELETE FROM team_new_folder_limit WHERE project=?1",
+        [PROJECT],
+    )
+    .unwrap();
+
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+
+    assert!(set().is_some(), "greet's edits wait once the finish asked");
+    let partial = told(&fixture, "may be partial");
+    assert_eq!(partial.len(), 1, "{partial:?}");
+    assert!(partial[0].contains("greet"), "{partial:?}");
+    assert_eq!(
+        cause(&fixture),
+        None,
+        "a save that went through clears the cause"
+    );
+}
+
+/// team-20 r1 L2: a lasting refusal of a linked lead's record after its teammates landed is
+/// tried at each later idle pass, `TEAMMATE_TURN_TRIES` passes in all. The lead hears the
+/// pending note at the first refusal only and nothing at the second; at the last it hears
+/// that its next turn end records the work, naming every teammate that landed meanwhile, and
+/// the engine stops trying. It is never told to finish.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lasting_refusal_of_a_linked_lead_s_record_is_told_pending_once_then_given_up_once() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let bulk = linked.teammate("greet").join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for index in 0..101 {
+        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
+    }
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::team::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+        [PROJECT],
+    )
+    .unwrap();
+    let told = |fixture: &Fixture, words: &str| -> Vec<String> {
+        linked
+            .notes(fixture)
+            .into_iter()
+            .filter(|note| note.contains(words))
+            .collect()
+    };
+    let pending = "could not record it for the owner's review yet";
+    let given_up = "It is recorded when your next turn ends";
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        told(&fixture, pending).len(),
+        1,
+        "the first refusal is told"
+    );
+
+    std::fs::write(linked.teammate("check").join("check.txt"), "Checked.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "check"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(linked.worktree.join("check.txt")).unwrap(),
+        "Checked.\n",
+        "check's work landed on the lead's task branch meanwhile"
+    );
+    assert_eq!(
+        told(&fixture, pending).len(),
+        1,
+        "the second refusal is not told"
+    );
+    assert!(told(&fixture, given_up).is_empty());
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    let last = told(&fixture, given_up);
+    assert_eq!(last.len(), 1, "the last refusal is told once: {last:?}");
+    assert!(last[0].contains("greet, check"), "{last:?}");
+    assert!(
+        last[0].contains(&format!("{} times", super::TEAMMATE_TURN_TRIES)),
+        "{last:?}"
+    );
+
+    let heard = linked.notes(&fixture).len();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.notes(&fixture).len(),
+        heard,
+        "the engine stopped trying"
+    );
+    assert!(
+        crate::landing::open_change_set(&db, &linked.worktree)
+            .unwrap()
+            .is_none()
+    );
+    assert!(told(&fixture, "finish it again").is_empty());
+}
+
 /// OP-9b step 5 (leader 17:32, answer a): a resting teammate's change set that conflicts
 /// with its idle linked lead's task branch stays on `<task branch>--<name>`, the lead's
 /// branch is left as it was and the lead is told the files once, not at every pass.
