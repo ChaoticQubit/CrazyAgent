@@ -140,6 +140,12 @@ export async function openGate() {
   await settle(80);
 }
 
+/** Answers the oldest command waiting at the gate and keeps holding new ones. Output: nothing. */
+export async function passGate() {
+  gatedAnswers.shift()?.();
+  await settle(80);
+}
+
 /** Reads the option a choice group shows. Input: the group's label. Output: its words. */
 export function checked(label) {
   return say(document.querySelector(`[role="radiogroup"][aria-label="${label}"] [aria-checked="true"]`));

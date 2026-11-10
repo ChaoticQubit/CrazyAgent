@@ -329,9 +329,12 @@ test("a burst of changes reads the order once, after the last one", async () => 
     await page.evaluate(`Fixture.gate("${SAVE}")`);
     await press(page, PIN("Account 0"), "Use last");
     await press(page, PIN("Account 2"), "Never use");
+    await page.evaluate("Fixture.passGate()");
+    const middle = await commandCount(page, RANKING);
     await page.evaluate("Fixture.openGate()");
-    return { before, after: await commandCount(page, RANKING) };
+    return { before, middle, after: await commandCount(page, RANKING) };
   });
+  assert.equal(seen.middle, seen.before, "no read while a change still waits");
   assert.equal(seen.after, seen.before + 1);
 });
 
