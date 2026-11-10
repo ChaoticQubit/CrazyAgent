@@ -56,6 +56,7 @@ pub struct TerminalSession {
     first: Option<FirstScreen>,
     turn: bool,
     held: bool,
+    over_hold: bool,
     own_held: bool,
     live: bool,
     own: bool,
@@ -307,6 +308,7 @@ impl TerminalSession {
             first: None,
             turn: false,
             held: false,
+            over_hold: false,
             own_held: false,
             live: false,
             own: false,
@@ -406,6 +408,7 @@ impl TerminalSession {
         if !self.turn {
             return Err(failure("launch_not_running"));
         }
+        self.over_hold = false;
         if self.held {
             self.held = false;
             self.turn = false;
@@ -696,6 +699,11 @@ impl TerminalSession {
                 continue;
             }
             let event = match fact {
+                TranscriptEvent::Interrupted | TranscriptEvent::TurnError { .. }
+                    if self.over_hold && !self.background.is_empty() =>
+                {
+                    continue;
+                }
                 TranscriptEvent::Text { text } => LaunchEvent::Text { text },
                 TranscriptEvent::ToolUse { name } => LaunchEvent::ToolUse { name },
                 TranscriptEvent::Interrupted => LaunchEvent::Interrupted,
@@ -703,15 +711,17 @@ impl TerminalSession {
                     LaunchEvent::TurnError { rate_limited }
                 }
                 TranscriptEvent::TurnFinished { success } => {
-                    if success && !self.background.is_empty() {
+                    if !self.background.is_empty() && (success || self.over_hold) {
                         self.held = true;
                         continue;
                     }
                     self.held = false;
+                    self.over_hold = false;
                     self.turn = false;
                     LaunchEvent::TurnFinished { success }
                 }
                 TranscriptEvent::TurnStarted => {
+                    self.over_hold |= self.held;
                     self.held = false;
                     continue;
                 }
