@@ -294,7 +294,7 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
     argv.extend(strings(&[
         "-c",
         &format!(
-            "projects={{\"{}\"={{trust_level=\"trusted\"}}}}",
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
             built.cwd.display()
         ),
     ]));
