@@ -6856,7 +6856,8 @@ impl TeamRuntime {
                 "CrazyAgent landed the work of your teammates {names} on your task branch {shown}. If your work is done, finish it again."
             )
         } else if tried < TEAMMATE_TURN_TRIES {
-            self.teammates_unrecorded.insert(lead, (names.clone(), branch, tried));
+            self.teammates_unrecorded
+                .insert(lead, (names.clone(), branch, tried));
             if tried > 1 {
                 return Ok(());
             }
