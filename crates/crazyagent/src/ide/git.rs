@@ -194,7 +194,12 @@ pub const PRIVATE_INDEX: &str = "git-index";
 /// which never has the forwarder, they fail with a plain message. The forwarder is told the
 /// shim's own path, so a pull's local step comes back through it. `worktree prune` and
 /// `worktree remove` are refused, since the IDE sees an agent worktree as missing and would
-/// drop it (IN1-FN1). Every other command runs the
+/// drop it (IN1-FN1), also after git's own leading options: `shim_skip` passes every leading
+/// option, with the next word after `-c`, `-C`, `--git-dir`, `--work-tree`, `--namespace`,
+/// `--config-env`, `--attr-source` or `--shallow-file`, the options git takes with a separate
+/// value, and leaves in `shim_rest` how many words start at the verb (SECAUDIT-14-L1). The
+/// project folder's checks read their verb the same way ([`private_flow`]). Every other
+/// command runs the
 /// `git` on the server's PATH, as stock VS Code does, where the engine resolved no real git
 /// ([`shim_text`]), without the relay's secret in its environment, so a project's hook under
 /// it does not hold it; the shim keeps the secret in an unexported variable for the index
@@ -210,15 +215,35 @@ fi\n  \
 echo \"fatal: CrazyAgent runs git $1 in its engine. Use Source Control in the IDE once it has connected\" >&2\n  \
 exit 128\n  \
 ;;\n\
-worktree)\n  \
-case \"$2\" in\n  \
-prune|remove)\n    \
-echo \"fatal: CrazyAgent keeps its agents' worktrees, so the IDE does not run git worktree $2\" >&2\n    \
-exit 128\n    \
-;;\n  \
-esac\n  \
-;;\n\
 esac\n\
+shim_skip() {\n  \
+while [ $# -gt 0 ]; do\n    \
+case \"$1\" in\n    \
+-c|-C|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--shallow-file)\n      \
+[ $# -gt 1 ] && shift\n      \
+;;\n    \
+-*) ;;\n    \
+*) break ;;\n    \
+esac\n    \
+shift\n  \
+done\n  \
+shim_rest=$#\n\
+}\n\
+shim_worktree() {\n  \
+shim_skip \"$@\"\n  \
+shift $(($# - shim_rest))\n  \
+case \"$1\" in\n  \
+worktree)\n    \
+case \"$2\" in\n    \
+prune|remove)\n      \
+echo \"fatal: CrazyAgent keeps its agents' worktrees, so the IDE does not run git worktree $2\" >&2\n      \
+exit 128\n      \
+;;\n    \
+esac\n    \
+;;\n  \
+esac\n\
+}\n\
+shim_worktree \"$@\"\n\
 secret=$CRAZYAGENT_IDE_GIT_SECRET\n\
 unset CRAZYAGENT_IDE_GIT_SECRET\n\
 exec git \"$@\"\n";
@@ -233,10 +258,6 @@ const READ_ONLY: &str = "status|diff|log|show|rev-parse|ls-files|cat-file|for-ea
 /// private index that checkout would lose its own, so they run as they are.
 const OWN_INDEX: &str = "worktree|clone";
 const REBASE_REFUSED: &str = "fatal: CrazyAgent does not run git rebase from the IDE in the project folder, because its sandbox denies git's rebase state. Use your own terminal.";
-/// git's own options that take the next word as their value. The shim skips them, with that
-/// word, and every other leading option to find the verb its checks read (SECAUDIT-14-L1).
-const VALUED_OPTIONS: &str =
-    "-c|-C|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--shallow-file";
 const INTENT_REFUSED: &str = "fatal: CrazyAgent does not mark files as intent to add from the IDE in the project folder, because it cannot carry that mark into the project's index. Add the whole file, or use your own terminal.";
 const NO_FORWARDER: &str = "fatal: CrazyAgent carries git index changes through the IDE's Source Control, which this process cannot reach. Use Source Control or your own terminal.";
 const NOT_COPIED: &str =
@@ -255,9 +276,10 @@ fn shell_folder(folder: &Path) -> Result<&str, EngineError> {
 /// The end of the shim where the IDE sandbox denies the project's real index
 /// (SECAUDIT-IDE-SERVER-INDEX). A [`READ_ONLY`] or [`OWN_INDEX`] command, and any command
 /// outside the project folder, runs git directly. In the folder, the verb is read after git's
-/// own leading options ([`VALUED_OPTIONS`]): `rebase` stops with a plain line; a process with
-/// no forwarder fails before git runs. `add`, `stage`, `reset` or `apply` asked to mark a
-/// file intent to add (`-N`, alone or among short flags, `--inten` and longer, or any prefix
+/// own leading options (`shim_skip` in [`SHIM_TEXT`]): `rebase` stops with a plain line; a
+/// process with no forwarder fails before git runs. `add`, `stage`, `reset` or `apply`
+/// asked to mark a file intent to add (`-N`, alone or among short flags, `--inten` and
+/// longer, or any prefix
 /// of `--intent-to-add` from `--i` for reset and from `--int` for apply, which git reads as
 /// it) stops with a plain line, since the carry has no form for that mark. Anything else runs on a throwaway copy of the index,
 /// and when its bytes changed the engine carries the difference across through git's own
@@ -270,7 +292,7 @@ fn private_flow(project: &Path, private: &Path, runner: &str) -> Result<String, 
         "case \"$1\" in\n{READ_ONLY}|{OWN_INDEX})\n  exec {runner} \"$@\"\n  ;;\nesac\n\
 if [ \"$(pwd -P)\" != '{project}' ]; then\n  exec {runner} \"$@\"\nfi\n\
 shim_stop() {{\n  echo \"$1\" >&2\n  exit 128\n}}\n\
-shim_check() {{\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n    {VALUED_OPTIONS})\n      [ $# -gt 1 ] && shift\n      ;;\n    -*) ;;\n    *) break ;;\n    esac\n    shift\n  done\n  \
+shim_check() {{\n  shim_skip \"$@\"\n  shift $(($# - shim_rest))\n  \
   case \"$1\" in\n  rebase) shim_stop \"{REBASE_REFUSED}\" ;;\n  add|stage|reset|apply) subcommand=$1 ;;\n  *) return 0 ;;\n  esac\n  shift\n  \
   for word in \"$@\"; do\n    case \"$word\" in\n    --) return 0 ;;\n    --inten*|-N*|-[!-]*N*) shim_stop \"{INTENT_REFUSED}\" ;;\n    esac\n    \
     case \"$subcommand$word\" in\n    reset--i*|apply--int*)\n      case --intent-to-add in\n      \"$word\"*) shim_stop \"{INTENT_REFUSED}\" ;;\n      esac\n      ;;\n    esac\n  done\n}}\n\
@@ -323,6 +345,11 @@ pub fn shim_text(
     let head = SHIM_TEXT
         .strip_suffix(SHIM_EXEC)
         .expect("the shim ends by running git");
+    assert!(
+        head.contains("\nshim_skip() {\n"),
+        "private_flow reads its verb through it"
+    );
+    assert!(head.contains("\nshim_worktree \"$@\"\n"));
     let hooks = match project_hooks {
         None => String::new(),
         Some(project) => {
