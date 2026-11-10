@@ -333,7 +333,7 @@ pub(super) struct CodexState {
     #[serde(default)]
     replay: Option<Replay>,
     #[serde(default)]
-    model: String,
+    pub(super) model: String,
     #[serde(default)]
     fast: bool,
     #[serde(default)]

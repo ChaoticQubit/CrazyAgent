@@ -337,7 +337,14 @@ fn follow_turn(
     }
     let closed = match format {
         Format::Claude => super::activity::claude_line(value, &mut progress.turn),
-        Format::Codex => super::activity::codex_line(value, &mut progress.turn),
+        Format::Codex => {
+            super::activity::codex_line(value, &mut progress.turn).map(|mut closed| {
+                if closed.model.is_empty() {
+                    closed.model.clone_from(&progress.codex.model);
+                }
+                closed
+            })
+        }
     };
     let copied = replayed
         || closed
