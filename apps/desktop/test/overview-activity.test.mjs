@@ -101,14 +101,14 @@ test("the project's creation shows under Project", () => {
   assert.match(html, /You created Harbor Notes/);
 });
 
-const KINDS = ["created", "research_started", "research_saved", "research_stopped", "task_started", "task_finished", "changes_ready", "accepted", "discarded", "conflict", "sent_back", "lead_merged", "merged_into_main", "undone", "work_started", "work_review_ready", "work_complete", "work_closed", "phase", "test"];
+const KINDS = ["created", "research_started", "research_saved", "research_stopped", "research_waiting", "task_started", "task_finished", "task_stopped", "changes_ready", "accepted", "discarded", "conflict", "sent_back", "lead_merged", "merged_into_main", "undone", "work_started", "work_review_ready", "work_complete", "work_closed", "phase", "test"];
 
 test("every kind falls under one filter chip, and the project's creation only under All", () => {
   assert.ok(Array.isArray(research.ACTIVITY_FILTERS) && typeof research.activityFilter === "function", "the chips and their rule come from research.ts");
   assert.deepEqual(research.ACTIVITY_FILTERS.map((filter) => filter.label), ["All", "Merges", "Changes", "Tests", "Tasks", "Phases"]);
   const under = Object.fromEntries(KINDS.map((kind) => [kind, research.activityFilter(kind)]));
   assert.deepEqual(under, {
-    created: null, research_started: "task", research_saved: "task", research_stopped: "task", task_started: "task", task_finished: "task",
+    created: null, research_started: "task", research_saved: "task", research_stopped: "task", research_waiting: "task", task_started: "task", task_finished: "task", task_stopped: "task",
     changes_ready: "change", accepted: "change", discarded: "change", conflict: "change", sent_back: "change",
     lead_merged: "merge", merged_into_main: "merge", undone: "merge",
     work_started: "task", work_review_ready: "task", work_complete: "task", work_closed: "task", phase: "phase", test: "tests",
@@ -211,6 +211,22 @@ test("a phase or test row an agent logged reads as its own words, a test claim i
     ]);
     assert.equal(html.match(/class="pj-small pj-muted pj-activity-by">/g)?.length, 3, "every row still names its actor");
   }
+});
+
+test("a task that stopped or went back to the queue never reads as finished, and research waiting for a pool never reads as stopped", () => {
+  const now = 10 * 60_000;
+  const items = [
+    item(3, now, "Build the service", { kind: "task_stopped", actor: "Ada", text: "Ada stopped “Login”, back in the queue" }),
+    item(2, now - 60_000, "Build the service", { kind: "task_finished", actor: "Ada", text: "Ada finished “Signup”" }),
+    item(1, now - 2 * 60_000, null, { kind: "research_waiting", actor: "Research", text: "Research waiting for a pool: Design research" }),
+  ];
+  const html = renderToStaticMarkup(createElement(overview.ActivityTimeline, { items, now }));
+  const rows = [...html.matchAll(/class="pj-activity-kind ?([a-z]*)">.*?<\/span><span class="pj-activity-text">([^<]*)</g)].map((found) => [found[1], found[2]]);
+  assert.deepEqual(rows, [
+    ["warn", "Ada stopped “Login”, back in the queue"],
+    ["ok", "Ada finished “Signup”"],
+    ["", "Research waiting for a pool: Design research"],
+  ]);
 });
 
 test("the phase path shows at most four steps around the current one and counts the rest", () => {

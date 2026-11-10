@@ -6336,6 +6336,148 @@ fn a_task_start_is_recorded_in_the_project_activity() {
     team.shutdown().unwrap();
 }
 
+/// Lists the text of the project's activity lines whose kind has the stored name `kind`,
+/// sorted, so a row compares them in any order and compiles before a new kind exists.
+/// Inputs: the fixture and the kind's name. Output: the sorted lines.
+fn activity_lines(fixture: &Fixture, kind: &str) -> Vec<String> {
+    let mut lines: Vec<String> = crate::activity::list(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        crate::activity::LIST_MAX,
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|item| item.kind.name() == kind)
+    .map(|item| item.text)
+    .collect();
+    lines.sort();
+    lines
+}
+
+/// Inserts a task an agent runs, as the engine leaves it while the agent works on it, with
+/// the owner's cancel asked for when `cancel` is set. Inputs: the fixture, the agent, the
+/// prompt and the cancel. Output: the task id.
+fn running_task(fixture: &Fixture, agent: i64, prompt: &str, cancel: bool) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,cancel_requested,created_ms,started_ms)
+             VALUES (?1,'master','codex',0,?2,'running',?3,1,?4,1,1)",
+            params![PROJECT, prompt, agent, cancel],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    assert!(task > 0);
+    task
+}
+
+/// A task still running when the engine starts again tells the project's activity how it
+/// ended (T10-R2-F2): back in the queue, or stopped when the owner had asked to cancel it.
+/// Its "started" line with no end would read as work still going on.
+#[test]
+fn a_task_left_running_at_an_engine_start_is_told_back_in_the_queue_or_stopped() {
+    let fixture = Fixture::new(1);
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let requeued = running_task(&fixture, agent, "Write the page", false);
+    let cancelled = running_task(&fixture, agent, "Write the index", true);
+
+    let _team = fixture.runtime();
+
+    assert_eq!(task_row(&fixture, requeued).0, "queued");
+    assert_eq!(task_row(&fixture, cancelled).0, "cancelled");
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![
+            format!("{label} stopped \u{201c}Write the index\u{201d}"),
+            format!("{label} stopped \u{201c}Write the page\u{201d}, back in the queue"),
+        ]
+    );
+}
+
+/// A running task whose turn ends cancelled or interrupted tells the project's activity it
+/// stopped, and one a rate limit sends back to the queue says so (T10-R2-F2), so no
+/// "started" line is left with no end and a second start follows the first one's end.
+#[test]
+fn a_task_turn_that_ends_cancelled_or_back_in_the_queue_is_told_so() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let cancelled = running_task(&fixture, agent, "Write the page", false);
+    let interrupted = running_task(&fixture, agent, "Write the index", false);
+    let limited = running_task(&fixture, agent, "Write the notes", false);
+
+    team.finish_task(cancelled, "", TurnEnd::Cancelled, None)
+        .unwrap();
+    team.finish_task(interrupted, "", TurnEnd::Interrupted, None)
+        .unwrap();
+    team.finish_task(limited, "", TurnEnd::RateLimited, None)
+        .unwrap();
+
+    let states = [cancelled, interrupted, limited].map(|task| task_row(&fixture, task).0);
+    assert_eq!(states, ["cancelled", "cancelled", "queued"]);
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![
+            format!("{label} stopped \u{201c}Write the index\u{201d}"),
+            format!("{label} stopped \u{201c}Write the notes\u{201d}, back in the queue"),
+            format!("{label} stopped \u{201c}Write the page\u{201d}"),
+        ]
+    );
+}
+
+/// A held agent's running task that goes back to its queue, or is cancelled when the
+/// owner asked for that, tells the project's activity so (T10-R2-F2).
+#[test]
+fn a_released_task_is_told_back_in_the_queue_or_stopped() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let requeued = running_task(&fixture, agent, "Write the page", false);
+    let cancelled = running_task(&fixture, agent, "Write the index", true);
+
+    team.release(Some(agent), Busy::Task(requeued)).unwrap();
+    team.release(Some(agent), Busy::Task(cancelled)).unwrap();
+
+    assert_eq!(task_row(&fixture, requeued).0, "queued");
+    assert_eq!(task_row(&fixture, cancelled).0, "cancelled");
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![
+            format!("{label} stopped \u{201c}Write the index\u{201d}"),
+            format!("{label} stopped \u{201c}Write the page\u{201d}, back in the queue"),
+        ]
+    );
+}
+
+/// A sub-agent's running task that the engine puts back in the queue as it shuts down
+/// tells the project's activity so (T10-R2-F2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_running_at_shutdown_is_told_back_in_the_queue() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    owner(&fixture, &[hand_off(&fixture, "Work for a long time")]);
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        task_of(f, "Work for a long time").0 == "running"
+    });
+    let agent = task_and_agent(&fixture, "Work for a long time").1.unwrap();
+
+    team.shutdown().unwrap();
+
+    assert_eq!(task_of(&fixture, "Work for a long time").0, "queued");
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![format!(
+            "{label} stopped \u{201c}Work for a long time\u{201d}, back in the queue"
+        )]
+    );
+}
+
 /// A master whose idle bound is tiny is not stopped while a sub-agent works on a task;
 /// once that task ends and its result reached the master, its idle time runs out and it stops.
 #[cfg(target_os = "macos")]
@@ -19364,6 +19506,15 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
     assert!(
         !team.workers[&lead].stopping,
         "with the idle stop Off the lead keeps running"
+    );
+    let label = crate::team::events::label(&fixture.connection, lead).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_started"),
+        vec![
+            format!("{label} started \u{201c}Then write the index\u{201d}"),
+            format!("{label} started \u{201c}Write the release notes\u{201d}"),
+        ],
+        "the resumed task tells its start as a dispatched one does (T10-R2-F2)"
     );
     team.shutdown().unwrap();
 }
