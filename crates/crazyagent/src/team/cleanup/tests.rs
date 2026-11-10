@@ -250,7 +250,7 @@ impl Case {
     }
 
     fn listed(&self) -> Vec<i64> {
-        finished(&self.db, &self.team, &self.project, NOW)
+        finished(&self.db, &self.project, NOW)
             .unwrap()
             .iter()
             .filter(|agent| agent.kept.is_none())
@@ -260,7 +260,7 @@ impl Case {
 
     /// The agents a check keeps, newest first, with the code it keeps each with.
     fn held(&self) -> Vec<(i64, String)> {
-        finished(&self.db, &self.team, &self.project, NOW)
+        finished(&self.db, &self.project, NOW)
             .unwrap()
             .into_iter()
             .filter_map(|agent| agent.kept.map(|code| (agent.id, code)))
@@ -348,7 +348,7 @@ impl Case {
     }
 
     fn remove(&self, agents: &[i64]) -> Removal {
-        remove(&self.db, &self.team, &self.project, agents, NOW).unwrap()
+        remove(&self.db, &self.project, agents, NOW).unwrap()
     }
 
     fn retiring(&self) -> Vec<i64> {
@@ -416,7 +416,7 @@ fn a_clean_finished_agent_is_listed_with_its_worktree_size_and_loses_only_its_wo
             )
             .unwrap();
     }
-    let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
+    let listed = finished(&case.db, &case.project, NOW).unwrap();
     assert_eq!(
         listed
             .iter()
@@ -484,7 +484,7 @@ fn an_agent_a_check_keeps_is_listed_with_the_code_the_button_answers() {
     case.agent(4, "sub", "stopped");
     case.agent(5, "master", "stopped");
     case.agent(6, "sub", "working");
-    let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
+    let listed = finished(&case.db, &case.project, NOW).unwrap();
     let codes: Vec<(i64, Option<&str>)> = listed
         .iter()
         .map(|agent| (agent.id, agent.kept.as_deref()))
@@ -707,7 +707,7 @@ fn a_finished_agent_sharing_a_running_agent_s_name_is_offered_by_number_only() {
             )
             .unwrap();
     }
-    let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
+    let listed = finished(&case.db, &case.project, NOW).unwrap();
     assert_eq!(
         listed
             .iter()
@@ -783,7 +783,7 @@ fn a_change_after_the_read_is_caught_inside_the_removal_and_nothing_is_removed()
     assert!(case.kept(1) && case.kept(3));
     let other = ProjectId::new("project-2").unwrap();
     assert_eq!(
-        remove(&case.db, &case.team, &other, &[1], NOW).unwrap(),
+        remove(&case.db, &other, &[1], NOW).unwrap(),
         refused("cleanup_agent_not_found")
     );
     let over = i64::try_from(RECLAIMABLE_MAX).unwrap() + 1;
