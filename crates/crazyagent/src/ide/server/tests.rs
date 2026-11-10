@@ -2452,6 +2452,22 @@ fn only_a_full_access_server_carries_a_lineage_token() {
     }
 }
 
+/// A Full access launch whose lineage could not be read, as a first follow whose listing
+/// failed keeps it, fails its stop's read and leaves UNLISTED for the next open, never
+/// none; a clean end leaves none (5b r1 rv-secreview L1).
+#[test]
+fn a_stop_whose_lineage_cannot_be_read_leaves_unlisted() {
+    let followed = Followed {
+        leader: std::process::id(),
+        token: LineageToken::new().unwrap(),
+        lineage: Mutex::new(Some(Err(Unstopped::Uncertain))),
+    };
+    let settled = followed.before_stop().and_then(Lineage::settle);
+    assert!(matches!(settled, Err(Unstopped::Uncertain)));
+    assert_eq!(left_names(settled).as_deref(), Some(leftovers::UNLISTED));
+    assert_eq!(left_names(Ok(())), None);
+}
+
 /// A process that carries a Full access launch's token but left its group, parent and
 /// session is named after the stop, for the next open only.
 #[cfg(target_os = "macos")]

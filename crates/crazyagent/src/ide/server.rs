@@ -569,7 +569,8 @@ impl Servers {
         for slot in slots {
             let _start = tokio::time::timeout_at(deadline, slot.start.lock()).await;
             let running = locked(&slot.state).take();
-            if let Some(running) = running {
+            if let Some(mut running) = running {
+                running.followed = None;
                 finish(&slot, running).await;
             }
         }
@@ -868,11 +869,18 @@ async fn finish(slot: &Slot, mut running: Running) {
         let settled = tokio::task::spawn_blocking(move || lineage.and_then(Lineage::settle))
             .await
             .unwrap_or(Err(Unstopped::Uncertain));
-        *locked(&slot.left) = settled.err().map(|unstopped| match unstopped {
-            Unstopped::Left(left) => left.names(),
-            Unstopped::Uncertain => leftovers::UNLISTED.to_owned(),
-        });
+        *locked(&slot.left) = left_names(settled);
     }
+}
+
+/// What a Full access stop leaves for the next open: the names of what its lineage left,
+/// [`leftovers::UNLISTED`] when its processes could not be listed, none for a clean end.
+/// Input: the settled lineage. Output: the text, or none.
+fn left_names(settled: Result<(), Unstopped>) -> Option<String> {
+    settled.err().map(|unstopped| match unstopped {
+        Unstopped::Left(left) => left.names(),
+        Unstopped::Uncertain => leftovers::UNLISTED.to_owned(),
+    })
 }
 
 /// Gives a Full access server a new lineage token in [`LINEAGE_VARIABLE`], which every
