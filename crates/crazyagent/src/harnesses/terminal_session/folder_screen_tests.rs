@@ -1,10 +1,9 @@
 use super::TerminalSession;
 use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
+use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::{AccountBinding, LaunchError, LaunchLimits, LaunchRequest};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{
-    AgentId, FOLDER, Host, HostError, InteractiveCommand, PaneRef, TerminalStream,
-};
+use crate::terminal::{AgentId, FOLDER, Host, HostError, PaneRef, TerminalStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
