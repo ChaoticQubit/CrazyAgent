@@ -294,6 +294,7 @@ impl TerminalSession {
             first: None,
             turn: false,
             held: false,
+            over_hold: false,
             own_held: false,
             live: false,
             own: false,
