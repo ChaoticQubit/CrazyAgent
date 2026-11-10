@@ -233,6 +233,10 @@ const READ_ONLY: &str = "status|diff|log|show|rev-parse|ls-files|cat-file|for-ea
 /// private index that checkout would lose its own, so they run as they are.
 const OWN_INDEX: &str = "worktree|clone";
 const REBASE_REFUSED: &str = "fatal: CrazyAgent does not run git rebase from the IDE in the project folder, because its sandbox denies git's rebase state. Use your own terminal.";
+/// git's own options that take the next word as their value. The shim skips them, with that
+/// word, and every other leading option to find the verb its checks read (SECAUDIT-14-L1).
+const VALUED_OPTIONS: &str =
+    "-c|-C|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--shallow-file";
 const INTENT_REFUSED: &str = "fatal: CrazyAgent does not mark files as intent to add from the IDE in the project folder, because it cannot carry that mark into the project's index. Add the whole file, or use your own terminal.";
 const NO_FORWARDER: &str = "fatal: CrazyAgent carries git index changes through the IDE's Source Control, which this process cannot reach. Use Source Control or your own terminal.";
 const NOT_COPIED: &str =
@@ -250,10 +254,12 @@ fn shell_folder(folder: &Path) -> Result<&str, EngineError> {
 
 /// The end of the shim where the IDE sandbox denies the project's real index
 /// (SECAUDIT-IDE-SERVER-INDEX). A [`READ_ONLY`] or [`OWN_INDEX`] command, and any command
-/// outside the project folder, runs git directly. In the folder, `rebase` stops with a plain line; a process with
+/// outside the project folder, runs git directly. In the folder, the verb is read after git's
+/// own leading options ([`VALUED_OPTIONS`]): `rebase` stops with a plain line; a process with
 /// no forwarder fails before git runs. `add`, `stage`, `reset` or `apply` asked to mark a
-/// file intent to add (`-N`, alone or among short flags, or `--intent-to-add` and its
-/// prefixes) stops with a plain line, since the carry has no form for that mark. Anything else runs on a throwaway copy of the index,
+/// file intent to add (`-N`, alone or among short flags, `--inten` and longer, or any prefix
+/// of `--intent-to-add` from `--i` for reset and from `--int` for apply, which git reads as
+/// it) stops with a plain line, since the carry has no form for that mark. Anything else runs on a throwaway copy of the index,
 /// and when its bytes changed the engine carries the difference across through git's own
 /// path check. Inputs: the project folder, the private folder and the word that runs git.
 /// Output: the text, or `ide_settings_invalid` for a folder [`shell_folder`] refuses.
@@ -263,8 +269,12 @@ fn private_flow(project: &Path, private: &Path, runner: &str) -> Result<String, 
     let text = format!(
         "case \"$1\" in\n{READ_ONLY}|{OWN_INDEX})\n  exec {runner} \"$@\"\n  ;;\nesac\n\
 if [ \"$(pwd -P)\" != '{project}' ]; then\n  exec {runner} \"$@\"\nfi\n\
-if [ \"$1\" = rebase ]; then\n  echo \"{REBASE_REFUSED}\" >&2\n  exit 128\nfi\n\
-case \"$1\" in\nadd|stage|reset|apply)\n  for word in \"$@\"; do\n    case \"$word\" in\n    --) break ;;\n    --inten*|-N*|-[!-]*N*)\n      echo \"{INTENT_REFUSED}\" >&2\n      exit 128\n      ;;\n    esac\n  done\n  ;;\nesac\n\
+shim_stop() {{\n  echo \"$1\" >&2\n  exit 128\n}}\n\
+shim_check() {{\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n    {VALUED_OPTIONS})\n      [ $# -gt 1 ] && shift\n      ;;\n    -*) ;;\n    *) break ;;\n    esac\n    shift\n  done\n  \
+  case \"$1\" in\n  rebase) shim_stop \"{REBASE_REFUSED}\" ;;\n  add|stage|reset|apply) subcommand=$1 ;;\n  *) return 0 ;;\n  esac\n  shift\n  \
+  for word in \"$@\"; do\n    case \"$word\" in\n    --) return 0 ;;\n    --inten*|-N*|-[!-]*N*) shim_stop \"{INTENT_REFUSED}\" ;;\n    esac\n    \
+    case \"$subcommand$word\" in\n    reset--i*|apply--int*)\n      case --intent-to-add in\n      \"$word\"*) shim_stop \"{INTENT_REFUSED}\" ;;\n      esac\n      ;;\n    esac\n  done\n}}\n\
+shim_check \"$@\"\n\
 if [ -z \"$CRAZYAGENT_IDE_GIT_NODE\" ] || [ -z \"$CRAZYAGENT_IDE_GIT_FORWARD\" ] || [ -z \"$secret\" ]; then\n  echo \"{NO_FORWARDER}\" >&2\n  exit 128\nfi\n\
 private='{private}'\nbase=\"$private/$$.base\"\nwork=\"$private/$$.work\"\n\
 if [ -e .git/index ]; then\n  if ! /bin/cp .git/index \"$base\" || ! /bin/cp .git/index \"$work\"; then\n    /bin/rm -f \"$base\" \"$work\"\n    echo \"{NOT_COPIED}\" >&2\n    exit 128\n  fi\nfi\n\
