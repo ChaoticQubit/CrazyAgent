@@ -9,7 +9,7 @@ function assert(condition: boolean, message: string): asserts condition {
 export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";
 
 /** What Full access means for the IDE, the same in the TUI. */
-export const FULL_ACCESS_IDE = "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on.";
+export const FULL_ACCESS_IDE = "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on. Until you trust the folder, IDE git and extensions that need trust stay off.";
 
 /** What a lower saved level does to agents already running: the engine stops each one that started above it,
  * but not what a Full access agent started outside its terminal. */

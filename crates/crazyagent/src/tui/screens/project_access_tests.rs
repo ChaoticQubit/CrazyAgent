@@ -283,7 +283,7 @@ fn the_full_access_box_says_what_full_access_means_for_the_ide() {
         .join(" ");
     assert_eq!(
         FULL_ACCESS_IDE,
-        "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on."
+        "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on. Until you trust the folder, IDE git and extensions that need trust stay off."
     );
     assert!(shown.contains(FULL_ACCESS_IDE), "{shown}");
 }
