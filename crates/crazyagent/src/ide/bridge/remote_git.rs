@@ -24,8 +24,9 @@ const PASSED: [&str; 7] = [
     "TMPDIR",
     "XDG_CONFIG_HOME",
 ];
-const FIXED: [(&str, &str); 9] = [
+const FIXED: [(&str, &str); 10] = [
     ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_GRAFT_FILE", "/dev/null"),
     ("GIT_ASKPASS", ""),
     ("SSH_ASKPASS_REQUIRE", "never"),
     ("GIT_ALLOW_PROTOCOL", PROTOCOLS),

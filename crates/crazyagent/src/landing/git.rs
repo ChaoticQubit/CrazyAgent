@@ -364,6 +364,7 @@ impl Repo {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_GRAFT_FILE", "/dev/null")
             .envs(env.iter().copied())
             .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")

@@ -1810,7 +1810,7 @@ impl ProjectSandbox {
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
         text.push_str(&self.nested_git_denies());
-        text.push_str(&self.commit_graph_denies());
+        text.push_str(&self.ancestry_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
@@ -2086,27 +2086,30 @@ impl ProjectSandbox {
         text
     }
 
-    /// The Seatbelt rule that keeps an agent from writing a commit-graph file, single or
-    /// split, into the project's object store or the one its checkout shares, in any letter
-    /// case: git answers `merge-base` and `--is-ancestor` from that file without reading the
-    /// commits, so a forged one could claim an agent commit is on the landing tip (land-19 r1
-    /// M1). Engine git reads none; this also keeps the owner's own git from being handed one.
-    /// Input: the policy. Output: the rule text.
-    fn commit_graph_denies(&self) -> String {
+    /// The Seatbelt rule that keeps an agent from writing what git answers ancestry from
+    /// without reading the commits, in any letter case: a commit-graph file, single or split,
+    /// in the project's object store or the one its checkout shares (land-19 r1 M1), and the
+    /// project's `.git/info` (which holds `grafts`) and `.git/shallow` (land-19 r2 M1). A
+    /// forged one could claim an agent commit is on the landing tip. The case-exact denies on
+    /// `.git/info` and `.git/shallow` miss a case variant made where the project has none, as
+    /// after a clone or `init --template=`, which git then reads through the case-insensitive
+    /// volume. Engine git reads none of them; this also keeps the owner's own git from being
+    /// handed one. Input: the policy. Output: the rule text.
+    fn ancestry_denies(&self) -> String {
+        let dot_git = format!("{}/\\.[gG][iI][tT]", seatbelt_pattern(&self.project_root));
         let graph = "[iI][nN][fF][oO]/[cC][oO][mM][mM][iI][tT]-[gG][rR][aA][pP][hH][sS]?(/.*)?";
-        let mut stores = vec![format!(
-            "{}/\\.[gG][iI][tT]/[oO][bB][jJ][eE][cC][tT][sS]",
-            seatbelt_pattern(&self.project_root)
-        )];
+        let mut stores = vec![format!("{dot_git}/[oO][bB][jJ][eE][cC][tT][sS]")];
         if let Some(checkout) = &self.checkout {
             stores.push(seatbelt_pattern(&checkout.objects));
         }
-        let mut text = String::from("(deny file-write*");
+        let mut text = format!(
+            "(deny file-write*\n  (regex #\"^{dot_git}/([iI][nN][fF][oO](/.*)?|[sS][hH][aA][lL][lL][oO][wW])$\")"
+        );
         for store in &stores {
             text.push_str(&format!("\n  (regex #\"^{store}/{graph}$\")"));
         }
         text.push_str(")\n");
-        assert_eq!(text.matches("(regex #\"^/").count(), stores.len());
+        assert_eq!(text.matches("(regex #\"^/").count(), stores.len() + 1);
         text
     }
 
