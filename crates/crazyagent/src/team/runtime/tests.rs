@@ -19368,6 +19368,55 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
     team.shutdown().unwrap();
 }
 
+/// S4B-B1: a native lead taken over and then stopped is proven gone like any other pane.
+/// One whose pane process ignores terminate is not confirmed, so the worker reports the
+/// cleanup uncertain instead of a clean stop.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let agent = AgentId::team(id).unwrap();
+    let adoption = Adoption {
+        host: host.clone(),
+        agent: agent.clone(),
+        record,
+        limits: LaunchLimits::default(),
+        live: false,
+        managed: Some(Managed {
+            home: fixture.base.join(format!("lead-home-{id}")),
+            executable: PathBuf::from("/bin/sh"),
+        }),
+        access: AgentAccess::Sandboxed,
+        toolchains: Some(Vec::new()),
+        network: crate::sandbox::policy::AgentNetwork::Open,
+        proxy: None,
+        task_start: None,
+    };
+    let (orders, ordered) = channel();
+    let (reports, _reported) = channel();
+    orders.send(Order::Stop).unwrap();
+
+    let problem = native_adopted(
+        adoption,
+        &ordered,
+        &reports,
+        &AtomicBool::new(false),
+        &AtomicBool::new(false),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        problem,
+        Some(with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(crate::harnesses::leftovers::UNCERTAIN),
+        ))
+    );
+    assert!(!host.alive().unwrap().contains(&agent));
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
 /// lead an earlier engine left running. A Stop before any order, or a first order without
 /// the signed-in account, ends its pane; a Stop while the engine leaves panes running
@@ -22438,6 +22487,53 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
             .unwrap();
         assert_eq!(error.as_deref(), Some(reason), "{maker}");
     }
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1: a native teammate a stop ends is proven gone like any other pane. One whose
+/// pane process ignores terminate is not confirmed, so its row says the cleanup is
+/// uncertain, and its pane is still closed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+
+    assert_eq!(team.stop_unmanaged().unwrap().len(), 1);
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
+    );
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(mate).unwrap())
+    );
     team.shutdown().unwrap();
 }
 
