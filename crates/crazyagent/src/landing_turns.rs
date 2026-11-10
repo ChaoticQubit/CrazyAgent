@@ -79,18 +79,46 @@ fn catch_up_with(
 }
 
 /// Checks a set again once its lockfile regeneration landed nothing (OS-8): after a
-/// refusal the clash goes to its agent as Task 7's update, after the set or main moved
-/// the check may start another regeneration; a step that cannot run is logged by its plain
-/// code and the set waits for the owner. Inputs: the store, the set and whether another
-/// regeneration may start.
+/// refusal the clash goes to its agent as Task 7's update and the owner, told at the turn
+/// end that the edits wait in Changes, hears that they went back; after the set or main
+/// moved the check may start another regeneration; a step that cannot run is logged by its
+/// plain code and the set waits for the owner. Inputs: the store, the set and whether
+/// another regeneration may start.
 fn after_regeneration(db: &Connection, id: &ChangeSetId, again: bool) {
     let after = again.then_some(after_regeneration as landing::AfterRegeneration);
-    if let Err(problem) = catch_up_with(db, id, after) {
+    let told = catch_up_with(db, id, after).and_then(|back| match back {
+        true => tell_owner_it_went_back(db, id),
+        false => Ok(()),
+    });
+    if let Err(problem) = told {
         eprintln!(
             "catch_up_skipped cause={}",
             crate::protocol::plain_code(&problem.0)
         );
     }
+}
+
+/// Leaves the owner a note in the team conversation that a set the turn end said waits in
+/// Changes went back to its agent. Inputs: the store and the set. Output: Ok once written,
+/// or the plain refusal.
+fn tell_owner_it_went_back(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    let project = set_project(db, id)?;
+    let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
+    let note = format!(
+        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
+        set.agent.label
+    );
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    crate::team::append_message(
+        &tx,
+        &project,
+        crate::team::MessageAuthor::Engine,
+        &note,
+        crate::team::MessageState::Note,
+        crate::team::now_ms(),
+    )?
+    .map_err(refused)?;
+    tx.commit().map_err(storage)
 }
 
 const RESOLVE_PROMPT_BYTES_MAX: usize = crate::team::TASK_PROMPT_BYTES_MAX;
