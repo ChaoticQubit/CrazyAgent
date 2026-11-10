@@ -485,26 +485,36 @@ fn a_different_case_rename_never_moves_the_worktrees_folders_or_a_checkout() {
             case.project.clone()
         }),
     ];
+    let (case, sandbox, profile, _) = git_case();
+    fs::create_dir_all(case.project.join("plain")).unwrap();
+    let control = run(&sandbox, &profile, "mv PLAIN p");
+    assert!(control.status.success(), "{control:?}");
+    assert!(case.project.join("p").is_dir());
     let mut moved = Vec::new();
     for (name, script, target) in attacks {
         let (case, sandbox, profile, _) = git_case();
         let agent = case.project.join(".crazyagent/worktrees/agent-1");
         fs::create_dir_all(&agent).unwrap();
         let before = fs::symlink_metadata(target(&case)).unwrap();
-        let _ = run(&sandbox, &profile, script);
+        let output = run(&sandbox, &profile, script);
         let after = fs::symlink_metadata(target(&case));
         let stayed = after.as_ref().is_ok_and(|after| {
             std::os::unix::fs::MetadataExt::ino(after)
                 == std::os::unix::fs::MetadataExt::ino(&before)
         });
-        if !stayed {
-            moved.push(name);
+        let denied = String::from_utf8_lossy(&output.stderr).contains("not permitted");
+        if !stayed || !denied {
+            moved.push((
+                name,
+                stayed,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
         }
     }
     assert_eq!(
         moved,
-        Vec::<&str>::new(),
-        "a different-case rename moved these"
+        Vec::<(&str, bool, String)>::new(),
+        "a different-case rename moved these or failed without a sandbox deny"
     );
 }
 
