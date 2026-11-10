@@ -233,6 +233,9 @@ struct Progress {
     total: Tokens,
     #[serde(default)]
     codex: CodexState,
+    /// How far the live scan had filed turns and tools when Use new set this record back.
+    #[serde(default)]
+    filed_to: u64,
 }
 
 /// The records of one read, one entry per message. Inputs arrive line by line.

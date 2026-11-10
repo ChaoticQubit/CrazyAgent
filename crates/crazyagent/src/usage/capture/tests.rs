@@ -1698,3 +1698,27 @@ fn one_harness_name_holds_claude_and_claude_code_rows() {
         ]
     );
 }
+
+#[test]
+fn a_tool_filed_before_a_rewind_is_not_collected_again() {
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("s1.jsonl");
+    let line = |name: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": name, "input": {}}
+            ]}})
+        )
+    };
+    append(&record, &line("Bash"));
+    let filed = std::fs::metadata(&record).unwrap().len();
+    append(&record, &line("Read"));
+    let mut progress = Progress {
+        filed_to: filed,
+        ..Progress::default()
+    };
+    let mut tools = Vec::new();
+    read_record_with(&record, Format::Claude, &mut progress, NOW, &mut tools);
+    assert_eq!(tools, ["Read".to_owned()]);
+}

@@ -100,6 +100,8 @@ fn report() -> UsageReport {
         health: Vec::new(),
         partial_homes: 0,
         money: Default::default(),
+        recount: None,
+        counting_notice: None,
     }
 }
 
@@ -1007,4 +1009,97 @@ fn with_prices_off_the_main_number_key_is_not_offered_and_does_nothing() {
     assert!(keys.contains(&"p".to_owned()), "{keys:?}");
     assert!(matches!(page.key(&Key::Char('m'), &mut ctx), Flow::Ignored));
     assert!(ctx.next_screen_request().is_none());
+}
+
+#[test]
+fn the_recount_offer_shows_both_totals_and_how_to_choose() {
+    let status = RecountStatus {
+        old: Tokens {
+            input: 4000,
+            ..Tokens::default()
+        },
+        new: Tokens {
+            input: 1000,
+            ..Tokens::default()
+        },
+        new_cost_nanos: 5_000_000_000,
+        sessions_recounted: 2,
+        sessions_kept_old: 1,
+        homes_partial: 0,
+    };
+    let text: Vec<String> = recount_lines(&status, true)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(text[1].contains("Not estimated"));
+    assert!(text[2].contains("$5.00 (Estimated cost at API prices)"));
+    assert!(text[3].starts_with("2 sessions recounted, 1 keep"));
+    assert!(text[4].contains("the account their agent last used"));
+    assert!(text[5].contains("New dollars cover recounted sessions only"));
+    assert!(text[6].contains("Press n"));
+    let off: Vec<String> = recount_lines(&status, false)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(off.iter().all(|line| !line.contains('$')
+        && !line.contains("Estimated cost")
+        && !line.contains("Not estimated")));
+    assert!(off.last().unwrap().contains("Press n"));
+}
+
+fn offer() -> RecountStatus {
+    RecountStatus {
+        old: Tokens {
+            input: 4000,
+            ..Tokens::default()
+        },
+        new: Tokens {
+            input: 1000,
+            ..Tokens::default()
+        },
+        new_cost_nanos: 5_000_000_000,
+        sessions_recounted: 2,
+        sessions_kept_old: 1,
+        homes_partial: 0,
+    }
+}
+
+#[test]
+fn the_recount_offer_wraps_to_the_screen_under_its_notice() {
+    let mut view = report();
+    view.counting_notice = Some("These numbers still use the old counting.".to_owned());
+    view.recount = Some(offer());
+    let lines = text(&recount_head(&view, 60));
+    assert_eq!(lines[0], "These numbers still use the old counting.");
+    assert!(
+        lines.iter().all(|line| line.chars().count() <= 60),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("Press n")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn the_recount_keys_work_only_while_it_is_offered() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer.clone())), &mut ctx);
+    assert!(matches!(page.key(&Key::Char('n'), &mut ctx), Flow::Ignored));
+    answer.recount = Some(offer());
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    for (key, expected) in [('n', true), ('o', false)] {
+        assert!(matches!(page.key(&Key::Char(key), &mut ctx), Flow::Handled));
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the recount key asks the engine");
+        };
+        let SettingsJob::DecideRecount(use_new) = *job else {
+            panic!("the recount key sends the choice");
+        };
+        assert_eq!(use_new, expected);
+    }
 }

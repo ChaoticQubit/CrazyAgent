@@ -8,6 +8,7 @@ use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
+use crate::usage::RecountStatus;
 use crate::usage::health::{StepHealth, UsageStep};
 use crate::usage::money::{MainNumber, MoneyView, PriceSource};
 use crate::usage::report::{UsageReport, UsageRow};
@@ -201,6 +202,14 @@ pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
         None => format!("{said} CrazyAgent keeps retrying; {missing}."),
         Some(recovered) => format!("{said} It worked again {}.", ago(recovered, now_ms, offset)),
     }
+}
+
+fn recount_lines(_: &RecountStatus, _: bool) -> Vec<Line<'static>> {
+    Vec::new()
+}
+
+fn recount_head(_: &UsageReport, _: usize) -> Vec<Line<'static>> {
+    Vec::new()
 }
 
 fn refusal(code: &str) -> &'static str {

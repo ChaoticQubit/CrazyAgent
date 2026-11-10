@@ -5200,6 +5200,85 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
     }
 }
 
+#[test]
+fn a_budget_stays_valid_after_the_recount_is_used() {
+    let (directory, mut connection, project) = team_database("team-budget-recount");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    used_tokens(&connection, &project, "s1", now_ms(), 400, 0);
+    let before = budget(&connection, &project).unwrap().unwrap();
+    let home = directory.path().join("recount-home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-11-09T02:00:00.000Z",
+                "message": {"id": "msg_a", "model": "claude-opus-4-5", "usage": {"input_tokens": 1, "output_tokens": 0}}
+            })
+        ),
+    )
+    .unwrap();
+    crate::usage::recount::tests_support::recount_and_use(
+        &connection,
+        &home,
+        project.as_str(),
+        now_ms(),
+    );
+    let after = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(after.tokens, before.tokens);
+    assert!(after.used <= before.used);
+    assert!(!after.reached);
+}
+
+#[test]
+fn a_budget_can_rise_after_the_recount_is_used_and_says_it_was_reached() {
+    let (directory, mut connection, project) = team_database("team-budget-recount-up");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    used_tokens(&connection, &project, "s1", now_ms(), 400, 0);
+    let before = budget(&connection, &project).unwrap().unwrap();
+    assert!(!before.reached);
+    let home = directory.path().join("recount-home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": "msg_a", "model": "claude-opus-4-5", "usage": {"input_tokens": BUDGET_CHOICES[0] + 1, "output_tokens": 0}}
+            })
+        ),
+    )
+    .unwrap();
+    crate::usage::recount::tests_support::recount_and_use(
+        &connection,
+        &home,
+        project.as_str(),
+        now_ms(),
+    );
+    let after = budget(&connection, &project).unwrap().unwrap();
+    assert!(after.used > before.used);
+    assert!(after.reached);
+}
+
 /// A budget reads tokens only, so the estimated dollars on a row never spend it.
 #[test]
 fn a_budget_spends_the_same_tokens_whatever_the_rows_cost() {

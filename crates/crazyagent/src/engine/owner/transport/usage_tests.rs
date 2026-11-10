@@ -419,3 +419,11 @@ async fn a_metrics_request_answers_one_project_runs_over_the_owner_socket() {
     );
     usage.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recount_choice_with_nothing_to_decide_is_refused_by_its_own_code() {
+    let usage = Usage::start().await;
+    let refused = usage.client.usage_decide_recount(true).await.unwrap_err();
+    assert_eq!(refused.0, "usage_recount_not_ready");
+    usage.stop().await;
+}

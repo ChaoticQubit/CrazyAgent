@@ -558,3 +558,60 @@ pub fn status(db: &Connection) -> Result<Option<RecountStatus>, EngineError> {
         homes_partial: sessions("SELECT homes_partial FROM usage_recount WHERE singleton=1")?,
     }))
 }
+
+const OLD_COUNTING: &str = "These numbers still use the old counting.";
+const KEPT_COUNTING: &str = "Older numbers use the old counting, because you chose Keep old numbers. New work uses the new counting.";
+
+pub fn counting_notice(_: &Connection) -> Result<Option<String>, EngineError> {
+    Ok(None)
+}
+
+pub fn decide(_: &Connection, _: bool, _: i64) -> Result<(), EngineError> {
+    Ok(())
+}
+
+pub(super) fn forget_copy(_: &Connection, _: i64) -> Result<(), EngineError> {
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use crate::usage::capture::RunKind;
+
+    /// Runs a recount of one home under the only agent of `project` and uses it. Inputs: the
+    /// store, the home, the project and the time. Only tests call this.
+    pub(crate) fn recount_and_use(db: &Connection, home: &Path, project: &str, now_ms: i64) {
+        let (agent, harness, kind): (String, String, String) = db
+            .query_row(
+                "SELECT agent,harness,kind FROM usage_tokens WHERE project=?1 LIMIT 1",
+                [project],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let attribution = Attribution {
+            kind: if kind == "master" {
+                RunKind::Master
+            } else {
+                RunKind::Agent
+            },
+            project: Some(ProjectId::new(project).unwrap()),
+            pool: None,
+            account: None,
+            agent,
+            harness,
+        };
+        begin(
+            db,
+            &[Home {
+                path: home.to_path_buf(),
+                format: Format::Claude,
+                attribution,
+            }],
+            now_ms,
+        )
+        .unwrap();
+        while step(db, BYTES_PER_STEP, now_ms).unwrap() {}
+        decide(db, true, now_ms).unwrap();
+    }
+}
