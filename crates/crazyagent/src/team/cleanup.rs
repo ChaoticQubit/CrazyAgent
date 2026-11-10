@@ -581,10 +581,11 @@ pub struct Swept {
 /// finish time counting as past it, each one checked and removed as Clean up does, one at a
 /// time, so one a check keeps never stops the others. Nothing goes when only the owner's
 /// Clean up removes. A pass reads at most `CANDIDATES_MAX` agents with an id above `after`
-/// and removes at most `RECLAIMABLE_MAX`. Inputs: the store, the setting, where the last
-/// pass stopped and the time now. Output: what this pass did.
+/// and removes at most `RECLAIMABLE_MAX`. Inputs: the store, the engine root, the setting,
+/// where the last pass stopped and the time now. Output: what this pass did.
 pub fn sweep(
     db: &Connection,
+    runtime: &Path,
     settings: &CleanupSettings,
     after: i64,
     now_ms: i64,
@@ -633,7 +634,7 @@ pub fn sweep(
         }
         assert!(*id > swept.after);
         swept.after = *id;
-        if let Err(problem) = sweep_one(db, project, *id, now, now_ms, &mut swept) {
+        if let Err(problem) = sweep_one(db, runtime, project, *id, now, now_ms, &mut swept) {
             swept.failures.push(format!(
                 "agent={id} cause={}",
                 crate::protocol::plain_code(&problem.0)
@@ -657,6 +658,7 @@ pub fn sweep(
 /// or stayed, or the problem that stopped the check.
 fn sweep_one(
     db: &Connection,
+    runtime: &Path,
     project: &str,
     id: i64,
     now: u64,
@@ -671,7 +673,7 @@ fn sweep_one(
     if !free {
         return Ok(());
     }
-    let removal = remove(db, &project, &[id], now_ms)?;
+    let removal = remove(db, runtime, &project, &[id], now_ms)?;
     match removal.kept {
         None => {
             assert_eq!(removal.agents, [id]);
@@ -698,6 +700,7 @@ fn sweep_one(
 /// the agents removed and the plain code of the first one kept.
 pub fn remove(
     db: &Connection,
+    runtime: &Path,
     project: &ProjectId,
     agents: &[i64],
     now_ms: i64,
@@ -718,7 +721,7 @@ pub fn remove(
         Err(code) => return Ok(Removal::refused(code)),
     };
     let mut removed = Vec::new();
-    let kept = match retire_claimed(db, project, &claimed, now, &mut removed) {
+    let kept = match retire_claimed(db, runtime, project, &claimed, now, &mut removed) {
         Ok(None) => None,
         Ok(Some(code)) => Some(code.to_owned()),
         Err(problem) => Some(problem.0),
@@ -748,6 +751,7 @@ pub fn remove(
 /// one kept.
 fn retire_claimed(
     db: &Connection,
+    _runtime: &Path,
     project: &ProjectId,
     claimed: &[Target],
     now: u64,
