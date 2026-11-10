@@ -1299,12 +1299,13 @@ pub fn accept(
     message: Option<&str>,
     place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
-    let _ = place;
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
+    return owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
+        false
+    });
     #[cfg(not(unix))]
     {
-        let _ = (db, owner_home, id, expected_head, message);
+        let _ = (db, owner_home, id, expected_head, message, place);
         Err(unavailable())
     }
 }
@@ -1325,16 +1326,30 @@ pub fn accept_into(
     target_branch: &str,
     place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
-    let _ = place;
-    accept_into_as(
+    #[cfg(unix)]
+    return owner::accept_to(
         db,
         owner_home,
         id,
         expected_head,
         message,
-        target_branch,
-        crate::activity::OWNER_ACTOR,
-    )
+        Some(target_branch),
+        owner::By::Owner(Some(place)),
+        &|_| false,
+    );
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            db,
+            owner_home,
+            id,
+            expected_head,
+            message,
+            target_branch,
+            place,
+        );
+        Err(unavailable())
+    }
 }
 
 /// The refusal of a land the owner did not press while a worker below the set's agent
@@ -1346,8 +1361,9 @@ pub const WORKER_OPEN_TEXT: &str = "a worker's work under that agent is still op
 
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
-/// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
-/// branch, or the conflicting files.
+/// engine. The owner's Accept goes through [`accept`] or [`accept_into`] instead, which know
+/// where it was pressed. Inputs: as [`accept_into`] without the place, plus who accepts.
+/// Output: the landed commit and branch, or the conflicting files.
 pub fn accept_into_as(
     db: &Connection,
     owner_home: &Path,
@@ -1357,6 +1373,11 @@ pub fn accept_into_as(
     target_branch: &str,
     by: &str,
 ) -> Result<AcceptOutcome, EngineError> {
+    assert_ne!(
+        by,
+        crate::activity::OWNER_ACTOR,
+        "the owner's Accept goes through accept or accept_into"
+    );
     #[cfg(unix)]
     return owner::accept_to(
         db,

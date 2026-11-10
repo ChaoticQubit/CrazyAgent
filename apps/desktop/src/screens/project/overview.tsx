@@ -81,10 +81,15 @@ function mergedBranch(item: ActivityItem): string {
   return /^The master merged its changes into (\S+): /u.exec(item.text)?.[1] ?? "its branch";
 }
 
-/** Who an activity row says acted: You for the owner, the master's own merge into main as
- * merged by itself at Full access, anyone else by name. Input: the event. Output: the line. */
+/** Who an activity row says acted: You for the owner, with where Accept was pressed when the
+ * row knows it, the master's own merge into main as merged by itself at Full access, anyone
+ * else by name. Input: the event. Output: the line. */
 function actorLine(item: ActivityItem): string {
-  if (item.actor === "Owner") return "You";
+  if (item.actor === "Owner") {
+    if (item.place === "changes") return "You, in Changes";
+    if (item.place === "ide") return "You, in the IDE";
+    return "You";
+  }
   if (item.kind === "merged_into_main" && item.actor === "Master") return "Master · Full access, merged by itself";
   return displayText(item.actor);
 }

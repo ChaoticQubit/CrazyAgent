@@ -1977,7 +1977,15 @@ fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() 
         let head = case.view(&id).head;
         let tip = case.tip();
         let before = case.checkout();
-        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        let stopped = owner::accept(
+            &case.db,
+            &case.home,
+            &id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+            &|at| at == step,
+        );
         assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
         assert_eq!(store::in_flight(&case.db).unwrap().len(), 1, "{step:?}");
         reconcile(&case.db).unwrap();
@@ -2021,7 +2029,15 @@ fn an_accept_that_failed_after_saving_its_intent_is_repaired_by_the_next_owner_a
         let id = case.turn(TurnOutcome::Succeeded).unwrap();
         let head = case.view(&id).head;
         let tip = case.tip();
-        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        let stopped = owner::accept(
+            &case.db,
+            &case.home,
+            &id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+            &|at| at == step,
+        );
         assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
         assert_eq!(store::in_flight(&case.db).unwrap().len(), 1, "{step:?}");
 
@@ -2046,9 +2062,15 @@ fn an_accept_that_failed_after_saving_its_intent_is_repaired_by_the_next_owner_a
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let head = case.view(&id).head;
     let tip = case.tip();
-    let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| {
-        at == owner::Step::Recorded
-    });
+    let stopped = owner::accept(
+        &case.db,
+        &case.home,
+        &id,
+        &head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+        &|at| at == owner::Step::Recorded,
+    );
     assert_eq!(refused(stopped), "changes_git_failed");
 
     discard(&case.db, &id, &head, NOW_MS).unwrap();
@@ -3372,7 +3394,15 @@ fn an_interrupted_accept_is_listed_in_the_ledger_once_settled() {
         case.edit("README", "one\ntwo\nthree\nfour\n");
         let id = case.turn(TurnOutcome::Succeeded).unwrap();
         let head = case.view(&id).head;
-        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        let stopped = owner::accept(
+            &case.db,
+            &case.home,
+            &id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+            &|at| at == step,
+        );
         assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
         reconcile(&case.db).unwrap();
         reconcile(&case.db).unwrap();
@@ -3414,9 +3444,15 @@ fn an_accept_settled_while_reconcile_waits_is_not_listed_as_interrupted() {
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let head = case.view(&id).head;
-    let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| {
-        at == owner::Step::Recorded
-    });
+    let stopped = owner::accept(
+        &case.db,
+        &case.home,
+        &id,
+        &head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+        &|at| at == owner::Step::Recorded,
+    );
     assert_eq!(refused(stopped), "changes_git_failed");
     let repository = store::load(&case.db, &id).unwrap().repository;
     let held = flow::hold(&repository);
@@ -13523,6 +13559,23 @@ fn an_owner_accept_row_says_where_accept_was_pressed() {
         "{landed:?}"
     );
     assert_eq!(accepted_places(&case), vec![None]);
+}
+
+/// AL2-PLACE: the owner's Accept never goes through accept_into_as, which knows no place.
+#[test]
+#[should_panic(expected = "the owner's Accept goes through accept or accept_into")]
+fn an_owner_accept_through_accept_into_as_is_refused_by_assertion() {
+    let case = Case::new();
+    let id = ChangeSetId::new("0".repeat(32)).unwrap();
+    let _ = super::accept_into_as(
+        &case.db,
+        &case.home,
+        &id,
+        "0",
+        None,
+        "main",
+        crate::activity::OWNER_ACTOR,
+    );
 }
 
 /// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
