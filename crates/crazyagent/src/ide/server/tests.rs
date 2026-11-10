@@ -2002,6 +2002,15 @@ fn set_agent_files(data: &Path, project: &ProjectId, access: AgentAccess, choice
     crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
 }
 
+/// Changes only the agent folders choice of a project's saved policy in a test data root.
+/// Inputs: the data root, the project and the choice.
+fn change_agent_files(data: &Path, project: &ProjectId, choice: IdeAgentFiles) {
+    let db = crate::landing::open(data).unwrap();
+    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    policy.ide_agent_files = choice;
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
 /// Changes only the network choice of a project's saved policy in a test data root. Inputs:
 /// the data root, the project and the choice.
 fn set_network(data: &Path, project: &ProjectId, network: AgentNetwork) {
@@ -2213,37 +2222,82 @@ fn a_saved_agent_folders_change_only_matters_below_full_access() {
 
 /// DEC-124: the agent folders choice the owner saved reaches the profile each launch
 /// installs below Full access, read from the engine database the way an open reads it;
-/// Allow all changes adds no rule.
+/// Allow all changes adds no rule. A project with a `.crazyagent` folder holds its agents
+/// root there, and one without, made before the projects home, also holds `<folder>/worktrees`,
+/// where the engine puts its agents, before any agent ran there (DEC-124 r1 M1).
 #[test]
 fn a_launch_profile_holds_the_saved_agent_folders_choice() {
-    let (checkout, data) = (scratch(), scratch());
+    let data = scratch();
     let servers = servers_in(data.path(), IDLE_LIMIT);
-    let root = fs::canonicalize(checkout.path()).unwrap();
-    let rule = |choice| {
-        AgentFilesRule {
-            choice,
-            older_agents: false,
-        }
-        .seatbelt(&root)
-    };
     let protecting = [IdeAgentFiles::NoDeleteOrRename, IdeAgentFiles::ReadOnly];
-    for (index, choice) in IdeAgentFiles::ALL.into_iter().enumerate() {
-        for (level, access) in [("s", AgentAccess::Sandboxed), ("o", AgentAccess::OwnBranch)] {
-            let id = project(&format!("files-{index}-{level}"));
-            set_agent_files(data.path(), &id, access, choice);
-            assert_eq!(ide_policy(data.path(), &id).unwrap().agent_files, choice);
-            let (_, folder) = built_server(&servers, &id, &root);
-            let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
-            for held in protecting {
-                assert!(!rule(held).is_empty());
-                assert_eq!(
-                    profile.contains(&rule(held)),
-                    held == choice,
-                    "{choice:?} {access:?} {held:?}"
-                );
+    for (layout, older_agents) in [("home", false), ("legacy", true)] {
+        let checkout = scratch();
+        let root = fs::canonicalize(checkout.path()).unwrap();
+        if !older_agents {
+            fs::create_dir(root.join(".crazyagent")).unwrap();
+        }
+        let rule = |choice| AgentFilesRule {
+            choice,
+            older_agents,
+        }
+        .seatbelt(&root);
+        for (index, choice) in IdeAgentFiles::ALL.into_iter().enumerate() {
+            for (level, access) in [("s", AgentAccess::Sandboxed), ("o", AgentAccess::OwnBranch)] {
+                let id = project(&format!("files-{layout}-{index}-{level}"));
+                set_agent_files(data.path(), &id, access, choice);
+                assert_eq!(ide_policy(data.path(), &id).unwrap().agent_files, choice);
+                let (_, folder) = built_server(&servers, &id, &root);
+                let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+                for held in protecting {
+                    assert!(!rule(held).is_empty());
+                    assert_eq!(
+                        profile.contains(&rule(held)),
+                        held == choice,
+                        "{layout} {choice:?} {access:?} {held:?}"
+                    );
+                }
             }
         }
     }
+}
+
+/// DEC-124 r1 M1: in a project with no `.crazyagent` folder, an agent folder the engine makes
+/// under `<folder>/worktrees` after the IDE opened keeps every file under No delete or rename,
+/// while the owner's own files stay removable.
+#[test]
+fn a_project_without_a_crazyagent_folder_holds_agents_started_after_its_ide_opened() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    assert_eq!(crate::projects_home::state_folder(&root), root);
+    let id = project("legacy-later-agent");
+    set_agent_files(
+        data.path(),
+        &id,
+        AgentAccess::Sandboxed,
+        IdeAgentFiles::NoDeleteOrRename,
+    );
+    let (_, folder) = built_server(&servers, &id, &root);
+    let agent = root.join("worktrees").join("agent-1");
+    fs::create_dir_all(&agent).unwrap();
+    let file = agent.join("a.txt");
+    fs::write(&file, "agent\n").unwrap();
+    let own = root.join("own.txt");
+    fs::write(&own, "owner\n").unwrap();
+    let removes = |path: &Path| {
+        let mut rm = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/bin/rm"));
+        rm.arg("-f")
+            .arg(path)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::spawn_gate::output(&mut rm).unwrap().status.success()
+    };
+    assert!(!removes(&file));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "agent\n");
+    assert!(removes(&own));
+    assert!(!own.exists());
 }
 
 #[test]
@@ -2439,6 +2493,40 @@ async fn a_hooks_change_leaves_a_full_access_ide_running() {
     assert!(!servers.follow_level(&id).await);
     assert!(servers.group(&id).is_some());
     servers.stop_all().await;
+}
+
+/// DEC-124 r1 L2: saving only another agent folders choice stops an open Sandboxed or Own
+/// branch IDE on a real server, its process group ends, and the next open installs a
+/// profile holding the new rule, which the first one did not.
+#[tokio::test]
+async fn an_agent_folders_change_restarts_an_open_ide_under_the_new_rule() {
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        let (checkout, data, servers, id) = open_at("files", access, false).await;
+        let root = fs::canonicalize(checkout.path()).unwrap();
+        let folder = servers.project_folder(&id).unwrap();
+        let group = recorded_launch(&folder);
+        let rule = crate::ide::workspace::agent_files_rule(
+            data.path(),
+            &id,
+            &root,
+            access,
+            IdeAgentFiles::ReadOnly,
+        )
+        .unwrap()
+        .seatbelt(&root);
+        assert!(!rule.is_empty());
+        let before = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+        assert!(!before.contains(&rule), "{access:?}");
+        change_agent_files(data.path(), &id, IdeAgentFiles::ReadOnly);
+        assert!(servers.follow_level(&id).await, "{access:?}");
+        assert!(servers.group(&id).is_none(), "{access:?}");
+        gone(group).await;
+        servers.open(&id, &root, &cached_build()).await.unwrap();
+        assert_ne!(recorded_launch(&folder), group, "{access:?}");
+        let after = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+        assert!(after.contains(&rule), "{access:?}");
+        servers.stop_all().await;
+    }
 }
 
 #[tokio::test]

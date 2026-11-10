@@ -2518,16 +2518,12 @@ fn allow_all_changes_lets_the_ide_delete_rename_and_edit_in_agent_folders() {
 /// DEC-124, No delete or rename: nothing in an agent folder, a teammate's included, is
 /// removed or renamed, not through a case variant, not by moving the agent folder or the
 /// agents root aside, while edits in place, new files and the in-place save "Edit anyway"
-/// allows still land. A save written beside and renamed over is printed, not assumed.
+/// allows still land. A save written beside and renamed over is refused, since the rename
+/// replaces the file (sandbox-exec probe, agent-files/l1-probe, DEC-124 r1 L1).
 #[test]
 fn no_delete_or_rename_keeps_every_agent_file_and_folder_while_edits_land() {
-    let changes = changes_under(IdeAgentFiles::NoDeleteOrRename);
-    eprintln!(
-        "edit_anyway_renamed_over={}",
-        changes.edit_anyway_renamed_over
-    );
     assert_eq!(
-        changes,
+        changes_under(IdeAgentFiles::NoDeleteOrRename),
         Changes {
             delete: false,
             delete_folder: false,
@@ -2539,7 +2535,7 @@ fn no_delete_or_rename_keeps_every_agent_file_and_folder_while_edits_land() {
             edit_in_place: true,
             create: true,
             edit_anyway_in_place: true,
-            edit_anyway_renamed_over: changes.edit_anyway_renamed_over,
+            edit_anyway_renamed_over: false,
         }
     );
 }
@@ -2566,8 +2562,62 @@ fn read_only_refuses_every_write_in_agent_folders() {
     );
 }
 
-/// The older agents root `<project>/worktrees` is held only while engine-made worktrees stay
-/// there; until then it may be the owner's own folder, which stays changeable.
+/// IDE-SANDBOX-AGENT-FOLDERS (a) with DEC-124: the installed profile keeps the agent git
+/// admin deny at every agent folders choice, with that choice's own rule right after it.
+#[test]
+fn every_agent_folders_choice_keeps_the_agent_admin_deny() {
+    for choice in IdeAgentFiles::ALL {
+        let rule = AgentFilesRule {
+            choice,
+            older_agents: false,
+        };
+        let s = server_with(rule);
+        let text = fs::read_to_string(&s.profile).unwrap();
+        let admin = agent_admin(&s.root);
+        assert!(!admin.is_empty());
+        assert!(
+            text.contains(&format!("{admin}{}", rule.seatbelt(&s.root))),
+            "{choice:?}"
+        );
+    }
+}
+
+/// DEC-124 r1 rv-code L1: a `.CRAZYAGENT` folder the IDE makes before the first agent, which
+/// the engine's agent then lands in on a case-insensitive volume, is never moved aside under a
+/// protecting choice, so the agent's files stay under the rule; under Read only the IDE cannot
+/// make it at all (sandbox-exec probe, agent-files/l1code-probe).
+#[test]
+fn a_case_variant_crazyagent_folder_made_before_the_first_agent_stays_in_place() {
+    for (choice, made) in [
+        (IdeAgentFiles::NoDeleteOrRename, true),
+        (IdeAgentFiles::ReadOnly, false),
+    ] {
+        let s = server_with(AgentFilesRule {
+            choice,
+            older_agents: false,
+        });
+        let variant = s.root.join(".CRAZYAGENT");
+        assert_eq!(sh(&s.profile, "mkdir \"$1\"", &variant), made, "{choice:?}");
+        let agent = s.root.join(".crazyagent").join("worktrees").join("agent-4");
+        setup(
+            &s.root,
+            &["worktree", "add", "-q", "-b", "agent-4", agent.to_str().unwrap()],
+        );
+        let file = agent.join("a.txt");
+        assert!(file.exists());
+        assert!(
+            !sh(&s.profile, "mv \"$1\" \"$1-aside\"", &variant),
+            "{choice:?}"
+        );
+        assert!(!sh(&s.profile, "rm -f \"$1\"", &file), "{choice:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "base\n");
+    }
+}
+
+/// In a project with a `.crazyagent` folder, the older agents root `<project>/worktrees` is
+/// held only while engine-made worktrees stay there; until then it may be the owner's own
+/// folder, which stays changeable. A project without one always holds it
+/// (`ide::workspace::agent_files_rule`, DEC-124 r1 M1).
 #[test]
 fn the_older_agents_root_is_held_only_while_agents_stay_there() {
     for (older_agents, held) in [(false, false), (true, true)] {
@@ -2575,6 +2625,7 @@ fn the_older_agents_root_is_held_only_while_agents_stay_there() {
             choice: IdeAgentFiles::NoDeleteOrRename,
             older_agents,
         });
+        fs::create_dir_all(s.root.join(".crazyagent")).unwrap();
         let agent = s.root.join("worktrees").join("agent-1");
         fs::create_dir_all(&agent).unwrap();
         let file = agent.join("a.txt");

@@ -903,19 +903,23 @@ mod tests {
             super::super::any_case("/.crazyagent"),
             super::super::any_case("worktrees")
         );
+        let state = format!("^{root_text}{}$", super::super::any_case("/.crazyagent"));
         for (older_agents, agents) in [(false, &new), (true, &both)] {
             let keep_root = format!("(deny file-write-unlink\n  (regex #\"{agents}$\"))\n");
             assert_eq!(
                 rule(IdeAgentFiles::NoDeleteOrRename, older_agents),
                 format!(
-                    "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}"
+                    "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
                 )
             );
             assert_eq!(
                 rule(IdeAgentFiles::ReadOnly, older_agents),
-                format!("(deny file-write*\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}")
+                format!(
+                    "(deny file-write*\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
+                )
             );
         }
+        assert!(state.contains("[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]$"));
         assert!(new.contains("[wW][oO][rR](k|K|\u{212a})[tT][rR][eE][eE](s|S|\u{17f})"));
     }
 }
