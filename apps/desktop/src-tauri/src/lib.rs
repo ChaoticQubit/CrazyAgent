@@ -3096,6 +3096,17 @@ async fn desktop_usage_set_money(
 }
 
 #[tauri::command]
+async fn desktop_usage_decide_recount(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    use_new: bool,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_decide_recount(use_new)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_ide_focus(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4207,6 +4218,7 @@ native_commands! {
     desktop_usage_refresh,
     desktop_usage_notices,
     desktop_usage_set_money,
+    desktop_usage_decide_recount,
     desktop_usage_set_reset,
     desktop_ide_extension_asks,
     desktop_ide_extension_approve,

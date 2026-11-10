@@ -2475,6 +2475,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_set_money(settings)?; call.await }.await;
             routed(result)
         }
+        "desktop_usage_decide_recount" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                use_new: bool,
+            }
+            let Args { use_new } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_decide_recount(use_new)?; call.await }.await;
+            routed(result)
+        }
         "desktop_usage_set_reset" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

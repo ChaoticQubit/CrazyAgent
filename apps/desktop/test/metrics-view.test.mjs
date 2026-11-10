@@ -271,3 +271,12 @@ test("with Tokens leading the dollar's label is visible in the tile and the tabl
   assert.match(markup, /<th scope="col" class="num">Tokens<small> Estimated cost at API prices<\/small><\/th>/u);
   assert.doesNotMatch(text(priced(off())), /Estimated cost at API prices/u);
 });
+
+test("the old-counting notice shows above the tiles and only when the report has one", () => {
+  const sentence = "These numbers still use the old counting.";
+  const shown = render({ usage: { kind: "ok", value: usage({ counting_notice: sentence }) } });
+  assert.ok(text(shown).includes(sentence));
+  assert.ok(shown.indexOf(sentence) < shown.indexOf('class="mx-tiles"'), "above the tiles");
+  assert.doesNotMatch(text(render()), /old counting/u);
+  assert.doesNotMatch(text(render({ usage: { kind: "ok", value: usage({ counting_notice: null }) } })), /old counting/u);
+});

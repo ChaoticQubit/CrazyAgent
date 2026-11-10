@@ -245,6 +245,7 @@ fn main() {
         "desktop_usage_refresh",
         "desktop_usage_notices",
         "desktop_usage_set_money",
+        "desktop_usage_decide_recount",
         "desktop_usage_set_reset",
         "desktop_ide_extension_asks",
         "desktop_ide_extension_approve",

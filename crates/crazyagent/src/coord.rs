@@ -45,6 +45,7 @@ pub use claims::{
     restore_set, stopped_with_unheld, wait_cycle_notices, wake_waiters,
 };
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
+pub(crate) use presence::add_tool_hour;
 #[cfg(test)]
 pub(crate) use presence::{TOOL_HOURS_MAX, TOOLS_PER_HOUR_MAX};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};

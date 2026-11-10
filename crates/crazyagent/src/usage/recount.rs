@@ -1,8 +1,10 @@
+use super::activity::{add_turns, history_turns};
 use super::capture::{
-    self, Added, Attribution, Format, Messages, ROW_TOKENS_MAX, Tokens, all_records, clamp,
-    count_usages, recount_read,
+    self, Added, Attribution, Format, Messages, ROW_TOKENS_MAX, RecountRead, Tokens, all_records,
+    clamp, count_usages, recount_read,
 };
-use super::storage;
+use super::report::has_table;
+use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS usage_recount_homes (
     account TEXT NOT NULL,
     agent TEXT NOT NULL,
     harness TEXT NOT NULL,
+    team_agent INTEGER,
     listed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS usage_recount_homes_todo ON usage_recount_homes(listed) WHERE listed=0;
@@ -109,12 +112,14 @@ const CLEAR_STAGING: &str = "DELETE FROM usage_recount_rows; DELETE FROM usage_r
     DELETE FROM usage_recount_sessions; DELETE FROM usage_recount_live;";
 
 /// One agent home the recount reads, and who its tokens count against. `removed` marks a run
-/// of a removed project, whose name no project id can hold.
+/// of a removed project, whose name no project id can hold. `team_agent` is the team agent
+/// the home belongs to, whose tool calls fill its tool hours; a research run has none.
 pub(super) struct Home {
     pub path: PathBuf,
     pub format: Format,
     pub attribution: Attribution,
     pub removed: bool,
+    pub team_agent: Option<i64>,
 }
 
 /// What the owner sees once: the totals as they stand and as they would be, and how many
@@ -172,10 +177,15 @@ pub(super) fn begin(db: &Connection, homes: &[Home], now_ms: i64) -> Result<(), 
             let who = &home.attribution;
             tx.execute(
                 "INSERT OR IGNORE INTO usage_recount_homes
-                 (home,format,kind,project,pool,account,agent,harness) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                 (home,format,kind,project,pool,account,agent,harness,team_agent)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     home.path.to_string_lossy(),
-                    if home.format == Format::Claude { "claude" } else { "codex" },
+                    if home.format == Format::Claude {
+                        "claude"
+                    } else {
+                        "codex"
+                    },
                     who.kind.name(),
                     if home.removed {
                         super::REMOVED_PROJECTS
@@ -186,6 +196,7 @@ pub(super) fn begin(db: &Connection, homes: &[Home], now_ms: i64) -> Result<(), 
                     who.account.as_ref().map_or("", CredentialRef::as_str),
                     who.agent,
                     crate::harnesses::canonical(&who.harness),
+                    home.team_agent,
                 ],
             )
             .map_err(storage)?;
@@ -255,13 +266,63 @@ fn line_time(at_ms: Option<i64>, fallback_ms: i64, now_ms: i64) -> i64 {
         .unwrap_or_else(|| fallback_ms.min(now_ms).max(LINE_TIME_FLOOR_MS))
 }
 
+/// When the recount started. Input: the store. Output: the time, None before it starts.
+pub(super) fn started_ms(db: &Connection) -> Result<Option<i64>, EngineError> {
+    db.query_row(
+        "SELECT started_ms FROM usage_recount WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(storage)
+}
+
+/// Files the history a chunk showed, in the hour each turn began and each tool was called. A
+/// time before the floor files at the record's own time. Inputs: the open transaction, the
+/// chunk, the recount's start and the record's time, the project, the agent and its team id.
+/// Output: done, or `usage_unavailable`.
+fn add_history(
+    tx: &Connection,
+    read: &mut RecountRead,
+    (started, fallback_ms): (i64, i64),
+    (project, agent, team_agent): (&str, &str, Option<i64>),
+) -> Result<(), EngineError> {
+    for turn in history_turns(std::mem::take(&mut read.turns), started) {
+        let began = line_time(turn.began_ms, fallback_ms, started);
+        add_turns(
+            tx,
+            began - began.rem_euclid(HOUR_MS),
+            project,
+            agent,
+            std::slice::from_ref(&turn),
+        )?;
+    }
+    let Some(team_agent) = team_agent else {
+        return Ok(());
+    };
+    if !has_table(tx, "coord_tool_hours")? {
+        return Ok(());
+    }
+    for call in read
+        .tools
+        .iter()
+        .filter(|call| call.at_ms.is_some_and(|at| at < started))
+    {
+        let at = line_time(call.at_ms, fallback_ms, started);
+        crate::coord::add_tool_hour(tx, at - at.rem_euclid(HOUR_MS), team_agent, &call.name)
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
 /// Reads one chunk of one record into the staging tables, in one write with its cursor, so a
 /// restart repeats no line. The try is counted first, so a record that panics or fails is
 /// given up on after `ATTEMPTS_MAX`. Who it counts against is read inside that write, so a
-/// project removed during the read files under its removed name. Inputs: the store, the record
-/// and the time. Output: the budget the read costs.
+/// project removed during the read files under its removed name. The turns and tool calls
+/// begun before the recount started are filed in the same write. Inputs: the store, the
+/// record and the time. Output: the budget the read costs.
 fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineError> {
-    type Who = (String, String, String, String, String, String);
+    type Who = (String, String, String, String, String, String, Option<i64>);
     let format: String = db
         .query_row(
             "SELECT format FROM usage_recount_homes WHERE home=?1",
@@ -279,7 +340,8 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
         [&file.path],
     )
     .map_err(storage)?;
-    let read = recount_read(
+    let mut read = recount_read(
+        db,
         Path::new(&file.path),
         format,
         &file.progress,
@@ -287,9 +349,9 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
         now_ms,
     );
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
-    let (kind, project, pool, account, agent, harness): Who = tx
+    let (kind, project, pool, account, agent, harness, team_agent): Who = tx
         .query_row(
-            "SELECT kind,project,pool,account,agent,harness FROM usage_recount_homes WHERE home=?1",
+            "SELECT kind,project,pool,account,agent,harness,team_agent FROM usage_recount_homes WHERE home=?1",
             [&file.home],
             |row| {
                 Ok((
@@ -299,6 +361,7 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -319,6 +382,19 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
             )?;
         }
     }
+    let started: i64 = tx
+        .query_row(
+            "SELECT started_ms FROM usage_recount WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    add_history(
+        &tx,
+        &mut read,
+        (started, file.fallback_ms),
+        (&project, &agent, team_agent),
+    )?;
     tx.execute(
         "UPDATE usage_recount_files SET progress=?2,done=?3,complete=?4,attempts=0 WHERE path=?1",
         params![file.path, read.progress, read.done, read.complete],
@@ -580,4 +656,135 @@ pub fn status(db: &Connection) -> Result<Option<RecountStatus>, EngineError> {
         ))?,
         homes_partial: sessions("SELECT homes_partial FROM usage_recount WHERE singleton=1")?,
     }))
+}
+
+const COPY_KEPT_MS: i64 = 30 * 24 * HOUR_MS;
+
+/// The records of the sessions the recount replaces.
+const REWOUND: &str = "SELECT f.path,f.progress FROM usage_recount_files f JOIN usage_recount_homes h ON h.home=f.home
+    WHERE EXISTS (SELECT 1 FROM usage_recount_sessions s
+        WHERE s.project=h.project AND s.agent=h.agent AND s.session=f.session)";
+const OLD_COUNTING: &str = "These numbers still use the old counting.";
+const KEPT_COUNTING: &str = "Older numbers use the old counting, because you chose Keep old numbers. New work uses the new counting.";
+
+/// The sentence the usage pages show about how their numbers were counted. Input: the store.
+/// Output: the sentence, None once the numbers are the new counting's or there was nothing
+/// to compare.
+pub fn counting_notice(db: &Connection) -> Result<Option<String>, EngineError> {
+    Ok(match state(db)?.as_deref() {
+        None | Some("running" | "ready") => Some(OLD_COUNTING.to_owned()),
+        Some("kept") => Some(KEPT_COUNTING.to_owned()),
+        _ => None,
+    })
+}
+
+/// Applies the owner's choice, once. Use new replaces the rows of each session read to its
+/// end, keeps a copy of them, sets their records back to what the recount read and forgets
+/// only the keys the live scan took from those records since, so a line written since is read
+/// again and counts once. Each record remembers how far the live scan had filed turns and
+/// tools. Keep old leaves every row. Inputs: the store, the choice and the time. Output: done,
+/// or `usage_recount_not_ready`.
+pub fn decide(db: &Connection, use_new: bool, now_ms: i64) -> Result<(), EngineError> {
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    if state(&tx)?.as_deref() != Some("ready") {
+        return Err(failure("usage_recount_not_ready"));
+    }
+    if use_new {
+        tx.execute_batch(&format!(
+            "DROP TABLE IF EXISTS usage_tokens_before_recount;
+             CREATE TABLE usage_tokens_before_recount AS SELECT t.* FROM usage_tokens t WHERE {COVERED};
+             DELETE FROM usage_tokens AS t WHERE {COVERED};
+             INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,model,
+                input,output,cache_read,cache_write,cost_nanos)
+             SELECT hour_ms,kind,project,pool,account,agent,harness,session,model,
+                input,output,cache_read,cache_write,cost_nanos FROM usage_recount_rows r WHERE {STAGED}
+             ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
+                input=MIN(input+excluded.input,{max}),output=MIN(output+excluded.output,{max}),
+                cache_read=MIN(cache_read+excluded.cache_read,{max}),
+                cache_write=MIN(cache_write+excluded.cache_write,{max}),
+                cost_nanos=MIN(cost_nanos+excluded.cost_nanos,{max});
+             DELETE FROM usage_messages
+                WHERE id IN (SELECT l.id FROM usage_recount_live l JOIN ({REWOUND}) w ON w.path=l.path)
+                AND id NOT IN (SELECT id FROM usage_recount_messages);
+             UPDATE usage_messages SET (input,output,cache_read,cache_write,web)=
+                (SELECT m.input,m.output,m.cache_read,m.cache_write,m.web
+                 FROM usage_recount_messages m WHERE m.id=usage_messages.id)
+                WHERE id IN (SELECT l.id FROM usage_recount_live l JOIN ({REWOUND}) w ON w.path=l.path)
+                AND id IN (SELECT id FROM usage_recount_messages);
+             INSERT INTO usage_files (path,progress)
+             SELECT w.path,json_set(w.progress,'$.filed_to',COALESCE(json_extract(u.progress,'$.offset'),0))
+             FROM ({REWOUND}) w LEFT JOIN usage_files u ON u.path=w.path WHERE true
+             ON CONFLICT(path) DO UPDATE SET progress=excluded.progress;",
+            max = ROW_TOKENS_MAX
+        ))
+        .map_err(storage)?;
+    }
+    tx.execute_batch(CLEAR_STAGING).map_err(storage)?;
+    tx.execute(
+        "UPDATE usage_recount SET state=?1,decided_ms=?2 WHERE singleton=1",
+        params![if use_new { "used" } else { "kept" }, now_ms],
+    )
+    .map_err(storage)?;
+    tx.commit().map_err(storage)
+}
+
+/// Drops the copy of the replaced rows once it is past its age. Inputs: the store and the
+/// time. Output: done, or `usage_unavailable`.
+pub(super) fn forget_copy(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
+    let due: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM usage_recount WHERE state='used' AND decided_ms<=?1)",
+            [now_ms - COPY_KEPT_MS],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if due {
+        db.execute_batch("DROP TABLE IF EXISTS usage_tokens_before_recount")
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use crate::usage::capture::RunKind;
+
+    /// Runs a recount of one home under the only agent of `project` and uses it. Inputs: the
+    /// store, the home, the project and the time. Only tests call this.
+    pub(crate) fn recount_and_use(db: &Connection, home: &Path, project: &str, now_ms: i64) {
+        let (agent, harness, kind): (String, String, String) = db
+            .query_row(
+                "SELECT agent,harness,kind FROM usage_tokens WHERE project=?1 LIMIT 1",
+                [project],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let attribution = Attribution {
+            kind: if kind == "master" {
+                RunKind::Master
+            } else {
+                RunKind::Agent
+            },
+            project: Some(ProjectId::new(project).unwrap()),
+            pool: None,
+            account: None,
+            agent,
+            harness,
+        };
+        begin(
+            db,
+            &[Home {
+                path: home.to_path_buf(),
+                format: Format::Claude,
+                attribution,
+                removed: false,
+                team_agent: None,
+            }],
+            now_ms,
+        )
+        .unwrap();
+        while step(db, BYTES_PER_STEP, now_ms).unwrap() {}
+        decide(db, true, now_ms).unwrap();
+    }
 }

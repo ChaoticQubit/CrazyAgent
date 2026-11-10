@@ -97,6 +97,18 @@ impl NativeBridge {
         }))
     }
 
+    /// Applies the owner's choice of the recount, run without the bridge lock. Input: whether
+    /// to use the new numbers. Output: done once it is applied.
+    pub fn usage_decide_recount(&self, use_new: bool) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client
+                .usage_decide_recount(use_new)
+                .await
+                .map_err(usage_error)
+        }))
+    }
+
     /// Sets or clears the owner's manual reset time of one account's window, run without
     /// the bridge lock. Inputs: the account id, "five_hour" or "weekly", and the time.
     pub fn usage_set_reset(

@@ -256,6 +256,7 @@ impl Usage {
     /// Starts the once-only recount, then reads one bounded part of it each step. Inputs: the
     /// live access and the time. Output: done, or the store's failure.
     fn recount(&self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+        recount::forget_copy(&self.db, now_ms)?;
         if !recount::started(&self.db)? {
             recount::begin(&self.db, &self.recount_homes(access)?, now_ms)?;
         }
@@ -317,6 +318,7 @@ impl Usage {
                         access,
                     ),
                     removed: false,
+                    team_agent: Some(id),
                 });
             }
         }
@@ -350,6 +352,7 @@ impl Usage {
                     format,
                     attribution,
                     removed,
+                    team_agent: None,
                 });
             }
         }

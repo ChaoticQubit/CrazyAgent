@@ -43,6 +43,7 @@ pub(in crate::tui) enum SettingsJob {
     },
     RefreshUsage,
     SetMoney(MoneySettings),
+    DecideRecount(bool),
     SignIn(SignInJob),
     JoinPools {
         account: CredentialRef,
@@ -198,6 +199,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
             Self::SetMoney(_) => "SetMoney",
+            Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
@@ -315,6 +317,7 @@ pub(in crate::tui) enum SettingsEvent {
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
     MoneySet(Result<(), String>),
+    RecountDecided(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
@@ -365,6 +368,7 @@ impl SettingsEvent {
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
+            SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
@@ -541,6 +545,15 @@ impl NativeOwner {
                 SettingsEvent::MoneySet(match self.settings_controller() {
                     Ok(controller) => controller
                         .usage_set_money(settings)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::DecideRecount(use_new) => {
+                SettingsEvent::RecountDecided(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_decide_recount(use_new)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

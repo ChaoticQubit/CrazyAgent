@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { POLL_MS } from "./e2e-harness.mjs";
-import { USAGE_MS, handOff, onEngine } from "./codex-task-engine.mjs";
+import { USAGE_MS, handOff, onEngine, pricesOff } from "./codex-task-engine.mjs";
 
 const LABEL = "Estimated cost at API prices";
 const AT = new Date().toISOString();
@@ -141,5 +141,103 @@ test("A refused money switch says so on the page", OPTIONS, async (t) => {
     await me.click("Tokens", MAIN);
     await eventually("the refusal gone after a good switch", () => page.evaluate(`document.querySelector(".mx-page [role=alert]") === null`));
     await eventually("tokens leading after the good switch", async () => (await figures(page)).every(([main]) => !main.includes("$")));
+  });
+});
+
+const OFFER = "We recounted your history";
+
+/** Makes a running store look as an earlier build left it: the session inflated and no recount
+ * yet. Inputs: the engine root, the session and its inflated input. Output: none. */
+function asBeforeTheRecount(runtime, session, input) {
+  onStore(runtime, (store) => {
+    store.prepare("UPDATE usage_tokens SET input=?, cost_nanos=0 WHERE session=?").run(input, session);
+    store.exec("DELETE FROM usage_recount; DELETE FROM usage_recount_homes; DELETE FROM usage_recount_files; DELETE FROM usage_recount_rows; DELETE FROM usage_recount_messages; DELETE FROM usage_recount_sessions; DELETE FROM usage_recount_live; DELETE FROM usage_messages;");
+  });
+}
+
+/** Says whether the page offers the recount. Input: the page. Output: true when it does. */
+function offerShown(page) {
+  return page.evaluate(`document.body.innerText.includes(${JSON.stringify(OFFER)})`);
+}
+
+/** Reads the Metrics page's text. Input: the page. Output: the text. */
+function metricsText(page) {
+  return page.evaluate(`document.querySelector(".mx-page")?.innerText ?? ""`);
+}
+
+/** Runs a recount offer to the point of choosing, then chooses and checks it stays gone. Inputs:
+ * the test context, the prefix, the button's words, the input the session must end on and the
+ * notice that must follow, null for none. */
+async function chosen(t, prefix, button, input, notice) {
+  await onEngine(t, prefix, async ({ projects, runtime, me, page }) => {
+    assert.equal(await handOff(me, page, projects[0], runtime), "done");
+    const session = transcript(runtime, "cb-r", 100);
+    await eventually("the engine counting the transcript", () => inputOf(runtime, session) === 100);
+    asBeforeTheRecount(runtime, session, 400);
+    await me.click("Metrics", ".app-nav a.nav-item");
+    await eventually("the recount being offered", () => offerShown(page));
+    await me.capture(`recount-offer-${input}`);
+    assert.match(await metricsText(page), /These numbers still use the old counting\./u);
+    await me.click(button, ".mx-page button");
+    await eventually("the offer going away", async () => !(await offerShown(page)));
+    assert.equal(inputOf(runtime, session), input);
+    await eventually("the notice following the choice", async () => {
+      const shown = await metricsText(page);
+      return notice === null ? !/old counting/u.test(shown) : shown.includes(notice);
+    });
+    await page.send("Page.reload", {});
+    await eventually("the page back after a reload", () => page.evaluate(`document.querySelector(".mx-page") !== null`));
+    assert.equal(await offerShown(page), false, "the offer is shown once");
+  });
+}
+
+test("CB-E5 Use new replaces the numbers and the offer never returns", OPTIONS, async (t) => {
+  await chosen(t, "ca-recount-new-", "Use new numbers", 100, null);
+});
+
+test("CB-E6 Keep old leaves the numbers and the offer never returns", OPTIONS, async (t) => {
+  await chosen(t, "ca-recount-old-", "Keep old numbers", 400, "Older numbers use the old counting, because you chose Keep old numbers. New work uses the new counting.");
+});
+
+test("CB-E9 With prices Off the recount offer shows no dollar", OPTIONS, async (t) => {
+  await onEngine(t, "ca-recount-off-", async ({ projects, runtime, me, page, bridge }) => {
+    assert.equal(await handOff(me, page, projects[0], runtime), "done");
+    const session = transcript(runtime, "cb-o", 100);
+    await eventually("the engine counting the transcript", () => inputOf(runtime, session) === 100);
+    asBeforeTheRecount(runtime, session, 400);
+    await pricesOff(bridge);
+    await me.click("Metrics", ".app-nav a.nav-item");
+    await eventually("the recount being offered", () => offerShown(page));
+    assert.doesNotMatch(await metricsText(page), /\$|Estimated cost at API prices/u);
+    await me.capture("recount-offer-prices-off");
+  });
+});
+
+test("A refused recount choice says so and keeps the offer", OPTIONS, async (t) => {
+  await onEngine(t, "ca-recount-refused-", async ({ projects, runtime, me, page }) => {
+    assert.equal(await handOff(me, page, projects[0], runtime), "done");
+    const session = transcript(runtime, "cb-f", 100);
+    await eventually("the engine counting the transcript", () => inputOf(runtime, session) === 100);
+    asBeforeTheRecount(runtime, session, 400);
+    await me.click("Metrics", ".app-nav a.nav-item");
+    await eventually("the recount being offered", () => offerShown(page));
+    onStore(runtime, (store) => store.exec("CREATE TRIGGER refuse_choice BEFORE UPDATE ON usage_recount BEGIN SELECT RAISE(ABORT, 'refused'); END;"));
+    await me.click("Use new numbers", ".mx-page button");
+    await eventually("the refusal on the page", () => page.evaluate(`document.querySelector(".mx-page [role=alert]")?.innerText.includes("Usage isn't available") ?? false`));
+    assert.equal(await offerShown(page), true, "the offer stays until a choice is applied");
+    assert.equal(inputOf(runtime, session), 400);
+    await me.capture("recount-refused");
+  });
+});
+
+test("CB-E8 history fills the activity chart through the recount", OPTIONS, async (t) => {
+  await onEngine(t, "ca-backfill-", async ({ projects, runtime, me, page }) => {
+    assert.equal(await handOff(me, page, projects[0], runtime), "done");
+    editingTurn(runtime, "cb-h", new Date(Date.now() - 3_600_000).toISOString());
+    asBeforeTheRecount(runtime, "no-such-session", 0);
+    await me.click("Metrics", ".app-nav a.nav-item");
+    const panelText = () => page.evaluate(`document.querySelector(".mx-page").innerText`);
+    await eventually("the history in By activity", async () => /By activity[\s\S]*Feature/u.test(await panelText()));
+    await me.capture("metrics-activity-history");
   });
 });
