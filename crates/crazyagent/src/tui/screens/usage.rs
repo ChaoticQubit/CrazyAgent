@@ -565,6 +565,14 @@ impl UsagePage {
         }
     }
 
+    /// Whether the main number can be changed: a report is shown and prices are on, as on the
+    /// page. Output: the answer.
+    fn offers_main_number(&self) -> bool {
+        self.report
+            .as_ref()
+            .is_some_and(|(_, report)| report.money.settings.prices != PriceSource::Off)
+    }
+
     fn reload(&mut self, ctx: &mut Ctx) {
         if self.waiting {
             return;
@@ -653,14 +661,17 @@ impl Screen for UsagePage {
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
-        vec![
+        let mut hints = vec![
             hint("t", "Range"),
             hint("r", "Read again"),
             hint("c", "Check limits now"),
-            hint("m", "Dollars or tokens"),
-            hint("p", "Prices on or off"),
-            hint("Esc", "Back"),
-        ]
+        ];
+        if self.offers_main_number() {
+            hints.push(hint("m", "Dollars or tokens"));
+        }
+        hints.push(hint("p", "Prices on or off"));
+        hints.push(hint("Esc", "Back"));
+        hints
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -672,7 +683,7 @@ impl Screen for UsagePage {
             }
             Key::Char('r') => self.reload(ctx),
             Key::Char('c') => send(ctx, SettingsJob::RefreshUsage),
-            Key::Char('m') => {
+            Key::Char('m') if self.offers_main_number() => {
                 if let Some((_, report)) = &self.report {
                     let mut settings = report.money.settings;
                     settings.main_number = match settings.main_number {

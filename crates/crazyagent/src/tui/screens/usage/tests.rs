@@ -992,3 +992,19 @@ fn a_recount_fault_reads_in_plain_words() {
     );
     assert!(line.contains("the comparison may arrive later"), "{line}");
 }
+
+#[test]
+fn with_prices_off_the_main_number_key_is_not_offered_and_does_nothing() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.money.settings.prices = PriceSource::Off;
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    let keys: Vec<String> = page.hints(&ctx).into_iter().map(|hint| hint.key).collect();
+    assert!(!keys.contains(&"m".to_owned()), "{keys:?}");
+    assert!(keys.contains(&"p".to_owned()), "{keys:?}");
+    assert!(matches!(page.key(&Key::Char('m'), &mut ctx), Flow::Ignored));
+    assert!(ctx.next_screen_request().is_none());
+}

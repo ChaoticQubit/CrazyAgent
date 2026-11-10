@@ -22,6 +22,12 @@ export function figure(tokens: Tokens, costNanos: number, money: MoneyView): { m
   return money.shown === "dollars" ? { main: cost, beside: `${count} tokens`, title } : { main: count, beside: cost, title };
 }
 
+/** Says whether tokens lead while dollars stand beside them. Input: the view. Output: the
+ * answer. */
+export function dollarsBeside(money: MoneyView): boolean {
+  return money.shown === "tokens" && money.settings.prices !== "off";
+}
+
 /** Renders one figure. Inputs: the tokens, the dollars and the view. Output: the element. */
 export function Figure({ tokens, costNanos, money }: { tokens: Tokens; costNanos: number; money: MoneyView }): ReactElement {
   const shown = figure(tokens, costNanos, money);

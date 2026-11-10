@@ -3,13 +3,13 @@ import { listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type MoneyView, type Tokens, type UsageReport } from "../../api-usage";
+import { loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type MoneySettings, type MoneyView, type Tokens, type UsageReport } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
 import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
 import { HARNESS_NAMES } from "../team/coordination";
-import { COST_LABEL, Figure, dollarText, figure, unpricedNote } from "./money";
+import { COST_LABEL, Figure, dollarText, dollarsBeside, figure, unpricedNote } from "./money";
 import "../project/projects.css";
 import "./metrics.css";
 
@@ -168,7 +168,7 @@ function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
   const parts = `${compactCount(total.input)} input, ${compactCount(total.cache_write)} cache write, ${compactCount(total.output)} output`;
   return <div className="mx-tiles">
     <Tile label={usage.money.shown === "dollars" ? COST_LABEL : "Tokens"} value={shown.main} title={shown.title}
-      detail={shown.beside ? `${shown.beside} · ${parts}` : parts} />
+      detail={shown.beside ? `${shown.beside}${dollarsBeside(usage.money) ? ` ${COST_LABEL}` : ""} · ${parts}` : parts} />
     <Tile label="Re-read from cache" value={compactCount(total.cache_read)} quiet
       detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
     <Tile label="Runs" value={String(usage.runs)} detail={`${metrics.running} running now`} />
@@ -327,7 +327,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total, money
   return <Panel title="Breakdown" padded={false} actions={control}>
     <div className="pj-table-wrap mx-table-wrap"><table className="pj-table mx-table" data-by={by}>
       <thead><tr>
-        <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">{money.shown === "dollars" ? COST_LABEL : "Tokens"}</th><th scope="col" className="num">Input</th>
+        <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">{money.shown === "dollars" ? COST_LABEL : "Tokens"}{dollarsBeside(money) && <small> {COST_LABEL}</small>}</th><th scope="col" className="num">Input</th>
         <th scope="col" className="num">Cache write</th><th scope="col" className="num">Output</th><th scope="col" className="num muted">Cache read</th>
         {extra.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col">Share of tokens</th>
       </tr></thead>
@@ -387,13 +387,18 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   onBy: (by: MetricsBy) => void;
   onRetry: () => void;
 }) {
+  const [refused, setRefused] = useState("");
+  const change = (settings: MoneySettings) => void setMoney(settings).then((result) => {
+    setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
+    if (result.kind === "ok") onRetry();
+  });
   const ranges = <Segmented label="Range" value={range} options={METRIC_RANGES} onValue={onRange} />;
   const covers = filter === undefined ? (projectId === null ? "All projects" : "This project only")
     : projectId === null ? `${filter.projects.length} project${filter.projects.length === 1 ? "" : "s"}` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
   const money = usage.kind === "ok" ? usage.value.money : null;
   const moneyTools = money && <div className="pj-row mx-money">
-    {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(main_number) => void setMoney({ ...money.settings, main_number }).then(onRetry)} />}
-    <Segmented label="Prices" value={money.settings.prices} options={PRICE_SOURCES} onValue={(prices) => void setMoney({ ...money.settings, prices }).then(onRetry)} />
+    {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(main_number) => change({ ...money.settings, main_number })} />}
+    <Segmented label="Prices" value={money.settings.prices} options={PRICE_SOURCES} onValue={(prices) => change({ ...money.settings, prices })} />
   </div>;
   const tools = <div className="mx-tools">
     {filter ? <div className="pj-row">
@@ -404,16 +409,17 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     {moneyTools}
     <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
   </div>;
+  const head = <>{tools}{refused && <LoadError message={refused} onRetry={() => { setRefused(""); onRetry(); }} />}</>;
   const reads = [usage, metrics];
   if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) return <NotReady what="Metrics" />;
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{tools}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    return <div className="stack">{head}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
-  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}<Skeleton shape="card" count={3} /></div>;
+  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{head}<Skeleton shape="card" count={3} /></div>;
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
   return <div className="stack mx-page">
-    {tools}
+    {head}
     <Tiles usage={usage.value} metrics={metrics.value} />
     <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} money={usage.value.money} />
     <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} money={usage.value.money} />

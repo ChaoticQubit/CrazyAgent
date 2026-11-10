@@ -216,7 +216,7 @@ test("tokens lead when chosen and the dollars beside them still carry the label"
   const markup = priced(tokensLead());
   assert.match(markup, /<span class="mx-tile-key">Tokens<\/span><span class="mx-tile-value">2\.3K<\/span>/u);
   assert.match(markup, new RegExp(`<div class="mx-tile" title="${LABEL}, prices as of 2026-11-08"><span class="mx-tile-key">Tokens</span>`, "u"));
-  assert.match(markup, /<span class="mx-tile-detail">\$5\.00 · /u);
+  assert.match(markup, new RegExp(`<span class="mx-tile-detail">\\$5\\.00 ${LABEL} · `, "u"));
   assert.match(markup, /Tokens over time/u);
   assert.match(markup, /mx-legend/u);
   assert.match(markup, new RegExp(`title="${LABEL}, prices as of 2026-11-08"><b>[0-9.]+K?</b><small> \\$2\\.00</small>`, "u"));
@@ -262,4 +262,12 @@ test("a chart of under a cent repeats no axis figure", () => {
   });
   const figures = [...shown.matchAll(/class="ax"[^>]*>([^<]*)</gu)].map((found) => found[1]).filter((figure) => figure.includes("$"));
   assert.deepEqual(figures, ["&lt;$0.01"]);
+});
+
+test("with Tokens leading the dollar's label is visible in the tile and the table heading", () => {
+  const markup = priced(bundled({ settings: { main_number: "tokens", prices: "bundled" }, shown: "tokens" }));
+  const tile = markup.slice(markup.indexOf('class="mx-tiles"'), markup.indexOf("Re-read from cache"));
+  assert.match(text(tile), /Estimated cost at API prices/u);
+  assert.match(markup, /<th scope="col" class="num">Tokens<small> Estimated cost at API prices<\/small><\/th>/u);
+  assert.doesNotMatch(text(priced(off())), /Estimated cost at API prices/u);
 });

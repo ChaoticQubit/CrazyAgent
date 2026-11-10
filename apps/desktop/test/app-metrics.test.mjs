@@ -23,6 +23,7 @@ const usage = {
   since_ms: SINCE, total: tokens(1200, 800, 300, 4000), runs: 3, projects: [], pools: [], accounts: [], agents: [], days: [],
   lines: [{ project: "alpha", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
   agent_lines: [], limits: [], partial_homes: 0,
+  money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 },
 };
 const metrics = {
   running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, merges: 19, merges_into_main: 5, merges_undone: 1, bucket_ms: 2 * HOUR,
