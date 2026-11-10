@@ -55,7 +55,8 @@ class LeadDoneTests(unittest.TestCase):
         lead's first and final tasks, and its background command in the final task. Inputs:
         the lead's final task end and result, how its background command ends ("held", "lost",
         "late", "detached" or None), the later worker's task end as an offset from now in ms,
-        and the prompt and start of its later task, as an offset from the lead's end. Output: none."""
+        and the prompt and start of its later task, as an offset from the lead's end, None for a
+        task that never started. Output: none."""
         w = self.world
         now = w.now
         lead = w.agent("sub", mode="app_spawned")
@@ -67,10 +68,10 @@ class LeadDoneTests(unittest.TestCase):
                   prompt=f"Add {'add' if number == 0 else 'sub'}(a, b) to calc.py and commit it on your branch.",
                   result="Done.", created_ms=now - 280_000, started_ms=now - 280_000, finished_ms=now + end, parent=lead)
         if late is not None:
-            begun = now + lead_end + late_start
-            w.row("team_tasks", project=PROJECT, source="engine", harness="claude-code", tools=1, status="done", agent=worker,
-                  prompt=late, result="No response requested.", created_ms=begun, started_ms=begun,
-                  finished_ms=now + lead_end + 9_000, parent=lead)
+            begun = None if late_start is None else now + lead_end + late_start
+            w.row("team_tasks", project=PROJECT, source="engine", harness="claude-code", tools=1, status="queued" if begun is None else "done", agent=worker,
+                  prompt=late, result="No response requested.", created_ms=now if begun is None else begun, started_ms=begun,
+                  finished_ms=None if begun is None else now + lead_end + 9_000, parent=lead)
         w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, status="done", agent=lead,
               prompt="Lead B: two sub-agents add add() and sub() to calc.py.", result="Started Ada and Alan.",
               created_ms=now - 300_000, started_ms=now - 300_000, finished_ms=now - 285_000)
@@ -127,6 +128,13 @@ class LeadDoneTests(unittest.TestCase):
     def test_a_worker_s_wake_that_began_after_the_lead_ended_is_not_work_the_lead_left(self):
         outcome, detail = self.run_check_for(late=WAKE)
         self.assertEqual(outcome, "PASS", detail)
+        self.assertRegex(detail, r"; late wakes left out=1 \(tasks \d+\)")
+
+    def test_a_worker_s_wake_that_never_started_is_left_out_and_does_not_read_as_open(self):
+        outcome, detail = self.run_check_for(late=WAKE, late_start=None)
+        self.assertEqual(outcome, "PASS", detail)
+        self.assertNotIn("still had an open task", detail)
+        self.assertRegex(detail, r"; late wakes left out=1 \(tasks \d+\)")
 
     def test_a_worker_s_wake_that_began_before_the_lead_ended_still_counts(self):
         outcome, detail = self.run_check_for(late=WAKE, late_start=-1_000)
