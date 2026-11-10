@@ -17721,6 +17721,90 @@ fn a_stopped_or_failed_linked_teammate_s_edits_are_saved_and_land_with_a_partial
     assert_eq!(partial(&fixture).len(), 2);
 }
 
+/// team-20 r2 R2-M1: a teammate that ended and whose save is refused gives up after
+/// `TEAMMATE_TURN_TRIES` passes, tells its lead once and keeps the cause for the lead's
+/// finish; once that finish asks for another save and the cause is gone, its edits wait as
+/// its change set, the lead hears they may be partial and the cause is cleared.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ended_teammate_s_refused_save_keeps_its_cause_and_is_tried_again_when_finish_asks() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::team::initialize(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+        [PROJECT],
+    )
+    .unwrap();
+    let bulk = linked.teammate("greet").join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for index in 0..101 {
+        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
+    }
+    let greet = linked.id(&fixture, "greet");
+    linked.mark(&fixture, greet, "stopped");
+    let told = |fixture: &Fixture, words: &str| -> Vec<String> {
+        linked
+            .notes(fixture)
+            .into_iter()
+            .filter(|note| note.contains(words))
+            .collect()
+    };
+    let cause = |fixture: &Fixture| -> Option<String> {
+        fixture
+            .connection
+            .query_row(
+                "SELECT save_refused FROM team_teammate_names WHERE agent=?1",
+                [greet],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten()
+    };
+    let set = || crate::landing::open_change_set(&db, &linked.teammate("greet")).unwrap();
+
+    for _ in 0..=TEAMMATE_TURN_TRIES {
+        team.record_teammate_turns(&linked.project, linked.lead)
+            .unwrap();
+    }
+
+    assert!(set().is_none(), "greet's save is refused");
+    let given_up = told(&fixture, "greet has ended, so ask the owner to look at it");
+    assert_eq!(given_up.len(), 1, "the lead is told once: {given_up:?}");
+    let kept = cause(&fixture);
+    assert!(
+        kept.as_deref().is_some_and(|code| !code.is_empty()),
+        "the cause is kept for the lead's finish: {kept:?}"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_teammate_names SET save_refused='' WHERE agent=?1",
+            [greet],
+        )
+        .unwrap();
+    db.execute(
+        "DELETE FROM team_new_folder_limit WHERE project=?1",
+        [PROJECT],
+    )
+    .unwrap();
+
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+
+    assert!(set().is_some(), "greet's edits wait once the finish asked");
+    let partial = told(&fixture, "may be partial");
+    assert_eq!(partial.len(), 1, "{partial:?}");
+    assert!(partial[0].contains("greet"), "{partial:?}");
+    assert_eq!(
+        cause(&fixture),
+        None,
+        "a save that went through clears the cause"
+    );
+}
+
 /// team-20 r1 L2: a lasting refusal of a linked lead's record after its teammates landed is
 /// tried at each later idle pass, `TEAMMATE_TURN_TRIES` passes in all. The lead hears the
 /// pending note at the first refusal only and nothing at the second; at the last it hears
