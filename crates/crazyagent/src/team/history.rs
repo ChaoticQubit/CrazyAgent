@@ -392,8 +392,10 @@ fn listing(found: &[Conversation]) -> String {
 /// Finds every past conversation of a project, newest first: each master session with
 /// engine turns, the team's messages and every harness record in its team agents' homes,
 /// their native teammates' included (TPH-2 C), each record folder within its fair share of
-/// the visit and record budgets (OP25-S5). Takes the engine database, the project and the
-/// agents folder. Returns at most `RECORDS_MAX` records with the stored conversations.
+/// the visit and record budgets (OP25-S5). Folders are read oldest agent first, so what an
+/// older one leaves of its share goes to the newer ones, whose work is searched most (r1 M1).
+/// Takes the engine database, the project and the agents folder. Returns at most
+/// `RECORDS_MAX` records with the stored conversations.
 fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Conversation> {
     let mut found = turn_sessions(connection, project).unwrap_or_default();
     if let Ok(Some(at_ms)) = team_last(connection, project) {
@@ -408,7 +410,7 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
     let trees = record_trees(connection, project, agents);
     let (mut visits_left, mut records_left) = (VISITS_MAX, RECORDS_MAX);
     let mut records = Vec::new();
-    for (at, tree) in trees.iter().enumerate() {
+    for (at, tree) in trees.iter().rev().enumerate() {
         let trees_left = trees.len() - at;
         let (mine, visits) = tree_records(
             agents,
