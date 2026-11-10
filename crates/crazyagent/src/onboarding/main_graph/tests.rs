@@ -211,6 +211,31 @@ fn a_graph_is_due_when_missing_or_the_tip_moved() {
     assert!(tip_valid(&"0f".repeat(32)));
 }
 
+/// A folder something else made where a copy goes, such as an agent process still running
+/// from an earlier start, is never removed: the copy gives the error and the folder keeps
+/// its files. Only a folder the copy made itself holds the graph (DEC-123).
+#[test]
+fn a_folder_made_by_something_else_is_never_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = project(&base);
+    let agent = worktree(&base, "agent");
+    let theirs = agent.join("graphify-out");
+    fs::create_dir(&theirs).unwrap();
+    fs::write(theirs.join("theirs.txt"), "theirs\n").unwrap();
+    let parent = open_folder(CWD, agent.as_path()).unwrap();
+    let source = open_folder(CWD, root.join("graphify-out").as_path()).unwrap();
+
+    let error = fill_new(&parent, GRAPH_OUT, &source).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(read(theirs.join("theirs.txt")), "theirs\n");
+    assert!(!theirs.join("graph.json").exists());
+    fs::remove_dir_all(&theirs).unwrap();
+    fill_new(&parent, GRAPH_OUT, &source).unwrap();
+    assert_eq!(read(theirs.join("graph.json")), "{\"nodes\":1}");
+}
+
 /// A failed or timed-out build holds its project back for the retry time whatever tip main
 /// moves to, so a graph that keeps failing is built at most once per wait (DEC-123).
 #[test]

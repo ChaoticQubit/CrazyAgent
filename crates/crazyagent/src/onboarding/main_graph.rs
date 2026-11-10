@@ -127,13 +127,7 @@ pub(crate) fn publish(root: &Path, build: &Build) -> io::Result<bool> {
     let folder = build.folder();
     let part = CString::new([folder.as_bytes(), b".part"].concat()).expect("no NUL");
     remove_entry(&store, &part, 0)?;
-    let mut budget = ENTRIES_MAX;
-    let copied =
-        new_folder(&store, &part).and_then(|target| copy_tree(&graph, &target, 0, &mut budget));
-    if let Err(error) = copied {
-        let _ = remove_entry(&store, &part, 0);
-        return Err(error);
-    }
+    fill_new(&store, &part, &graph)?;
     rustix::fs::renameat(&store, &part, &store, &folder)?;
     write_record(&store, build)?;
     prune(&store, &folder)?;
@@ -157,8 +151,9 @@ pub(crate) fn latest(root: &Path) -> Option<Build> {
 /// only while that folder is missing or holds nothing but the read-only links an older
 /// engine placed there into the project's graph (I3), which are removed first; anything else
 /// there is the agent's and is left alone. Links in the published graph are never followed
-/// nor copied. A copy that fails is removed whole. Inputs: the project folder and the
-/// worktree. Output: true once copied, false when nothing was copied.
+/// nor copied. A copy that fails is removed whole, and a folder something else made there
+/// meanwhile is left alone ([`fill_new`]). Inputs: the project folder and the worktree.
+/// Output: true once copied, false when nothing was copied.
 pub(crate) fn copy_into(root: &Path, worktree: &Path) -> io::Result<bool> {
     let tree = open_folder(CWD, worktree)?;
     match rustix::fs::statat(&tree, GRAPH_OUT, AtFlags::SYMLINK_NOFOLLOW) {
@@ -180,14 +175,23 @@ pub(crate) fn copy_into(root: &Path, worktree: &Path) -> io::Result<bool> {
         return Ok(false);
     };
     let source = open_folder(&store, build.folder().as_c_str())?;
-    let mut budget = ENTRIES_MAX;
-    let copied =
-        new_folder(&tree, GRAPH_OUT).and_then(|target| copy_tree(&source, &target, 0, &mut budget));
-    if let Err(error) = copied {
-        let _ = remove_entry(&tree, GRAPH_OUT, 0);
-        return Err(error);
-    }
+    fill_new(&tree, GRAPH_OUT, &source)?;
     Ok(true)
+}
+
+/// Makes `name` below `parent` as a new folder and copies `source` into it, removing the
+/// folder again only when this call made it and the copy then failed. A folder something
+/// else made there first, such as an agent process still running from an earlier start,
+/// gives the error and is left as it was. Inputs: the parent folder, the name and the
+/// source folder. Output: nothing once copied.
+fn fill_new(parent: &OwnedFd, name: &CStr, source: &OwnedFd) -> io::Result<()> {
+    let target = new_folder(parent, name)?;
+    let mut budget = ENTRIES_MAX;
+    let copied = copy_tree(source, &target, 0, &mut budget);
+    if copied.is_err() {
+        let _ = remove_entry(parent, name, 0);
+    }
+    copied
 }
 
 /// Opens one folder below `parent` without following a link. Inputs: the parent folder and
