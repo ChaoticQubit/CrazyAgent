@@ -7672,6 +7672,7 @@ impl TeamRuntime {
             Report::Turn { end: None, .. } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 worker.turn_started = Some(now_ms());
+                worker.ended_well = false;
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
@@ -7746,6 +7747,7 @@ impl TeamRuntime {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 assert!(worker.kept_session);
                 worker.own_turn = Some(now_ms());
+                worker.ended_well = false;
                 worker.idle_since = Instant::now();
                 let idle = worker.busy.is_none();
                 if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
@@ -8885,10 +8887,15 @@ fn live_serve(
     ended_with(settle_stop(session.stop(), held), problem)
 }
 
-/// What a harness's end reports. Inputs: what its stop left to say, and the problem that
-/// ended it. Output: the one to report, if either.
+/// What a harness's end reports: what its stop left to say and the problem that ended it,
+/// both when there are both. The problem comes last because the agent's status reads the
+/// last code, so a command left running never hides that the process closed.
+/// Inputs: the stop's report and the ending problem. Output: the report, if either.
 fn ended_with(stopped: Option<String>, problem: Option<String>) -> Option<String> {
-    stopped.or(problem)
+    match (stopped, problem) {
+        (Some(stopped), Some(problem)) => Some(format!("{stopped} {problem}")),
+        (stopped, problem) => stopped.or(problem),
+    }
 }
 
 /// The account's credential copy and lease an agent's harness holds while it runs.
