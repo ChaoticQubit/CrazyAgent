@@ -169,6 +169,8 @@
     "allow-desktop-set-sandbox-settings",
     "allow-desktop-cleanup-settings",
     "allow-desktop-set-cleanup-settings",
+    "allow-desktop-quit-settings",
+    "allow-desktop-set-quit-settings",
     "allow-desktop-pool-summaries",
     "allow-desktop-account-schedule",
     "allow-desktop-account-ranking",

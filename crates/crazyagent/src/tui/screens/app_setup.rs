@@ -4,6 +4,9 @@ use super::{Flow, Place, Screen, open};
 use crate::cleanup_settings::{CleanupMode, CleanupSettings, DAYS_MAX, DAYS_MIN};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
+use crate::quit_settings::{
+    HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
+};
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::pack::entry_title;
@@ -56,6 +59,14 @@ const CLEANUP_CHOICES: [CleanupMode; 3] = [
 ];
 const DAYS_TEXT: &str = "Enter a whole number of days from 1 to 365.";
 const DAYS_DIGITS_MAX: usize = 3;
+const QUIT_TEXT: &str = "When CrazyAgent quits: what happens to team agents that are running.";
+const QUIT_CHOICES: [OnQuit; 2] = [OnQuit::KeepRunning, OnQuit::Stop];
+const LEFT_TEXT: &str =
+    "Left running: how long agents left running wait for CrazyAgent to open again.";
+const LEFT_RUNNING_NOTE: &str = "An agent still running when the time is up ends with its terminal. Opening CrazyAgent before then takes it over. The limit also covers agents left behind when CrazyAgent did not quit cleanly.";
+const LEFT_CHOICES: [LeftRunning; 2] = [LeftRunning::AfterHours, LeftRunning::Never];
+const HOURS_TEXT: &str = "Enter a whole number of hours from 1 to 168.";
+const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.
 /// Inputs: the mode and the days the first option waits. Output: the title, such as
@@ -72,15 +83,51 @@ pub(in crate::tui) fn cleanup_title(mode: CleanupMode, days: u16) -> String {
 /// Reads the typed days as the engine takes them. Input: the typed text. Output: the whole
 /// number of days from 1 to 365, or None for anything else.
 fn cleanup_days(typed: &str) -> Option<u16> {
+    whole_number(typed, DAYS_DIGITS_MAX, DAYS_MIN..=DAYS_MAX)
+}
+
+/// Reads the typed hours as the engine takes them. Input: the typed text. Output: the whole
+/// number of hours from 1 to 168, or None for anything else.
+fn quit_hours(typed: &str) -> Option<u16> {
+    whole_number(typed, HOURS_DIGITS_MAX, HOURS_MIN..=HOURS_MAX)
+}
+
+/// Reads a typed whole number in a range. Inputs: the typed text, the most digits and the
+/// range. Output: the number, or None for blank, signed, decimal or out of range text.
+fn whole_number(typed: &str, digits: usize, range: std::ops::RangeInclusive<u16>) -> Option<u16> {
     let typed = typed.trim();
-    if typed.is_empty()
-        || typed.len() > DAYS_DIGITS_MAX
-        || !typed.bytes().all(|byte| byte.is_ascii_digit())
+    if typed.is_empty() || typed.len() > digits || !typed.bytes().all(|byte| byte.is_ascii_digit())
     {
         return None;
     }
-    let days: u16 = typed.parse().ok()?;
-    (DAYS_MIN..=DAYS_MAX).contains(&days).then_some(days)
+    let value: u16 = typed.parse().ok()?;
+    range.contains(&value).then_some(value)
+}
+
+/// The title of one quit option and what it does, the same words as the desktop Settings.
+/// Input: the option. Output: the title and its sentence.
+pub(in crate::tui) fn on_quit_words(on_quit: OnQuit) -> (&'static str, &'static str) {
+    match on_quit {
+        OnQuit::KeepRunning => (
+            "Keep team agents running",
+            "They go on with their work, and CrazyAgent takes them over when it opens again.",
+        ),
+        OnQuit::Stop => (
+            "Stop team agents",
+            "Each agent stops as Stop would, and its task goes back to the queue.",
+        ),
+    }
+}
+
+/// The title of one time limit option for agents left running, the same words as the
+/// desktop Settings. Inputs: the option and the hours the first one waits. Output: the
+/// title, such as "24 hours after CrazyAgent quits".
+pub(in crate::tui) fn left_running_title(left_running: LeftRunning, hours: u16) -> String {
+    match left_running {
+        LeftRunning::AfterHours if hours == 1 => "1 hour after CrazyAgent quits".to_owned(),
+        LeftRunning::AfterHours => format!("{hours} hours after CrazyAgent quits"),
+        LeftRunning::Never => "No limit, until CrazyAgent opens again".to_owned(),
+    }
 }
 
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
@@ -116,6 +163,7 @@ pub fn setup_plain(code: &str) -> String {
         "cleanup_settings_invalid" => {
             "The stored finished agents setting is not one this version knows."
         }
+        "quit_settings_invalid" => "The stored quitting setting is not one this version knows.",
         crate::storage::versioned::STALE_CODE => {
             "The pack changed in another window, so this was not saved. The list shows it now."
         }
@@ -229,6 +277,17 @@ enum Ask {
         choice: usize,
     },
     CleanupDays(TextField),
+    QuitChoice {
+        choice: usize,
+    },
+    QuitLimit {
+        on_quit: OnQuit,
+        choice: usize,
+    },
+    QuitHours {
+        on_quit: OnQuit,
+        field: TextField,
+    },
 }
 
 enum Sent {
@@ -241,7 +300,7 @@ enum Sent {
 /// home folder: Enter installs and continues to Home, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
-/// setting and when finished agents' worktrees go.
+/// setting, when finished agents' worktrees go and what quitting does to team agents.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
@@ -249,10 +308,11 @@ pub struct AppSetup {
     github: Load<GitHubStatus>,
     sandbox: Load<SandboxSettings>,
     cleanup: Load<CleanupSettings>,
+    quit: Load<QuitSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 5],
+    reading: [bool; 6],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -263,8 +323,8 @@ impl AppSetup {
     /// A setup page with nothing loaded yet.
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
-    /// home, the GitHub account, the sandbox settings and the finished agents
-    /// setting.
+    /// home, the GitHub account, the sandbox settings, the finished agents
+    /// setting and the quitting setting.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
@@ -273,10 +333,11 @@ impl AppSetup {
             github: Load::Idle,
             sandbox: Load::Idle,
             cleanup: Load::Idle,
+            quit: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 5],
+            reading: [false; 6],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -356,6 +417,10 @@ impl AppSetup {
             self.cleanup = Load::Loading;
         }
         self.read(4, AppSetupJob::Cleanup, ctx);
+        if matches!(self.quit, Load::Idle) {
+            self.quit = Load::Loading;
+        }
+        self.read(5, AppSetupJob::Quit, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -699,6 +764,149 @@ impl AppSetup {
         lines
     }
 
+    fn ask_quit(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.quit else {
+            ctx.say(Message::warning(
+                "The quitting setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = QUIT_CHOICES
+            .iter()
+            .position(|on_quit| *on_quit == settings.on_quit)
+            .expect("every option is listed");
+        self.ask = Some(Ask::QuitChoice { choice });
+    }
+
+    fn pick_quit(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < QUIT_CHOICES.len());
+        let Load::Ready(current) = &self.quit else {
+            ctx.say(Message::warning(
+                "The quitting setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let limit = LEFT_CHOICES
+            .iter()
+            .position(|left_running| *left_running == current.left_running)
+            .expect("every option is listed");
+        self.ask = Some(Ask::QuitLimit {
+            on_quit: QUIT_CHOICES[choice],
+            choice: limit,
+        });
+    }
+
+    fn pick_limit(&mut self, on_quit: OnQuit, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < LEFT_CHOICES.len());
+        let Load::Ready(current) = &self.quit else {
+            ctx.say(Message::warning(
+                "The quitting setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let (left_running, hours) = (LEFT_CHOICES[choice], current.hours);
+        if left_running != LeftRunning::AfterHours {
+            let settings = QuitSettings {
+                on_quit,
+                left_running,
+                hours,
+            };
+            self.set_quit(settings, ctx);
+            return;
+        }
+        let mut field = TextField::new("Hours after CrazyAgent quits", HOURS_DIGITS_MAX)
+            .placeholder(&HOURS_DEFAULT.to_string());
+        field.set(&hours.to_string());
+        self.ask = Some(Ask::QuitHours { on_quit, field });
+    }
+
+    fn submit_hours(&mut self, on_quit: OnQuit, field: TextField, ctx: &mut Ctx) {
+        let Some(hours) = quit_hours(field.value()) else {
+            ctx.say(Message::error(HOURS_TEXT, ""));
+            self.ask = Some(Ask::QuitHours { on_quit, field });
+            return;
+        };
+        let settings = QuitSettings {
+            on_quit,
+            left_running: LeftRunning::AfterHours,
+            hours,
+        };
+        self.set_quit(settings, ctx);
+    }
+
+    fn set_quit(&mut self, settings: QuitSettings, ctx: &mut Ctx) {
+        assert!((HOURS_MIN..=HOURS_MAX).contains(&settings.hours));
+        if matches!(&self.quit, Load::Ready(current) if *current == settings) {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!(
+            "When quitting: {}. Left running: {}.",
+            on_quit_words(settings.on_quit).0,
+            left_running_title(settings.left_running, settings.hours)
+        );
+        let job = AppSetupJob::SetQuit {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn quit_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.quit {
+            Load::Ready(settings) => Line::raw(on_quit_words(settings.on_quit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn quit_rows(&self, ask: &Ask, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let choice_line = |picked: bool, title: String| {
+            let mark = if picked { "> " } else { "  " };
+            join([Line::raw(mark), styled(title, Role::Heading, theme)])
+        };
+        let mut lines = Vec::new();
+        match ask {
+            Ask::QuitChoice { choice } => {
+                lines.extend(muted(QUIT_TEXT, 0));
+                for (index, on_quit) in QUIT_CHOICES.iter().enumerate() {
+                    let (title, detail) = on_quit_words(*on_quit);
+                    lines.push(choice_line(index == *choice, title.to_owned()));
+                    lines.extend(muted(detail, 4));
+                }
+            }
+            Ask::QuitLimit { choice, .. } => {
+                let hours = match &self.quit {
+                    Load::Ready(settings) => settings.hours,
+                    _ => HOURS_DEFAULT,
+                };
+                lines.extend(muted(LEFT_TEXT, 0));
+                for (index, left_running) in LEFT_CHOICES.iter().enumerate() {
+                    let title = left_running_title(*left_running, hours);
+                    lines.push(choice_line(index == *choice, title));
+                }
+                lines.extend(muted(LEFT_RUNNING_NOTE, 0));
+            }
+            _ => {}
+        }
+        lines
+    }
+
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
         match &self.github {
             Load::Ready(github) if github.signed_in => self.ask = Some(Ask::SignOut),
@@ -832,6 +1040,46 @@ impl AppSetup {
                 other => {
                     field.key(other);
                     self.ask = Some(Ask::CleanupDays(field));
+                }
+            },
+            Ask::QuitChoice { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::QuitChoice {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::QuitChoice {
+                        choice: (choice + 1).min(QUIT_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.pick_quit(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::QuitChoice { choice }),
+            },
+            Ask::QuitLimit { on_quit, choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::QuitLimit {
+                        on_quit,
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::QuitLimit {
+                        on_quit,
+                        choice: (choice + 1).min(LEFT_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.pick_limit(on_quit, choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::QuitLimit { on_quit, choice }),
+            },
+            Ask::QuitHours { on_quit, mut field } => match key {
+                Key::Esc => {}
+                Key::Enter => self.submit_hours(on_quit, field, ctx),
+                other => {
+                    field.key(other);
+                    self.ask = Some(Ask::QuitHours { on_quit, field });
                 }
             },
         }
@@ -1117,6 +1365,12 @@ impl AppSetup {
         if matches!(self.cleanup, Load::Ready(_)) {
             lines.extend(under(CLEANUP_NOTE));
         }
+        lines.push(label("When quitting", self.quit_value(ctx)));
+        if let Load::Ready(settings) = &self.quit {
+            let title = left_running_title(settings.left_running, settings.hours);
+            lines.push(label("Left running", Line::raw(title)));
+            lines.extend(under(LEFT_RUNNING_NOTE));
+        }
         lines
     }
 
@@ -1175,6 +1429,19 @@ impl AppSetup {
                 lines.extend(field_lines);
                 lines.extend(sentence(
                     "Days from 1 to 365. CrazyAgent removes a finished agent's worktree that many days after it finishes.",
+                ));
+            }
+            Some(ask @ (Ask::QuitChoice { .. } | Ask::QuitLimit { .. })) => {
+                lines.extend(self.quit_rows(ask, limit, ctx))
+            }
+            Some(Ask::QuitHours { field, .. }) => {
+                let (field_lines, at) =
+                    field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
+                let top = lines.len() as u16;
+                cursor = at.map(|at| Position::new(at.x, at.y + top));
+                lines.extend(field_lines);
+                lines.extend(sentence(
+                    "Hours from 1 to 168. An agent still running that many hours after CrazyAgent quits ends with its terminal.",
                 ));
             }
             Some(Ask::HomeChoice {
@@ -1296,12 +1563,24 @@ impl Screen for AppSetup {
             }
             Some(Ask::Remove { .. }) => return vec![hint("y", "Remove"), hint("n", "Keep")],
             Some(Ask::SignOut) => return vec![hint("y", "Sign out"), hint("n", "Stay signed in")],
-            Some(Ask::CleanupDays(_)) => return vec![hint("Enter", "Save"), hint("Esc", "Cancel")],
-            Some(Ask::Sockets { .. } | Ask::Cleanup { .. }) => {
+            Some(Ask::CleanupDays(_) | Ask::QuitHours { .. }) => {
+                return vec![hint("Enter", "Save"), hint("Esc", "Cancel")];
+            }
+            Some(
+                ask @ (Ask::Sockets { .. }
+                | Ask::Cleanup { .. }
+                | Ask::QuitChoice { .. }
+                | Ask::QuitLimit { .. }),
+            ) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+                let enter = if matches!(ask, Ask::QuitChoice { .. }) {
+                    "Next"
+                } else {
+                    "Save"
+                };
                 return vec![
                     hint(&arrows, "Choose"),
-                    hint("Enter", "Save"),
+                    hint("Enter", enter),
                     hint("Esc", "Cancel"),
                 ];
             }
@@ -1342,6 +1621,7 @@ impl Screen for AppSetup {
             }
             hints.push(hint("l", "Linux sockets"));
             hints.push(hint("f", "Finished agents"));
+            hints.push(hint("q", "Quitting"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -1350,7 +1630,10 @@ impl Screen for AppSetup {
     }
 
     fn typing(&self) -> bool {
-        matches!(self.ask, Some(Ask::HomePath(_) | Ask::CleanupDays(_)))
+        matches!(
+            self.ask,
+            Some(Ask::HomePath(_) | Ask::CleanupDays(_) | Ask::QuitHours { .. })
+        )
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1402,13 +1685,17 @@ impl Screen for AppSetup {
                 self.ask_cleanup(ctx);
                 Flow::Handled
             }
+            Key::Char('q') if !self.first_run => {
+                self.ask_quit(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 5];
+            self.reading = [false; 6];
             self.sent = None;
             return Flow::Handled;
         }
@@ -1421,7 +1708,8 @@ impl Screen for AppSetup {
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
             | AppSetupEvent::SandboxSet(result)
-            | AppSetupEvent::CleanupSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::CleanupSet(result)
+            | AppSetupEvent::QuitSet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -1429,6 +1717,10 @@ impl Screen for AppSetup {
             AppSetupEvent::Cleanup(result) => {
                 self.reading[4] = false;
                 self.cleanup = loaded(result);
+            }
+            AppSetupEvent::Quit(result) => {
+                self.reading[5] = false;
+                self.quit = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -1478,6 +1770,7 @@ impl Screen for AppSetup {
             || matches!(self.github, Load::Loading)
             || matches!(self.sandbox, Load::Loading)
             || matches!(self.cleanup, Load::Loading)
+            || matches!(self.quit, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

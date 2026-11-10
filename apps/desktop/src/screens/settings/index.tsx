@@ -9,6 +9,7 @@ import { MemorySettings } from "./memory";
 import { PackSettings } from "./pack";
 import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
+import { QuittingSettings } from "./quitting";
 import { ProcessSettings } from "../process";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
@@ -31,7 +32,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   { title: "Agents", items: [
     { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
     { id: "process", label: "Process" }, { id: "pack", label: "Pack" }, { id: "memory", label: "Memory" },
-    { id: "finished", label: "Finished agents" },
+    { id: "finished", label: "Finished agents" }, { id: "quit", label: "Quitting" },
   ] },
   { title: "App", items: [
     { id: "home", label: "Projects folder" }, { id: "sandbox", label: "Sandbox" },
@@ -88,6 +89,7 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
       : tab === "sandbox" ? <SandboxSettingsTab />
       : tab === "memory" ? <MemorySettings />
       : tab === "finished" ? <FinishedAgentsSettings />
+      : tab === "quit" ? <QuittingSettings />
       : tab === "alerts" ? <TeamAlertsSettings />
       : tab === "updates" ? <UpdatesSettings />
       : <ProfileSettings />}

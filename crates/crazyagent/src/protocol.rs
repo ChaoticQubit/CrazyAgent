@@ -212,6 +212,10 @@ pub enum Command {
         settings: crate::cleanup_settings::CleanupSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerAgentQuit {
+        settings: crate::quit_settings::QuitSettings,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

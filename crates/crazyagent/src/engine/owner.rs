@@ -254,6 +254,9 @@ pub enum OwnerMutation {
     SetCleanupSettings {
         settings: crate::cleanup_settings::CleanupSettings,
     },
+    SetQuitSettings {
+        settings: crate::quit_settings::QuitSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -544,6 +547,9 @@ impl OwnerMutation {
             Self::SetCleanupSettings { settings } => Command::OwnerAgentCleanup {
                 settings: *settings,
             },
+            Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -735,6 +741,7 @@ pub enum OwnerRead {
     OwnerProfile,
     SandboxSettings,
     CleanupSettings,
+    QuitSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -833,6 +840,7 @@ impl OwnerRead {
             | Self::OwnerProfile
             | Self::SandboxSettings
             | Self::CleanupSettings
+            | Self::QuitSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1259,6 +1267,9 @@ pub enum OwnerData {
     },
     CleanupSettings {
         settings: crate::cleanup_settings::CleanupSettings,
+    },
+    QuitSettings {
+        settings: crate::quit_settings::QuitSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,
