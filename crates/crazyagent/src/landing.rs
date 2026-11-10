@@ -1892,11 +1892,11 @@ pub fn linked_teammate_place(
     }
 }
 
-/// Says whether one native teammate of a linked lead holds edits not committed on its own
-/// branch `<task branch>--<name>` yet (OP9B-C4), so its lead does not finish over work the
-/// engine could not save. Inputs: the store, the lead's worktree and git folder and a valid
-/// teammate name. Output: the answer, false for a lead in its own clone or a teammate with
-/// no worktree on its own branch, or the code that kept it unread.
+/// Says whether one native teammate of a linked lead holds edits not committed in its
+/// worktree `<worktree>/.worktrees/<name>` yet (OP9B-C4), so its lead does not finish over
+/// work the engine could not save. Inputs: the store, the lead's worktree and git folder and
+/// a valid teammate name. Output: the answer, false for a lead in its own clone or a
+/// teammate with no folder there, or the code that kept it unread.
 pub fn teammate_unsaved(
     db: &Connection,
     worktree: &Path,

@@ -209,11 +209,11 @@ pub(super) fn linked_teammate_place(
     Ok(Some((folder, own_git)))
 }
 
-/// Says whether one native teammate of a linked lead holds edits not committed on its own
-/// branch yet (OP9B-C4), read with the engine's own git under the repository's hold, as the
-/// cleanup check reads a teammate worktree. Inputs: the store, the lead's worktree and git
-/// folder and the teammate's name. Output: the answer, false for a lead in its own clone or
-/// a teammate with no worktree on its own branch, or the code that kept it unread.
+/// Says whether one native teammate of a linked lead holds edits not committed in its
+/// worktree `<worktree>/.worktrees/<name>` yet (OP9B-C4), whatever its HEAD names, read with
+/// the engine's own git under the repository's hold, as the cleanup check reads a teammate
+/// worktree. Inputs: the store, the lead's worktree and git folder and the teammate's name.
+/// Output: the answer, false for a lead in its own clone or a teammate with no folder there.
 pub(super) fn teammate_unsaved(
     db: &Connection,
     worktree: &Path,
@@ -221,16 +221,23 @@ pub(super) fn teammate_unsaved(
     name: &str,
 ) -> Result<bool, EngineError> {
     assert!(agent_git::worktree_name_valid(name));
-    let Some((folder, own_git)) = linked_teammate_place(db, worktree, git_dir, name)? else {
+    if git_dir == agent_git::git_dir(worktree) {
         return Ok(false);
-    };
+    }
+    let folder = worktree.join(agent_git::TEAMMATES_FOLDER).join(name);
+    match std::fs::symlink_metadata(&folder) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(invalid()),
+        Ok(found) if !found.is_dir() => return Ok(false),
+        Ok(_) => {}
+    }
     assert!(folder.starts_with(worktree));
     let repository = linked_repository(git_dir)?;
+    let own_git = linked_git_dir(&folder)?;
     let _held = hold(repository);
     let agent = open_agent(db, AgentKind::Sub, repository, &folder, &own_git)?;
-    let head = agent.head()?;
-    let excluded = graph_excludes(&agent.repo, &head)?;
-    Ok(!holds_only_except(&agent.repo, &head, excluded)?)
+    let excluded = graph_excludes(&agent.repo, "HEAD")?;
+    Ok(!holds_only_except(&agent.repo, "HEAD", excluded)?)
 }
 
 /// The owner checkout root a linked worktree's git folder sits in,
