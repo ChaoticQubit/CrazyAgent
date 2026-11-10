@@ -457,6 +457,10 @@ fn text(path: &Path) -> Result<String, LaunchError> {
         .ok_or_else(|| failure("launch_path_invalid"))
 }
 
+/// The settings a Codex terminal launch runs under. The working folder is recorded as
+/// untrusted, a decision that keeps Codex from loading a `.codex/config.toml` the repository
+/// brings; approval and sandbox come from these settings either way. Inputs: the request,
+/// whether context is on, the working folder and the key file. Output: the arguments.
 fn codex(
     request: &LaunchRequest,
     context: bool,
@@ -471,7 +475,7 @@ fn codex(
         .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain([
             "check_for_update_on_startup=false".to_owned(),
-            format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
+            format!("projects={{{folder}={{trust_level=\"untrusted\"}}}}"),
         ])
     {
         arguments.push("-c".to_owned());
