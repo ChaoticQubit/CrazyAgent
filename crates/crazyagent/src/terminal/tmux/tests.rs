@@ -1664,7 +1664,7 @@ impl StandIn {
         let agent = AgentId::team(1).unwrap();
         let host = Tmux::open(Some(forging_tmux(home.path(), &agent, pid)), &folder);
         let address = host.address().unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(&address).unwrap();
+        let listener = crate::spawn_gate::bind_unix_std(&address).unwrap();
         Self {
             home,
             _listener: listener,
@@ -1851,7 +1851,7 @@ fn the_server_pid_comes_only_from_a_listener_bound_at_the_socket_itself() {
     let stand_in = StandIn::naming(2);
     assert_eq!(stand_in.host.server_pid(), Some(std::process::id()));
     let other = stand_in.home.path().join("other.sock");
-    let _other = std::os::unix::net::UnixListener::bind(&other).unwrap();
+    let _other = crate::spawn_gate::bind_unix_std(&other).unwrap();
 
     std::fs::remove_file(&stand_in.address).unwrap();
     std::os::unix::fs::symlink(&other, &stand_in.address).unwrap();
