@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(all(test, unix))]
 mod tests;
 
-const KEYS: usize = 14;
+const KEYS: usize = 16;
 
 /// The git configuration every git the IDE server starts runs with, as `GIT_CONFIG_COUNT`
 /// and numbered `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` variables, which outrank every
@@ -18,11 +18,14 @@ const KEYS: usize = 14;
 /// ssh command, the pager, credential helpers, the signing programs and, last so the shim
 /// can leave it out for the project folder alone ([`shim_text`]), the hooks folder. A gc
 /// never prunes a worktree, since the IDE cannot read an agent worktree's `.git` and so
-/// sees it as missing (IN1-FN1), and every signing switch is off, so a project that signs
-/// every commit or tag still commits and tags from the IDE, unsigned (INT1-3). The
-/// server's environment adds them after its allowlist.
+/// sees it as missing (IN1-FN1), and expires no reflog, since `reflog expire --all` locks
+/// each agent's `HEAD` in its admin folder, which the IDE cannot write
+/// (IDE-SANDBOX-AGENT-FOLDERS); git skips the reflog step only when both expiry keys are
+/// `never`. Every signing switch is off, so a project that signs every commit or tag still
+/// commits and tags from the IDE, unsigned (INT1-3). The server's environment adds them
+/// after its allowlist.
 pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
-    ("GIT_CONFIG_COUNT", "14"),
+    ("GIT_CONFIG_COUNT", "16"),
     ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
     ("GIT_CONFIG_VALUE_0", "all"),
     ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
@@ -49,13 +52,17 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
     ("GIT_CONFIG_VALUE_11", "false"),
     ("GIT_CONFIG_KEY_12", "tag.forceSignAnnotated"),
     ("GIT_CONFIG_VALUE_12", "false"),
-    ("GIT_CONFIG_KEY_13", "core.hooksPath"),
-    ("GIT_CONFIG_VALUE_13", "/dev/null"),
+    ("GIT_CONFIG_KEY_13", "gc.reflogExpire"),
+    ("GIT_CONFIG_VALUE_13", "never"),
+    ("GIT_CONFIG_KEY_14", "gc.reflogExpireUnreachable"),
+    ("GIT_CONFIG_VALUE_14", "never"),
+    ("GIT_CONFIG_KEY_15", "core.hooksPath"),
+    ("GIT_CONFIG_VALUE_15", "/dev/null"),
 ];
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
 /// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
-const PROJECT_HOOKS_COUNT: &str = "13";
+const PROJECT_HOOKS_COUNT: &str = "15";
 
 /// The variable that ends git's search for a repository at the project's agents root
 /// (INT1-1): git in an agent folder, whose `.git` the IDE sandbox cannot read, then finds no
@@ -335,7 +342,7 @@ pub fn shim_text(
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
         CONFIG_ENV[2 * KEYS - 1],
-        ("GIT_CONFIG_KEY_13", "core.hooksPath")
+        ("GIT_CONFIG_KEY_15", "core.hooksPath")
     );
     assert!(
         git.is_absolute(),

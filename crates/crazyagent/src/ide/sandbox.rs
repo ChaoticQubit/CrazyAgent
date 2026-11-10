@@ -48,8 +48,9 @@ pub fn qualified() -> bool {
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
-/// config and agent git folders in the project are denied for reading ([`agent_config`]).
-/// The project's own git index and its lock stay denied: the IDE stages on a private index
+/// config and agent git folders in the project are denied for reading ([`agent_config`]),
+/// then the project's `.git/worktrees`, its agents' admin folders, for writing
+/// ([`agent_admin`]). The project's own git index and its lock stay denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
 /// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
@@ -144,6 +145,7 @@ pub fn profile(
     ));
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
+    text.push_str(&agent_admin(grants.root));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
@@ -262,6 +264,22 @@ fn agent_config(root: &Path) -> String {
     format!(
         "(deny file-read*\n  (regex #\"{agents}(.*/)?{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\")\n  (regex #\"{agents}{git}(/.*)?$\"))\n"
     )
+}
+
+/// The rule that keeps the IDE out of its agents' git state (IDE-SANDBOX-AGENT-FOLDERS (a)):
+/// nothing it runs writes at or under the project's `.git/worktrees`, in any letter case,
+/// where each linked agent's and teammate's admin folder holds its `HEAD`, `index`, refs
+/// and reflog, so no shell, real git or alias rewrites an agent's `HEAD` or plants an admin
+/// folder. Under an own clone's `.git` the base profile's nested `.git` rule already
+/// refuses every write. Input: the project folder. Output: the rule text.
+fn agent_admin(root: &Path) -> String {
+    let admins = format!(
+        "^{}/{}/{}(/.*)?$",
+        caseless(root),
+        anycase("\\.git"),
+        anycase("worktrees")
+    );
+    format!("(deny file-write*\n  (regex #\"{admins}\"))\n")
 }
 
 /// A Seatbelt regex matching `path` in any letter case, as APFS matches names, so a case
