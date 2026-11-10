@@ -1917,3 +1917,30 @@ fn model_rows_shrink_with_the_others_to_fit_one_reply() {
     assert!(fitted.is_ok());
     assert_eq!(fitted.unwrap().models.len(), 0);
 }
+
+#[test]
+fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','big',100,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','small',1,0,0,0,900)",
+    );
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["big", "small"]
+    );
+}

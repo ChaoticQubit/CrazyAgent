@@ -9,6 +9,7 @@ use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
 use crate::usage::health::{StepHealth, UsageStep};
+use crate::usage::money::MoneyView;
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
 use ratatui::Frame;
@@ -19,6 +20,17 @@ use std::collections::HashMap;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const ROWS_SHOWN: usize = 5;
 const UNITS: [(f64, &str); 3] = [(1e3, "K"), (1e6, "M"), (1e9, "B")];
+
+/// One dollar figure with its label. Input: nanodollars. Output: the text every TUI dollar uses.
+pub fn money_text(_cost_nanos: i64) -> String {
+    String::new()
+}
+
+/// One row's figures in the order the owner chose. Inputs: the tokens text, the row's dollars
+/// and the view. Output: the text. With no price date only the tokens are shown.
+pub fn figures_text(tokens: &str, _cost_nanos: i64, _money: &MoneyView) -> String {
+    tokens.to_owned()
+}
 
 /// The range the Usage summary covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

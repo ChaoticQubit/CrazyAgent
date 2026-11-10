@@ -30,7 +30,8 @@ const usage = (patch = {}) => ({
   ],
   days: [],
   lines: [{ project: "alpha", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
-  agent_lines: [], limits: [limits()], partial_homes: 0, ...patch,
+  agent_lines: [], limits: [limits()], partial_homes: 0,
+  money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
 const metrics = (patch = {}) => ({
   running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR,
@@ -179,4 +180,72 @@ test("both Metrics views open on 7 days, as the mockup does", () => {
     const markup = renderToStaticMarkup(createElement(view.MetricsView, props));
     assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
   }
+});
+
+const LABEL = "Estimated cost at API prices";
+const bundled = (patch = {}) => ({ settings: { main_number: "dollars", prices: "bundled" }, shown: "dollars", as_of: "2026-11-08", cost_nanos: 5_000_000_000, unpriced_tokens: 0, ...patch });
+const tokensLead = () => bundled({ settings: { main_number: "tokens", prices: "bundled" }, shown: "tokens" });
+const off = () => ({ settings: { main_number: "dollars", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 });
+const priced = (money) => render({
+  usage: { kind: "ok", value: usage({ money, agents: usage().agents.map((one) => ({ ...one, cost_nanos: 2_000_000_000 })) }) },
+  metrics: { kind: "ok", value: metrics({ series: metrics().series.map((bar) => ({ ...bar, cost_nanos: 1_000_000_000 })) }) },
+  notices: "the notice text",
+});
+
+test("a chart bar keeps its dollars, an empty bar has none", () => {
+  const bars = view.chartBars(metrics({ bucket_ms: HOUR, series: [{ start_ms: SINCE, tokens: tokens({ input: 1 }), cost_nanos: 7 }] }), SINCE, SINCE + HOUR);
+  assert.deepEqual(bars.map((bar) => bar.cost_nanos), [7, 0]);
+});
+
+test("dollars lead the first tile, the chart and the table, each with its label", () => {
+  const markup = priced(bundled());
+  assert.match(markup, new RegExp(`<span class="mx-tile-key">${LABEL}</span><span class="mx-tile-value">\\$5\\.00</span>`, "u"));
+  assert.match(markup, new RegExp(`${LABEL} over time`, "u"));
+  assert.match(markup, new RegExp(`<title>[^<]*\\$1\\.00 \\(${LABEL}, prices as of 2026-11-08\\)</title>`, "u"));
+  assert.match(markup, new RegExp(`<th scope="col" class="num">${LABEL}</th>`, "u"));
+  assert.match(markup, new RegExp(`title="${LABEL}, prices as of 2026-11-08"><b>\\$2\\.00</b>`, "u"));
+  assert.doesNotMatch(markup, /mx-legend/u);
+});
+
+test("tokens lead when chosen and the dollars beside them still carry the label", () => {
+  const markup = priced(tokensLead());
+  assert.match(markup, /<span class="mx-tile-key">Tokens<\/span><span class="mx-tile-value">2\.3K<\/span>/u);
+  assert.match(markup, new RegExp(`<div class="mx-tile" title="${LABEL}, prices as of 2026-11-08"><span class="mx-tile-key">Tokens</span>`, "u"));
+  assert.match(markup, /<span class="mx-tile-detail">\$5\.00 · /u);
+  assert.match(markup, /Tokens over time/u);
+  assert.match(markup, /mx-legend/u);
+  assert.match(markup, new RegExp(`title="${LABEL}, prices as of 2026-11-08"><b>[0-9.]+K?</b><small> \\$2\\.00</small>`, "u"));
+  assert.match(markup, /aria-label="Tokens per two hours/u);
+});
+
+test("the chart names its dollars for a screen reader when dollars lead", () => {
+  assert.match(priced(bundled()), new RegExp(`aria-label="${LABEL} per two hours"`, "u"));
+});
+
+test("with prices off the page has no dollar, no label and no main number switch", () => {
+  const markup = priced(off());
+  assert.doesNotMatch(markup, /\$\d/u);
+  assert.doesNotMatch(markup, new RegExp(LABEL, "u"));
+  assert.doesNotMatch(markup, /Prices as of/u);
+  assert.doesNotMatch(markup, /aria-label="Main number"/u);
+  assert.match(markup, /aria-label="Prices"/u);
+});
+
+test("both money switches show while prices are on", () => {
+  const markup = priced(bundled());
+  assert.match(markup, /aria-label="Main number"/u);
+  assert.match(markup, /aria-label="Prices"/u);
+});
+
+test("the page says the price date, what has no price and credits CodeBurn", () => {
+  const markup = priced(bundled({ unpriced_tokens: 1200 }));
+  assert.match(markup, /Prices as of 2026-11-08\. Off hides every dollar\. Tokens keep counting\./u);
+  assert.match(markup, /1\.2K tokens have no price, so they are left out of the dollars\./u);
+  assert.match(markup, /<details class="mx-credit"><summary>Counting rules adapted from CodeBurn \(MIT\)<\/summary><pre>the notice text<\/pre><\/details>/u);
+});
+
+test("an Other row holds the dollars a capped list leaves out", () => {
+  const value = usage({ money: bundled(), agents: [{ ...usage().agents[0], cost_nanos: 2_000_000_000 }] });
+  const markup = render({ usage: { kind: "ok", value } });
+  assert.match(tableText(markup), /Other, not listed \$3\.00/u);
 });
