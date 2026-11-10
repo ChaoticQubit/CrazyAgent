@@ -3616,13 +3616,20 @@ impl TeamRuntime {
     /// starts it again only once the owner turns it on, and says why in one team note and
     /// the master's problem line. Takes the project and the reason. Returns any SQLite failure.
     fn live_off(&mut self, project: &ProjectId, reason: &str) -> Result<(), EngineError> {
-        super::master::set_live(&self.connection, project, false)?;
-        self.live_starts.remove(project);
         let line = full_stop(format!(
             "{LIVE_STOPPED}: {reason}. Start it again from the master view"
         ));
-        if super::master::problem(&self.connection, project, Some(&line))? {
-            self.note(project, &line)?;
+        self.live_ended(project, &line)
+    }
+
+    /// Turns a project's live master off, so the runtime starts it again only once the owner
+    /// turns it on, and says why in one team note and the master's problem line. Takes the
+    /// project and the line. Returns any SQLite failure.
+    fn live_ended(&mut self, project: &ProjectId, line: &str) -> Result<(), EngineError> {
+        super::master::set_live(&self.connection, project, false)?;
+        self.live_starts.remove(project);
+        if super::master::problem(&self.connection, project, Some(line))? {
+            self.note(project, line)?;
         }
         Ok(())
     }
@@ -5224,7 +5231,7 @@ impl TeamRuntime {
             worker.stopping = true;
             let _ = worker.orders.send(Order::Stop);
             if live {
-                self.live_off(project, &format!("it was idle for {}", choice.label()))?;
+                self.live_ended(project, &super::master::idle_stopped_line(choice.label()))?;
             }
         }
         Ok(())
@@ -9766,7 +9773,7 @@ const RESUME_REFUSED: &str = "launch_resume_unavailable";
 const LIVE_STARTS_MAX: usize = 3;
 const GIT_POINTER_BYTES_MAX: u64 = 4096;
 const LIVE_STARTS_WINDOW: Duration = Duration::from_secs(10 * 60);
-const LIVE_STOPPED: &str = "The live master was turned off";
+const LIVE_STOPPED: &str = super::master::LIVE_STOPPED;
 const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
 
 /// Says which of the owner's time limits cut a turn and where to change it. Inputs: the
