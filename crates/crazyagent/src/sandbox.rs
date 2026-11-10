@@ -23,6 +23,8 @@ pub mod model_proxy;
 pub mod policy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
+#[cfg(target_os = "macos")]
+pub mod tool_cache;
 pub mod toolchains;
 pub mod warden;
 #[cfg(target_os = "windows")]
@@ -776,6 +778,7 @@ pub struct ProjectSandbox {
     teammates: bool,
     answers: Option<PathBuf>,
     setup: Option<TeammatesSetup>,
+    tool_cache: Option<(PathBuf, bool)>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -850,6 +853,7 @@ impl ProjectSandbox {
             teammates: false,
             answers: None,
             setup: None,
+            tool_cache: None,
         })
     }
 
@@ -1272,6 +1276,24 @@ impl ProjectSandbox {
         }
         assert!(skipped <= paths.len() && self.tool_roots.len() <= TOOL_ROOTS_MAX);
         Ok((self, skipped))
+    }
+
+    /// Grants the agent's tool cache (T8, not written yet). Inputs: the cache root and
+    /// whether its uv markers are in place. Output: the sandbox.
+    pub fn allow_tool_cache(self, _root: &Path, _uv: bool) -> Result<Self, SandboxError> {
+        Ok(self)
+    }
+
+    /// The program the agent's PATH finds, if the engine may run it (T8, not written yet).
+    /// Input: the program name. Output: None.
+    pub fn tool_program(&self, _name: &str) -> Option<PathBuf> {
+        None
+    }
+
+    /// A found program the engine may run (T8, not written yet). Input: the path. Output:
+    /// None.
+    pub fn trusted_program(&self, _found: &Path) -> Option<PathBuf> {
+        None
     }
 
     /// Adds the agent's short writable temp folder (see [`toolchains::make_tmp`]), which

@@ -1065,6 +1065,24 @@ fn a_grafts_file_does_not_hide_an_agent_gitlink_at_the_turn_end_or_at_accept() {
     assert_eq!(case.tip(), tip);
 }
 
+/// T8 R1: a uv cache bucket an agent moved into its worktree, with its engine-made `.git`
+/// link to `/dev/null`, opens a set of plain files with no `.git` path and no gitlink.
+#[test]
+fn a_moved_uv_bucket_opens_a_set_of_plain_files() {
+    let case = Case::new();
+    case.start();
+    let bucket = case.workspace.worktree.join("moved");
+    write(&bucket.join("a.txt"), "a\n");
+    std::os::unix::fs::symlink("/dev/null", bucket.join(".git")).unwrap();
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let listed = case.owner(&["ls-tree", "-r", &case.view(&id).head]);
+    assert!(listed.contains("moved/a.txt"), "{listed}");
+    assert!(
+        !listed.contains(".git") && !listed.contains("160000"),
+        "{listed}"
+    );
+}
+
 /// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
 fn plant_links(folder: &Path, links: &[(&str, &str)]) {
     for (link, target) in links {

@@ -151,6 +151,40 @@ impl AgentNetwork {
     }
 }
 
+/// Who shares one project's tool cache, the uv cache and pnpm store a confined agent's
+/// tools write (T8): Shared, the default, gives one cache to the project's agents at the
+/// same access level that write the same kind of tree (the project folder, a linked
+/// worktree, an own clone or a clone teammate); One per agent gives each agent its own. A
+/// Full access agent gets none and uses its tools' own defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCacheScope {
+    #[default]
+    Shared,
+    PerAgent,
+}
+
+impl ToolCacheScope {
+    /// Every choice, the default first.
+    pub const ALL: [Self; 2] = [Self::Shared, Self::PerAgent];
+
+    /// The choice's stable id, as stored and sent to clients.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::PerAgent => "per_agent",
+        }
+    }
+
+    /// The name shown to the owner.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared by agents with the same access",
+            Self::PerAgent => "One per agent",
+        }
+    }
+}
+
 /// How far a sandboxed IDE server or terminal at a level reaches: nothing at Sandboxed, and
 /// the project's network choice at Own branch through [`AgentNetwork::sandbox`], with no
 /// model port. A Full access process has no Seatbelt for a choice to limit, so it never

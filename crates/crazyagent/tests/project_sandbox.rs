@@ -2,7 +2,10 @@
 
 use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    agent_env, tool_cache,
 };
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -68,6 +71,249 @@ fn quoted(path: &Path) -> String {
     let text = path.to_str().unwrap();
     assert!(!text.contains('\''));
     format!("'{text}'")
+}
+
+/// A tool cache prepared under an engine runtime folder beside the case, with the real uv
+/// the agent's PATH finds when `uv` is set. A machine without uv fails the rows that ask
+/// for it instead of skipping them (T8).
+fn tool_cache(case: &Case, uv: bool) -> tool_cache::Prepared {
+    let runtime = case.root.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let base = sandbox(case, SandboxNetwork::Only(Vec::new()));
+    let program = uv.then(|| base.tool_program("uv").expect("uv missing"));
+    tool_cache::prepare(&runtime, "project-1", "sandboxed-root", program.as_deref()).unwrap()
+}
+
+/// The variables a sandbox's commands start with, by name.
+fn command_env(sandbox: &ProjectSandbox, profile: &Path) -> BTreeMap<String, String> {
+    sandbox
+        .command(profile, Path::new("/usr/bin/true"))
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((
+                name.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// T8 row 1 and C1: the tool cache is one more writable root, listed as a non-working-tree
+/// root in the SM1-R rule, whose other lines stay as they were.
+#[test]
+fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
+    let case = case();
+    let cache = tool_cache(&case, false);
+    let without = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let with = without
+        .clone()
+        .allow_tool_cache(&cache.root, cache.uv)
+        .unwrap();
+    let rule = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| line.contains("[gG][iI][tT](/.*)?$"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let (before, after) = (rule(&without.profile()), rule(&with.profile()));
+    let added: Vec<&String> = after.iter().filter(|line| !before.contains(line)).collect();
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(added.len(), 1);
+    assert!(added[0].contains("runtime") && added[0].contains("/(.+/)?"));
+    assert!(
+        with.profile()
+            .contains(&format!("(subpath \"{}\")", cache.root.display()))
+    );
+    assert!(with.writes(&cache.root.join("uv")) && !without.writes(&cache.root));
+}
+
+/// T8: a tool cache inside another root, or a second one, is refused.
+#[test]
+fn a_tool_cache_inside_another_root_or_a_second_one_is_refused() {
+    let case = case();
+    let cache = tool_cache(&case, false);
+    let inside = case.project.join("cache");
+    fs::create_dir(&inside).unwrap();
+    let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    assert!(base.clone().allow_tool_cache(&inside, false).is_err());
+    assert!(base.clone().allow_tool_cache(&case.home, false).is_err());
+    let once = base.allow_tool_cache(&cache.root, false).unwrap();
+    assert!(once.allow_tool_cache(&cache.root, false).is_err());
+}
+
+/// T8 row 5 and P5: a sandbox with a tool cache points `pnpm_config_store_dir` into it, and
+/// `UV_CACHE_DIR` only when its uv markers are in place; one without sets neither; and a
+/// harness's own values never replace the ones the cache set.
+#[test]
+fn a_tool_cache_sets_the_store_and_uv_cache_variables_a_harness_cannot_replace() {
+    let case = case();
+    let cache = tool_cache(&case, false);
+    let profile = case.profiles.join("env.sb");
+    let store = cache.root.join("pnpm-store").display().to_string();
+    let uv = cache.root.join("uv").display().to_string();
+    let none = command_env(&sandbox(&case, SandboxNetwork::Only(Vec::new())), &profile);
+    assert!(!none.contains_key("UV_CACHE_DIR") && !none.contains_key("pnpm_config_store_dir"));
+    let pnpm_only = command_env(
+        &sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .allow_tool_cache(&cache.root, false)
+            .unwrap(),
+        &profile,
+    );
+    assert_eq!(pnpm_only.get("pnpm_config_store_dir"), Some(&store));
+    assert!(!pnpm_only.contains_key("UV_CACHE_DIR"));
+    let both = command_env(
+        &sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .allow_tool_cache(&cache.root, true)
+            .unwrap(),
+        &profile,
+    );
+    assert_eq!(both.get("UV_CACHE_DIR"), Some(&uv));
+    assert_eq!(both.get("pnpm_config_store_dir"), Some(&store));
+    let base = [
+        ("UV_CACHE_DIR", OsStr::new(&uv)),
+        ("pnpm_config_store_dir", OsStr::new(&store)),
+    ];
+    let harness = [
+        (OsStr::new("UV_CACHE_DIR"), Some(OsStr::new("/elsewhere"))),
+        (OsStr::new("pnpm_config_store_dir"), None),
+    ];
+    let pinned = agent_env(&base, harness).unwrap();
+    for (name, value) in base {
+        assert!(pinned.contains(&(name.into(), value.to_owned())), "{name}");
+    }
+    let passed = agent_env(&[], harness).unwrap();
+    assert!(passed.contains(&("UV_CACHE_DIR".into(), "/elsewhere".into())));
+}
+
+/// T8 C3: the engine runs a program only from a read-only root the agent cannot write.
+#[test]
+fn the_engine_trusts_a_tool_only_outside_every_agent_root() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let planted = case.project.join("uv");
+    fs::write(&planted, "#!/bin/sh\n").unwrap();
+    assert_eq!(sandbox.trusted_program(&planted), None);
+    assert_eq!(
+        sandbox.trusted_program(&case.outside.join("fixture.txt")),
+        None
+    );
+    assert_eq!(
+        sandbox.trusted_program(Path::new("/usr/bin/true")),
+        Some(PathBuf::from("/usr/bin/true"))
+    );
+}
+
+/// T8 row 3 (P1b as a row): under the real agent profile uv runs on a primed tool cache,
+/// `tool list` and `lock` alike, and fails on its marker in a cache the engine did not
+/// prime. Fails, not skips, without uv.
+#[test]
+fn uv_runs_on_a_primed_tool_cache_under_the_agent_profile_and_fails_on_an_unprimed_one() {
+    let case = case();
+    let cache = tool_cache(&case, true);
+    assert!(cache.uv && cache.primed);
+    let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let uv = base.tool_program("uv").unwrap();
+    let sandbox = base.allow_tool_cache(&cache.root, cache.uv).unwrap();
+    let profile = case.profiles.join("uv.sb");
+    fs::write(
+        case.project.join("pyproject.toml"),
+        "[project]\nname = \"pkg\"\nversion = \"0.1.0\"\nrequires-python = \">=3.9\"\ndependencies = []\n",
+    )
+    .unwrap();
+    for args in ["tool list", "lock"] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("UV_OFFLINE=1 {} {args}", quoted(&uv)),
+        );
+        assert!(
+            output.status.success(),
+            "{args}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(case.project.join("uv.lock").is_file());
+    let unprimed = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "UV_OFFLINE=1 UV_CACHE_DIR={} {} tool list",
+            quoted(&case.tmp.join("fresh")),
+            quoted(&uv)
+        ),
+    );
+    assert!(!unprimed.status.success());
+    assert!(String::from_utf8_lossy(&unprimed.stderr).contains("Operation not permitted"));
+}
+
+/// T8 R1 (C1): the engine-made marker, the only `.git` entry in an agent root, cannot be
+/// removed, moved or pointed elsewhere under the agent profile, and writing through it
+/// changes nothing. A bucket moved into the agent's tree keeps it, and the owner's git
+/// stages the bucket's files as plain files, never a `.git` path or a gitlink.
+#[test]
+fn the_uv_marker_cannot_be_changed_and_a_moved_bucket_stages_as_plain_files() {
+    let case = case();
+    let cache = tool_cache(&case, true);
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_tool_cache(&cache.root, cache.uv)
+        .unwrap();
+    let profile = case.profiles.join("marker.sb");
+    let bucket = cache.root.join("uv").join("sdists-v10");
+    let marker = bucket.join(".git");
+    for script in [
+        format!("rm -f {}", quoted(&marker)),
+        format!("mv {} {}", quoted(&marker), quoted(&bucket.join("moved"))),
+        format!("ln -sfn /etc {}", quoted(&marker)),
+    ] {
+        assert!(
+            !run(&sandbox, &profile, &script).status.success(),
+            "{script}"
+        );
+    }
+    let _ = run(
+        &sandbox,
+        &profile,
+        &format!("printf 'gitdir: /x' > {}", quoted(&marker)),
+    );
+    assert_eq!(fs::read_link(&marker).unwrap(), Path::new("/dev/null"));
+    let git = |args: &[&str]| {
+        let output = owner_git(&case.project, &case.home, args);
+        assert!(output.status.success(), "{args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    let moved = case.project.join("moved");
+    let into = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mv {} {} && echo data > {}",
+            quoted(&bucket),
+            quoted(&moved),
+            quoted(&moved.join("a.txt"))
+        ),
+    );
+    assert!(
+        into.status.success(),
+        "{}",
+        String::from_utf8_lossy(&into.stderr)
+    );
+    assert!(
+        !run(
+            &sandbox,
+            &profile,
+            &format!("rm -f {}", quoted(&moved.join(".git")))
+        )
+        .status
+        .success()
+    );
+    git(&["add", "-A"]);
+    let staged = git(&["ls-files", "-s"]);
+    assert!(staged.contains("moved/a.txt"), "{staged}");
+    assert!(
+        !staged.contains(".git") && !staged.contains("160000"),
+        "{staged}"
+    );
 }
 
 /// land-19 r2 M1 and L1: in a project with no `.git/info` or `.git/objects/info`, as a clone
