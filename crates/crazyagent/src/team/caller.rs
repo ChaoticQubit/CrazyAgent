@@ -701,7 +701,7 @@ fn pane_of(
     None
 }
 
-fn process_parents() -> Option<HashMap<u32, u32>> {
+pub(crate) fn process_parents() -> Option<HashMap<u32, u32>> {
     let output = crate::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "pid=,ppid="])
