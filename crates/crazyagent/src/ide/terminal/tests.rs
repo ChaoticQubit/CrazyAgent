@@ -197,6 +197,44 @@ fn the_sandboxed_terminal_cannot_commit() {
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
+/// The owner's login shell in a Sandboxed terminal pane starts with one line saying the
+/// terminal cannot stage or commit, printed inside the pane, since the pane host repaints
+/// the terminal as it attaches and wipes anything written from outside.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
+    let case = Case::new();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let pane = ide_shell::interactive(&ide_shell::Launch {
+        root: &case.root,
+        project: &project,
+        folder: &case.folder,
+        cwd: &case.folder,
+        shell: std::path::Path::new("/bin/sh"),
+        arguments: &[],
+        incoming: &[],
+        extra_reads: &[],
+    })
+    .unwrap();
+    let mut command = std::process::Command::new(&pane.argv[0]);
+    command
+        .args(&pane.argv[1..])
+        .current_dir(&pane.cwd)
+        .env_clear()
+        .envs(pane.env.iter().map(|(name, value)| (name, value)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        said.lines().next(),
+        Some("This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
+        "{output:?}"
+    );
+}
+
 /// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
 /// denies stands in its way as the owner's home does for the IDE server's git.
 #[cfg(target_os = "macos")]
