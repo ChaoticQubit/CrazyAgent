@@ -1,10 +1,10 @@
 use super::live_claude_tests::processes_with;
-use super::managed_agent::{ManagedAgent, SignedIn, codex, shown};
+use super::managed_agent::{Closing, ManagedAgent, SignedIn, codex, real_codex, shown};
 use super::{Report, TurnEnd};
 use crate::team::{AgentRole, BackgroundAtEnd};
 use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{FOLDER, Host};
-use std::path::Path;
+use crate::terminal::{AgentId, FOLDER, Host};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,14 +13,22 @@ const CODEX_TURN: Duration = Duration::from_secs(180);
 const REAPED: Duration = Duration::from_secs(10);
 const MARKER_GRACE: Duration = Duration::from_secs(5);
 const FIRST_PROMPT: &str = "Reply with exactly the word OK and nothing else.";
+/// The title row of Codex's folder access screen, as the engine's own screen read finds it.
+const FOLDER_SCREEN_TITLE: &str = "Folder access";
+/// How often a row reads its agent's pane. The engine leaves the folder access screen up
+/// for at least the 700 ms its first screen must stay quiet before it answers.
+const SCREEN_LOOK: Duration = Duration::from_millis(100);
 
-/// Reads every rollout Codex wrote below a sessions folder. Input: the folder.
-/// Output: the rollouts' text, joined.
-fn rollouts(folder: &Path) -> String {
-    let mut text = String::new();
+/// Lists every `.jsonl` file below a folder, none when the folder does not exist.
+/// Input: the folder. Output: the files' paths.
+fn jsonl_files(folder: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
     let mut pending = vec![folder.to_path_buf()];
     while let Some(folder) = pending.pop() {
-        for item in std::fs::read_dir(&folder).unwrap() {
+        let Ok(items) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for item in items {
             let path = item.unwrap().path();
             if path.is_dir() {
                 pending.push(path);
@@ -28,11 +36,20 @@ fn rollouts(folder: &Path) -> String {
                 .extension()
                 .is_some_and(|extension| extension == "jsonl")
             {
-                text.push_str(&std::fs::read_to_string(&path).unwrap());
+                files.push(path);
             }
         }
     }
-    text
+    files
+}
+
+/// Reads every rollout Codex wrote below a sessions folder. Input: the folder.
+/// Output: the rollouts' text, joined.
+fn rollouts(folder: &Path) -> String {
+    jsonl_files(folder)
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect()
 }
 
 /// A real Codex team agent runs a turn with the launch files of its own home read-only and
@@ -112,10 +129,103 @@ fn running(command: &str) -> bool {
     })
 }
 
-/// A real Codex sub-agent in a tmux pane on a host of its own, as the owner's agents run.
-/// Input: the prefix of its temporary folder. Output: that folder, which must outlive the
-/// agent, the host and the prepared agent.
-fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Arc<dyn Host>, ManagedAgent) {
+/// What the real Codex wrote of its sessions under an agent home: each rollout's path, the
+/// `cli_version` each session record names and the text of each assistant message.
+struct CodexTrace {
+    rollouts: Vec<PathBuf>,
+    versions: Vec<String>,
+    said: Vec<String>,
+}
+
+impl CodexTrace {
+    /// Reads the rollouts under an agent home's `sessions` folder. Input: the agent home.
+    /// Output: the trace, empty when Codex wrote none.
+    fn of(home: &Path) -> Self {
+        let rollouts = jsonl_files(&home.join("sessions"));
+        let (mut versions, mut said) = (Vec::new(), Vec::new());
+        for path in &rollouts {
+            for line in std::fs::read_to_string(path).unwrap().lines() {
+                let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let payload = &entry["payload"];
+                if entry["type"] == "session_meta" {
+                    versions.extend(payload["cli_version"].as_str().map(str::to_owned));
+                } else if entry["type"] == "response_item"
+                    && payload["type"] == "message"
+                    && payload["role"] == "assistant"
+                {
+                    said.extend(
+                        payload["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|part| part["type"] == "output_text")
+                            .filter_map(|part| part["text"].as_str().map(str::to_owned)),
+                    );
+                }
+            }
+        }
+        Self {
+            rollouts,
+            versions,
+            said,
+        }
+    }
+
+    /// Checks that the real Codex itself gave a row's reply: a rollout whose session record
+    /// names a Codex version, and an assistant message there holding `word`. Input: the
+    /// word. Output: none; prints the rollouts and the version.
+    fn assert_said(&self, word: &str) {
+        println!(
+            "codex rollouts={:?} cli_version={:?}",
+            self.rollouts, self.versions
+        );
+        assert!(!self.rollouts.is_empty(), "Codex wrote no rollout");
+        assert!(
+            self.versions.iter().any(|version| !version.is_empty()),
+            "no rollout names its Codex version"
+        );
+        assert!(
+            self.said.iter().any(|text| text.contains(word)),
+            "no assistant message in the rollouts holds {word}: {:?}",
+            self.said
+        );
+    }
+}
+
+/// Watches a pane for Codex's folder access screen until `done` is set, reading its visible
+/// screen every `SCREEN_LOOK` as the engine reads it. Inputs: the pane's host and name and
+/// the stop flag. Output: the watch, whose result is how many separate times the screen
+/// appeared.
+fn folder_screens(
+    host: Arc<dyn Host>,
+    pane: AgentId,
+    done: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<usize> {
+    std::thread::spawn(move || {
+        let (mut screens, mut showing) = (0, false);
+        while !done.load(Ordering::SeqCst) {
+            if let Ok(screen) = host.screen(&pane) {
+                let menu = crate::team::events::screen_rows(&screen)
+                    .iter()
+                    .any(|row| row.trim() == FOLDER_SCREEN_TITLE);
+                if menu && !showing {
+                    screens += 1;
+                }
+                showing = menu;
+            }
+            std::thread::sleep(SCREEN_LOOK);
+        }
+        screens
+    })
+}
+
+/// A real Codex sub-agent in a tmux pane on a host of its own, as the owner's agents run,
+/// refused while `CRAZYAGENT_CODEX` names another program. Input: the prefix of its
+/// temporary folder. Output: that folder, the host, which closes when dropped, and the
+/// prepared agent, to be dropped in reverse order.
+fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Closing, ManagedAgent) {
     let root = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -123,30 +233,33 @@ fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Arc<dyn Host>, ManagedAgent) {
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
     let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
-    let agent = ManagedAgent::in_pane("codex", &codex(), host.clone(), AgentRole::Sub);
-    (root, host, agent)
+    let agent = ManagedAgent::in_pane("codex", &real_codex(), host.clone(), AgentRole::Sub);
+    (root, Closing::new(host), agent)
 }
 
-/// SECAUDIT-5-LIVE G1: under Stop, a real Codex sub-agent in a pane, on the owner's
+/// SECAUDIT-5-LIVE G1: under Stop, the real Codex as a sub-agent in a pane, on the owner's
 /// signed-in account, runs a script with its shell tool inside the agent's Seatbelt profile
 /// and its process-info deny. The script leaves a `nohup` sleep and a sleep in a session of
-/// its own. The turn ends in success with no problem, both sleeps were seen running, and
-/// within `REAPED` after the turn no process names either sleep or the agent's home. Runs in
-/// a live window only.
+/// its own. The turn ends in success with no problem, the real Codex's rollout holds the
+/// reply, both sleeps were seen running, and within `REAPED` after the turn no process names
+/// either sleep or the agent's home. Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
     let (_root, host, mut agent) = in_a_pane("ca-live-codex-bg-");
     agent.background = BackgroundAtEnd::Stop;
     let mut signed_in = SignedIn::codex();
-    let tag = std::process::id() % 100_000;
-    let kept = format!("/bin/sleep 300.{tag:05}");
-    let own_session = format!("/bin/sleep 301.{tag:05}");
+    let tag = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let kept = format!("/bin/sleep 300.{tag:09}");
+    let own_session = format!("/bin/sleep 301.{tag:09}");
     let script = agent.working_dir.join("background.sh");
     std::fs::write(
         &script,
         format!(
-            "/usr/bin/nohup {kept} > /dev/null 2>&1 &\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid(); exec \"/bin/sleep\", \"301.{tag:05}\"' > /dev/null 2>&1 &\necho started\n"
+            "/usr/bin/nohup {kept} > /dev/null 2>&1 &\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid(); exec \"/bin/sleep\", \"301.{tag:09}\"' > /dev/null 2>&1 &\necho started\n"
         ),
     )
     .unwrap();
@@ -178,8 +291,6 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
     let (reports, problem) = agent.run_turns(None, turns, CODEX_TURN);
     done.store(true, Ordering::SeqCst);
     watcher.join().unwrap();
-    let (text, end, cause) = finished(&reports);
-    println!("real codex background stop: end={end:?} cause={cause:?} reply={text:?}");
     let deadline = Instant::now() + REAPED;
     let left = loop {
         let mut left = processes_with(&kept);
@@ -190,10 +301,13 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
         }
         std::thread::sleep(Duration::from_millis(200));
     };
-    host.close(&[]).unwrap();
+    host.close();
+    let (text, end, cause) = finished(&reports);
+    println!("real codex background stop: end={end:?} cause={cause:?} reply={text:?}");
     assert_eq!(problem, None);
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains("STARTED"), "{text}");
+    CodexTrace::of(&agent.home).assert_said("STARTED");
     assert!(
         seen[0].load(Ordering::SeqCst),
         "the agent's nohup sleep never ran: {text}"
@@ -208,71 +322,130 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
     );
 }
 
-/// Runs the first turn of a real Codex sub-agent in a pane on the owner's signed-in
-/// account. With `planted`, its worktree first gets a repository `.codex` whose MCP server
-/// would create a marker file in the worktree when started. Inputs: whether to plant it and
-/// the launch's name. Output: the turn's reply, end and cause, the problem that ended the
-/// worker, and whether the marker appeared by `MARKER_GRACE` after the turn.
-fn first_turn_in_a_pane(
-    planted: bool,
-    launch: &str,
-) -> (String, TurnEnd, Option<String>, Option<String>, bool) {
+/// What one first turn of a real Codex sub-agent in a pane showed: its reply, end and
+/// cause, the problem that ended the worker, how many separate times the folder access
+/// screen appeared, whether the planted server's marker appeared, and what Codex wrote.
+struct FirstTurn {
+    text: String,
+    end: TurnEnd,
+    cause: Option<String>,
+    problem: Option<String>,
+    screens: usize,
+    ran: bool,
+    trace: CodexTrace,
+}
+
+/// Control for a planted `.codex`: runs the MCP server command the planted config names,
+/// read back from that config, inside the agent's own Seatbelt profile and worktree, and
+/// checks it makes its marker, then removes the marker. So a marker missing after the
+/// turn means Codex never started the server, not that the command cannot run there.
+/// Inputs: the agent, the planted config and the marker. Output: none.
+fn planted_server_makes_its_marker(agent: &ManagedAgent, config: &str, marker: &Path) {
+    let table: toml::Table = toml::from_str(config).unwrap();
+    let server = &table["mcp_servers"]["plant"];
+    let program = server["command"].as_str().unwrap();
+    let arguments = server["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|argument| argument.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let ran =
+        crate::spawn_gate::output(&mut agent.command(Path::new(program), &arguments)).unwrap();
+    assert!(
+        ran.status.success() && marker.exists(),
+        "control: the planted server's own command made no marker inside the agent's sandbox"
+    );
+    std::fs::remove_file(marker).unwrap();
+}
+
+/// Runs the first turn of the real Codex as a sub-agent in a pane on the owner's signed-in
+/// account, watching the pane for the folder access screen. With `planted`, its worktree
+/// first gets a repository `.codex` naming an MCP server that would create a marker file
+/// in the worktree when started, and the control shows that command makes the marker.
+/// Inputs: whether to plant it and the launch's name. Output: what the turn showed, the
+/// marker read by `MARKER_GRACE` after the turn.
+fn first_turn_in_a_pane(planted: bool, launch: &str) -> FirstTurn {
     let (_root, host, mut agent) = in_a_pane("ca-live-codex-pane-");
     let mut signed_in = SignedIn::codex();
     let marker = agent.working_dir.join("plant-started");
     if planted {
         let folder = agent.working_dir.join(".codex");
         std::fs::create_dir(&folder).unwrap();
-        std::fs::write(
-            folder.join("config.toml"),
-            format!(
-                "[mcp_servers.plant]\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"/usr/bin/touch {}; /bin/sleep 20\"]\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
+        let config = format!(
+            "[mcp_servers.plant]\ncommand = \"/usr/bin/touch\"\nargs = [{}]\n",
+            serde_json::to_string(marker.to_str().unwrap()).unwrap()
+        );
+        std::fs::write(folder.join("config.toml"), &config).unwrap();
+        planted_server_makes_its_marker(&agent, &config, &marker);
     }
+    let (pane_host, pane) = agent.plan.pane.clone().expect("a pane agent has its pane");
+    let done = Arc::new(AtomicBool::new(false));
+    let watch = folder_screens(pane_host, pane, done.clone());
     let turns = vec![(FIRST_PROMPT, signed_in.acquire(launch))];
     let (reports, problem) = agent.run_turns(None, turns, CODEX_TURN);
+    done.store(true, Ordering::SeqCst);
+    let screens = watch.join().unwrap();
     let deadline = Instant::now() + MARKER_GRACE;
     let mut ran = marker.exists();
     while !ran && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
         ran = marker.exists();
     }
-    host.close(&[]).unwrap();
+    host.close();
     let (text, end, cause) = finished(&reports);
-    (text, end, cause, problem, ran)
+    FirstTurn {
+        text,
+        end,
+        cause,
+        problem,
+        screens,
+        ran,
+        trace: CodexTrace::of(&agent.home),
+    }
 }
 
-/// CODEX-UNTRUSTED-LIVE G3: a real Codex sub-agent on the owner's signed-in account starts
-/// in a pane in a worktree with no `.codex`, which its launch records trusted, so no folder
-/// access screen holds its first prompt: the turn ends in success with the asked word. Runs
-/// in a live window only.
+/// CODEX-UNTRUSTED-LIVE G3: the real Codex as a sub-agent on the owner's signed-in account
+/// starts in a pane in a worktree with no `.codex`, which its launch records trusted. The
+/// folder access screen never shows in the pane, the first prompt ends in success with the
+/// asked word, and the real Codex's rollout holds that reply. Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 fn a_real_codex_agent_in_a_pane_takes_its_first_prompt_with_no_folder_screen() {
-    let (text, end, cause, problem, _) = first_turn_in_a_pane(false, "codex-live-pane-trusted");
-    println!("real codex pane, no .codex: end={end:?} cause={cause:?} reply={text:?}");
-    assert_eq!(problem, None);
-    assert_eq!(end, TurnEnd::Success, "{cause:?}");
-    assert!(text.contains("OK"), "{text}");
+    let turn = first_turn_in_a_pane(false, "codex-live-pane-trusted");
+    println!(
+        "real codex pane, no .codex: end={:?} cause={:?} reply={:?} folder_screens={}",
+        turn.end, turn.cause, turn.text, turn.screens
+    );
+    assert_eq!(turn.problem, None);
+    assert_eq!(turn.end, TurnEnd::Success, "{:?}", turn.cause);
+    assert!(turn.text.contains("OK"), "{}", turn.text);
+    turn.trace.assert_said("OK");
+    assert_eq!(turn.screens, 0, "the folder access screen showed");
 }
 
 /// CODEX-UNTRUSTED-LIVE G4: the same agent with a repository `.codex` in its worktree,
-/// whose MCP server would create a marker, starts recorded untrusted behind Codex's folder
-/// access screen. The engine gets it past the screen, the first prompt still ends in success
-/// with the asked word, and the repository's server never starts. Runs in a live window only.
+/// whose MCP server's command makes a marker when run inside the agent's sandbox (the
+/// control), starts recorded untrusted. The folder access screen shows in the pane exactly
+/// once and the engine gets the agent past it, the first prompt still ends in success with
+/// the asked word in the real Codex's rollout, and the repository's server never starts.
+/// Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 fn a_real_codex_agent_in_a_pane_with_a_codex_folder_gets_past_the_screen_and_starts_nothing_from_it()
  {
-    let (text, end, cause, problem, ran) = first_turn_in_a_pane(true, "codex-live-pane-untrusted");
+    let turn = first_turn_in_a_pane(true, "codex-live-pane-untrusted");
     println!(
-        "real codex pane, .codex planted: end={end:?} cause={cause:?} reply={text:?} plant_started={ran}"
+        "real codex pane, .codex planted: end={:?} cause={:?} reply={:?} folder_screens={} plant_started={}",
+        turn.end, turn.cause, turn.text, turn.screens, turn.ran
     );
-    assert_eq!(problem, None);
-    assert_eq!(end, TurnEnd::Success, "{cause:?}");
-    assert!(text.contains("OK"), "{text}");
-    assert!(!ran, "the repository's .codex MCP server started");
+    assert_eq!(turn.problem, None);
+    assert_eq!(turn.end, TurnEnd::Success, "{:?}", turn.cause);
+    assert!(turn.text.contains("OK"), "{}", turn.text);
+    turn.trace.assert_said("OK");
+    assert_eq!(
+        turn.screens, 1,
+        "the folder access screen did not show exactly once"
+    );
+    assert!(!turn.ran, "the repository's .codex MCP server started");
 }

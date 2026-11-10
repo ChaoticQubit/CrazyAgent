@@ -227,6 +227,59 @@ pub(crate) fn claude() -> PathBuf {
     installed("CRAZYAGENT_CLAUDE", "claude")
 }
 
+/// The Homebrew harness executable for a row whose pass must come from the real app: a
+/// set override variable could name any program, so it ends the row with the plain
+/// BLOCKED message instead. Input: the variable and the Homebrew command name. Output:
+/// the executable's canonical path.
+fn homebrew_only(variable: &str, name: &str) -> PathBuf {
+    if std::env::var_os(variable).is_some() {
+        panic!(
+            "BLOCKED: {variable} is set, so this row could run another program than the real {name}. Unset it for a live run"
+        );
+    }
+    installed(variable, name)
+}
+
+/// The Homebrew Codex, refused while `CRAZYAGENT_CODEX` overrides it (see [`homebrew_only`]).
+pub(crate) fn real_codex() -> PathBuf {
+    homebrew_only("CRAZYAGENT_CODEX", "codex")
+}
+
+/// The Homebrew Claude Code, refused while `CRAZYAGENT_CLAUDE` overrides it (see
+/// [`homebrew_only`]).
+pub(crate) fn real_claude() -> PathBuf {
+    homebrew_only("CRAZYAGENT_CLAUDE", "claude")
+}
+
+/// A row's own terminal host that closes when dropped, so a row that panics before its
+/// own close still ends its tmux server before its folder goes. Input: the host.
+pub(super) struct Closing(Option<Arc<dyn Host>>);
+
+impl Closing {
+    /// Holds a row's host until [`Closing::close`] or a drop. Input: the host.
+    pub(super) fn new(host: Arc<dyn Host>) -> Self {
+        Self(Some(host))
+    }
+
+    /// Closes the host now, failing the row when the host cannot close. Input: none.
+    /// Output: none.
+    pub(super) fn close(mut self) {
+        self.0
+            .take()
+            .expect("a host closes once")
+            .close(&[])
+            .unwrap();
+    }
+}
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        if let Some(host) = self.0.take() {
+            let _ = host.close(&[]);
+        }
+    }
+}
+
 /// One short line per report, so a failed wait says what the lead sent: the report's kind,
 /// and for a turn its end, cause and first `SHOWN_TEXT_MAX` characters. Input: the reports.
 /// Output: the lines, in order.

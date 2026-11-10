@@ -1,4 +1,4 @@
-use super::managed_agent::{ManagedAgent, SignedIn, claude};
+use super::managed_agent::{Closing, ManagedAgent, SignedIn, claude, real_claude};
 use super::{BACKGROUND_STOPPED, Report, TurnEnd};
 use crate::harnesses::terminal_session::Resume;
 use crate::team::{AgentRole, BackgroundAtEnd};
@@ -347,24 +347,48 @@ echo "lsof=$?"
 /usr/bin/perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1", LocalPort => 0) or die "bind\n"; system("/usr/sbin/lsof -a -p $$ -iTCP:" . $s->sockport . " -sTCP:LISTEN > /dev/null 2>&1"); print "lsofport=", $? >> 8, "\n"'
 "#;
 
-/// The standard output of every command the agent ran with its Bash tool, from the
-/// transcript Claude Code keeps. Input: the transcript path. Output: the outputs in
-/// transcript order, joined by newlines.
-fn bash_output(record: &Path) -> String {
+/// The `lsof=` and `lsofport=` lines among the standard output of every command the agent
+/// ran with its Bash tool, from the transcript Claude Code keeps, so nothing else the agent
+/// ran reaches the log. Input: the transcript path. Output: those lines in transcript order.
+fn lsof_lines(record: &Path) -> Vec<String> {
     std::fs::read_to_string(record)
         .unwrap_or_else(|problem| panic!("no transcript at {}: {problem}", record.display()))
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter_map(|entry| entry["toolUseResult"]["stdout"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .flat_map(|stdout| {
+            stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("lsof=") || line.starts_with("lsofport="))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
-/// SECAUDIT-5-LIVE G2: a real Claude Code sub-agent in a pane, on the owner's signed-in
-/// account, runs a script with its Bash tool inside the agent's Seatbelt profile and its
-/// process-info deny: `lsof` on its own shell, then on a loopback port its own perl child
-/// listens on. The turn ends in success and the transcript shows both `lsof` runs exited
-/// 0, so the deny still lets the agent read its own processes. Runs in a live window only.
+/// The Claude Code versions a transcript's entries name, each once, in transcript order.
+/// Input: the transcript path. Output: the versions.
+fn transcript_versions(record: &Path) -> Vec<String> {
+    let mut versions = Vec::new();
+    for line in std::fs::read_to_string(record).unwrap().lines() {
+        if let Some(version) = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|entry| entry["version"].as_str().map(str::to_owned))
+            .filter(|version| !versions.contains(version))
+        {
+            versions.push(version);
+        }
+    }
+    versions
+}
+
+/// SECAUDIT-5-LIVE G2: the real Claude Code as a sub-agent in a pane, on the owner's
+/// signed-in account, runs a script with its Bash tool inside the agent's Seatbelt profile
+/// and its process-info deny: `lsof` on its own shell, then on a loopback port its own perl
+/// child listens on. The turn ends in success, and the transcript Claude Code wrote in the
+/// agent's home, naming its version, shows both `lsof` runs exited 0, so the deny still lets
+/// the agent read its own processes. Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_agent_sandbox() {
@@ -375,7 +399,9 @@ fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_a
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
     let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
-    let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
+    let mut agent =
+        ManagedAgent::in_pane("claude-code", &real_claude(), host.clone(), AgentRole::Sub);
+    let host = Closing::new(host);
     let mut signed_in = SignedIn::claude();
     let script = agent.working_dir.join("lsof-check.sh");
     std::fs::write(&script, LSOF_SCRIPT).unwrap();
@@ -385,21 +411,37 @@ fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_a
     );
     let turns = vec![(prompt.as_str(), signed_in.acquire("claude-live-lsof"))];
     let (reports, problem) = agent.run_turns(None, turns, TURN);
-    host.close(&[]).unwrap();
+    host.close();
     let (text, end, cause, conversation) = outcome(&reports);
     println!("real claude lsof: end={end:?} cause={cause:?} reply={text:?}");
     assert_eq!(problem, None);
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
-    let conversation = conversation.expect("the turn records its conversation");
-    let printed = bash_output(&conversation.record);
-    println!("bash output: {printed:?}");
-    assert!(
-        printed.lines().any(|line| line.trim() == "lsof=0"),
-        "lsof on the agent's own shell failed: {printed}"
+    let record = conversation
+        .expect("the turn records its conversation")
+        .record;
+    let versions = transcript_versions(&record);
+    println!(
+        "claude transcript={} versions={versions:?}",
+        record.display()
     );
     assert!(
-        printed.lines().any(|line| line.trim() == "lsofport=0"),
-        "lsof on the agent's own listening port failed: {printed}"
+        record.starts_with(&agent.home),
+        "the transcript is not in the agent's home: {}",
+        record.display()
+    );
+    assert!(
+        !versions.is_empty(),
+        "the transcript names no Claude Code version"
+    );
+    let printed = lsof_lines(&record);
+    println!("lsof lines: {printed:?}");
+    assert!(
+        printed.iter().any(|line| line == "lsof=0"),
+        "lsof on the agent's own shell failed: {printed:?}"
+    );
+    assert!(
+        printed.iter().any(|line| line == "lsofport=0"),
+        "lsof on the agent's own listening port failed: {printed:?}"
     );
 }
 
