@@ -2716,7 +2716,8 @@ fn a_worker_the_master_stopped_wakes_for_the_master_and_not_for_its_lead() {
 }
 
 /// A stop of an agent a higher stop already holds says who holds it and who can wake it,
-/// instead of offering a wake that would be refused (HB-S5-B).
+/// instead of offering a wake that would be refused (HB-S5-B), and a lead's stop says it
+/// fails the tasks still queued for that agent, such as the master's wake (HB-S5-B-L2).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_stop_under_a_higher_stop_says_who_holds_it() {
@@ -2733,6 +2734,30 @@ fn a_stop_under_a_higher_stop_says_who_holds_it() {
         (
             format!(
                 "The master stopped {label} already. Only the master or the owner can wake it."
+            ),
+            false
+        )
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Wake.','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let wake = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![wake, PROJECT, worker],
+        )
+        .unwrap();
+    assert_eq!(
+        as_sub(&mut fixture, lead, tool::STOP_TOOL, stop.clone()),
+        (
+            format!(
+                "The master stopped {label} already. Your stop fails the tasks still queued for it: 1. Only the master or the owner can wake it."
             ),
             false
         )

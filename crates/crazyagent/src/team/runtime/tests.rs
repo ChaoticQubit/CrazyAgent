@@ -23589,7 +23589,8 @@ fn the_owner_never_wakes_through_admit_wake() {
 }
 
 /// A wake admitted after one stop and still queued dies at a later stop, whoever makes it:
-/// the task fails, the agent stays stopped and the stop stands at its new time (HB-S5-B).
+/// the task fails with the later stop's maker as its cause, the agent stays stopped and the
+/// stop stands at its new time with the higher maker's standing (HB-S5-B, HB-S5-B-L2).
 #[test]
 fn a_later_stop_fails_a_wake_still_queued_behind_a_full_team() {
     use crate::team::StoppedBy::{Lead, Master};
@@ -23602,7 +23603,7 @@ fn a_later_stop_fails_a_wake_still_queued_behind_a_full_team() {
     for (first, second, held, reason) in [
         (Lead, Lead, Lead, super::LEAD_STOPPED_TASK),
         (Lead, Master, Master, super::MASTER_STOPPED_TASK),
-        (Master, Lead, Master, super::MASTER_STOPPED_TASK),
+        (Master, Lead, Master, super::LEAD_STOPPED_TASK),
         (Master, Master, Master, super::MASTER_STOPPED_TASK),
     ] {
         let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
