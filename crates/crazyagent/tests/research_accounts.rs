@@ -483,7 +483,7 @@ fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_p
     };
     let both = [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
     assert_eq!(
-        resolver.pool_pick(&pool, &both),
+        resolver.pool_pick("project-a", &pool, &both),
         endpoint("local-connection", "http://127.0.0.1:11434/v1")
     );
     let jobs = crazyagent::research::jobs::ResearchJobs::open(&runtime.database).unwrap();
@@ -500,28 +500,41 @@ fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_p
     };
     let first = pause("local-connection");
     assert_eq!(
-        resolver.pool_pick(&pool, &both),
+        resolver.pool_pick("project-a", &pool, &both),
         endpoint("second-connection", "http://127.0.0.1:11435/v1")
     );
     let second = pause("second-connection");
     assert!(second >= first);
-    assert_eq!(resolver.pool_pick(&pool, &both), anthropic);
+    assert_eq!(resolver.pool_pick("project-a", &pool, &both), anthropic);
     assert_eq!(
-        resolver.pool_pick(&pool, &[ResearchHarness::Codex]),
+        resolver.pool_pick("project-a", &pool, &[ResearchHarness::Codex]),
         AccountPick::Paused { until_ms: first }
     );
     let third = pause("anthropic-local-connection");
     assert!(third >= second);
     assert_eq!(
         resolver.pool_pick(
+            "project-a",
             &pool,
             &[ResearchHarness::ClaudeCode, ResearchHarness::Codex]
         ),
         AccountPick::Paused { until_ms: first }
     );
-    assert_eq!(resolver.pool_pick(&pool, &[]), AccountPick::NoUsableAccount);
     assert_eq!(
-        resolver.pool_pick(&CredentialRef::new("absent-pool").unwrap(), &both),
+        resolver.pool_pick("project-b", &pool, &both),
+        endpoint("local-connection", "http://127.0.0.1:11434/v1"),
+        "the holds are project-a's own"
+    );
+    assert_eq!(
+        resolver.pool_pick("project-a", &pool, &[]),
+        AccountPick::NoUsableAccount
+    );
+    assert_eq!(
+        resolver.pool_pick(
+            "project-a",
+            &CredentialRef::new("absent-pool").unwrap(),
+            &both
+        ),
         AccountPick::NeedsPool
     );
 }

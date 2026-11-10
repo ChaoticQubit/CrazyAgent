@@ -969,7 +969,24 @@ pub enum Standing {
 pub struct RankedAccount {
     pub connection: CredentialRef,
     pub standing: Standing,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_for: Vec<ProjectHold>,
 }
+
+/// A hold one project put on an account after a limit its own agent reported
+/// (SECAUDIT-RATELIMIT-FORGE). Every other project still uses the account, so the ranking keeps
+/// its place and shows the hold beside it: the project, its name or its id, and the hold's end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectHold {
+    pub project: String,
+    pub name: String,
+    pub until_ms: i64,
+}
+
+/// The most project holds one account shows. One hold per project at most, so this only bites
+/// past that many projects held on one account at once.
+const HOLDS_SHOWN_MAX: usize = 64;
 
 /// One pool's ranking: the strategy that orders it, the accounts work would try now in
 /// that order, then every held account in pool order, and how many of the pool's projects
@@ -994,6 +1011,10 @@ pub fn ranking(
     now_ms: i64,
 ) -> Result<Vec<PoolRanking>, EngineError> {
     let pauses = table_exists(tx, "team_paused_accounts")?;
+    let holds = (
+        table_exists(tx, "team_project_pauses")?,
+        table_exists(tx, "projects")?,
+    );
     let sign_ins = table_exists(tx, "native_auth_operations")?;
     let run = active_run(tx)?;
     let mut pools = Vec::with_capacity(access.pools.len());
@@ -1033,6 +1054,7 @@ pub fn ranking(
             accounts.push(RankedAccount {
                 connection: candidates[at].connection.clone(),
                 standing: choice.next(&candidates[at], why),
+                held_for: Vec::new(),
             });
             above = Some(key);
         }
@@ -1046,8 +1068,12 @@ pub fn ranking(
         accounts.extend(held.into_iter().map(|(index, standing)| RankedAccount {
             connection: pool.members[index].clone(),
             standing,
+            held_for: Vec::new(),
         }));
         assert_eq!(accounts.len(), pool.members.len());
+        for account in &mut accounts {
+            account.held_for = project_holds(tx, holds, &account.connection, now_ms)?;
+        }
         pools.push(PoolRanking {
             pool: pool.id.clone(),
             strategy: choice.strategy,
@@ -1137,6 +1163,44 @@ fn paused_until(
             |row| row.get(0),
         )
         .optional()
+        .map_err(error)
+}
+
+/// Reads the unended holds projects put on one account, soonest end first, at most
+/// `HOLDS_SHOWN_MAX`. Takes the store, whether the hold and project tables exist, the account
+/// and the clock. Returns each hold named by its project's name, or by its id when the project
+/// has no name or is gone.
+fn project_holds(
+    connection: &Connection,
+    (holds, projects): (bool, bool),
+    member: &CredentialRef,
+    now_ms: i64,
+) -> Result<Vec<ProjectHold>, EngineError> {
+    if !holds {
+        return Ok(Vec::new());
+    }
+    let sql = if projects {
+        "SELECT h.project, COALESCE(NULLIF(CASE WHEN json_valid(p.body) THEN
+             CASE WHEN json_type(p.body,'$.spec.name')='text'
+             THEN json_extract(p.body,'$.spec.name') END END, ''), h.project), h.until_ms
+         FROM team_project_pauses h LEFT JOIN projects p ON p.id=h.project
+         WHERE h.connection=?1 AND h.until_ms>?2 ORDER BY h.until_ms, h.project LIMIT ?3"
+    } else {
+        "SELECT project, project, until_ms FROM team_project_pauses
+         WHERE connection=?1 AND until_ms>?2 ORDER BY until_ms, project LIMIT ?3"
+    };
+    let limit = i64::try_from(HOLDS_SHOWN_MAX).map_err(error)?;
+    let mut statement = connection.prepare(sql).map_err(error)?;
+    statement
+        .query_map(params![member.as_str(), now_ms, limit], |row| {
+            Ok(ProjectHold {
+                project: row.get(0)?,
+                name: row.get(1)?,
+                until_ms: row.get(2)?,
+            })
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(error)
 }
 

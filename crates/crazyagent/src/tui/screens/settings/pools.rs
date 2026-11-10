@@ -1151,6 +1151,7 @@ mod tests {
         let ranked = |id: &str, standing| RankedAccount {
             connection: CredentialRef::new(id).unwrap(),
             standing,
+            held_for: Vec::new(),
         };
         screen.arrive(
             &settings(SettingsEvent::Ranking(Ok(vec![PoolRanking {

@@ -248,6 +248,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     let not_signed_in = |connection: &str| RankedAccount {
         connection: reference(connection),
         standing: Standing::NotSignedIn,
+        held_for: Vec::new(),
     };
     assert_eq!(
         controller.account_ranking().await.unwrap(),

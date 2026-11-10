@@ -45,6 +45,35 @@ pub fn request_refresh(db: &Connection, now_ms: i64) -> Result<(), EngineError> 
     Ok(())
 }
 
+/// The least time between two polls asked for because agents reported a limit, however many
+/// reports arrive, so a run that keeps reporting cannot make the engine poll more often
+/// (SECAUDIT-RATELIMIT-FORGE).
+pub const CONFIRM_EVERY_MS: i64 = 60 * 1000;
+const _: () = assert!(CONFIRM_EVERY_MS > 0 && CONFIRM_EVERY_MS < POLL_EVERY_MS);
+
+/// Asks the usage service to poll every signed-in account at its next scan because an agent
+/// reported a limit, so the provider's own reading can confirm it, unless anything asked
+/// within the last `CONFIRM_EVERY_MS`. A store with no usage tables has no service to ask.
+/// Inputs: the store and the time. Output: whether it asked.
+pub fn request_confirm(db: &Connection, now_ms: i64) -> rusqlite::Result<bool> {
+    let usage: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_refresh')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !usage {
+        return Ok(false);
+    }
+    let asked = db.execute(
+        "INSERT INTO usage_refresh (singleton,requested_ms) VALUES (1,?1)
+         ON CONFLICT(singleton) DO UPDATE SET requested_ms=excluded.requested_ms
+         WHERE requested_ms<=excluded.requested_ms-?2",
+        params![now_ms, CONFIRM_EVERY_MS],
+    )?;
+    assert!(asked <= 1);
+    Ok(asked == 1)
+}
+
 fn refresh_requested(db: &Connection) -> Result<Option<i64>, EngineError> {
     db.query_row(
         "SELECT requested_ms FROM usage_refresh WHERE singleton=1",

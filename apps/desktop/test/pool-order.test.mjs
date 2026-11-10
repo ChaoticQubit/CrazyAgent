@@ -67,6 +67,7 @@ test("the held list says what it is", () => {
 test("a reason outside the table and a ready account as held are refused, never shown as blank", () => {
   assert.throws(() => whyLine({ kind: "because" }, NOW), /no words for the order reason because/);
   assert.throws(() => heldLine({ kind: "next", weekly_resets_ms: null, weekly_left_percent: null, use_last: false, why: { kind: "tied_order" } }, NOW), /a ready account is not held/);
+  assert.throws(() => holdLine({ project: "project-a", name: "", until_ms: LATER }, NOW), /the hold on project-a has no name/);
 });
 
 test("the order line names the strategy, where it was set and how a row moves", () => {

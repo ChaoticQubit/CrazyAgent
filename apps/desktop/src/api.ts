@@ -659,9 +659,16 @@ export type AccountStanding =
   | { kind: "five_hour_cap"; until_ms: number | null }
   | { kind: "reserve_reached"; reserve_percent: number; until_ms: number | null };
 
+export interface ProjectHold {
+  project: string;
+  name: string;
+  until_ms: number;
+}
+
 export interface RankedAccount {
   connection: string;
   standing: AccountStanding;
+  held_for?: ProjectHold[];
 }
 
 export interface PoolRanking {
