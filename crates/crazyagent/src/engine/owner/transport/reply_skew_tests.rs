@@ -528,7 +528,13 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
     for ((module, source), (named, reads)) in sources.iter().zip(expected) {
         assert_eq!(module, named);
         assert_eq!(source.matches(head).count(), 1, "{module}");
-        let body = source.split(head).nth(1).unwrap().split("\n}\n").next().unwrap();
+        let body = source
+            .split(head)
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
         let arms: Vec<&str> = body
             .lines()
             .map(str::trim)

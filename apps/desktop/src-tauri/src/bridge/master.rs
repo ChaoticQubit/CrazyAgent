@@ -1306,12 +1306,27 @@ fallback_allowed = false
         let source = include_str!("master.rs");
         let product = source.split("#[cfg(test)]").next().unwrap();
         let open = "crazyagent::tui::default_master_open(self.controller()?, &project_id)\n            .await\n            .map_err(|reason| open_failure(&reason))?;";
-        assert_eq!(product.matches(open).count(), 2, "open_default_master and new_master_session");
+        assert_eq!(
+            product.matches(open).count(),
+            2,
+            "open_default_master and new_master_session"
+        );
         assert_eq!(product.matches("default_master_open(").count(), 2);
-        assert_eq!(product.matches("failure(\"master_open_unavailable\")").count(), 0);
+        assert_eq!(
+            product
+                .matches("failure(\"master_open_unavailable\")")
+                .count(),
+            0
+        );
         let tui = include_str!("../../../../../crates/crazyagent/src/tui/master_session.rs");
-        let opened = tui.split("pub async fn default_master_open(").nth(1).unwrap();
-        let setup = opened.split(".project_setup(project_id.clone())").nth(1).unwrap();
+        let opened = tui
+            .split("pub async fn default_master_open(")
+            .nth(1)
+            .unwrap();
+        let setup = opened
+            .split(".project_setup(project_id.clone())")
+            .nth(1)
+            .unwrap();
         let kept = ".await\n        .map_err(|error| match error.0.as_str() {\n            \"engine_version_mismatch\" => error.0,";
         assert!(setup.trim_start().starts_with(kept), "{setup}");
         assert_eq!(
