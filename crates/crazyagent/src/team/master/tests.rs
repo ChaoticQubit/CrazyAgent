@@ -1078,7 +1078,6 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
 /// Adds a sub-agent of the fixture's project with a role handle and, for a finished one, a
 /// kept worktree, as a delegated agent leaves them. Takes the fixture, the role, the status
 /// and when it stopped. Returns the agent id.
-#[cfg(target_os = "macos")]
 fn named_sub(fixture: &Fixture, role: &str, status: &str) -> i64 {
     fixture
         .connection
@@ -4156,6 +4155,7 @@ impl Clones {
             .unwrap_or_else(|| panic!("no work id in {answer}"))
     }
 
+    #[cfg(target_os = "macos")]
     fn worker_set(&self) -> crate::landing::ChangeSetId {
         let db = crate::landing::open(&self.fixture.base).unwrap();
         crate::landing::record_turn_end(
@@ -4181,6 +4181,7 @@ impl Clones {
         .expect("the worker's commit is work for review")
     }
 
+    #[cfg(target_os = "macos")]
     fn set_state(&self, set: &crate::landing::ChangeSetId) -> (String, Option<String>) {
         self.fixture
             .connection

@@ -69,7 +69,9 @@ pub struct TerminalSession {
     stopped: bool,
     group_ended: bool,
     uncertain: bool,
+    #[cfg(target_os = "macos")]
     unconfined: bool,
+    #[cfg(target_os = "macos")]
     unkept: bool,
     lineage: Option<Result<Lineage, Unstopped>>,
     followed: Instant,
@@ -340,7 +342,9 @@ impl TerminalSession {
             stopped: false,
             group_ended: false,
             uncertain: false,
+            #[cfg(target_os = "macos")]
             unconfined: request.unconfined,
+            #[cfg(target_os = "macos")]
             unkept,
             lineage: lineage_of(pane.pid, unkept, request.unconfined, Some(token.clone())),
             followed: Instant::now(),

@@ -99,7 +99,7 @@ fn assert_applied(reply: &OwnerReply) {
 /// A Save whose reply was lost has committed with no hook behind it, so the client's
 /// Reconcile, answered Committed, is what ends the project's open IDE. Its reply names no
 /// project, so every open IDE is compared with its saved policy (v21-ide-level-3 r1 F1).
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reconcile_of_a_save_whose_reply_was_lost_stops_the_projects_running_ide() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy};

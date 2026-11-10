@@ -324,7 +324,9 @@ impl TerminalSession {
             stopped: false,
             group_ended: false,
             uncertain: false,
+            #[cfg(target_os = "macos")]
             unconfined,
+            #[cfg(target_os = "macos")]
             unkept,
             lineage: super::lineage_of(record.pid, unkept, unconfined, record.lineage.clone()),
             followed: Instant::now(),
