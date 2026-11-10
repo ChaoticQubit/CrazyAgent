@@ -1115,4 +1115,4 @@ impl AgentSession {
 mod tests;
 
 #[cfg(all(test, target_os = "macos"))]
-mod folder_screen_tests;
+pub(crate) mod folder_screen_tests;

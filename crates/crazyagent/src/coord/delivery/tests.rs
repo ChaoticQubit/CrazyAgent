@@ -292,6 +292,30 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
     );
 }
 
+/// SECAUDIT-13 F1: a tick that cannot use a Codex agent's bridge keeps the plain code, so
+/// the engine log names a refusal once; here the agent has a home but no pane to compare.
+#[test]
+fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
+    let fixture = Fixture::new();
+    let agent = fixture.agent("sub", "codex", "working", None);
+    std::fs::create_dir_all(crate::team::runtime::agent_home(&fixture.base, agent)).unwrap();
+    fixture.send(Party::Owner, agent, MessageKind::Prompt, "Ship it", 1);
+    let asleep = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            3,
+            &reach(None, None, &fixture.base, &asleep),
+        )
+        .unwrap();
+    assert_eq!(
+        deliveries.bridge_refused.get(&agent),
+        Some(&"codex_bridge_peer_unknown")
+    );
+}
+
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back
 /// to Sent on the next tick, so its next session gets them; a live agent's stay.
 #[test]
@@ -370,7 +394,17 @@ fn native_only_and_the_claude_code_grace_leave_messages_sent() {
     );
     let asleep = BTreeSet::new();
     let none = reach(None, None, &fixture.base, &asleep);
-    assert!(deliver_to(&fixture.db, &project(), claude, now, &none).unwrap());
+    assert!(
+        deliver_to(
+            &fixture.db,
+            &project(),
+            claude,
+            now,
+            &none,
+            &mut BTreeMap::new()
+        )
+        .unwrap()
+    );
     assert_eq!(fixture.receipt(young), "sent");
     assert!(
         !deliver_to(
@@ -378,7 +412,8 @@ fn native_only_and_the_claude_code_grace_leave_messages_sent() {
             &project(),
             claude,
             now + NATIVE_GRACE_MS,
-            &none
+            &none,
+            &mut BTreeMap::new()
         )
         .unwrap(),
         "a message past the grace is retried while it cannot be typed"
