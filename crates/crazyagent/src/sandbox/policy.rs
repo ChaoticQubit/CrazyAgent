@@ -201,10 +201,35 @@ pub struct AgentFilesRule {
 }
 
 impl AgentFilesRule {
-    /// The Seatbelt rules that hold the choice under the project's agents root. Input: the
-    /// project folder, a clean absolute path. Output: the rule text.
-    pub fn seatbelt(self, _root: &Path) -> String {
-        String::new()
+    /// The Seatbelt rules that hold the choice under the project's agents root, in any
+    /// letter case: none for Allow all changes; for No delete or rename, no removal and no
+    /// rename of an agent folder or of anything in it, so edits in place still land; for
+    /// Read only, no write of any kind there. Either way the agents root itself is never
+    /// removed or moved aside, so no agent folder leaves the rule's reach; the base profile
+    /// already holds the `.crazyagent` folder. Input: the project folder, a clean absolute
+    /// path. Output: the rule text.
+    pub fn seatbelt(self, root: &Path) -> String {
+        let operation = match self.choice {
+            IdeAgentFiles::AllowAll => return String::new(),
+            IdeAgentFiles::NoDeleteOrRename => "file-write-unlink",
+            IdeAgentFiles::ReadOnly => "file-write*",
+        };
+        assert!(super::clean_absolute(root));
+        let root = root.to_str().expect("a clean absolute path is text");
+        let state = super::any_case("/.crazyagent");
+        let layout = if self.older_agents {
+            format!("({state})?")
+        } else {
+            state
+        };
+        let agents = format!(
+            "^{}{layout}/{}",
+            super::any_case(root),
+            super::any_case("worktrees")
+        );
+        format!(
+            "(deny {operation}\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n(deny file-write-unlink\n  (regex #\"{agents}$\"))\n"
+        )
     }
 }
 
