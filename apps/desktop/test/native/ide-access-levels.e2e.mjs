@@ -34,6 +34,20 @@ const MENU_ROWS = `(() => {
   }));
   return rows.length ? rows : null;
 })()`;
+const TRUST = `(() => ({
+  asked: [...document.querySelectorAll(".monaco-dialog-box")].some((box) => (box.textContent ?? "").includes("Do you trust the authors of the files in this")),
+  restricted: [...document.querySelectorAll(".part.banner")].some((banner) => (banner.textContent ?? "").includes("Restricted Mode is intended for safe code browsing.")),
+}))()`;
+const DISTRUST = `(() => {
+  ${CENTRE}
+  const button = [...document.querySelectorAll(".monaco-dialog-box .monaco-button")].find((item) => (item.textContent ?? "").includes("No, I don't trust the authors"));
+  return button ? centre(button) : null;
+})()`;
+const CRAZYAGENT_VIEWS = ["Memories", "Agents", "Change sets", "Brief and documents"];
+const CRAZYAGENT_PANES = `(() => {
+  const titles = [...document.querySelectorAll(".part.sidebar .pane-header .title")].map((item) => (item.textContent ?? "").trim());
+  return ${JSON.stringify(CRAZYAGENT_VIEWS)}.every((name) => titles.includes(name)) ? titles : null;
+})()`;
 const LEVELS = [
   { access: "sandboxed", label: "Sandboxed", confined: true, report: ["net-no", "outside-no", "config-no", "hooks-no"], menu: [["Sandboxed", false], [`Own branch - ${RAISE}`, true], [`Full access - ${RAISE}`, true]] },
   { access: "own_branch", label: "Own branch", confined: true, report: ["net-yes", "outside-no", "config-no", "hooks-no"], menu: [["Sandboxed", false], ["Own branch", false], [`Full access - ${RAISE}`, true]] },
@@ -133,9 +147,9 @@ async function openTab(page, { site, project, opened, evidence }) {
   }
 }
 
-/** One level: a project saved at it, its IDE opened, then the server, the default terminal and
- * for Full access the owner's own shell, each checked in the real workbench. Inputs: the test
- * context, the level and what the run shares. Output: none. */
+/** One level: a project saved at it, its IDE opened, then the server, workspace trust, the
+ * default terminal and for Full access the owner's own shell, each checked in the real
+ * workbench. Inputs: the test context, the level and what the run shares. Output: none. */
 async function atLevel(t, level, shared) {
   const { bridge, projects, root, next, evidence, port } = shared;
   const repo = join(root, "repos", `level-${level.access.replace("_", "-")}`);
@@ -158,6 +172,24 @@ async function atLevel(t, level, shared) {
       return document.querySelector(".monaco-workbench .part.activitybar") !== null && explorer !== null && explorer.textContent.includes(${JSON.stringify(FOLDER)});
     })()`, WORKBENCH_MS);
     await pause(SETTLE_MS * 2);
+
+    if (level.confined) {
+      await t.test(`${level.label}: workspace trust is off`, async () => {
+        assert.deepEqual(await page.evaluate(TRUST), { asked: false, restricted: false });
+      });
+    }
+
+    if (level.access === "full") {
+      await t.test("Full access: workspace trust asks first and the extension's views load in Restricted Mode", async () => {
+        await ide.until("the workspace trust question", `${TRUST}.asked`);
+        await me.capture("level-full-trust-asked");
+        await keys.click(await ide.until("the answer that keeps the folder untrusted", DISTRUST));
+        await ide.until("the Restricted Mode banner", `${TRUST}.restricted`);
+        await ide.run("View: Show CrazyAgent");
+        assert.deepEqual(await ide.until("the CrazyAgent views in Restricted Mode", CRAZYAGENT_PANES), CRAZYAGENT_VIEWS);
+        await me.capture("level-full-restricted");
+      });
+    }
 
     await t.test(`${level.label}: the first terminal shows its panel`, async () => {
       await ide.run("Terminal: Create New Terminal");
