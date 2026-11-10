@@ -687,14 +687,16 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
     }
 }
 
-/// CTX-M1 r1: when the planted `skills/.system` cannot be moved away even after its flags
-/// are cleared, here because the agent filled the folder the engine moves it to with a
-/// file it made immutable, the Codex launch is refused with an ordinary error rather than
-/// started with the planted system skills.
+/// CTX-M1 r1, r2 I3: a parked folder holding a file the agent made immutable no longer
+/// refuses the relaunch, which releases and removes it. When the planted `skills/.system`
+/// still cannot be moved away, here because a Full access agent denied new folders in its
+/// own home with an ACL the engine leaves alone, the Codex launch is refused with an ordinary
+/// error rather than started with the planted system skills.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
     let home = directory.path().canonicalize().unwrap().join("codex");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
     let context = AgentContext {
@@ -718,7 +720,6 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     fs::create_dir(&parked).unwrap();
     let held = parked.join("held");
     fs::write(&held, "held\n").unwrap();
-    let _unlocked = Unlocked(vec![held.clone()]);
     assert!(
         chflags("uchg", &held),
         "the parked folder's file is immutable"
@@ -727,9 +728,30 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     let relaunch = context.install("codex", &home, true);
 
     assert_eq!(
-        relaunch.err().map(|problem| problem.0),
-        Some("launch_context_skills_kept".to_owned()),
+        relaunch.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "a parked folder with an immutable file is released, not a refusal"
+    );
+    assert!(!parked.exists(), "the parked folder is removed");
+    assert!(!planted.exists(), "the planted system skills are removed");
+    drop(relaunch);
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("SKILL.md"), "planted again\n").unwrap();
+    assert!(
+        chmod(&["+a", "everyone deny add_subdirectory"], &home),
+        "the home denies new folders"
+    );
+
+    let hold = lock_only(&home, "codex");
+
+    assert_eq!(
+        hold.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned()),
         "a launch that keeps the planted system skills is refused"
+    );
+    assert!(
+        planted.exists(),
+        "the refusal leaves the skills it could not move"
     );
 }
 
