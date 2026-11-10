@@ -3715,6 +3715,55 @@ fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt
 }
 
 #[test]
+fn a_set_accepted_in_a_place_a_later_build_named_still_lists_and_keeps_that_place() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET accepted_in='terminal' WHERE id=?1",
+            [id.as_str()],
+        )
+        .unwrap();
+    let listed = list(&case.db, &case.workspace.project)
+        .expect("a set accepted in a later build's place still lists");
+    assert!(
+        listed
+            .iter()
+            .any(|view| view.id == id && view.state == ChangeState::Accepted)
+    );
+    let mut record =
+        store::load(&case.db, &id).expect("a set accepted in a later build's place still reads");
+    assert_eq!(record.accepted_in, None);
+    let rows = crate::activity::list(&case.db, &case.workspace.project, crate::activity::LIST_MAX)
+        .unwrap();
+    let ours = rows
+        .iter()
+        .filter(|item| item.change_set.as_deref() == Some(id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(!ours.is_empty());
+    assert!(ours.iter().all(|item| item.place.is_none()), "{ours:?}");
+    record.updated_ms += 1;
+    store::save(&case.db, &record).unwrap();
+    let kept: Option<String> = case
+        .db
+        .query_row(
+            "SELECT accepted_in FROM landing_change_sets WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some("terminal"),
+        "a save by this build keeps a place it cannot read"
+    );
+}
+
+#[test]
 fn a_second_open_change_set_for_one_worktree_is_refused_and_both_rows_stay() {
     let case = Case::new();
     case.edit("README", "one\ntwo\nthree\nfour\n");
