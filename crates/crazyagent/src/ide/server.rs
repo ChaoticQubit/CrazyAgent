@@ -44,7 +44,7 @@ pub const RECONNECTION_GRACE: Duration = Duration::from_secs(30);
 pub const WORKSPACE: &str = super::workspace::FILE;
 
 const GROUP: &str = "server.pid";
-const SERVER_DATA: &str = "server-data";
+pub(crate) const SERVER_DATA: &str = "server-data";
 const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
@@ -846,7 +846,13 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let written = settings::write(folder, &home, data, project_hooks.then_some(root))?;
+    let written = settings::write(
+        folder,
+        &home,
+        data,
+        project_hooks.then_some(root),
+        Some(root),
+    )?;
     let older_agents = super::workspace::older_agents(data, project, root)?;
     let ceiling = super::git::ceiling(root, older_agents)?;
     let owner_home = std::env::var_os("HOME");

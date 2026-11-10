@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GIT_ARGS_MAX = exports.GIT_OUTCOME_UNKNOWN = exports.GIT_REQUEST_MS = exports.GIT_SECRET_ENV = exports.GIT_FORWARD_ENV = exports.GIT_NODE_ENV = exports.GIT_SOCKET_ENV = void 0;
+exports.GIT_ARGS_MAX = exports.GIT_OUTCOME_UNKNOWN = exports.GIT_REQUEST_MS = exports.GIT_SECRET_ENV = exports.GIT_SHIM_ENV = exports.GIT_FORWARD_ENV = exports.GIT_NODE_ENV = exports.GIT_SOCKET_ENV = void 0;
 exports.gitCall = gitCall;
 exports.gitOutcome = gitOutcome;
 exports.startRelay = startRelay;
@@ -14,6 +14,7 @@ const engine_js_1 = require("./engine.js");
 exports.GIT_SOCKET_ENV = "CRAZYAGENT_IDE_GIT_SOCKET";
 exports.GIT_NODE_ENV = "CRAZYAGENT_IDE_GIT_NODE";
 exports.GIT_FORWARD_ENV = "CRAZYAGENT_IDE_GIT_FORWARD";
+exports.GIT_SHIM_ENV = "CRAZYAGENT_IDE_GIT_SHIM";
 exports.GIT_SECRET_ENV = "CRAZYAGENT_IDE_GIT_SECRET";
 exports.GIT_REQUEST_MS = 700_000;
 exports.GIT_OUTCOME_UNKNOWN = "ide_git_outcome_unknown";

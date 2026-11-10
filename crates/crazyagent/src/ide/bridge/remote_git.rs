@@ -835,5 +835,7 @@ pub(super) fn text(bytes: &[u8], keep: usize) -> String {
     text
 }
 
+pub(super) mod index;
+
 #[cfg(test)]
 pub(crate) mod tests;

@@ -65,6 +65,7 @@ pub fn write(
     server_data: &Path,
     data: &Path,
     project_hooks: Option<&Path>,
+    _index_project: Option<&Path>,
 ) -> Result<Written, EngineError> {
     if !folder.is_absolute()
         || !folder.starts_with(data)
@@ -87,7 +88,12 @@ pub fn write(
         folder,
         SHIM_TEMPORARY,
         &shim,
-        super::git::shim_text(project_hooks, crate::research::runner::sandboxed_git())?.as_bytes(),
+        super::git::shim_text(
+            project_hooks,
+            crate::research::runner::sandboxed_git(),
+            None,
+        )?
+        .as_bytes(),
         0o700,
     )?;
     let target = machine.join(SETTINGS);

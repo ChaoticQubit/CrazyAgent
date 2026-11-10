@@ -1140,6 +1140,15 @@ async fn git_call(
     }
 }
 
+/// The engine's index step for a row that plays the relay. Inputs: the private folder, the
+/// engine's folder, the project folder and the slot. Output: the exit code the shim reads.
+#[cfg(all(test, unix))]
+pub(crate) fn carry_index(private: &Path, engine: &Path, project: &Path, slot: &str) -> i32 {
+    remote_git::index::carry(&Mutex::new(()), private, engine, project, slot)
+        .unwrap()
+        .code
+}
+
 /// Writes the project's generated workspace file on a blocking thread, setting the
 /// show-all switch first when given. Inputs: the owner runtime, project and switch.
 /// Output: `{path, hidden, show_all}`, `hidden` counting the agents the cap left out.
@@ -1323,6 +1332,8 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
 mod changes;
 #[cfg(unix)]
 mod comments;
+#[cfg(all(test, unix))]
+pub(crate) mod engine_step;
 mod extensions;
 #[cfg(unix)]
 mod remote_git;

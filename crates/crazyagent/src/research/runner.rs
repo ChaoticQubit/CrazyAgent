@@ -2362,11 +2362,11 @@ pub(crate) fn setup_git() -> &'static Path {
 /// `git pack-objects` and the rest) in its `libexec/git-core` instead of falling through the
 /// search path to the `/usr/bin` shims.
 #[cfg(unix)]
-const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+pub(crate) const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
 /// The Command Line Tools root, which every agent profile reads.
 #[cfg(unix)]
-const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
+pub(crate) const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
 
 #[cfg(all(test, unix))]
 thread_local! {

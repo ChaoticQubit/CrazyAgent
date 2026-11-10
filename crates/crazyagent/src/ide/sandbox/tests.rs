@@ -1,4 +1,5 @@
 use super::*;
+use crate::ide::bridge::engine_step::{FORWARD_REQUEST, FORWARDER_VARIABLES};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
@@ -551,7 +552,7 @@ fn ide_git_recorded(
         "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin",
     );
     command.args(args).current_dir(dir);
-    crate::spawn_gate::output(&mut command).unwrap()
+    crate::ide::bridge::engine_step::output_with_engine(&mut command, home, root)
 }
 
 /// The IDE server's git as VS Code starts it: the shim under the installed profile, in the
@@ -595,6 +596,7 @@ fn server_git(
             ("GIT_COMMITTER_NAME", "Owner"),
             ("GIT_COMMITTER_EMAIL", "owner@example.invalid"),
         ])
+        .envs(crate::ide::bridge::engine_step::forwarder_env(home))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -778,10 +780,15 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         ));
     };
 
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((&root, &home.join(crate::ide::git::PRIVATE_INDEX)))
+        )
+        .unwrap()
     );
     let (status, said) = ide_git(
         &profile,
@@ -857,10 +864,15 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     assert!(!ran("project-sign"));
     refuse_agents("Off");
 
-    crate::ide::settings::write(&mine, &home, &data, Some(&root)).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, Some(&root), Some(&root)).unwrap();
     assert_ne!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((&root, &home.join(crate::ide::git::PRIVATE_INDEX)))
+        )
+        .unwrap()
     );
     fs::write(root.join("a.txt"), "on\n").unwrap();
     let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
@@ -987,7 +999,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
 
     let before = ide_git_output(
@@ -1097,7 +1109,7 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let top = |older_agents: bool, dir: &Path| {
         ide_git_recorded(
@@ -1200,7 +1212,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let top = |dir: &Path| {
         ide_git_recorded(
@@ -1287,7 +1299,7 @@ fn ide_git_never_prunes_an_agent_worktree() {
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let said = |output: &std::process::Output| {
         format!(
@@ -1375,7 +1387,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let ide = |args: &[&str]| {
         let mut command = server_git(&profile, &shim, &home, &root, false, "/usr/bin:/bin");
@@ -1407,4 +1419,387 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         );
     }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+const NO_FORWARDER_LINE: &str = "carries git index changes through the IDE's Source Control";
+
+/// One project with one commit under an installed IDE profile, and the engine's shim and
+/// private index folder as a launch writes them.
+struct Server {
+    _scratch: tempfile::TempDir,
+    root: PathBuf,
+    home: PathBuf,
+    profile: PathBuf,
+    shim: PathBuf,
+}
+
+/// Makes a [`Server`]. Output: the server.
+fn server() -> Server {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None, Some(&root)).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    Server {
+        _scratch: scratch,
+        root,
+        home,
+        profile,
+        shim,
+    }
+}
+
+impl Server {
+    /// Git through the shim in the project folder, with the engine step behind it. Input:
+    /// the arguments. Output: whether it exited 0 and what it printed on standard error.
+    fn git(&self, args: &[&str]) -> (bool, String) {
+        ide_git(
+            &self.profile,
+            &self.shim,
+            &self.home,
+            &self.root,
+            &self.root,
+            args,
+        )
+    }
+
+    /// Git as a task or the IDE shell runs it, by name with the shim's folder first on the
+    /// path and no forwarder in its environment. Input: the shell line. Output: its output.
+    fn task(&self, line: &str) -> std::process::Output {
+        let path = format!(
+            "{}:/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin",
+            crate::ide::settings::machine_folder(&self.home).display()
+        );
+        let mut command = server_git(
+            &self.profile,
+            Path::new("/bin/sh"),
+            &self.home,
+            &self.root,
+            false,
+            &path,
+        );
+        for name in FORWARDER_VARIABLES {
+            command.env_remove(name);
+        }
+        command.args(["-c", line]).current_dir(&self.root);
+        crate::spawn_gate::output(&mut command).unwrap()
+    }
+
+    /// The real index's path. Output: the path.
+    fn index(&self) -> PathBuf {
+        self.root.join(".git").join("index")
+    }
+
+    /// Whether the private index folder is empty. Output: the answer.
+    fn no_private_files(&self) -> bool {
+        fs::read_dir(self.home.join(crate::ide::git::PRIVATE_INDEX))
+            .unwrap()
+            .next()
+            .is_none()
+    }
+
+    /// The owner's own `git status --porcelain`, outside the sandbox. Output: the text.
+    fn status(&self) -> String {
+        setup(&self.root, &["status", "--porcelain"])
+    }
+}
+
+/// SECAUDIT-IDE-SERVER-INDEX and SECAUDIT-GIT-STATE-FILES under the installed `server.sb`:
+/// no door reaches the real index or its lock, by the plain name or a case variant, and
+/// nothing can be planted under the folders that carry a program or another repository.
+/// The private index folder stays writable and each tool used by a door works elsewhere.
+#[test]
+fn the_server_reaches_the_real_index_and_the_program_carrying_files_by_no_door() {
+    let s = server();
+    fs::write(s.root.join("CaseProbe"), "").unwrap();
+    assert!(
+        s.root.join("caseprobe").exists(),
+        "needs a case-insensitive volume"
+    );
+    fs::remove_file(s.root.join("CaseProbe")).unwrap();
+    let (index, lock) = (s.index(), s.root.join(".git/index.lock"));
+    let spare = s.root.join("spare");
+    fs::write(&spare, "raw\n").unwrap();
+    let before = fs::read(&index).unwrap();
+    let from = spare.display();
+    let swap = format!(
+        "/usr/bin/perl -e 'my ($first, $second) = @ARGV; exit(syscall(488, -2, $first, -2, $second, 2) == 0 ? 0 : 1)' '{from}' \"$1\""
+    );
+    let doors = [
+        ("write", r#"printf x >> "$1""#.to_owned(), index.clone()),
+        ("create the lock", r#": > "$1""#.to_owned(), lock.clone()),
+        (
+            "rename over",
+            format!(r#"/bin/mv '{from}' "$1""#),
+            index.clone(),
+        ),
+        (
+            "hard link the lock",
+            format!(r#"/bin/ln '{from}' "$1""#),
+            lock.clone(),
+        ),
+        (
+            "hard link over",
+            format!(r#"/bin/ln -f '{from}' "$1""#),
+            index.clone(),
+        ),
+        (
+            "clone the lock",
+            format!(r#"/bin/cp -c '{from}' "$1""#),
+            lock.clone(),
+        ),
+        ("swap", swap.clone(), index.clone()),
+        ("unlink", r#"/bin/rm "$1""#.to_owned(), index.clone()),
+        (
+            "case variant of the folder",
+            r#"printf x >> "$1""#.to_owned(),
+            s.root.join(".GIT/index"),
+        ),
+        (
+            "case variant of the file",
+            r#"printf x >> "$1""#.to_owned(),
+            s.root.join(".git/INDEX"),
+        ),
+        (
+            "case variant of the lock",
+            r#": > "$1""#.to_owned(),
+            s.root.join(".GIT/INDEX.LOCK"),
+        ),
+        (
+            "move the git folder aside",
+            r#"/bin/mv "$1" "$1.aside""#.to_owned(),
+            s.root.join(".git"),
+        ),
+    ];
+    for (door, script, target) in &doors {
+        assert!(!sh(&s.profile, script, target), "{door} ran");
+        assert_eq!(fs::read(&index).unwrap(), before, "{door}");
+        assert!(!lock.exists(), "{door}");
+    }
+    for below in [
+        ".git/rebase-merge/git-rebase-todo",
+        ".git/rebase-apply/next",
+        ".git/remotes/origin",
+        ".git/branches/origin",
+        ".git/modules/x/hooks/post-checkout",
+        ".git/modules/x/config",
+        ".GIT/REBASE-MERGE/git-rebase-todo",
+        ".git/Remotes/origin",
+    ] {
+        let target = s.root.join(below);
+        let ran = sh(
+            &s.profile,
+            r#"/bin/mkdir -p "$(/usr/bin/dirname "$1")" && printf x > "$1""#,
+            &target,
+        );
+        assert!(!ran, "{below} was planted");
+        assert!(!target.exists(), "{below}");
+    }
+    for (name, script) in [
+        ("hard link", format!(r#"/bin/ln '{from}' "$1""#)),
+        ("clone", format!(r#"/bin/cp -c '{from}' "$1""#)),
+    ] {
+        let target = s.root.join(format!("control {name}"));
+        assert!(sh(&s.profile, &script, &target), "control {name}");
+        assert!(target.exists(), "control {name}");
+    }
+    let target = s.root.join("control swap");
+    fs::write(&target, "other\n").unwrap();
+    assert!(sh(&s.profile, &swap, &target), "control swap");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "raw\n");
+    let target = s.root.join("control rename");
+    assert!(sh(
+        &s.profile,
+        &format!(r#"/bin/mv '{from}' "$1""#),
+        &target
+    ));
+    let private = s.home.join(crate::ide::git::PRIVATE_INDEX).join("written");
+    assert!(sh(&s.profile, r#"printf x > "$1""#, &private));
+    fs::remove_file(private).unwrap();
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// A git the shim does not run, as an extension or anything else in the server can start,
+/// cannot stage: it fails on the denied lock and the real index is byte-identical.
+#[test]
+fn a_git_outside_the_shim_cannot_stage() {
+    let s = server();
+    fs::write(s.root.join("a.txt"), "changed\n").unwrap();
+    let before = fs::read(s.index()).unwrap();
+    let real = Path::new(crate::research::runner::TOOLS_GIT);
+    let mut command = server_git(&s.profile, real, &s.home, &s.root, false, "/usr/bin:/bin");
+    command.args(["add", "a.txt"]).current_dir(&s.root);
+    let output = crate::spawn_gate::output(&mut command).unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("index.lock"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(s.index()).unwrap(), before);
+    assert!(!s.root.join(".git/index.lock").exists());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// Source Control keeps working through the private index, with the real shim under the
+/// installed profile and the real engine step: stage, unstage, a partial stage, commit,
+/// checkout and a conflicted merge with its three stages, each read back by the owner's own
+/// git outside the sandbox. No private file outlives a command.
+#[test]
+fn source_control_works_through_the_private_index() {
+    let s = server();
+    let staged = |args: &[&str]| {
+        let (worked, said) = s.git(args);
+        assert!(worked, "git {args:?}: {said}");
+        assert!(s.no_private_files(), "git {args:?} left a private file");
+    };
+
+    fs::write(s.root.join("a.txt"), "changed\n").unwrap();
+    staged(&["add", "a.txt"]);
+    assert_eq!(s.status(), "M  a.txt");
+    staged(&["reset", "-q", "HEAD", "--", "a.txt"]);
+    assert_eq!(s.status(), "M a.txt");
+
+    fs::write(s.root.join("partial"), "part\n").unwrap();
+    let oid = setup(&s.root, &["hash-object", "-w", "partial"]);
+    fs::remove_file(s.root.join("partial")).unwrap();
+    staged(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{},a.txt", oid.trim()),
+    ]);
+    assert_eq!(s.status(), "MM a.txt");
+
+    staged(&["commit", "-q", "-m", "ide"]);
+    assert_eq!(s.status(), "M a.txt");
+    assert_eq!(
+        setup(&s.root, &["show", "HEAD:a.txt"]),
+        "part\n",
+        "the commit holds the partial stage"
+    );
+    staged(&["checkout", "-q", "--", "a.txt"]);
+    assert_eq!(s.status(), "");
+    assert_eq!(fs::read_to_string(s.root.join("a.txt")).unwrap(), "part\n");
+
+    setup(&s.root, &["switch", "-q", "-c", "other", "HEAD~1"]);
+    fs::write(s.root.join("a.txt"), "theirs\n").unwrap();
+    setup(&s.root, &["commit", "-q", "-am", "theirs"]);
+    setup(&s.root, &["switch", "-q", "main"]);
+    let (merged, said) = s.git(&["merge", "other"]);
+    assert!(!merged, "the merge conflicts: {said}");
+    assert!(s.no_private_files());
+    assert_eq!(s.status(), "UU a.txt");
+    assert_eq!(
+        setup(&s.root, &["ls-files", "-u"]).lines().count(),
+        3,
+        "all three stages reached the real index"
+    );
+
+    fs::write(s.root.join("a.txt"), "resolved\n").unwrap();
+    staged(&["add", "a.txt"]);
+    staged(&["commit", "-q", "--no-edit"]);
+    assert_eq!(s.status(), "");
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// A read-only command runs on the real index, so Source Control sees what is staged, and
+/// makes no private copy.
+#[test]
+fn a_read_only_git_sees_the_real_index_and_copies_nothing() {
+    let s = server();
+    fs::write(s.root.join("a.txt"), "changed\n").unwrap();
+    setup(&s.root, &["add", "a.txt"]);
+    let output = ide_git_output(
+        &s.profile,
+        &s.shim,
+        &s.home,
+        &s.root,
+        &s.root,
+        &["status", "--porcelain"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "M  a.txt\n");
+    assert!(s.no_private_files());
+    assert!(!s.home.join(FORWARD_REQUEST).exists());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// A git command that cannot reach the engine fails before git runs, with a plain line:
+/// the shim with no forwarder, and a task's `git add` with the shim first on its path, as
+/// the IDE shell and tasks run it. Read-only commands still work there.
+#[test]
+fn a_git_that_cannot_reach_the_engine_fails_before_it_runs() {
+    let s = server();
+    fs::write(s.root.join("a.txt"), "changed\n").unwrap();
+    let before = fs::read(s.index()).unwrap();
+    let held = |output: &std::process::Output| {
+        assert_eq!(output.status.code(), Some(128), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(NO_FORWARDER_LINE),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(s.index()).unwrap(), before);
+        assert!(s.no_private_files());
+    };
+    let mut direct = server_git(
+        &s.profile,
+        &s.shim,
+        &s.home,
+        &s.root,
+        false,
+        "/usr/bin:/bin",
+    );
+    for name in FORWARDER_VARIABLES {
+        direct.env_remove(name);
+    }
+    direct.args(["add", "a.txt"]).current_dir(&s.root);
+    held(&crate::spawn_gate::output(&mut direct).unwrap());
+    held(&s.task("git add a.txt"));
+    let read = s.task("git branch --show-current");
+    assert!(read.status.success(), "{read:?}");
+    assert_eq!(String::from_utf8_lossy(&read.stdout), "main\n");
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// A rebase from the IDE stops with a plain line and leaves no state folder, since the
+/// sandbox denies it; a merge still runs.
+#[test]
+fn a_rebase_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    let (ran, said) = s.git(&["rebase", "main"]);
+    assert!(!ran);
+    assert!(
+        said.contains("does not run git rebase from the IDE"),
+        "{said}"
+    );
+    assert!(!s.root.join(".git/rebase-merge").exists());
+    assert!(s.no_private_files());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }

@@ -183,6 +183,10 @@ pub fn workspace() -> Map<String, Value> {
 /// ([`super::settings::write`]).
 pub const SHIM: &str = "git";
 
+/// The folder under the server's data folder that holds each git command's throwaway
+/// copy of the project's index.
+pub const PRIVATE_INDEX: &str = "git-index";
+
 /// The shim's text. The IDE sandbox has no network, so `push`, `pull`, `fetch` and
 /// `ls-remote` go to the built-in extension's forwarder, which the extension names in
 /// `CRAZYAGENT_IDE_GIT_NODE` and `CRAZYAGENT_IDE_GIT_FORWARD` and which hands them to the
@@ -224,7 +228,11 @@ const SHIM_EXEC: &str = "exec git \"$@\"\n";
 /// folder. Inputs: the canonical project folder, or None for Off, and the absolute git
 /// ([`crate::research::runner::sandboxed_git`]). Output: the text, or `ide_settings_invalid`
 /// for a folder that is not absolute, not UTF-8 or holds a quote or a control character.
-pub fn shim_text(project_hooks: Option<&Path>, git: &Path) -> Result<String, EngineError> {
+pub fn shim_text(
+    project_hooks: Option<&Path>,
+    git: &Path,
+    _index: Option<(&Path, &Path)>,
+) -> Result<String, EngineError> {
     assert_eq!(CONFIG_ENV[0].1.parse::<usize>(), Ok(KEYS));
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(

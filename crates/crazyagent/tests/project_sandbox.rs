@@ -447,6 +447,44 @@ fn write_refused(sandbox: &ProjectSandbox, profile: &Path, script: &str, target:
     assert!(!target.exists(), "{}", target.display());
 }
 
+/// SECAUDIT-GIT-STATE-FILES and SECAUDIT-IDE-SERVER-INDEX: a sandboxed process cannot take
+/// the project's index lock or plant git state that names a program or another repository,
+/// by the plain name or a case variant. An agent's own git folder keeps its rebase state.
+#[test]
+fn a_sandbox_refuses_git_state_that_names_a_program_or_another_repository() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let git = case.project.join(".git");
+    for below in [
+        "index.lock",
+        "rebase-merge/git-rebase-todo",
+        "rebase-apply/next",
+        "remotes/origin",
+        "branches/origin",
+        "REBASE-MERGE/git-rebase-todo",
+    ] {
+        let target = git.join(below);
+        let script = format!(
+            "mkdir -p {} && : > {}",
+            quoted(target.parent().unwrap()),
+            quoted(&target)
+        );
+        write_refused(&sandbox, &profile, &script, &target);
+    }
+    let own = git
+        .join("worktrees")
+        .join("engine-one")
+        .join("rebase-merge");
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mkdir -p {own} && : > {own}/git-rebase-todo",
+            own = quoted(&own)
+        ),
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
 #[test]
 fn a_sandbox_refuses_writes_to_the_submodule_store() {
     let (case, sandbox, profile, _worktree) = git_case();
