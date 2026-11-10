@@ -1356,15 +1356,17 @@ fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
     }
 }
 
-/// Refuses a merged tree in which a change completes a bare-repository layout (SR1-1)
-/// or links the owner could follow out of the project (SR1-2): Accept's merge can join a
+/// Refuses a merged tree in which a change adds or changes a gitlink, which no set may land
+/// and the turn end's checks may have read from another start (land-19 r1 M1, L1), completes
+/// a bare-repository layout (SR1-1) or links the owner could follow out of the project
+/// (SR1-2): Accept's merge can join a
 /// change set's half of a layout or of a link chain with the other half another change set
 /// already landed. A layout the merge makes holds a name the change added or changed, and a
 /// chain the merge makes passes through a link the change added or changed, so the
 /// change's own kept paths name every folder and link to check.
 /// Inputs: the repository, the owner's checkout, the change's start and end commits and
-/// the merged tree. Output: Ok, else `changes_bare_repository`, `changes_link_outside` or
-/// the listing failure.
+/// the merged tree. Output: Ok, else `changes_embedded_repository`,
+/// `changes_bare_repository`, `changes_link_outside` or the listing failure.
 pub(super) fn check_merged(
     repo: &Repo,
     checkout: &Path,
@@ -1397,8 +1399,12 @@ pub(super) fn check_merged(
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
         let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
         let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
+        let mode = header.split(|byte| *byte == b' ').nth(1);
+        if mode == Some(b"160000".as_slice()) {
+            return Err(failure("changes_embedded_repository"));
+        }
         layout_folders(&mut folders, path);
-        if header.split(|byte| *byte == b' ').nth(1) == Some(b"120000".as_slice()) {
+        if mode == Some(b"120000".as_slice()) {
             links.insert(path.to_owned());
         }
     }
@@ -2009,7 +2015,10 @@ fn restarted_base(
 /// must stay within the bounds before anything is stored. With no set open, a head already
 /// on the landing tip is not checked, since all its commits are on that branch: it opens no
 /// set, and files left uncommitted above it are still checked with the whole range by the
-/// commit that takes them in (LAND-8-L2). The change set is stored
+/// commit that takes them in (LAND-8-L2). The gitlink, layout, link and ignore checks read
+/// the set's own work from where Accept measures it against the tip
+/// (`owner::measured_base`), so owner work the agent took in from the tip is not refused as
+/// its own, while the bounds count the whole set (LAND-17-L1). The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
 /// commits the same tree again. Its counts are measured against the tip it lands on,
 /// read before the hold as the clone fetch is (`owner::landing_tip`, DEC-107).
@@ -2100,7 +2109,18 @@ pub(super) fn record(
     }
     let fast_forwarded =
         open.is_none() && above != head && already_on_tip(&shared, &head, tip.as_deref())?;
-    let owned = own_start(&shared, above, &head, tip.as_deref())?;
+    let owned = match tip.as_deref() {
+        Some(tip) => super::owner::measured_base(
+            db,
+            &shared,
+            &workspace.project,
+            &workspace.repository,
+            above,
+            &head,
+            tip,
+        )?,
+        None => above.to_owned(),
+    };
     if above != head && !fast_forwarded {
         check_change(
             repo,
@@ -2210,32 +2230,6 @@ pub(super) fn record(
         agent.move_head(Some(&head), &commit, "CrazyAgent: turn end")?;
     }
     Ok(Some(record.id))
-}
-
-/// The commit an agent's own work starts from for the change checks: where its head meets
-/// the landing tip, when that lies above the set's start, as after the agent fast-forwarded
-/// or merged the tip in, so commits the tip already holds are not checked as its own
-/// (LAND-17-L1); else the set's start, also with no tip or no shared history. Inputs: the
-/// owner repository, the set's start, its head and the landing tip. Output: the commit.
-fn own_start(
-    owner: &Repo,
-    above: &str,
-    head: &str,
-    tip: Option<&str>,
-) -> Result<String, EngineError> {
-    let Some(tip) = tip else {
-        return Ok(above.to_owned());
-    };
-    let output = owner.exec(&["merge-base", tip, head], None, &[], 256)?;
-    let joined = match output.code {
-        0 => object_id(&output.stdout)?,
-        1 => return Ok(above.to_owned()),
-        _ => return Err(failure("changes_git_failed")),
-    };
-    if joined != above && owner.test(&["merge-base", "--is-ancestor", above, &joined])? {
-        return Ok(joined);
-    }
-    Ok(above.to_owned())
 }
 
 /// Says whether a commit is already on the branch a set would land on, so an agent that only

@@ -26,9 +26,10 @@ thread_local! {
 
 /// The settings every engine git call carries on top of the research runner's
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
-/// case-folding path checks on, no signing, no untracked or split index caches and no
-/// reflog created for a ref update.
-const ENGINE_SETTINGS: [&str; 18] = [
+/// case-folding path checks on, no signing, no untracked or split index caches, no
+/// reflog created for a ref update and no commit-graph file, which a confined process could
+/// write to make git answer ancestry wrongly (land-19 r1 M1).
+const ENGINE_SETTINGS: [&str; 20] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -47,6 +48,8 @@ const ENGINE_SETTINGS: [&str; 18] = [
     "core.splitIndex=false",
     "-c",
     "core.logAllRefUpdates=false",
+    "-c",
+    "core.commitGraph=false",
 ];
 
 pub(super) fn failure(code: &str) -> EngineError {

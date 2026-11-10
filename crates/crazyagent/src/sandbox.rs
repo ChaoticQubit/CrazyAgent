@@ -1810,6 +1810,7 @@ impl ProjectSandbox {
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
         text.push_str(&self.nested_git_denies());
+        text.push_str(&self.commit_graph_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
@@ -2082,6 +2083,30 @@ impl ProjectSandbox {
                     + usize::from(self.setup.is_some())
         );
         assert!(text.ends_with(")\n"));
+        text
+    }
+
+    /// The Seatbelt rule that keeps an agent from writing a commit-graph file, single or
+    /// split, into the project's object store or the one its checkout shares, in any letter
+    /// case: git answers `merge-base` and `--is-ancestor` from that file without reading the
+    /// commits, so a forged one could claim an agent commit is on the landing tip (land-19 r1
+    /// M1). Engine git reads none; this also keeps the owner's own git from being handed one.
+    /// Input: the policy. Output: the rule text.
+    fn commit_graph_denies(&self) -> String {
+        let graph = "[iI][nN][fF][oO]/[cC][oO][mM][mM][iI][tT]-[gG][rR][aA][pP][hH][sS]?(/.*)?";
+        let mut stores = vec![format!(
+            "{}/\\.[gG][iI][tT]/[oO][bB][jJ][eE][cC][tT][sS]",
+            seatbelt_pattern(&self.project_root)
+        )];
+        if let Some(checkout) = &self.checkout {
+            stores.push(seatbelt_pattern(&checkout.objects));
+        }
+        let mut text = String::from("(deny file-write*");
+        for store in &stores {
+            text.push_str(&format!("\n  (regex #\"^{store}/{graph}$\")"));
+        }
+        text.push_str(")\n");
+        assert_eq!(text.matches("(regex #\"^/").count(), stores.len());
         text
     }
 
