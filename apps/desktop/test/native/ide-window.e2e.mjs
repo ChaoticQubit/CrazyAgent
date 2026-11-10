@@ -315,6 +315,9 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     assert.equal(Math.round(settled.look.height * scale), ide.size[1], "the page has the webview's whole height");
 
     raise("IDE");
+    await pause(POLL_MS);
+    shot("own-window");
+    await browser.saveScreenshot(join(evidence, "tab-while-out.png"));
     assert.ok(!menuNames().includes("File"), `the IDE window's menu owns none of the editor's keys: ${menuNames()}`);
     const before = (await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused, "the IDE window never had the focus", OWN_WINDOW_MS)).look.editors;
     commandKey("n");

@@ -329,8 +329,8 @@ test("an open dialog, drawer or menu hides the IDE webview until the last one cl
   assert.match(menu, /useCover\(open\)/, "an open menu counts too");
   const tab = read("src/screens/project/ide.tsx");
   assert.match(tab, /const covered = useOverlayShown\(\);/);
-  assert.match(tab, /if \(!ready \|\| !element \|\| covered\) return;/, "while covered the webview is hidden and not opened");
-  assert.match(tab, /\}, \[projectId, ready, covered\]\);/, "it opens again once the overlay closes");
+  assert.match(tab, /if \(!ready \|\| !element \|\| covered \|\| out\) return;/, "while covered the webview is hidden and not opened");
+  assert.match(tab, /\}, \[projectId, ready, covered, out\]\);/, "it opens again once the overlay closes");
 });
 
 test("an open the tab gave up on is refused quietly instead of showing a problem", () => {
@@ -381,9 +381,11 @@ test("the IDE webview follows its panel through any layout shift or scroll, and 
 
 test("closing a project page stops its IDE server, ordered with any open of the same project", () => {
   const lib = read("src-tauri/src/lib.rs");
-  const close = command(lib, "desktop_ide_close");
-  assert.ok(close.indexOf("views.closing(&project)") >= 0 && close.indexOf("views.closing(&project)") < close.indexOf("ide::close("), "the close is noted before the webview closes and before any await");
-  assert.match(close, /views\s*\.stop_closed\(&project, closing,/);
+  const page = command(lib, "desktop_ide_close");
+  assert.ok(page.indexOf("views.keep_for_own_window(&project)") >= 0 && page.indexOf("views.keep_for_own_window(&project)") < page.indexOf("close_ide("), "an IDE in its own window outlives its page");
+  const close = lib.slice(lib.indexOf("async fn close_ide"), lib.indexOf("#[tauri::command]", lib.indexOf("async fn close_ide")));
+  assert.ok(close.indexOf("views.closing(project)") >= 0 && close.indexOf("views.closing(project)") < close.indexOf("ide::close("), "the close is noted before the webview closes and before any await");
+  assert.match(close, /views\s*\.stop_closed\(project, closing,/);
   assert.match(close, /ide_stop\(project\.clone\(\)\)/, "the engine stops the server");
   const open = command(lib, "desktop_ide_open");
   assert.match(open, /let \(ticket, turn\) = views\.begin\(&project\);/, "an open takes its ticket and its turn under one lock");
