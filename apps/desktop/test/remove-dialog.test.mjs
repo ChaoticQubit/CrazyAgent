@@ -4,7 +4,9 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { RemoveDialogView, deleteReady, lossLines, removeChoices } = await import("../src/screens/project/remove-dialog.tsx");
+const dialog = await import("../src/screens/project/remove-dialog.tsx");
+const { RemoveDialogView, deleteReady, lossLines, removeChoices } = dialog;
+const NAME_BYTES_MAX = 255;
 
 const preview = (patch = {}) => ({
   name: "Gone app",
@@ -252,4 +254,38 @@ test("the keyboard goes from the name box to the folder list and scrolls it with
   assert.deepEqual(seen.reached, { focused: true, top: 0 }, "Shift+Tab from the name box lands on the list");
   assert.equal(seen.scrolled.focused, true, "the list keeps the focus");
   assert.ok(seen.scrolled.top > 0, `the keys scrolled the list: ${JSON.stringify(seen)}`);
+});
+
+test("a project name up to the 255-byte bound is cut to one line with an ellipsis in the dialog title and the Type to confirm label, and its whole text stays in the hover and the page (UI2-R2 markup)", async () => {
+  const { readFileSync } = await import("node:fs");
+  assert.equal(typeof dialog.removeTitle, "function", "the remove dialog draws its own title");
+  for (const name of ["n".repeat(NAME_BYTES_MAX), "word ".repeat(51).trim()]) {
+    const clip = new RegExp(`<span class="pj-remove-clip" title="${name}">${name}</span>`, "u");
+    const title = renderToStaticMarkup(createElement("h2", null, dialog.removeTitle(name)));
+    assert.match(title, clip, "the title cuts the name and keeps it whole in the hover");
+    assert.match(title, /from CrazyAgent\?<\/h2>$/u, "the end of the question stays in view");
+    assert.match(view({ preview: preview({ name }), choice: "everything" }), new RegExp(`Type ${clip.source} to confirm`, "u"), "the label cuts the name too");
+  }
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  assert.match(css, /\.pj-remove-clip \{[^}]*display: inline-block;[^}]*max-width: [^;]+;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/u);
+  const shell = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
+  assert.match(shell, /\.dialog-head h2 \{[^}]*min-width: 0;/u, "a long title cannot push the close button out");
+  const settings = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(settings, /<Dialog open=\{confirming\} title=\{removeTitle\(displayText\(data\.name\)\)\}/u, "the project settings dialog uses that title");
+});
+
+test("at the smallest windows a project name at the 255-byte bound, spaced or unbroken, leaves the dialog its fit with the name box and Delete in view (UI2-R2)", async () => {
+  const { bundle } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/remove-dialog-fit.mjs", import.meta.url).pathname);
+  for (const size of SMALLEST) {
+    for (const name of ["n".repeat(NAME_BYTES_MAX), "word ".repeat(51).trim()]) {
+      const { fit } = await measured(fixture, fourLines({ name }), size);
+      const seen = `${size.join("x")} ${name.slice(0, 8)}: ${JSON.stringify(fit)}`;
+      assert.ok(fit.dialog.scroll <= fit.dialog.client && fit.dialog.top === 0, `the frame does not scroll: ${seen}`);
+      assert.ok(fit.wide <= fit.frameWidth, `nothing pushes the frame sideways: ${seen}`);
+      assert.equal(fit.titleLines, 1, `the title stays one line: ${seen}`);
+      assert.equal(fit.name, true, `the name box is in view: ${seen}`);
+      assert.equal(fit.remove, true, `the Delete everything button is in view: ${seen}`);
+    }
+  }
 });
