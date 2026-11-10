@@ -741,6 +741,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         choice: MasterIdleStop,
     },
+    MasterLiveTerminal {
+        project_id: ProjectId,
+        on: bool,
+    },
     CatchUpMain {
         project_id: ProjectId,
         mode: CatchUpMain,
@@ -1008,6 +1012,7 @@ impl TeamAction {
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
             | Self::MasterIdleStop { .. }
+            | Self::MasterLiveTerminal { .. }
             | Self::TerminalsPerWindow { .. }
             | Self::CatchUpMain { .. }
             | Self::ReuseIdle { .. }
@@ -1041,6 +1046,7 @@ impl TeamAction {
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
             | Self::MasterIdleStop { project_id, .. }
+            | Self::MasterLiveTerminal { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
             | Self::ReuseIdle { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
@@ -2504,6 +2510,7 @@ fn perform(
             set_master_idle_stop(tx, project, *choice)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MasterLiveTerminal { .. } => Ok(Outcome::Applied),
         TeamAction::TerminalsPerWindow { per_window, .. } => {
             wall::store(tx, project, *per_window)?;
             Ok(Outcome::Applied)
@@ -3084,6 +3091,12 @@ fn reask_default() -> bool {
     true
 }
 
+/// The "Live terminal" setting a team status read without one shows: on (DEC-117 Q4).
+/// Output: the default.
+fn live_terminal_default() -> bool {
+    true
+}
+
 /// Everything the clients show about a project's team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStatus {
@@ -3123,6 +3136,8 @@ pub struct TeamStatus {
     pub reask_empty_reply: bool,
     #[serde(default)]
     pub master_idle_stop: MasterIdleStop,
+    #[serde(default = "live_terminal_default")]
+    pub master_live_terminal: bool,
     #[serde(default)]
     pub catch_up_main: CatchUpMain,
     #[serde(default)]
@@ -4801,6 +4816,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             master_idle_stop(connection, project)?,
             master::live(connection, project)?,
         ),
+        master_live_terminal: true,
         catch_up_main: catch_up_main(connection, project)?,
         reuse_idle: reuse_idle(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
