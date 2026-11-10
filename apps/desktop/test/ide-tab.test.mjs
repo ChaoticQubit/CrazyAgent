@@ -240,9 +240,8 @@ const FORWARD = "Bring it forward";
 const IN_ITS_WINDOW = "This IDE is in its own window";
 
 test("the window button moves the IDE out, and the tab says so and offers to bring it forward", () => withOpenTab("[]", async (evaluate) => {
-  const height = await evaluate("window.innerHeight");
   await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)})`);
-  assert.deepEqual(await evaluate("Fixture.asks()"), [{ projectId: "project-one", viewport: height }], "the page's height goes along, to measure the title bar");
+  assert.deepEqual(await evaluate("Fixture.asks()"), [{ projectId: "project-one" }], "the page sends nothing the window can get wrong from the main window's state");
   const shown = await evaluate("Fixture.tab()");
   assert.ok(shown.text.includes(IN_ITS_WINDOW), shown.text);
   assert.ok(shown.buttons.includes(FORWARD), JSON.stringify(shown.buttons));

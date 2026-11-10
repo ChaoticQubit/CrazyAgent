@@ -371,6 +371,11 @@ impl IdeViews {
         self.lock().out.contains_key(project.as_str())
     }
 
+    /// Stub for the red rows.
+    pub fn page_left(&self, _project: &ProjectId) -> bool {
+        false
+    }
+
     /// Keeps a project's IDE when its page closes while the IDE has its own window, noting the
     /// close so that closing the window does the stop the page skipped. Input: the project.
     /// Output: true when it was kept and the page's close must do nothing more.
@@ -593,6 +598,11 @@ fn hex_of(project: &ProjectId) -> String {
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Stub for the red rows.
+fn title_inset(_fullscreen: bool) -> f64 {
+    0.0
 }
 
 /// Where an IDE webview goes in its own window, from the window's frame. Inner size will not do:
@@ -1326,22 +1336,37 @@ mod tests {
     }
 
     #[test]
-    fn the_title_bar_is_measured_from_the_page_in_the_main_window() {
-        let inset = |viewport| Bounds::title_bar(viewport, 870.0).map_err(|error| error.code);
+    fn the_title_bar_inset_follows_the_ide_windows_own_full_screen() {
         assert_eq!(
-            inset(838.0),
-            Ok(32.0),
-            "the page starts below the title bar"
+            title_inset(true),
+            0.0,
+            "a window in native full screen has no title bar"
         );
-        assert_eq!(inset(870.0), Ok(0.0), "a page that fills the view has none");
         assert_eq!(
-            inset(900.0),
-            Ok(0.0),
-            "a page taller than the view has none"
+            title_inset(false),
+            if cfg!(target_os = "macos") { 32.0 } else { 0.0 },
+            "the title bar is there whatever the main window is doing"
         );
-        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, SPAN_MAX + 1.0] {
-            assert_eq!(inset(bad), Err("ide_bounds_invalid"), "{bad}");
-        }
+    }
+
+    #[test]
+    fn a_removal_owes_the_server_stop_only_when_the_page_had_already_closed() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        assert!(!views.page_left(&alpha), "with no window nothing was skipped");
+        views
+            .lock()
+            .out
+            .insert("alpha".to_owned(), own_window("ide-window-61"));
+        assert!(
+            !views.page_left(&alpha),
+            "the page is open, so it does its own stop"
+        );
+        assert!(views.keep_for_own_window(&alpha));
+        assert!(
+            views.page_left(&alpha),
+            "the page's stop was skipped, so the removal owes it"
+        );
     }
 
     #[test]

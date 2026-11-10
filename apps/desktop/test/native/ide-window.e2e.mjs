@@ -293,6 +293,13 @@ function samePage(row, other, message) {
   assert.ok(row.look && Math.abs(row.look.origin - other.look.origin) < SAME_PAGE_MS, `${message}: ${row.look?.origin} and ${other.look.origin}`);
 }
 
+/** Whether a project's IDE server process is alive under this run's test root. Input: the
+ * project. Output: a boolean. */
+function serverUp(project) {
+  const pattern = `server-data-dir ${root}/[^ ]*/ide/${project}/`;
+  return spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim() !== "";
+}
+
 /** Opens a project's IDE tab, waits for the workbench and presses the window button, all on the
  * page's timers because the webdriver session cannot see the main window meanwhile. Input: the
  * project. Output: the row that first shows the webview in its own window. */
@@ -384,6 +391,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const first = await newProject("ide-own-one");
     const second = await newProject("ide-own-two");
     const third = await newProject("ide-own-three");
+    const fourth = await newProject("ide-own-four");
     await buildReady();
     await go(`#/projects/${encodeURIComponent(first)}/overview`);
     await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
@@ -440,13 +448,28 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     assert.ok(!home.windows.some((label) => OWN_WINDOW.test(label)), "and the window has gone");
     await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
 
+    await go(`#/projects/${encodeURIComponent(fourth)}/overview`);
+    await moveOut(fourth);
+    assert.ok(serverUp(fourth), "the IDE's server runs while the IDE is in its own window");
+    await go("#/");
+    await pause(POLL_MS);
+    assert.ok(serverUp(fourth), "leaving the page keeps the server for the window");
+    const leaving = Date.now();
+    await closeTitled("IDE");
+    await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "closing the window after the page left kept the window", OWN_WINDOW_MS, leaving);
+    await until(() => !serverUp(fourth), OWN_WINDOW_MS, "closing the window after its page had left kept the IDE's server running");
+
     await go(`#/projects/${encodeURIComponent(second)}/overview`);
     await moveOut(second);
+    assert.ok(serverUp(second), "the second IDE's server runs while the IDE is in its own window");
+    await go("#/");
+    await pause(POLL_MS);
     const removing = Date.now();
     const removal = await invoke("desktop_remove_project", { id: second, generation: ++generation, deleteName: null });
     assert.equal(removal.outcome, "applied", JSON.stringify(removal));
     await invoke("desktop_close_project_walls", { id: second });
     await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "removing the project left its IDE window open", OWN_WINDOW_MS, removing);
+    await until(() => !serverUp(second), OWN_WINDOW_MS, "removing a project whose page had closed left its IDE server running");
 
     await go(`#/projects/${encodeURIComponent(third)}/overview`);
     await moveOut(third);
