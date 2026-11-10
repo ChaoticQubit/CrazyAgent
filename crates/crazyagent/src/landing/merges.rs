@@ -399,7 +399,10 @@ pub(super) fn holds_changes_since(
 ) -> Result<bool, EngineError> {
     assert!(is_object_id(base));
     assert!(is_object_id(head));
-    let Some((conflicts, differences)) = merge_differences(owner, commit, base, commit, head)?
+    let Some(Remerged {
+        conflicts,
+        differences,
+    }) = merge_differences(owner, commit, base, commit, head)?
     else {
         return Ok(false);
     };
@@ -572,7 +575,10 @@ fn kept_from_base(
     ours: &str,
     theirs: &str,
 ) -> Result<Option<Vec<Vec<u8>>>, EngineError> {
-    let Some((conflicts, differences)) = merge_differences(owner, commit, base, ours, theirs)?
+    let Some(Remerged {
+        conflicts,
+        differences,
+    }) = merge_differences(owner, commit, base, ours, theirs)?
     else {
         return Ok(None);
     };
@@ -589,6 +595,13 @@ struct Difference {
     gone: Option<String>,
 }
 
+/// A merge made again from a base: the paths it conflicts on, as git printed them, and
+/// every path where a commit's tree differs from its result.
+struct Remerged {
+    conflicts: Vec<Vec<u8>>,
+    differences: Vec<Difference>,
+}
+
 /// Merges two sides from a base and lists every path where a commit's tree differs from
 /// the result. Paths are compared as git printed them. Inputs: the owner repository, the
 /// commit, the base and both sides. Output: the conflicted paths and the differences, or
@@ -599,7 +612,7 @@ fn merge_differences(
     base: &str,
     ours: &str,
     theirs: &str,
-) -> Result<Option<(Vec<Vec<u8>>, Vec<Difference>)>, EngineError> {
+) -> Result<Option<Remerged>, EngineError> {
     assert!(is_object_id(base));
     let paths = super::owner::merge_paths(owner, base, ours, theirs)?;
     if super::owner::uses_configured_commands(owner, &paths, &[base, ours, theirs])? {
@@ -646,7 +659,10 @@ fn merge_differences(
             .iter()
             .all(|difference| !difference.path.is_empty())
     );
-    Ok(Some((conflicts, differences)))
+    Ok(Some(Remerged {
+        conflicts,
+        differences,
+    }))
 }
 
 /// Tells whether one of the merges brought a set's head in through its second parent, so
