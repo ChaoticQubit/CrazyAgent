@@ -197,10 +197,12 @@ pub const PRIVATE_INDEX: &str = "git-index";
 /// drop it (IN1-FN1), also after git's own leading options: `shim_skip` passes every leading
 /// option, with the next word after `-c`, `-C`, `--git-dir`, `--work-tree`, `--namespace`,
 /// `--config-env`, `--attr-source` or `--shallow-file`, the options git takes with a separate
-/// value, and leaves in `shim_rest` how many words start at the verb (SECAUDIT-14-L1). The
-/// project folder's checks read their verb the same way ([`private_flow`]). Every other
-/// command runs the
-/// `git` on the server's PATH, as stock VS Code does, where the engine resolved no real git
+/// value, and leaves in `shim_rest` how many words start at the verb (SECAUDIT-14-L1).
+/// `shim_verb` reads the verb there, so a network command after a leading option, which the
+/// forwarder would take as given, fails with the same plain message instead of running the
+/// server's own git (shim-wtremove r1 L1). The project folder's checks read their verb the
+/// same way ([`private_flow`]). Every other command runs the `git` on the server's PATH,
+/// as stock VS Code does, where the engine resolved no real git
 /// ([`shim_text`]), without the relay's secret in its environment, so a project's hook under
 /// it does not hold it; the shim keeps the secret in an unexported variable for the index
 /// step ([`private_flow`]).
@@ -229,10 +231,14 @@ shift\n  \
 done\n  \
 shim_rest=$#\n\
 }\n\
-shim_worktree() {\n  \
+shim_verb() {\n  \
 shim_skip \"$@\"\n  \
 shift $(($# - shim_rest))\n  \
 case \"$1\" in\n  \
+push|pull|fetch|ls-remote)\n    \
+echo \"fatal: CrazyAgent runs git $1 in its engine. Use Source Control in the IDE once it has connected\" >&2\n    \
+exit 128\n    \
+;;\n  \
 worktree)\n    \
 case \"$2\" in\n    \
 prune|remove)\n      \
@@ -243,7 +249,7 @@ esac\n    \
 ;;\n  \
 esac\n\
 }\n\
-shim_worktree \"$@\"\n\
+shim_verb \"$@\"\n\
 secret=$CRAZYAGENT_IDE_GIT_SECRET\n\
 unset CRAZYAGENT_IDE_GIT_SECRET\n\
 exec git \"$@\"\n";
@@ -349,7 +355,7 @@ pub fn shim_text(
         head.contains("\nshim_skip() {\n"),
         "private_flow reads its verb through it"
     );
-    assert!(head.contains("\nshim_worktree \"$@\"\n"));
+    assert!(head.contains("\nshim_verb \"$@\"\n"));
     let hooks = match project_hooks {
         None => String::new(),
         Some(project) => {
