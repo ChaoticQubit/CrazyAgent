@@ -4338,8 +4338,9 @@ async fn team_settings_make_a_harness_switch_carry_over_again() {
     assert_eq!(status.on_harness_switch, crate::team::SwitchMode::Carry);
     shows_once(&shown, "On harness switch  Carry over");
 }
-/// Pumps the shell until its top screen is the given place. Takes the shell, the connection
-/// and the place. Returns nothing; fails with the screen shown after 30 s.
+/// Refreshes and pumps the shell, as the run loop does, until its top screen is the given
+/// place. Takes the shell, the connection and the place. Returns nothing; fails with the
+/// screen shown after 30 s.
 async fn until_place(shell: &mut Shell, connection: &mut Connection, place: &Place) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while shell.place().as_ref() != Some(place) {
@@ -4348,6 +4349,7 @@ async fn until_place(shell: &mut Shell, connection: &mut Connection, place: &Pla
             "never opened {place:?}:\n{}",
             render(shell, 100, 40)
         );
+        shell.refresh();
         pump(shell, connection).await;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

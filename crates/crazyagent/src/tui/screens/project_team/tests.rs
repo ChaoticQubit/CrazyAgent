@@ -2767,7 +2767,6 @@ fn capital_v_turns_live_terminal_off_and_on() {
 /// (OWNER-Q4-2-L3).
 #[test]
 fn capital_v_says_why_for_a_master_with_no_live_terminal() {
-    let mut view = loaded();
     let mut shown = team();
     let master = shown
         .harnesses
@@ -2775,7 +2774,9 @@ fn capital_v_says_why_for_a_master_with_no_live_terminal() {
         .find(|harness| harness.role == crate::team::AgentRole::Master)
         .expect("the fixture lists a master harness");
     master.harness = "rcli".into();
-    reread(&mut view, shown, NOW + 10);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(shown))));
     assert_eq!(view.key(press(KeyCode::Char('V'))), TeamReply::Handled);
     assert_eq!(
         view.notice,
