@@ -248,7 +248,14 @@ impl Case {
         id: &ChangeSetId,
         message: Option<&str>,
     ) -> Result<AcceptOutcome, EngineError> {
-        accept(&self.db, &self.home, id, &self.view(id).head, message)
+        accept(
+            &self.db,
+            &self.home,
+            id,
+            &self.view(id).head,
+            message,
+            crate::activity::AcceptPlace::Changes,
+        )
     }
 
     fn landed_message(&self, commit: &str) -> String {
@@ -1120,7 +1127,14 @@ fn a_dirty_detached_busy_or_conflicting_checkout_refuses_accept_and_changes_noth
         );
     }
     assert_eq!(
-        refused(accept(&case.db, &case.home, &id, &case.tip(), None)),
+        refused(accept(
+            &case.db,
+            &case.home,
+            &id,
+            &case.tip(),
+            None,
+            crate::activity::AcceptPlace::Changes
+        )),
         "changes_stale"
     );
     case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
@@ -5421,13 +5435,26 @@ fn accept_into_an_unchecked_out_branch_moves_only_the_ref() {
     let before = case.checkout();
     assert_eq!(
         refused(accept_into(
-            &case.db, &case.home, &id, &tip, None, "release"
+            &case.db,
+            &case.home,
+            &id,
+            &tip,
+            None,
+            "release",
+            crate::activity::AcceptPlace::Changes
         )),
         "changes_stale"
     );
-    let AcceptOutcome::Landed { commit, branch } =
-        accept_into(&case.db, &case.home, &id, &head, None, "release").unwrap()
-    else {
+    let AcceptOutcome::Landed { commit, branch } = accept_into(
+        &case.db,
+        &case.home,
+        &id,
+        &head,
+        None,
+        "release",
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
         panic!("the accept conflicted");
     };
     assert_eq!(branch, "release");
@@ -5503,6 +5530,7 @@ fn accept_into_a_lead_agent_branch_updates_its_worktree() {
         &case.view(&id).head,
         None,
         "crazyagent/agent-2",
+        crate::activity::AcceptPlace::Changes,
     )
     .unwrap() else {
         panic!("the accept conflicted");
@@ -5538,6 +5566,7 @@ fn accept_into_a_lead_agent_branch_updates_its_worktree() {
             &case.view(&second).head,
             None,
             "crazyagent/agent-2",
+            crate::activity::AcceptPlace::Changes,
         )),
         "changes_agent_busy"
     );
@@ -5582,7 +5611,15 @@ fn accept_into_refuses_invalid_and_externally_checked_out_targets() {
         ("elsewhere", "changes_target_checked_out"),
     ] {
         assert_eq!(
-            refused(accept_into(&case.db, &case.home, &id, &head, None, target)),
+            refused(accept_into(
+                &case.db,
+                &case.home,
+                &id,
+                &head,
+                None,
+                target,
+                crate::activity::AcceptPlace::Changes
+            )),
             code,
             "{target:?}"
         );
@@ -7356,7 +7393,15 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
     let head = case.view(&id).head;
     let before = case.tip();
     assert_eq!(
-        refused(accept_into(&case.db, &case.home, &id, &head, None, "main")),
+        refused(accept_into(
+            &case.db,
+            &case.home,
+            &id,
+            &head,
+            None,
+            "main",
+            crate::activity::AcceptPlace::Changes
+        )),
         "changes_owner_dirty"
     );
     assert_eq!(case.tip(), before, "a refused accept moves no branch");
@@ -7375,9 +7420,16 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
             .unwrap()
             .is_empty()
     );
-    let AcceptOutcome::Landed { commit, branch } =
-        accept_into(&case.db, &case.home, &id, &head, None, "main").unwrap()
-    else {
+    let AcceptOutcome::Landed { commit, branch } = accept_into(
+        &case.db,
+        &case.home,
+        &id,
+        &head,
+        None,
+        "main",
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
         panic!("the accept conflicted");
     };
     assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
@@ -9798,7 +9850,14 @@ fn an_owner_accept_of_a_master_set_closes_the_sets_it_holds_and_a_second_accept_
 
     let tip = case.tip();
     assert_eq!(
-        refused(accept(&case.db, &case.home, &sub, &sub_head, None)),
+        refused(accept(
+            &case.db,
+            &case.home,
+            &sub,
+            &sub_head,
+            None,
+            crate::activity::AcceptPlace::Changes
+        )),
         "changes_stale",
         "a second Accept finds the set closed, not a new conflict"
     );
@@ -13403,6 +13462,69 @@ fn the_owners_accept_names_the_set_by_its_number_in_the_activity() {
     );
 }
 
+/// The places the project's Accepted rows name, newest first. Input: the case. Output: the
+/// places.
+fn accepted_places(case: &Case) -> Vec<Option<crate::activity::AcceptPlace>> {
+    crate::activity::list(&case.db, &case.workspace.project, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::Accepted)
+        .map(|item| item.place)
+        .collect()
+}
+
+/// AL2-PLACE: the owner's Accepted row says where Accept was pressed, Changes or the IDE,
+/// through either landing call, while an Accept the engine makes for someone else names no
+/// place.
+#[test]
+fn an_owner_accept_row_says_where_accept_was_pressed() {
+    use crate::activity::AcceptPlace;
+    let pending = || {
+        let case = Case::new();
+        closing_tables(&case);
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        (case, id, head)
+    };
+    for (place, onto) in [
+        (AcceptPlace::Ide, None),
+        (AcceptPlace::Changes, None),
+        (AcceptPlace::Changes, Some("main")),
+        (AcceptPlace::Ide, Some("main")),
+    ] {
+        let (case, id, head) = pending();
+        let landed = match onto {
+            None => accept(&case.db, &case.home, &id, &head, None, place),
+            Some(branch) => accept_into(&case.db, &case.home, &id, &head, None, branch, place),
+        };
+        assert!(
+            matches!(landed, Ok(AcceptOutcome::Landed { .. })),
+            "{landed:?}"
+        );
+        assert_eq!(
+            accepted_places(&case),
+            vec![Some(place)],
+            "{place:?} onto {onto:?}"
+        );
+    }
+    let (case, id, head) = pending();
+    let landed = super::accept_into_as(
+        &case.db,
+        &case.home,
+        &id,
+        &head,
+        None,
+        "main",
+        crate::activity::ENGINE_ACTOR,
+    );
+    assert!(
+        matches!(landed, Ok(AcceptOutcome::Landed { .. })),
+        "{landed:?}"
+    );
+    assert_eq!(accepted_places(&case), vec![None]);
+}
+
 /// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
 /// red, else a few seconds. Output: the seconds.
 #[cfg(target_os = "macos")]
@@ -13587,6 +13709,7 @@ fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
         &case.view(&id).head,
         None,
         "crazyagent/agent-2",
+        crate::activity::AcceptPlace::Changes,
     )
     .unwrap();
     assert!(matches!(landed, AcceptOutcome::Landed { .. }));
@@ -13658,6 +13781,7 @@ fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_workt
         &case.view(&second).head,
         None,
         "crazyagent/agent-2",
+        crate::activity::AcceptPlace::Changes,
     )
     .unwrap();
     assert!(

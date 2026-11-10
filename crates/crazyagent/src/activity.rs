@@ -161,6 +161,32 @@ impl ActivityKind {
     }
 }
 
+/// Where the owner pressed Accept, as an accepted row names it: a Changes page, the
+/// desktop's or the terminal's, or the IDE's Source Control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptPlace {
+    Changes,
+    Ide,
+}
+
+impl AcceptPlace {
+    /// The place's stored name. Output: `changes` or `ide`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Changes => "changes",
+            Self::Ide => "ide",
+        }
+    }
+
+    /// Reads a stored name. Input: the name. Output: the place, or None for any other word.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Changes, Self::Ide]
+            .into_iter()
+            .find(|place| place.name() == name)
+    }
+}
+
 /// One thing that happened in a project, as the Overview shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityItem {
@@ -176,6 +202,10 @@ pub struct ActivityItem {
     /// read from the stored set rather than the row's words; None for any other row.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Where the owner pressed Accept on an accepted row, read from the stored set; None for
+    /// any other row, an Accept by someone else, or one recorded before places were kept.
+    #[serde(default)]
+    pub place: Option<AcceptPlace>,
 }
 
 /// One event a writer records. `agent` is the team agent whose work the event is about:
@@ -718,6 +748,7 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
                         branch: row.get::<_, Option<String>>(8)?.and_then(|reference| {
                             reference.strip_prefix("refs/heads/").map(str::to_owned)
                         }),
+                        place: None,
                     },
                 ))
             },

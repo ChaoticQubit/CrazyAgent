@@ -160,6 +160,19 @@ test("an activity row names who acted as the mockup does: You for the owner, the
   assert.match(html, /3 items · last just now/);
 });
 
+test("an owner's accept row says where Accept was pressed, Changes or the IDE, and a row with no place says You (AL2-PLACE)", () => {
+  const now = Date.UTC(2026, 10, 10, 11, 0);
+  const items = [
+    item(4, now, null, { place: "ide" }),
+    item(3, now - 60_000, null, { place: "changes" }),
+    item(2, now - 2 * 60_000, null, { place: null }),
+    item(1, now - 3 * 60_000, null),
+  ];
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
+  const actors = [...html.matchAll(/class="pj-small pj-muted pj-activity-by">([^<]*)</g)].map((match) => match[1]);
+  assert.deepEqual(actors, ["You, in the IDE", "You, in Changes", "You", "You"]);
+});
+
 test("a goal named Project or Research is told apart from the events with no goal, in groups and in Timeline", () => {
   const items = [
     item(4, 4_000, "Research"),

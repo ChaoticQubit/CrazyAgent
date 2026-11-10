@@ -1289,14 +1289,17 @@ pub fn diff(
 /// with the owner's git identity. Inputs: the store, the owner's home folder (where git
 /// finds the owner's own user.name and user.email), the change set, the head the owner
 /// reviewed and the owner's edited message, None for the proposed one. Output: the
-/// landed commit and branch, or the conflicting files.
+/// landed commit and branch, or the conflicting files. `place` is where the owner pressed
+/// Accept, which the project's activity names.
 pub fn accept(
     db: &Connection,
     owner_home: &Path,
     id: &ChangeSetId,
     expected_head: &str,
     message: Option<&str>,
+    place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
+    let _ = place;
     #[cfg(unix)]
     return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
     #[cfg(not(unix))]
@@ -1311,8 +1314,8 @@ pub fn accept(
 /// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
 /// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
 /// the store, the owner's home folder, the change set, the head the owner reviewed, the
-/// edited message, None for the proposed one, and the target branch. Output: the landed
-/// commit and branch, or the conflicting files.
+/// edited message, None for the proposed one, the target branch and where the owner pressed
+/// Accept. Output: the landed commit and branch, or the conflicting files.
 pub fn accept_into(
     db: &Connection,
     owner_home: &Path,
@@ -1320,7 +1323,9 @@ pub fn accept_into(
     expected_head: &str,
     message: Option<&str>,
     target_branch: &str,
+    place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
+    let _ = place;
     accept_into_as(
         db,
         owner_home,
