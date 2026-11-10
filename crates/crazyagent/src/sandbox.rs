@@ -1975,11 +1975,15 @@ impl ProjectSandbox {
     /// No agent may move the project folder, the git worktrees folders or a worktree, which
     /// would carry protected files out of their denied paths and back. A worktree's `.git`
     /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
-    /// does, but never rewritten or removed, and no `config.worktree` may be written.
+    /// does, but never rewritten or removed, and no `config.worktree` may be written. No link
+    /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
+    /// which the owner's next commit runs as maintenance, empties whatever folder a link at
+    /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT).
     /// Input: the policy. Output: the rule text.
     fn git_link_denies(&self) -> String {
         let project = self.project_root.display();
         let pattern = seatbelt_pattern(&self.project_root);
+        let dot_git = "\\.[gG][iI][tT]";
         let admin = format!("{pattern}/\\.git/worktrees/[^/]+");
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
         let mut moves = format!(
@@ -1996,9 +2000,10 @@ impl ProjectSandbox {
             ));
         }
         let text = format!(
-            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/config\\.worktree$\"))\n"
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/config\\.worktree$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{dot_git}/\") (vnode-type SYMLINK)))\n"
         );
-        assert!(text.matches("(regex #\"^/").count() == 5);
+        assert!(text.matches("(regex #\"^/").count() == 6);
+        assert!(text.contains("(vnode-type SYMLINK)"));
         text
     }
 
