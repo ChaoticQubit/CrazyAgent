@@ -391,6 +391,60 @@ fn a_slot_of_any_other_shape_is_refused() {
     }
 }
 
+/// IDE-INDEX-MISSING-OBJECT: a private index entry naming an object the project's store
+/// lacks, or an object of another type than its mode holds, never reaches the real index,
+/// so the owner's status and commit keep working without a reset. The reply names the plain
+/// cause and the real index stays byte-identical. A stored blob still lands, and so does a
+/// submodule entry, whose commit lives in the submodule's own store.
+#[test]
+fn an_entry_naming_a_missing_object_never_reaches_the_real_index() {
+    let case = Case::new();
+    let before = fs::read(case.index()).unwrap();
+    let mut owned = Vec::new();
+    for line in case.listed().lines() {
+        let (meta, path) = line.split_once('\t').unwrap();
+        let oid = meta.split(' ').nth(1).unwrap().to_owned();
+        owned.push((path.as_bytes().to_vec(), oid));
+    }
+    let tree = ok(&case.project, None, &["rev-parse", "HEAD^{tree}"]);
+    let missing = "0123456789abcdef0123456789abcdef01234567";
+    for (slot, planted) in [("301", missing), ("302", tree.trim())] {
+        let mut names: Vec<(&[u8], &str)> = owned
+            .iter()
+            .map(|(path, oid)| (path.as_slice(), oid.as_str()))
+            .collect();
+        names.push((b"planted.txt", planted));
+        case.seed(slot);
+        fs::write(case.slot(slot).1, raw_index(&names)).unwrap();
+
+        let outcome = case.carried(slot);
+
+        assert_eq!(outcome.code, 1, "{slot}");
+        assert!(
+            outcome.stderr.contains("(index_object_missing)"),
+            "{}",
+            outcome.stderr
+        );
+        assert_eq!(fs::read(case.index()).unwrap(), before, "{slot}");
+    }
+    assert_eq!(ok(&case.project, None, &["status", "--porcelain"]), "");
+    ok(
+        &case.project,
+        None,
+        &["commit", "-q", "--allow-empty", "-m", "kept"],
+    );
+
+    let work = case.seed("303");
+    fs::write(case.project.join("a.txt"), "changed\n").unwrap();
+    ok(&case.project, Some(&work), &["add", "a.txt"]);
+    let gitlink = format!("160000,{missing},sub");
+    let cacheinfo = ["update-index", "--add", "--cacheinfo", gitlink.as_str()];
+    ok(&case.project, Some(&work), &cacheinfo);
+    let outcome = case.carried("303");
+    assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    assert_eq!(case.staged(), "a.txt\nsub\n");
+}
+
 /// The listing parser takes only what `ls-files -z -s` prints.
 #[test]
 fn only_a_strict_listing_is_read() {
