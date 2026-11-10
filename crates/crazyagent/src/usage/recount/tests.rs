@@ -552,3 +552,29 @@ fn a_chunk_read_while_its_project_is_removed_files_under_the_removed_name() {
         .unwrap();
     assert_eq!(staged, vec![crate::usage::REMOVED_PROJECTS.to_owned()]);
 }
+
+#[test]
+fn a_session_with_one_file_not_read_to_its_end_keeps_its_old_numbers() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let swapped = home.join("projects/-a/s1.jsonl");
+    message(&swapped, "msg_a", 100);
+    message(&home.join("projects/-b/s1.jsonl"), "msg_b", 20);
+    message(&home.join("projects/-repo/s2.jsonl"), "msg_c", 5);
+    old_row(&db, "s1", 400, 0);
+    old_row(&db, "s2", 50, 0);
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    assert!(step(&db, 1, NOW).unwrap(), "the listing spends the budget");
+    std::fs::rename(&swapped, root.path().join("aside.jsonl")).unwrap();
+    message(&swapped, "msg_x", 7);
+    while step(&db, BYTES_PER_STEP, NOW).unwrap() {}
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!(
+        status.new.input, 405,
+        "s1 keeps 400 though one of its files was read to its end"
+    );
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (1, 1)
+    );
+}
