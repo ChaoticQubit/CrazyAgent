@@ -18,6 +18,11 @@
     "onTerminalProfile:crazyagent.ownBranch"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
   "contributes": {
     "terminal": {
       "profiles": [

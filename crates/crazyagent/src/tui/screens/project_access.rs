@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub(in crate::tui) const FULL_ACCESS_WARNING: &str = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";
 
 /// What Full access means for the IDE, in the desktop's words.
-pub(in crate::tui) const FULL_ACCESS_IDE: &str = "";
+pub(in crate::tui) const FULL_ACCESS_IDE: &str = "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on.";
 
 /// What a lower saved level does to agents already running: the engine stops each one that
 /// started above it, but not what a Full access agent started outside its terminal.
@@ -25,7 +25,7 @@ pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain
 pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks";
 
 /// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
-pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. Applies when the IDE next starts.";
+pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. No effect at Full access: git runs as yours. Applies when the IDE next starts.";
 
 /// Why the network choice has no effect under Full access: Full access runs agents with no
 /// sandbox, so nothing bounds their network.
@@ -346,11 +346,13 @@ impl AccessEdit {
     /// the save line. Input: the look. Output: the rows.
     fn actions(&self, look: &Look) -> Vec<Row> {
         if self.confirm_full {
-            let mut rows: Vec<Row> =
-                wrap_words(&format!("Full access: {FULL_ACCESS_WARNING}"), TEXT_WIDTH)
-                    .into_iter()
-                    .map(|line| Row::of(line, look.warning))
-                    .collect();
+            let mut rows: Vec<Row> = wrap_words(
+                &format!("Full access: {FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}"),
+                TEXT_WIDTH,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.warning))
+            .collect();
             rows.push(
                 Row::of("[> y Allow Full access ]", look.selection).push("   [ n Keep ]", look.fg),
             );
