@@ -12440,6 +12440,41 @@ fn the_engine_start_sweeps_the_regenerations_a_stopped_engine_left() {
     );
 }
 
+/// The engine's start sweep removes a link at `.git/worktrees`, or one in it, by itself and
+/// before its own `git worktree prune`, which would otherwise empty the folder the link names
+/// outside the project; an older build let a Sandboxed process or a Full access agent plant
+/// one (SECAUDIT-WORKTREE-ADMIN-PLANT r1 L1). The real admin folders stay.
+#[test]
+fn the_engine_start_sweep_removes_a_planted_worktrees_link_before_its_prune_follows_it() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    crate::storage::initialize_authority_schemas(&case.db).unwrap();
+    let owner = case.repo.parent().unwrap().join("owner-files");
+    let files = [owner.join("keep.txt"), owner.join("sub").join("keep.txt")];
+    std::fs::create_dir_all(owner.join("sub")).unwrap();
+    for file in &files {
+        std::fs::write(file, "owner file\n").unwrap();
+    }
+    let kept = || files.iter().filter(|file| file.is_file()).count();
+    let admin = case.repo.join(".git").join("worktrees");
+    let planted = admin.join("x");
+    std::os::unix::fs::symlink(&owner, &planted).unwrap();
+    assert_eq!(crate::landing::sweep_regenerations(&case.db).unwrap(), 0);
+    assert!(std::fs::symlink_metadata(&planted).is_err());
+    assert_eq!(kept(), 2);
+    assert!(
+        case.owner(&["worktree", "list", "--porcelain"])
+            .contains("agent-1")
+    );
+    let held = case.repo.join(".git").join("worktrees-held");
+    std::fs::rename(&admin, &held).unwrap();
+    std::os::unix::fs::symlink(&owner, &admin).unwrap();
+    assert_eq!(crate::landing::sweep_regenerations(&case.db).unwrap(), 0);
+    assert!(std::fs::symlink_metadata(&admin).is_err());
+    assert_eq!(kept(), 2);
+    std::fs::rename(&held, &admin).unwrap();
+}
+
 /// A regeneration's own merge gate reads the paths main changed too: an owner merge driver
 /// on the path main renamed the agent's file to never runs, and nothing is regenerated
 /// (OS-8, as Task 7's turn-end check).

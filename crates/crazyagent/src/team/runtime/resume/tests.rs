@@ -347,6 +347,22 @@ fn the_note_of_an_interrupted_wake_task_does_not_point_at_a_missing_message() {
     assert!(written.ends_with(WAKE_DELIVERED), "{written}");
 }
 
+/// A wake task stopped as its message was handed over leaves that message unread, so the
+/// note says `inspect_work` lists it before it lets the agent end its turn (HB-S5-C-F1).
+#[test]
+fn the_note_of_an_interrupted_wake_task_says_inspect_work_lists_a_message_still_unread() {
+    use crate::team::master::WAKE_TASK;
+    let work = std::path::PathBuf::from("/nowhere");
+    let task = run("codex", None, &work, None);
+    let written = note(&task, Some(WAKE_TASK));
+    let unread = format!(
+        "{} lists every message you have not read",
+        crate::team::tool::INSPECT_WORK_TOOL
+    );
+    let (listed, end) = (written.find(&unread), written.find("end your turn"));
+    assert!(listed.is_some() && listed < end, "{written}");
+}
+
 #[cfg(target_os = "macos")]
 mod failed {
     use super::super::{RETRY_LATER, RETRY_ONCE};
