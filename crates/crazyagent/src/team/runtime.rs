@@ -613,6 +613,8 @@ pub struct TeamRuntime {
     #[cfg(unix)]
     caller_pins: BTreeMap<i64, Vec<(String, u32)>>,
     held_restarts: Vec<HostedRestart>,
+    unmanaged_ending: BTreeMap<i64, PendingEnd>,
+    unmanaged_ends: (Sender<PaneEnd>, Receiver<PaneEnd>),
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -842,6 +844,8 @@ impl TeamRuntime {
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
             held_restarts: Vec::new(),
+            unmanaged_ending: BTreeMap::new(),
+            unmanaged_ends: channel(),
             waited_for: BTreeMap::new(),
             #[cfg(test)]
             grant_waited: BTreeMap::new(),
@@ -1769,13 +1773,13 @@ impl TeamRuntime {
         self.tell_leads(&stopped)
     }
 
-    /// Ends the stopped sub-agents that no worker of this engine runs: native teammates a
-    /// lead's own agent team started (DEC-104 K5a), which the terminal host knows by their
-    /// own names once adopted. Each ends through `Host::kill`, never a tmux client of the
-    /// lead's server (K5c), and its row is marked stopped; a host that failed leaves it to
-    /// the next tick. Returns the agents stopped now and who stopped each, or any SQLite
-    /// failure.
+    /// Ends the stopped native teammates no worker of this engine runs (DEC-104 K5a) through
+    /// [`end_left_pane`]: terminate to the pane's first process, then kill to its group, never
+    /// a tmux client of the lead's server (K5c). Each end runs off the tick (S4B-B1-L1) and its
+    /// row is marked once it finished; a host failure leaves it to a later tick. Returns the
+    /// agents marked stopped now and who stopped each, or any SQLite failure.
     fn stop_unmanaged(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
+        let mut stopped = self.unmanaged_ended()?;
         let listed: Vec<(i64, String, String)> = {
             let mut statement = self
                 .connection
@@ -1794,39 +1798,80 @@ impl TeamRuntime {
                 .map_err(error)?
         };
         assert!(listed.len() <= UNMANAGED_STOPS_PER_TICK_MAX);
-        let mut stopped = Vec::new();
         for (id, project, by) in listed {
-            if self.workers.contains_key(&id) {
+            if self.workers.contains_key(&id) || self.unmanaged_ending.contains_key(&id) {
                 continue;
             }
             let Ok(project) = ProjectId::new(project) else {
                 continue;
             };
             let by = StoppedBy::named(&by);
-            if !self.end_unmanaged(id, stopped_teammate(by))? {
-                continue;
+            let end = self.end_unmanaged(id, stopped_teammate(by), Some((project.clone(), by)))?;
+            if end == UnmanagedEnd::Marked {
+                stopped.push((id, project, by));
             }
-            stopped.push((id, project, by));
         }
         Ok(stopped)
     }
 
-    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host as
-    /// any left pane ends, and marks its row stopped with the reason, plus the uncertain
-    /// cleanup code when the host could not prove its processes gone (S4B-B1). Takes the
-    /// agent and the reason. Returns whether it ended: false while the host could not end
-    /// it, so the next tick tries again, or a SQLite failure.
-    fn end_unmanaged(&self, id: i64, reason: &str) -> Result<bool, EngineError> {
-        assert!(!self.workers.contains_key(&id));
-        let mut confirmed = true;
-        if let Some(host) = &self.terminal {
-            let name = AgentId::team(id).map_err(EngineError::from)?;
-            match end_left_pane(host.as_ref(), &name, "team") {
-                Ok(ended) => confirmed = ended,
-                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                Err(_) => return Ok(false),
-            }
+    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host as any
+    /// left pane ends. That end can wait seconds on a pane that ignores terminate, so it runs
+    /// on a thread of its own and the tick goes on (S4B-B1-L1); [`Self::unmanaged_ended`] marks
+    /// the row once it finished. With no terminal host the row is marked at once. Takes the
+    /// agent, the reason and who stopped it, if the owner's side did. Returns how it was taken.
+    fn end_unmanaged(
+        &mut self,
+        id: i64,
+        reason: &'static str,
+        stopped: Option<(ProjectId, StoppedBy)>,
+    ) -> Result<UnmanagedEnd, EngineError> {
+        assert!(!self.workers.contains_key(&id) && !self.unmanaged_ending.contains_key(&id));
+        let Some(host) = self.terminal.clone() else {
+            self.mark_unmanaged(id, reason, true)?;
+            return Ok(UnmanagedEnd::Marked);
+        };
+        let name = AgentId::team(id).map_err(EngineError::from)?;
+        let sender = self.unmanaged_ends.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("team-end-{id}"))
+            .spawn(move || {
+                let _ = sender.send((id, end_left_pane(host.as_ref(), &name, "team")));
+            });
+        if spawned.is_err() {
+            return Ok(UnmanagedEnd::Retry);
         }
+        self.unmanaged_ending
+            .insert(id, PendingEnd { reason, stopped });
+        Ok(UnmanagedEnd::Handed)
+    }
+
+    /// Marks stopped each native teammate whose end a thread finished since the last call,
+    /// with its reason, plus the uncertain cleanup code when the host could not prove its
+    /// processes gone (S4B-B1). A pane the host does not know counts as gone; any other host
+    /// failure leaves the row to a later tick. Returns the owner's side stops among them and
+    /// who made each, or a SQLite failure.
+    fn unmanaged_ended(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
+        let mut stopped = Vec::new();
+        while let Ok((id, outcome)) = self.unmanaged_ends.1.try_recv() {
+            let pending = self
+                .unmanaged_ending
+                .remove(&id)
+                .expect("an end finished only after it was handed over");
+            let confirmed = match outcome {
+                Ok(confirmed) => confirmed,
+                Err(problem) if problem.0 == "terminal_agent_unknown" => true,
+                Err(_) => continue,
+            };
+            self.mark_unmanaged(id, pending.reason, confirmed)?;
+            stopped.extend(pending.stopped.map(|(project, by)| (id, project, by)));
+        }
+        Ok(stopped)
+    }
+
+    /// Marks one native teammate's row stopped with the reason, plus the uncertain cleanup
+    /// code when its end was not proven. Takes the agent, the reason and whether the end was
+    /// proven. Returns any SQLite failure.
+    fn mark_unmanaged(&self, id: i64, reason: &str, confirmed: bool) -> Result<(), EngineError> {
         let note = if confirmed {
             reason.to_owned()
         } else {
@@ -1839,7 +1884,7 @@ impl TeamRuntime {
                 params![id, note, now_ms()],
             )
             .map_err(error)?;
-        Ok(true)
+        Ok(())
     }
 
     /// Marks stopped the native teammates of a lead that just ended. They run on their own
@@ -1878,11 +1923,11 @@ impl TeamRuntime {
     }
 
     /// Ends a running lead's newest native teammates past the owner's Max teammates per
-    /// harness, counted with its app-spawned sub-agents (DEC-104 K8). App-spawned ones are
-    /// never ended here: the engine admits them against the cap before they start. The lead
-    /// gets a note naming the ones ended. Takes the project, the lead and the cap. Returns
-    /// any SQLite or coordination store failure.
-    fn cap_native(&self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
+    /// harness, counted with its app-spawned sub-agents (DEC-104 K8), an end still running off
+    /// the tick counted as made. App-spawned ones are never ended here: the engine admits them
+    /// against the cap before they start. The lead gets a note naming the ones ended. Takes the
+    /// project, the lead and the cap. Returns any SQLite or coordination store failure.
+    fn cap_native(&mut self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
         let running = super::caps::running_sub_agents(&self.connection, project, lead)?;
         if running <= u32::from(cap) {
             return Ok(());
@@ -1908,14 +1953,21 @@ impl TeamRuntime {
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
-        let over = usize::try_from(running - u32::from(cap)).unwrap_or(usize::MAX);
-        let mut ended = Vec::new();
-        for id in native
+        let ending = native
+            .iter()
+            .filter(|id| self.unmanaged_ending.contains_key(id))
+            .count();
+        let over = usize::try_from(running - u32::from(cap))
+            .unwrap_or(usize::MAX)
+            .saturating_sub(ending);
+        let picked: Vec<i64> = native
             .into_iter()
-            .filter(|id| !self.workers.contains_key(id))
+            .filter(|id| !self.workers.contains_key(id) && !self.unmanaged_ending.contains_key(id))
             .take(over)
-        {
-            if self.end_unmanaged(id, OVER_TEAMMATE_CAP)? {
+            .collect();
+        let mut ended = Vec::new();
+        for id in picked {
+            if self.end_unmanaged(id, OVER_TEAMMATE_CAP, None)? != UnmanagedEnd::Retry {
                 let name = names::name(&self.connection, id)?;
                 ended.push(names::label(AgentRole::Sub, id, name.as_ref()));
             }
@@ -9151,9 +9203,9 @@ fn native_session(
 /// a fresh custody use of the account, hands the credential to the lead's home again, then
 /// serves turns on the running session, so the lead and its teammates never run on without
 /// the account. A first order without the account ends the lead. A lead's end not proven
-/// gone reports the uncertain cleanup, and keeps a credential already handed over held
-/// (S4B-B1). Takes the adoption and the worker's channels and flags. Returns the problem
-/// that ended it, if any.
+/// gone reports the uncertain cleanup before the cause it ended for, and keeps a credential
+/// already handed over held (S4B-B1). Takes the adoption and the worker's channels and
+/// flags. Returns the problem that ended it, if any.
 fn native_adopted(
     adoption: Adoption,
     orders: &Receiver<Order>,
@@ -9194,10 +9246,11 @@ fn native_adopted(
     };
     let taken = first.is_some();
     let Some(grant) = grant else {
+        let cause = Some("The native lead was taken over without its signed-in account".into());
         if !end(taken, None) {
-            return settle_stop(Err(Unstopped::Uncertain), None);
+            return ended_with(settle_stop(Err(Unstopped::Uncertain), None), cause);
         }
-        return Some("The native lead was taken over without its signed-in account".into());
+        return cause;
     };
     let Grant { profile, .. } = *grant;
     let credential = match profile.hand_to_agent(
@@ -9207,13 +9260,14 @@ fn native_adopted(
     ) {
         Ok(credential) => credential,
         Err(problem) => {
-            if !end(taken, Some(problem.0.clone())) {
-                return settle_stop(Err(Unstopped::Uncertain), None);
-            }
-            return Some(with_code(
+            let cause = Some(with_code(
                 "The signed-in account could not reach the agent",
                 Some(&problem.0),
             ));
+            if !end(taken, Some(problem.0.clone())) {
+                return ended_with(settle_stop(Err(Unstopped::Uncertain), None), cause);
+            }
+            return cause;
         }
     };
     match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
@@ -9230,13 +9284,17 @@ fn native_adopted(
             leave,
         ),
         Err(problem) => {
-            if !end(taken, Some(problem.0.clone())) {
-                return settle_stop(Err(Unstopped::Uncertain), Some((credential, profile)));
-            }
-            Some(with_code(
+            let cause = Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),
-            ))
+            ));
+            if !end(taken, Some(problem.0.clone())) {
+                return ended_with(
+                    settle_stop(Err(Unstopped::Uncertain), Some((credential, profile))),
+                    cause,
+                );
+            }
+            cause
         }
     }
 }
@@ -9643,6 +9701,26 @@ const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
+
+/// One native teammate's end that ran on a thread of its own: the agent and the host's
+/// answer, whether its pane was proven gone, or the host's failure.
+type PaneEnd = (i64, Result<bool, crate::terminal::HostError>);
+
+/// What the row of a native teammate whose end runs on a thread gets once it finished: the
+/// reason, and the project and who stopped it when the owner's side did.
+struct PendingEnd {
+    reason: &'static str,
+    stopped: Option<(ProjectId, StoppedBy)>,
+}
+
+/// How one native teammate's end was taken: its row marked stopped now, its end handed to a
+/// thread whose answer a later tick marks, or left to the next tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnmanagedEnd {
+    Marked,
+    Handed,
+    Retry,
+}
 const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
 const MASTER_STOPPED_TEAMMATE: &str = "The master stopped this teammate.";
 const LEAD_STOPPED_TEAMMATE: &str = "Its lead stopped this teammate.";
