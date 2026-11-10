@@ -5003,7 +5003,13 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            if !delivery::intend(&self.connection, Busy::Task(task), agent, &prompt, None)? {
+            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
+            let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
+                super::master::WAKE_DELIVERED
+            } else {
+                prompt.as_str()
+            };
+            if !delivery::intend(&self.connection, Busy::Task(task), agent, task_text, None)? {
                 continue;
             }
             let handoff = if woken_fresh {
@@ -5023,12 +5029,6 @@ impl TeamRuntime {
             let layout = self
                 .agent_layout(&stored.project_id, agent)
                 .map_err(error)?;
-            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
-            let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
-                super::master::WAKE_DELIVERED
-            } else {
-                prompt.as_str()
-            };
             let mut prompt = sub_agent_prompt(
                 &stored.name,
                 &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
