@@ -350,10 +350,11 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
-    /// Whether an idle stop ended the live master, the one stop that offers s to start it
-    /// again from this view. Input: none. Output: the answer.
+    /// Whether an idle stop ended the live master and no Stop all holds the team, the one
+    /// stop that offers s to start it again from this view. Input: none. Output: the answer.
     fn idle_stopped(&self) -> bool {
         self.master
+            && !self.paused
             && self.live_on() == Some(false)
             && self.switch.as_ref().is_some_and(|switch| switch.idle)
     }

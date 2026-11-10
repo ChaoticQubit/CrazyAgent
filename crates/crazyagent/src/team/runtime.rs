@@ -5245,15 +5245,13 @@ impl TeamRuntime {
             let choice = super::MasterIdleStop::effective(chosen, worker.live);
             if !ended {
                 let limit = match worker.role {
-                    AgentRole::Master => match choice.after(self.limits.master_idle_stop) {
-                        Some(limit) => limit,
-                        None => continue,
-                    },
-                    AgentRole::Sub => match limits.idle_time() {
-                        Some(limit) => limit,
-                        None => continue,
-                    },
-                    AgentRole::Teammate => continue,
+                    AgentRole::Master => choice.after(self.limits.master_idle_stop),
+                    AgentRole::Sub => limits.idle_time(),
+                    AgentRole::Teammate => None,
+                };
+                let Some(limit) = limit else {
+                    worker.idle_since = Instant::now();
+                    continue;
                 };
                 if worker.idle_since.elapsed() < limit
                     || (worker.role == AgentRole::Sub && warm && live_subs <= floor)
