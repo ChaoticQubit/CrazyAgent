@@ -13,7 +13,7 @@ import { andList } from "./account-drawer";
 import { filterAccounts } from "./accounts";
 import { takePoolDraft } from "./pool-draft";
 import { AppOrder, KeepRowFocus, PoolOrderPicker, RowControls, SchedulePanel, applyHeld, usePoolChanges, type ApplyChange, type MadeChange } from "./pool-controls";
-import { HELD_HEAD, heldLine, isNear, orderLine, usageBars, whyLine } from "./pool-order";
+import { HELD_HEAD, heldLine, holdLine, isNear, orderLine, usageBars, whyLine } from "./pool-order";
 
 export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
 
@@ -169,6 +169,7 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs, open, onTogg
       <div className="pool-who-top"><span className="pool-name ellipsis" title={name}>{name}</span>{status && <StatusBadge word={status} />}{near && <StatusBadge word="Near its limit" tone="warn" />}</div>
       <div className="pool-plan">{plan ? `${harness} \u00b7 ${planLine(plan)}` : harness}</div>
       <div className="pool-why">{why}{signIn && <> <a href={`#/settings/accounts?action=sign_in&account=${encodeURIComponent(id)}`} aria-label={`Sign in ${name}`}>Sign in</a></>}</div>
+      {(item.held_for ?? []).map((hold) => <div key={hold.project} className="pool-hold">{holdLine(hold, nowMs)}</div>)}
     </div>
     <div className="pool-right">
       <div className="pool-ctl">

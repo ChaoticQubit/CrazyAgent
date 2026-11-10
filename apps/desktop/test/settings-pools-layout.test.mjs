@@ -82,6 +82,15 @@ test("held accounts come after the held line with no number, in the ranking's or
   assert.equal(seen.rows[2].why, "Never use. You pinned it.");
 });
 
+test("an account one project holds keeps its place and says on its own line which project holds it until when", async () => {
+  const seen = await onPools({ ranking: "project-held" }, rows);
+  assert.deepEqual(seen.map((row) => [row.number, row.name, row.held]), [["1", "Account 2", false], ["2", "Account 0", false], ["-", "Account 1", true]]);
+  assert.equal(seen[0].why, "You ranked it 1.");
+  assert.equal(seen[0].holds.length, 1);
+  assert.match(seen[0].holds[0], /^Held for Meals for two until (\d{2}:\d{2}|[A-Z][a-z]{2} \d{2}:\d{2})$/);
+  assert.deepEqual([seen[1].holds, seen[2].holds], [[], []]);
+});
+
 test("a sign-in that needs a check is held with no number, says why and links to its own sign-in", async () => {
   const seen = await onPools({ ranking: "unconfirmed" }, rows);
   assert.deepEqual(seen.map((row) => [row.number, row.spoken, row.name, row.held]), [["1", "Position 1", "Account 2", false], ["-", "Held", "Account 1", true]]);

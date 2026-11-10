@@ -2289,7 +2289,7 @@ impl TeamRuntime {
                 Some(slot) => (slot.harness.clone(), slot.tools),
             },
         };
-        let paused = self.paused()?;
+        let paused = self.paused(&project)?;
         let started = match self.account_for(access, &project, &harness, &paused) {
             Ok(None) => return self.note(&project, AGENT_RESTART_CHECKING),
             Ok(Some(account)) if role == AgentRole::Sub => {
@@ -2471,13 +2471,22 @@ impl TeamRuntime {
         Ok(stored)
     }
 
-    fn paused(&self) -> Result<BTreeSet<CredentialRef>, EngineError> {
+    /// The accounts `project`'s picks skip now: those paused for every project and those the
+    /// project holds itself after a limit its own agents reported (SECAUDIT-RATELIMIT-FORGE).
+    /// Takes the project. Returns the connections.
+    fn paused(&self, project: &ProjectId) -> Result<BTreeSet<CredentialRef>, EngineError> {
         let mut statement = self
             .connection
-            .prepare("SELECT connection FROM team_paused_accounts WHERE until_ms > ?1")
+            .prepare(
+                "SELECT connection FROM team_paused_accounts WHERE until_ms > ?1
+                 UNION SELECT connection FROM team_project_pauses
+                 WHERE project = ?2 AND until_ms > ?1",
+            )
             .map_err(error)?;
         let paused = statement
-            .query_map([now_ms()], |row| row.get::<_, String>(0))
+            .query_map(params![now_ms(), project.as_str()], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(error)?
             .filter_map(|row| row.ok().and_then(|c| CredentialRef::new(c).ok()))
             .collect();
@@ -2504,7 +2513,7 @@ impl TeamRuntime {
         {
             return Ok(());
         }
-        let paused = self.paused()?;
+        let paused = self.paused(project)?;
         self.retire_rejected(project, access);
         self.retire_narrowed(&stored);
         self.sync_pool(&stored, access)?;
@@ -7889,7 +7898,7 @@ impl TeamRuntime {
                 let team_tool = worker.team_tool;
                 let master = worker.role == AgentRole::Master;
                 if end == TurnEnd::RateLimited {
-                    self.pause(&connection)?;
+                    self.pause(&project, &connection)?;
                 }
                 self.count_turn(id, &project, master)?;
                 if team_tool {
@@ -7977,7 +7986,7 @@ impl TeamRuntime {
                 let master = worker.role == AgentRole::Master;
                 let live_session = worker.session.clone().filter(|_| worker.live);
                 if end == TurnEnd::RateLimited {
-                    self.pause(&connection)?;
+                    self.pause(&project, &connection)?;
                     self.workers.get_mut(&id).expect("worker exists").stopping = true;
                 }
                 let turn = super::master::turn_ended(
@@ -8044,7 +8053,7 @@ impl TeamRuntime {
                 let (project, connection) = (worker.project.clone(), worker.connection.clone());
                 let master = worker.role == AgentRole::Master;
                 if end == TurnEnd::RateLimited {
-                    self.pause(&connection)?;
+                    self.pause(&project, &connection)?;
                 }
                 self.count_turn(id, &project, master)?;
                 self.own_turn_ended(id, &project, started, &text, end)?;
@@ -8349,17 +8358,21 @@ impl TeamRuntime {
         self.note(project, &note)
     }
 
-    fn pause(&mut self, connection: &CredentialRef) -> Result<(), EngineError> {
-        let until = now_ms().saturating_add(
-            i64::try_from(self.limits.rate_limit_pause.as_millis()).unwrap_or(i64::MAX),
-        );
-        self.connection
-            .execute(
-                "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
-                 ON CONFLICT(connection) DO UPDATE SET until_ms=excluded.until_ms",
-                params![connection.as_str(), until],
-            )
-            .map_err(error)?;
+    /// Rests `connection` for `project` only after one of its agents' turns ended on a rate
+    /// limit read from what the agent's harness wrote (SECAUDIT-RATELIMIT-FORGE), and asks for
+    /// a usage poll that can hold it everywhere. Takes the project and the account.
+    fn pause(
+        &mut self,
+        project: &ProjectId,
+        connection: &CredentialRef,
+    ) -> Result<(), EngineError> {
+        super::hold_for_project(
+            &self.connection,
+            project.as_str(),
+            connection,
+            self.limits.rate_limit_pause,
+        )
+        .map_err(error)?;
         Ok(())
     }
 

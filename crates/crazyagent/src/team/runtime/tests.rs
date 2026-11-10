@@ -3533,7 +3533,8 @@ done
 
 /// A live master whose turn hits its account's usage limit stops, and the same master row
 /// starts again in its own worktree on another pool account while the limited one rests,
-/// with the live switch still on.
+/// with the live switch still on. The limit comes from the transcript the agent can write,
+/// so the account rests for this project only (SECAUDIT-RATELIMIT-FORGE).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
@@ -3583,7 +3584,7 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         [master],
         "the same master row"
     );
-    let rested: Vec<String> = fixture
+    let everywhere: Vec<String> = fixture
         .connection
         .prepare("SELECT connection FROM team_paused_accounts")
         .unwrap()
@@ -3591,7 +3592,20 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(rested, [first]);
+    assert_eq!(
+        everywhere,
+        Vec::<String>::new(),
+        "a limit read from the agent's own transcript never rests the account for other projects"
+    );
+    let rested: Vec<(String, String)> = fixture
+        .connection
+        .prepare("SELECT project,connection FROM team_project_pauses")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rested, [(project.as_str().to_owned(), first)]);
     assert!(super::super::master::live(&fixture.connection, &project).unwrap());
     assert!(
         !fixture
@@ -25060,7 +25074,7 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
         .stored(&fixture.setup.project_id)
         .unwrap()
         .expect("the project is set up");
-    let paused = team.paused().unwrap();
+    let paused = team.paused(&fixture.setup.project_id).unwrap();
     team.dispatch(&stored, &fixture.access, &paused).unwrap();
     team.keep_warm(&stored, &fixture.access, &paused).unwrap();
     let restart = HostedRestart {
@@ -27266,5 +27280,49 @@ fn a_coordination_message_forges_no_owner_line_at_the_live_master() {
                 .starts_with("[owner]")
         }),
         "{typed}"
+    );
+}
+
+/// A project's hold rests an account for that project only (SECAUDIT-RATELIMIT-FORGE, design
+/// row 1): the runtime's paused set for the holding project has it until the hold ends, another
+/// project's set does not, and an account-wide pause is in both.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
+    let fixture = Fixture::new(1);
+    let team = stand_in_runtime(&fixture);
+    let now = crate::team::now_ms();
+    for (project, connection, until_ms) in [
+        (PROJECT, "claude-a", now + 600_000),
+        (PROJECT, "claude-b", now - 1),
+        ("project-other", "claude-c", now + 600_000),
+    ] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_project_pauses(project,connection,until_ms) VALUES (?1,?2,?3)",
+                params![project, connection, until_ms],
+            )
+            .unwrap();
+    }
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('claude-d',?1)",
+            [now + 600_000],
+        )
+        .unwrap();
+    let paused = |project: &str| {
+        team.paused(&ProjectId::new(project).unwrap())
+            .unwrap()
+            .iter()
+            .map(|connection| connection.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paused(PROJECT), ["claude-a", "claude-d"]);
+    assert_eq!(
+        paused("project-other"),
+        ["claude-c", "claude-d"],
+        "another project still picks the held account"
     );
 }

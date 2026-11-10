@@ -429,17 +429,23 @@ impl ResearchJobs {
     }
 
     /// Returns the job of the claim `held` to the queue without spending its attempt after
-    /// its account hit a rate or usage limit, and pauses that pool account in the pause
-    /// master and team turns share before the job is free, so the next pick fails over to
-    /// another account; a claim lost meanwhile keeps the pause. Takes the claim and the
-    /// account's connection. Returns the new status and when the pause
-    /// ends, in ms since the epoch.
+    /// its account hit a rate or usage limit, and holds that pool account for the job's own
+    /// project before the job is free, so the project's next pick fails over to another
+    /// account; a claim lost meanwhile keeps the hold. The limit is read from what the run's
+    /// harness wrote, which its agent can write too in a terminal run, so the hold reaches no
+    /// other project (SECAUDIT-RATELIMIT-FORGE). Takes the claim and the account's
+    /// connection. Returns the new status and when the hold ends, in ms since the epoch.
     pub fn rate_limited(
         &self,
         held: &ResearchJob,
         account: &crate::protocol::CredentialRef,
     ) -> Result<(ResearchStatus, i64), JobError> {
-        let until = crate::team::pause_account(&self.connection, account)?;
+        let until = crate::team::hold_for_project(
+            &self.connection,
+            &held.project,
+            account,
+            crate::team::runtime::TeamLimits::default().rate_limit_pause,
+        )?;
         self.release(held, None)?;
         let status = self
             .get(held.id)?

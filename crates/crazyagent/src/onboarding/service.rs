@@ -141,10 +141,11 @@ struct Claimed {
     kind: Kind,
 }
 
-/// Picks the research account for a pool and the harnesses the runner can
-/// start. Input: the pool reference and the usable harnesses. Output: the
-/// account, or why there is none, such as every fitting member paused.
-type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send;
+/// Picks the research account for a project from its pool and the harnesses the
+/// runner can start. Input: the project, the pool reference and the usable
+/// harnesses. Output: the account, or why there is none, such as every fitting
+/// member paused or held for the project.
+type AccountLookup = dyn Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send;
 
 /// What the account and graphify lookups resolve to on every step, so a
 /// newly assigned pool member or a newly installed graphify takes effect
@@ -182,7 +183,7 @@ impl OnboardingService {
         tick: Duration,
     ) -> Self
     where
-        A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
+        A: Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
         Self::begin(runner, accounts, graphify, limits, tick, false)
@@ -200,7 +201,7 @@ impl OnboardingService {
         main_graphs: bool,
     ) -> Self
     where
-        A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
+        A: Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
         #[cfg(not(unix))]
@@ -985,7 +986,7 @@ fn mapping_step(
         if left.is_zero() {
             break;
         }
-        let account = match (work.accounts)(&claimed.pool, &harnesses) {
+        let account = match (work.accounts)(&claimed.project, &claimed.pool, &harnesses) {
             AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => {
                 *account
             }
@@ -1211,8 +1212,8 @@ pub fn start_for_engine(
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
     Ok(OnboardingService::begin(
         Arc::new(runner),
-        move |pool: &CredentialRef, harnesses: &[ResearchHarness]| {
-            resolver.pool_pick(pool, harnesses)
+        move |project: &str, pool: &CredentialRef, harnesses: &[ResearchHarness]| {
+            resolver.pool_pick(project, pool, harnesses)
         },
         move || engine_graphify(&runtime),
         OnboardingLimits::default(),
