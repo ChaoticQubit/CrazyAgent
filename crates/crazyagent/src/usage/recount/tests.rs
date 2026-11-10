@@ -996,6 +996,59 @@ fn history_fills_tool_hours_for_a_team_agent_and_only_before_the_start() {
 }
 
 #[test]
+fn a_team_call_written_before_the_start_and_first_read_live_is_charted_once() {
+    let (root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+         VALUES ('alpha','sub','claude-code',1,'running',?1,?1,1)",
+        [LATER],
+    )
+    .unwrap();
+    let agent = db.last_insert_rowid();
+    let home = root.path().join("home");
+    editing_turn(
+        &home.join("projects/-repo/s1.jsonl"),
+        AT_TWO,
+        "add a page",
+        "m1",
+    );
+    begin(
+        &db,
+        &[Home {
+            path: home.clone(),
+            format: Format::Claude,
+            attribution: who(),
+            removed: false,
+            team_agent: Some(agent),
+        }],
+        ms("2026-11-09T03:00:00.000Z"),
+    )
+    .unwrap();
+    capture::scan_agent_home(&db, &home, Format::Claude, &who(), agent, LATER).unwrap();
+    while step(&db, BYTES_PER_STEP, LATER).unwrap() {}
+    let hours: Vec<(i64, i64)> = db
+        .prepare("SELECT hour_ms,SUM(count) FROM coord_tool_hours WHERE agent=?1 GROUP BY hour_ms")
+        .unwrap()
+        .query_map([agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let used: i64 = db
+        .query_row(
+            "SELECT COALESCE(SUM(count),0) FROM coord_tool_use WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (hours, used),
+        (vec![(ms("2026-11-09T02:00:00.000Z"), 1)], 1),
+        "the transcript has one call: charted once, in its own hour, and kept in the adoption count"
+    );
+}
+
+#[test]
 fn a_resumed_copy_fills_history_once_in_either_order() {
     for swapped in [false, true] {
         let (root, db) = store();

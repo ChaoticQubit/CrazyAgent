@@ -1072,7 +1072,13 @@ fn scan(
         }
         if let Some(agent) = counting {
             for tool in &tools {
-                crate::coord::record_tool(&tx, agent, &tool.name, now_ms)?;
+                crate::coord::count_tool(
+                    &tx,
+                    agent,
+                    &tool.name,
+                    now_ms,
+                    super::activity::live_owns(tool.at_ms, recount_started),
+                )?;
             }
         }
         tx.execute(

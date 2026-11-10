@@ -306,7 +306,7 @@ fn add_history(
     for call in read
         .tools
         .iter()
-        .filter(|call| call.at_ms.is_some_and(|at| at < started))
+        .filter(|call| !super::activity::live_owns(call.at_ms, Some(started)))
     {
         let at = line_time(call.at_ms, fallback_ms, started);
         crate::coord::add_tool_hour(tx, at - at.rem_euclid(HOUR_MS), team_agent, &call.name)

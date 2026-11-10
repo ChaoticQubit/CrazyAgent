@@ -66,6 +66,20 @@ pub fn record_tool(
     tool: &str,
     now: i64,
 ) -> Result<(), EngineError> {
+    count_tool(db, agent_id, tool, now, true)
+}
+
+/// Counts one tool call as `record_tool` does, and in the hour of `now` only when `chart` is
+/// true, for a caller that leaves the call's hour to the recount. Takes the database, the
+/// agent, the tool name, the time in ms and whether to chart it. Returns Ok,
+/// `coord_tool_invalid` or `coord_agent_unknown`.
+pub(crate) fn count_tool(
+    db: &Connection,
+    agent_id: AgentId,
+    tool: &str,
+    now: i64,
+    chart: bool,
+) -> Result<(), EngineError> {
     if tool.is_empty()
         || tool.len() > TOOL_BYTES_MAX
         || tool.chars().any(|c| c.is_control() || c.is_whitespace())
@@ -82,7 +96,9 @@ pub fn record_tool(
             params![agent_id, tool, now],
         )
         .map_err(state)?;
-    add_tool_hour(change.db(), now - now.rem_euclid(HOUR_MS), agent_id, tool).map_err(state)?;
+    if chart {
+        add_tool_hour(change.db(), now - now.rem_euclid(HOUR_MS), agent_id, tool).map_err(state)?;
+    }
     change.commit()
 }
 

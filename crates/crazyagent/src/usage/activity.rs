@@ -814,25 +814,29 @@ fn line_ms(value: &Value) -> Option<i64> {
     value["timestamp"].as_str().and_then(timestamp_ms)
 }
 
-/// Keeps the turns the live scan owns: those begun at or after the recount's start, and those
-/// with no time. Until a recount has started, history is the recount's. Inputs: the finished
-/// turns and the recount's start. Output: the turns to count now.
+/// Says whether the live scan owns a turn or tool call: one written at or after the recount's
+/// start, or one with no time. Until a recount has started, history is the recount's, and the
+/// recount owns exactly what this leaves out. Inputs: the line's time and the recount's start.
+/// Output: the answer.
+pub(super) fn live_owns(at_ms: Option<i64>, recount_started: Option<i64>) -> bool {
+    recount_started.is_some_and(|started_ms| at_ms.is_none_or(|at| at >= started_ms))
+}
+
+/// Keeps the turns the live scan owns, as `live_owns` decides. Inputs: the finished turns and
+/// the recount's start. Output: the turns to count now.
 pub(super) fn live_turns(closed: Vec<Closed>, recount_started: Option<i64>) -> Vec<Closed> {
-    let Some(started_ms) = recount_started else {
-        return Vec::new();
-    };
     closed
         .into_iter()
-        .filter(|turn| turn.began_ms.is_none_or(|at| at >= started_ms))
+        .filter(|turn| live_owns(turn.began_ms, recount_started))
         .collect()
 }
 
-/// Keeps the turns the recount owns: those begun before its start. Inputs: the finished turns
-/// and the recount's start. Output: the turns it files.
+/// Keeps the turns the recount owns: those `live_owns` leaves out once it has started. Inputs:
+/// the finished turns and the recount's start. Output: the turns it files.
 pub(super) fn history_turns(closed: Vec<Closed>, started_ms: i64) -> Vec<Closed> {
     closed
         .into_iter()
-        .filter(|turn| turn.began_ms.is_some_and(|at| at < started_ms))
+        .filter(|turn| !live_owns(turn.began_ms, Some(started_ms)))
         .collect()
 }
 
