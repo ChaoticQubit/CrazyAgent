@@ -20,7 +20,7 @@
 .mx-table .mx-headline { font-weight: 600; }
 .mx-table .muted { color: var(--text-3); }
 .mx-total th, .mx-total td { border-top: 2px solid var(--border); }
-.mx-share { display: inline-flex; align-items: center; gap: 6px; }
+.mx-share { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .mx-bar { width: 70px; height: 6px; border-radius: var(--radius-pill); background: var(--surface-2); overflow: hidden; }
 .mx-bar i { display: block; height: 100%; background: var(--accent); }
 .mx-figure small { font-weight: 400; color: var(--text-2); }

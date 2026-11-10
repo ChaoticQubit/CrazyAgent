@@ -183,6 +183,7 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread, money }: { metrics: Me
   const dollars = money.shown === "dollars";
   const amount = (bar: MetricsBucket) => dollars ? bar.cost_nanos : headlineTokens(bar.tokens);
   const axis = (value: number) => dollars ? dollarText(value) : compactCount(value);
+  const tick = (step: number) => step === 0 ? "0" : step < 1 && axis(Math.round(step * max)) === axis(Math.round(max)) ? "" : axis(Math.round(step * max));
   const max = Math.max(1, ...bars.map(amount)) * 1.1;
   const { width, height, left, bottom, top, barMax } = CHART;
   const slot = (width - left) / Math.max(1, bars.length);
@@ -196,7 +197,7 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread, money }: { metrics: Me
     <svg className="mx-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={dollars ? `${COST_LABEL} per ${barWords(metrics.bucket_ms)}` : `Tokens per ${barWords(metrics.bucket_ms)}: input, cache write and output`}>
       {[0, 0.5, 1].map((step) => <g key={step}>
         <line className="gl" x1={left} x2={width} y1={y(step * max)} y2={y(step * max)} />
-        <text className="ax" x={left - 6} y={y(step * max) + 4} textAnchor="end">{step === 0 ? "0" : axis(Math.round(step * max))}</text>
+        <text className="ax" x={left - 6} y={y(step * max) + 4} textAnchor="end">{tick(step)}</text>
       </g>)}
       {bars.map((bar, index) => {
         const x = Math.round((left + index * slot + (slot - barWidth) / 2) * 10) / 10;
