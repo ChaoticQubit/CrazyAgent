@@ -1826,7 +1826,8 @@ static PARKED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// only there ([`clear`]), so no tool ever runs on a path an agent can swap (team-19 r1 M1).
 /// A `skills` folder that does not move has only its own pins cleared, by its fixed path, and
 /// is moved once more. A `skills` of another user is left alone. Input: the validated agent
-/// home. Output: Ok, or [`SKILLS_KEPT`] when `skills` stays in the home or comes back.
+/// home. Output: Ok, or [`SKILLS_KEPT`] when `skills` stays in the home, comes back, or is
+/// no longer a folder once the engine made it.
 #[cfg(unix)]
 fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, FileType};
@@ -1857,7 +1858,10 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
         return Err(failure(SKILLS_KEPT));
     }
     rustix::fs::mkdirat(&parent, "skills", Mode::RWXU).map_err(|_| failure(SKILLS_KEPT))?;
-    assert!(held(&parent, "skills"));
+    let made = rustix::fs::statat(&parent, "skills", AtFlags::SYMLINK_NOFOLLOW);
+    if !made.is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory) {
+        return Err(failure(SKILLS_KEPT));
+    }
     Ok(())
 }
 
