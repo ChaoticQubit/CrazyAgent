@@ -233,6 +233,7 @@ const READ_ONLY: &str = "status|diff|log|show|rev-parse|ls-files|cat-file|for-ea
 /// private index that checkout would lose its own, so they run as they are.
 const OWN_INDEX: &str = "worktree|clone";
 const REBASE_REFUSED: &str = "fatal: CrazyAgent does not run git rebase from the IDE in the project folder, because its sandbox denies git's rebase state. Use your own terminal.";
+const INTENT_REFUSED: &str = "fatal: CrazyAgent does not mark files as intent to add from the IDE in the project folder, because it cannot carry that mark into the project's index. Add the whole file, or use your own terminal.";
 const NO_FORWARDER: &str = "fatal: CrazyAgent carries git index changes through the IDE's Source Control, which this process cannot reach. Use Source Control or your own terminal.";
 const NOT_COPIED: &str =
     "fatal: CrazyAgent could not copy the project's git index for this command.";
@@ -250,7 +251,9 @@ fn shell_folder(folder: &Path) -> Result<&str, EngineError> {
 /// The end of the shim where the IDE sandbox denies the project's real index
 /// (SECAUDIT-IDE-SERVER-INDEX). A [`READ_ONLY`] or [`OWN_INDEX`] command, and any command
 /// outside the project folder, runs git directly. In the folder, `rebase` stops with a plain line; a process with
-/// no forwarder fails before git runs. Anything else runs on a throwaway copy of the index,
+/// no forwarder fails before git runs. `add`, `stage`, `reset` or `apply` asked to mark a
+/// file intent to add (`-N`, alone or among short flags, or `--intent-to-add` and its
+/// prefixes) stops with a plain line, since the carry has no form for that mark. Anything else runs on a throwaway copy of the index,
 /// and when its bytes changed the engine carries the difference across through git's own
 /// path check. Inputs: the project folder, the private folder and the word that runs git.
 /// Output: the text, or `ide_settings_invalid` for a folder [`shell_folder`] refuses.
@@ -261,6 +264,7 @@ fn private_flow(project: &Path, private: &Path, runner: &str) -> Result<String, 
         "case \"$1\" in\n{READ_ONLY}|{OWN_INDEX})\n  exec {runner} \"$@\"\n  ;;\nesac\n\
 if [ \"$(pwd -P)\" != '{project}' ]; then\n  exec {runner} \"$@\"\nfi\n\
 if [ \"$1\" = rebase ]; then\n  echo \"{REBASE_REFUSED}\" >&2\n  exit 128\nfi\n\
+case \"$1\" in\nadd|stage|reset|apply)\n  for word in \"$@\"; do\n    case \"$word\" in\n    --) break ;;\n    --inten*|-N*|-[!-]*N*)\n      echo \"{INTENT_REFUSED}\" >&2\n      exit 128\n      ;;\n    esac\n  done\n  ;;\nesac\n\
 if [ -z \"$CRAZYAGENT_IDE_GIT_NODE\" ] || [ -z \"$CRAZYAGENT_IDE_GIT_FORWARD\" ] || [ -z \"$secret\" ]; then\n  echo \"{NO_FORWARDER}\" >&2\n  exit 128\nfi\n\
 private='{private}'\nbase=\"$private/$$.base\"\nwork=\"$private/$$.work\"\n\
 if [ -e .git/index ]; then\n  if ! /bin/cp .git/index \"$base\" || ! /bin/cp .git/index \"$work\"; then\n    /bin/rm -f \"$base\" \"$work\"\n    echo \"{NOT_COPIED}\" >&2\n    exit 128\n  fi\nfi\n\
