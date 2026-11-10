@@ -11696,9 +11696,23 @@ fn clash_during_a_slow_tool<T>(
     during: impl FnOnce(&Case) -> T,
 ) -> (ChangeSetId, String, T) {
     cargo_workspace(case);
-    stand_in_cargo(case, "", "sleep 8", Duration::from_secs(60));
+    stand_in_cargo(
+        case,
+        "",
+        ": > .tool-started\nsleep 8\nrm -f .tool-started",
+        Duration::from_secs(60),
+    );
     let (id, _) = lockfile_clash_at_turn_end(case, "b = { path = \"../b\" }", "b");
     let head = case.view(&id).head;
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(".tool-started");
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the tool never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let done = during(case);
     (id, head, done)
 }
