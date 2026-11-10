@@ -622,6 +622,69 @@ fn lead_accept_closes_worker_sets_it_holds() {
     assert_eq!(team.pending_ref(&worker_set), "");
 }
 
+/// A lead that merged a worker's new file and then moved it holds the work, so the owner's
+/// Accept of the lead closes the worker's set and does not offer it again (TEAM-4-L1).
+#[test]
+fn lead_accept_closes_a_worker_set_whose_new_file_the_lead_moved() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.hand_merge(&team.lead, &fix);
+    team.git(&team.lead.worktree, &["mv", "fix.txt", "moved.txt"]);
+    team.git(&team.lead.worktree, &["commit", "-q", "-m", "Move it"]);
+    let lead_set = team.turn_end(&team.lead);
+    let AcceptOutcome::Landed { commit, .. } = landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &team.view_head(&lead_set),
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
+        panic!("the lead's accept conflicted");
+    };
+    assert_eq!(
+        team.git(&team.project, &["show", "main:moved.txt"]),
+        "fixed"
+    );
+    assert_eq!(
+        team.state(&worker_set),
+        ("accepted".to_owned(), Some(commit))
+    );
+    assert_eq!(team.pending_ref(&worker_set), "");
+    assert!(!team.owner_listed().contains(&worker_set));
+}
+
+/// A lead whose merge kept none of a worker's new file and whose own file is only like it
+/// does not hold the work: the worker's set stays open and offered after the owner's
+/// Accept of the lead (TEAM-4-L1).
+#[test]
+fn lead_accept_leaves_open_a_worker_set_whose_file_the_lead_has_only_a_like_one_of() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    merge_keeping_nothing(&team, &fix, true);
+    team.commit(&team.lead, "moved.txt", "fixed\nmore\n", "Own file");
+    let lead_set = team.turn_end(&team.lead);
+    landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &team.view_head(&lead_set),
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
+    assert_eq!(team.state(&lead_set).0, "accepted");
+    assert_eq!(team.state(&worker_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&worker_set));
+}
+
 /// While Lands is Lead, the owner's Changes list leaves out a lead's workers' sets, since
 /// the lead merges them; with Lands set to Owner it shows them (fix/hand-merged-set
 /// 8f98740a).
