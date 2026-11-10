@@ -394,7 +394,17 @@ fn native_only_and_the_claude_code_grace_leave_messages_sent() {
     );
     let asleep = BTreeSet::new();
     let none = reach(None, None, &fixture.base, &asleep);
-    assert!(deliver_to(&fixture.db, &project(), claude, now, &none).unwrap());
+    assert!(
+        deliver_to(
+            &fixture.db,
+            &project(),
+            claude,
+            now,
+            &none,
+            &mut BTreeMap::new()
+        )
+        .unwrap()
+    );
     assert_eq!(fixture.receipt(young), "sent");
     assert!(
         !deliver_to(
@@ -402,7 +412,8 @@ fn native_only_and_the_claude_code_grace_leave_messages_sent() {
             &project(),
             claude,
             now + NATIVE_GRACE_MS,
-            &none
+            &none,
+            &mut BTreeMap::new()
         )
         .unwrap(),
         "a message past the grace is retried while it cannot be typed"

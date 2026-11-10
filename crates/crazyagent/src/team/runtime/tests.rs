@@ -19708,16 +19708,30 @@ fn a_team_launch_whose_folder_screen_never_shows_ends_instead_of_waiting() {
     let (_orders, receive) = std::sync::mpsc::channel();
     let (reports, reported) = std::sync::mpsc::channel();
     let (cancel, leave) = (AtomicBool::new(false), AtomicBool::new(false));
-    let problem = live_serve(
-        pane.session,
-        &receive,
-        &reports,
-        &cancel,
-        &leave,
-        false,
-        None,
-    )
-    .expect("the launch ended with a problem");
+    let (ended, watched) = std::sync::mpsc::channel::<()>();
+    let cancelling = &cancel;
+    let problem = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            if watched
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .is_err()
+            {
+                cancelling.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let problem = live_serve(
+            pane.session,
+            &receive,
+            &reports,
+            &cancel,
+            &leave,
+            false,
+            None,
+        );
+        let _ = ended.send(());
+        problem
+    })
+    .expect("the launch ended by itself with a problem");
     assert!(
         problem.contains("launch_folder_screen_missing"),
         "{problem}"
