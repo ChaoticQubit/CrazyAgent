@@ -35,6 +35,7 @@ export function standingLine(standing: AccountStanding, nowMs: number): string {
       return standing.use_last ? `${line}, used last` : line;
     }
     case "not_signed_in": return "not signed in";
+    case "sign_in_unconfirmed": return "sign-in needs a check";
     case "paused": return `paused until ${at(standing.until_ms)}`;
     case "never_use": return "never use";
     case "five_hour_cap": return standing.until_ms === null ? "5-hour cap reached" : `5-hour cap until ${at(standing.until_ms)}`;

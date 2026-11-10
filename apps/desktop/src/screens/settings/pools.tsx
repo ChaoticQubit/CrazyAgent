@@ -142,7 +142,7 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs }: {
   const status = account?.status_label ?? member?.status_label ?? "";
   const near = limits.kind === "ok" && limits.value.some((row) => row.account === id && isNear(row, nowMs));
   const why = item.standing.kind === "next" ? whyLine(item.standing.why, nowMs) : heldLine(item.standing, nowMs);
-  const signIn = item.standing.kind === "not_signed_in";
+  const signIn = item.standing.kind === "not_signed_in" || item.standing.kind === "sign_in_unconfirmed";
   return <li className={at === null ? "pool-row held" : "pool-row"}>
     <span className="pool-pos"><span aria-hidden="true">{at === null ? "-" : at + 1}</span><span className="visually-hidden">{at === null ? "Held" : `Position ${at + 1}`}</span></span>
     <div className="pool-who">
