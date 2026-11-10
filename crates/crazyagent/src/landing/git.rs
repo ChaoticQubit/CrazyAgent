@@ -145,7 +145,20 @@ pub(super) struct Repo {
     overrides: Vec<String>,
     excludes: Option<String>,
     index: Option<PathBuf>,
+    confinement: Vec<std::ffi::OsString>,
 }
+
+/// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
+/// unconfined-git-add-reads-through-raced-symlink, unconfined-read-tree-u): it reads only the
+/// system, its own toolchain, the work tree, the repository's git folder and the owner's
+/// ignore file, and writes only what the step names and the worktree's index, never the
+/// repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
+/// Paths reach it as parameters, so no path text is read as profile text.
+#[cfg(target_os = "macos")]
+const WORK_TREE_PROFILE: &str = "(version 1)\n\
+(allow default)\n\
+(deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")))))\n\
+(deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n";
 
 /// What one confined git step may write besides the worktree's index: the object store,
 /// for a step that only reads the work tree, or the work tree, for one that fills it.
@@ -189,6 +202,7 @@ impl Repo {
             overrides: Vec::new(),
             excludes,
             index: None,
+            confinement: Vec::new(),
         };
         repo.check_version()?;
         let listing = repo.capture(
@@ -225,6 +239,7 @@ impl Repo {
             overrides: Vec::new(),
             excludes: None,
             index: None,
+            confinement: Vec::new(),
         }
     }
 
@@ -236,8 +251,79 @@ impl Repo {
         self
     }
 
-    /// This repository for one step on an agent's work tree. Input: what the step may
-    /// write. Output: the repository.
+    /// This repository with its git calls run under [`WORK_TREE_PROFILE`], for a step on a
+    /// linked agent worktree whose agent may still be changing it. Git reads a path with no
+    /// check it can hold, so a link swapped in during the step is stopped here. Input: what
+    /// the step may write. Output: the repository, `changes_workspace_invalid` for one that
+    /// is not a linked worktree's, or `changes_git_unsupported` where no toolchain git is
+    /// found.
+    #[cfg(target_os = "macos")]
+    pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
+        use std::ffi::OsString;
+        assert!(
+            self.index.is_none(),
+            "a confined step uses the worktree's own index"
+        );
+        let invalid = || failure("changes_workspace_invalid");
+        let real = |path: &Path| std::fs::canonicalize(path).map_err(|_| invalid());
+        let work = real(self.work_tree.as_deref().ok_or_else(invalid)?)?;
+        let private = real(&self.git_dir)?;
+        let common = private
+            .parent()
+            .filter(|parent| parent.ends_with("worktrees"))
+            .and_then(Path::parent)
+            .ok_or_else(invalid)?
+            .to_path_buf();
+        let unsupported = || failure("changes_git_unsupported");
+        let git = std::fs::canonicalize(crate::research::runner::sandboxed_git())
+            .map_err(|_| unsupported())?;
+        let tools = git
+            .ends_with("usr/bin/git")
+            .then(|| git.ancestors().nth(3))
+            .flatten()
+            .filter(|root| root.parent().is_some())
+            .ok_or_else(unsupported)?
+            .to_path_buf();
+        let excludes = self
+            .excludes
+            .as_deref()
+            .and_then(|setting| setting.strip_prefix("core.excludesFile="))
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| PathBuf::from("/dev/null"));
+        let target = match writes {
+            Writes::Objects => common.join("objects"),
+            Writes::WorkTree => work.clone(),
+        };
+        let mut confinement = Vec::new();
+        for (name, value) in [
+            ("WORK", &work),
+            ("COMMON", &common),
+            ("TOOLS", &tools),
+            ("EXCLUDES", &excludes),
+            ("WRITE", &target),
+            ("INDEX", &private.join("index")),
+            ("INDEX_LOCK", &private.join("index.lock")),
+        ] {
+            let mut pair = OsString::from(name);
+            pair.push("=");
+            pair.push(value);
+            confinement.extend([OsString::from("-D"), pair]);
+        }
+        confinement.extend([
+            OsString::from("-p"),
+            OsString::from(WORK_TREE_PROFILE),
+            git.into_os_string(),
+        ]);
+        Ok(Self {
+            confinement,
+            ..self.clone()
+        })
+    }
+
+    /// This repository unchanged, since only macOS has a confined step: elsewhere the step
+    /// runs as any engine git call does. Input: what the step may write. Output: the
+    /// repository.
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn confined(&self, _writes: Writes) -> Result<Self, EngineError> {
         Ok(self.clone())
     }
@@ -258,7 +344,13 @@ impl Repo {
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let mut command = Command::new(crate::research::runner::setup_git());
+        let mut command = if self.confinement.is_empty() {
+            Command::new(crate::research::runner::setup_git())
+        } else {
+            let mut confined = Command::new(crate::sandbox::SANDBOX_EXEC);
+            confined.args(&self.confinement);
+            confined
+        };
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
