@@ -419,7 +419,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await until(() => !serverUp(project), SERVER_GONE_MS, "the server kept running after its level was saved");
     await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "the own window stayed open after its server ended", WINDOW_GONE_MS, saving);
     await until(() => serverUp(project), REOPEN_MS, "the tab never opened the IDE again at the new level");
-    const editors = () => windowRows().filter((row) => row.at > saving && row.view?.window === "main" && row.look).at(-1)?.look.editors ?? -1;
+    const editors = () => windowRows().filter((row) => row.at > saving && row.view?.window === "main" && row.look && row.look.origin > focused.look.origin + SAME_PAGE_MS).at(-1)?.look.editors ?? -1;
     let count = editors();
     for (const deadline = Date.now() + RESTORE_MS; count !== before + 1 && Date.now() < deadline; await pause(POLL_MS)) count = editors();
     const back = count === before + 1;

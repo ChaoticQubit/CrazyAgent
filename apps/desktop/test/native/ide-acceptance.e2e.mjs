@@ -458,8 +458,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         });
         const reopened = await bridgeCall(bridge, "e2e_ide_open", { projectId: project });
         assert.ok("value" in reopened, `the IDE opens again: ${JSON.stringify(reopened)}`);
+        const origin = await page.evaluate("performance.timeOrigin");
         await page.send("Page.navigate", { url: workbenchUrl(reopened.value) });
-        await ide.until("the workbench again", `document.querySelector(".monaco-workbench .part.activitybar") !== null`, WORKBENCH_MS);
+        await ide.until("the workbench again", `performance.timeOrigin > ${origin} && document.querySelector(".monaco-workbench .part.activitybar") !== null`, WORKBENCH_MS);
         let back = false;
         for (const deadline = Date.now() + RESTORE_MS; !back && Date.now() < deadline; await pause(POLL_MS)) {
           back = await page.evaluate(`[...document.querySelectorAll(".view-line")].some((line) => line.textContent.includes(${JSON.stringify(UNSAVED)}))`);
