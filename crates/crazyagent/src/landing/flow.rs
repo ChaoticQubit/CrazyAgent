@@ -903,7 +903,7 @@ pub(super) const POINTER_MOVED_ON: &str = "changes_agent_busy";
 /// read-tree moves its index and tracked files and refuses, changing nothing, when a path
 /// it would change was edited, staged or is in its way untracked; then HEAD moves only
 /// while it still holds `from` and must still be the agent's pointer after. When HEAD did
-/// not move, the files go back unless the agent committed them meanwhile; when the pointer
+/// not move, each file goes back unless the agent committed it meanwhile; when the pointer
 /// left, HEAD goes back and the files too when the agent's checkout holds `from`. A stop
 /// between the steps leaves a state an engine start can finish. Inputs: the worktree and
 /// both commits.
@@ -939,7 +939,7 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
         .move_head(Some(from), target, "CrazyAgent: reset")
         .is_err()
     {
-        files_back(agent, from, target);
+        files_back(agent, target);
         return Ok(false);
     }
     #[cfg(test)]
@@ -954,7 +954,7 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
             return Err(failure(POINTER_MOVED_ON));
         }
         if agent.repo.commit_of("HEAD").ok().flatten().as_deref() == Some(from) {
-            files_back(agent, from, target);
+            files_back(agent, target);
         }
         return Ok(false);
     }
@@ -972,25 +972,18 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
     }
 }
 
-/// Puts an agent worktree's index and files back from `target` to `from` after its reset
-/// did not hold, with the same two-tree read-tree, so an edit the agent made meanwhile is
-/// never overwritten: git refuses, writing nothing, and the refusal is logged. An index
-/// equal to HEAD stays: the agent committed what the reset moved, and putting it back would
-/// stage a reversal of that commit. Inputs: the worktree and both commits. Output: none.
-fn files_back(agent: &Agent, from: &str, target: &str) {
-    let committed = agent.repo.exec(
-        &["diff-index", "--quiet", "--cached", "HEAD", "--"],
-        None,
-        &[],
-        4096,
-    );
-    if committed.is_ok_and(|committed| committed.code == 0) {
-        return;
-    }
+/// Puts an agent worktree's index and files back after its reset did not hold, moving them
+/// from `target` to whatever HEAD now holds with the same two-tree read-tree, path by path:
+/// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
+/// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
+/// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is
+/// logged. Inputs: the worktree and the reset's target. Output: none.
+fn files_back(agent: &Agent, target: &str) {
+    assert!(is_object_id(target));
     let back = agent
         .repo
         .confined(Writes::WorkTree)
-        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096));
+        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, "HEAD"], None, &[], 4096));
     if !back.is_ok_and(|back| back.code == 0) {
         eprintln!("landing_reset_files_back_refused");
     }

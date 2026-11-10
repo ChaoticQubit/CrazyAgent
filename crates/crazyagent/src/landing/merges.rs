@@ -387,7 +387,10 @@ fn sets_marker_size(
 /// does, merging from the set's own base. For a commit with the set's head in its history
 /// the merge base is that head and the merge always agrees, so a merge that kept none of
 /// the work shows only from the set's base. Inputs: the owner repository, the commit and
-/// the set's base and head. Output: the answer.
+/// the set's base and head. A path the merge has and the commit lacks still counts as held
+/// when the commit holds that file whole under another name than the head does, so a lead
+/// that moved a worker's file holds it; a file moved and changed does not, and that set
+/// waits for the owner. Output: the answer.
 pub(super) fn holds_changes_since(
     owner: &Repo,
     commit: &str,
@@ -396,7 +399,97 @@ pub(super) fn holds_changes_since(
 ) -> Result<bool, EngineError> {
     assert!(is_object_id(base));
     assert!(is_object_id(head));
-    Ok(kept_from_base(owner, commit, base, commit, head)?.is_some())
+    let Some(Remerged {
+        conflicts,
+        differences,
+    }) = merge_differences(owner, commit, base, commit, head)?
+    else {
+        return Ok(false);
+    };
+    let left: Vec<&Difference> = differences
+        .iter()
+        .filter(|difference| !conflicts.contains(&difference.path))
+        .collect();
+    if left.is_empty() {
+        return Ok(true);
+    }
+    let moved = moved_whole(owner, head, commit)?;
+    Ok(left.iter().all(|difference| {
+        difference.gone.as_ref().is_some_and(|blob| {
+            moved
+                .iter()
+                .any(|(path, moved_blob)| *path == difference.path && moved_blob == blob)
+        })
+    }))
+}
+
+/// Lists the files a commit holds whole under another name than a set's head does: git's
+/// exact renames from the head to the commit, never pairing two empty files, since any new
+/// empty file would otherwise stand for a worker's empty one. Past the output bound it lists
+/// none, so the set waits. Inputs: the owner repository, the head and the commit. Output:
+/// each moved file's path in the head and its blob.
+fn moved_whole(
+    owner: &Repo,
+    head: &str,
+    commit: &str,
+) -> Result<Vec<(Vec<u8>, String)>, EngineError> {
+    assert!(is_object_id(head));
+    let listed = owner.exec(
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--raw",
+            "--no-abbrev",
+            "--find-renames=100%",
+            "--no-rename-empty",
+            "--diff-filter=R",
+            head,
+            commit,
+        ],
+        None,
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if listed.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if listed.overflow {
+        return Ok(Vec::new());
+    }
+    let mut moved = Vec::new();
+    let mut fields = listed.stdout.split(|byte| *byte == 0);
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let [_, _, blob, renamed, status] = raw_header(header)?;
+        let (Some(from), Some(_)) = (fields.next(), fields.next()) else {
+            return Err(failure("changes_git_failed"));
+        };
+        if !status.starts_with('R') || blob != renamed || from.is_empty() {
+            return Err(failure("changes_git_failed"));
+        }
+        moved.push((from.to_vec(), blob.to_owned()));
+    }
+    assert!(moved.iter().all(|(_, blob)| is_object_id(blob)));
+    Ok(moved)
+}
+
+/// Splits one header of git's raw diff output into its two modes, two blobs and status.
+/// Inputs: the header as git printed it. Output: the five fields, or `changes_git_failed`.
+fn raw_header(header: &[u8]) -> Result<[&str; 5], EngineError> {
+    let text = std::str::from_utf8(header).map_err(|_| failure("changes_git_failed"))?;
+    let text = text
+        .strip_prefix(':')
+        .ok_or_else(|| failure("changes_git_failed"))?;
+    let Ok(fields) = <[&str; 5]>::try_from(text.split(' ').collect::<Vec<&str>>()) else {
+        return Err(failure("changes_git_failed"));
+    };
+    if !is_object_id(fields[2]) || !is_object_id(fields[3]) {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(fields)
 }
 
 /// Reads whether a file of a commit has a line a conflict marker starts. A path the commit
@@ -484,6 +577,45 @@ fn kept_from_base(
     ours: &str,
     theirs: &str,
 ) -> Result<Option<Vec<Vec<u8>>>, EngineError> {
+    let Some(Remerged {
+        conflicts,
+        differences,
+    }) = merge_differences(owner, commit, base, ours, theirs)?
+    else {
+        return Ok(None);
+    };
+    let kept = differences
+        .iter()
+        .all(|difference| conflicts.contains(&difference.path));
+    Ok(kept.then_some(conflicts))
+}
+
+/// One path where a commit's tree differs from a merge's result, with the merge's blob
+/// there when the commit has nothing at that path.
+struct Difference {
+    path: Vec<u8>,
+    gone: Option<String>,
+}
+
+/// A merge made again from a base: the paths it conflicts on, as git printed them, and
+/// every path where a commit's tree differs from its result.
+struct Remerged {
+    conflicts: Vec<Vec<u8>>,
+    differences: Vec<Difference>,
+}
+
+/// Merges two sides from a base and lists every path where a commit's tree differs from
+/// the result. Paths are compared as git printed them. Inputs: the owner repository, the
+/// commit, the base and both sides. Output: the conflicted paths and the differences, or
+/// None when a configured command would run.
+fn merge_differences(
+    owner: &Repo,
+    commit: &str,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<Option<Remerged>, EngineError> {
+    assert!(is_object_id(base));
     let paths = super::owner::merge_paths(owner, base, ours, theirs)?;
     if super::owner::uses_configured_commands(owner, &paths, &[base, ours, theirs])? {
         return Ok(None);
@@ -495,7 +627,8 @@ fn kept_from_base(
             "diff-tree",
             "-r",
             "-z",
-            "--name-only",
+            "--raw",
+            "--no-abbrev",
             "--no-renames",
             &merged,
             &tree,
@@ -507,12 +640,31 @@ fn kept_from_base(
     if changed.code != 0 || changed.overflow {
         return Err(failure("changes_git_failed"));
     }
-    let kept = changed
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .all(|path| conflicts.iter().any(|conflict| conflict == path));
-    Ok(kept.then_some(conflicts))
+    let mut differences = Vec::new();
+    let mut fields = changed.stdout.split(|byte| *byte == 0);
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let [_, _, blob, _, status] = raw_header(header)?;
+        let path = fields
+            .next()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| failure("changes_git_failed"))?;
+        differences.push(Difference {
+            path: path.to_vec(),
+            gone: (status == "D").then(|| blob.to_owned()),
+        });
+    }
+    assert!(
+        differences
+            .iter()
+            .all(|difference| !difference.path.is_empty())
+    );
+    Ok(Some(Remerged {
+        conflicts,
+        differences,
+    }))
 }
 
 /// Tells whether one of the merges brought a set's head in through its second parent, so
