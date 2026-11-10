@@ -1531,6 +1531,51 @@ impl Drop for Unlocked {
     }
 }
 
+/// T8 r2 L1: a folder an agent's leftover process swaps for a link to an owner folder while
+/// Clean up clears a pinned file of its cache sends no flag change there, since the flags go
+/// through the open entry and never a path. The owner's file keeps its flag and the cache
+/// still goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn clearing_a_pinned_cache_file_never_changes_an_owner_file_a_swapped_folder_points_to() {
+    use std::os::macos::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    write(&owner.join("pinned"), b"the owner's\n");
+    assert!(chflags("uchg", &owner.join("pinned")));
+    let _owner = Unlocked(owner.join("pinned"));
+    let cache = root.join("cache");
+    write(&cache.join("sub/pinned"), b"the agent's\n");
+    assert!(chflags("uchg", &cache.join("sub/pinned")));
+    let _agent = Unlocked(cache.join("moved/pinned"));
+    let (sub, moved, target) = (cache.join("sub"), cache.join("moved"), owner.clone());
+    AFTER_UNPIN_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&sub, &moved).unwrap();
+            std::os::unix::fs::symlink(&target, &sub).unwrap();
+        }));
+    });
+    remove_agent_tree(&cache).unwrap();
+    assert!(
+        AFTER_UNPIN_OPEN.with(|step| step.borrow().is_none()),
+        "no pinned entry was opened"
+    );
+    assert!(!cache.exists());
+    let flags = std::fs::symlink_metadata(owner.join("pinned"))
+        .unwrap()
+        .st_flags();
+    assert_eq!(
+        flags & nix::sys::stat::FileFlag::UF_IMMUTABLE.bits(),
+        nix::sys::stat::FileFlag::UF_IMMUTABLE.bits(),
+        "the owner's file lost its flag"
+    );
+    assert_eq!(
+        std::fs::read(owner.join("pinned")).unwrap(),
+        b"the owner's\n"
+    );
+}
+
 /// When git drops an agent's worktree record but leaves a file the engine cannot delete,
 /// the agent stays offered for removal with its record waiting, and a later removal
 /// finishes once the file can go, instead of refusing it as an invalid worktree for good

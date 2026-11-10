@@ -976,13 +976,12 @@ pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
 #[cfg(unix)]
 fn writable(folder: &Path, pinned: bool) {
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
-    use std::ffi::{CString, OsStr};
-    use std::os::unix::ffi::OsStrExt;
+    use std::ffi::CString;
     use std::rc::Rc;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
     if pinned {
-        unpin(rustix::fs::CWD, folder, folder);
+        unpin(rustix::fs::CWD, folder);
         let _ = rustix::fs::chmodat(
             rustix::fs::CWD,
             folder,
@@ -993,10 +992,9 @@ fn writable(folder: &Path, pinned: bool) {
     let Ok(top) = rustix::fs::open(folder, flags, Mode::empty()) else {
         return;
     };
-    let mut pending: Vec<(Rc<std::os::fd::OwnedFd>, Option<CString>, PathBuf)> =
-        vec![(Rc::new(top), None, folder.to_path_buf())];
+    let mut pending: Vec<(Rc<std::os::fd::OwnedFd>, Option<CString>)> = vec![(Rc::new(top), None)];
     let mut budget = DISK_ENTRIES_MAX;
-    while let Some((parent, name, path)) = pending.pop() {
+    while let Some((parent, name)) = pending.pop() {
         if budget == 0 {
             return;
         }
@@ -1006,7 +1004,7 @@ fn writable(folder: &Path, pinned: bool) {
             Some(name) => rustix::fs::openat(&*parent, name.as_c_str(), flags, Mode::empty())
                 .or_else(|_| {
                     if pinned {
-                        unpin(&*parent, name.as_c_str(), &path);
+                        unpin(&*parent, name.as_c_str());
                     }
                     rustix::fs::chmodat(
                         &*parent,
@@ -1022,7 +1020,7 @@ fn writable(folder: &Path, pinned: bool) {
             continue;
         };
         if pinned {
-            unpin(&*handle, c".", &path);
+            unpin(&*handle, c".");
         }
         let _ = rustix::fs::fchmod(&*handle, Mode::RWXU);
         let Ok(entries) = Dir::read_from(&*handle) else {
@@ -1036,14 +1034,13 @@ fn writable(folder: &Path, pinned: bool) {
             if matches!(child.to_bytes(), b"." | b"..") {
                 continue;
             }
-            let below = path.join(OsStr::from_bytes(child.to_bytes()));
             if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
                 if pinned {
-                    unpin(&*handle, child, &below);
+                    unpin(&*handle, child);
                 }
                 continue;
             }
-            pending.push((Rc::clone(&handle), Some(child.to_owned()), below));
+            pending.push((Rc::clone(&handle), Some(child.to_owned())));
         }
     }
 }
@@ -1051,38 +1048,56 @@ fn writable(folder: &Path, pinned: bool) {
 #[cfg(not(unix))]
 fn writable(_: &Path, _: bool) {}
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// A step a cleanup test runs in [`unpin`] once a pinned entry is open and before its
+    /// flags change, standing in for a process an agent left that swaps a folder meanwhile.
+    /// Runs once; None runs nothing.
+    pub(super) static AFTER_UNPIN_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Clears the immutable and append-only flags, which an agent may set on what it owns, from
 /// one entry of this user that is not a link, keeping every other flag (T8 r1 L3). The
-/// flags are set by path, as the engine has no call that sets them through a handle, and
-/// only while the path still names the entry its parent's handle found. Inputs: the entry's
-/// open parent, its name there and its path.
+/// entry is opened from its parent's handle without following a link, and its flags are set
+/// through `/dev/fd/<n>` of that open entry, so no path an agent can change is resolved and
+/// a folder or link it swaps in meanwhile is never followed (T8 r2 L1). An entry that will
+/// not open, such as one at mode 000, keeps its flags; the removal then stops on it and its
+/// caller reports what is left. Inputs: the entry's open parent and its name there.
 #[cfg(target_os = "macos")]
-fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P, path: &Path) {
+fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P) {
     use nix::sys::stat::FileFlag;
-    use rustix::fs::{AtFlags, FileType};
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::os::fd::AsRawFd;
     let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
-    let Ok(found) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
+    let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(entry) = rustix::fs::openat(parent, name, open, Mode::empty()) else {
         return;
     };
+    let Ok(found) = rustix::fs::fstat(&entry) else {
+        return;
+    };
+    assert_ne!(
+        FileType::from_raw_mode(found.st_mode),
+        FileType::Symlink,
+        "an entry opened without following a link is never one"
+    );
     let flags = FileFlag::from_bits_retain(found.st_flags);
-    if !flags.intersects(pinning)
-        || found.st_uid != rustix::process::geteuid().as_raw()
-        || FileType::from_raw_mode(found.st_mode) == FileType::Symlink
-    {
+    if !flags.intersects(pinning) || found.st_uid != rustix::process::geteuid().as_raw() {
         return;
     }
-    let Ok(named) = rustix::fs::lstat(path) else {
-        return;
-    };
-    if (named.st_dev, named.st_ino) == (found.st_dev, found.st_ino) {
-        let _ = nix::unistd::chflags(path, flags.difference(pinning));
+    #[cfg(test)]
+    if let Some(step) = AFTER_UNPIN_OPEN.with(|step| step.borrow_mut().take()) {
+        step();
     }
+    let handle = PathBuf::from(format!("/dev/fd/{}", entry.as_raw_fd()));
+    let _ = nix::unistd::chflags(&handle, flags.difference(pinning));
 }
 
 /// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:
 /// unused.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn unpin<P: rustix::path::Arg>(_: impl std::os::fd::AsFd, _: P, _: &Path) {}
+fn unpin<P: rustix::path::Arg>(_: impl std::os::fd::AsFd, _: P) {}
 
 /// Counts what a folder holds on disk, never following a link, visiting at most `budget`
 /// entries. Inputs: the folder and the entries left. Output: the bytes and whether every
