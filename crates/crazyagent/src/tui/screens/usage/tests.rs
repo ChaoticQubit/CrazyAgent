@@ -34,6 +34,7 @@ fn usage_row(key: &str) -> UsageRow {
         last_ms: NOW - 5 * MINUTE,
         cost_nanos: 0,
         not_reported_by: None,
+        project: None,
     }
 }
 

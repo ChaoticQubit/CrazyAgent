@@ -576,17 +576,33 @@ fn an_agent_key_used_in_two_projects_lists_once_per_project() {
     mark_unreported(&db, &opencode, MIDNIGHT + 4 * HOUR).unwrap();
 
     let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
-    let rows: Vec<(&str, u64, u64, i64)> = all
+    let rows: Vec<(&str, Option<&str>, u64, u64, i64)> = all
         .agents
         .iter()
-        .map(|row| (row.key.as_str(), row.tokens.input, row.runs, row.last_ms))
+        .map(|row| {
+            (
+                row.key.as_str(),
+                row.project.as_deref(),
+                row.tokens.input,
+                row.runs,
+                row.last_ms,
+            )
+        })
         .collect();
     assert_eq!(
         rows,
         [
-            ("onboarding", 70, 1, MIDNIGHT + HOUR),
-            ("onboarding", 30, 1, MIDNIGHT + 4 * HOUR),
+            ("onboarding", Some("alpha"), 70, 1, MIDNIGHT + HOUR),
+            ("onboarding", Some("beta"), 30, 1, MIDNIGHT + 4 * HOUR),
         ]
+    );
+    assert!(
+        all.projects
+            .iter()
+            .chain(&all.pools)
+            .chain(&all.accounts)
+            .all(|row| row.project.is_none()),
+        "only agent rows name a project"
     );
     assert_eq!(
         flagged(&all.agents),
