@@ -813,6 +813,7 @@ export interface TeamMessage {
 /** What the live master does with the conversation when the master harness changes: carry it
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
+export type MasterIdleStop = "off" | "fifteen_minutes" | "one_hour";
 
 /** When a saved master harness change reaches the running live master: once it is idle, or at
  * its next start. */
@@ -927,6 +928,7 @@ export interface TeamStatus {
   ask_before_merge?: boolean;
   master_lands?: MasterLands | null;
   reask_empty_reply?: boolean;
+  master_idle_stop?: MasterIdleStop;
   catch_up_main?: CatchUpMain;
   reuse_idle?: ReuseIdle;
   new_folder_files_max?: number;
@@ -944,6 +946,7 @@ export interface TeamStatus {
   terminals_per_window?: 4 | 6 | 9;
   live_master?: boolean | null;
   live_problem?: string | null;
+  live_idle_stopped?: boolean;
   settings_version?: number;
   min_agents: number;
   max_agents: number;

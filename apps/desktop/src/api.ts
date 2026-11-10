@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -642,8 +642,17 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+/** Why a ready account stands where it does in its pool's ranking. */
+export type OrderWhy =
+  | { kind: "use_last" } | { kind: "limit_reported" } | { kind: "no_reading" }
+  | { kind: "resets_soonest"; resets_ms: number } | { kind: "resets_later"; resets_ms: number }
+  | { kind: "least_used" } | { kind: "more_used" } | { kind: "more_five_hour_used" }
+  | { kind: "ranked"; rank: number } | { kind: "unranked" }
+  | { kind: "tied_rank"; rank: number | null } | { kind: "tied_order" };
+
 export type AccountStanding =
-  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean; why: OrderWhy }
+  | { kind: "not_signed_in" }
   | { kind: "paused"; until_ms: number }
   | { kind: "never_use" }
   | { kind: "five_hour_cap"; until_ms: number | null }
@@ -658,6 +667,7 @@ export interface PoolRanking {
   pool: string;
   strategy: AccountStrategy;
   accounts: RankedAccount[];
+  own_order_projects: number;
 }
 
 /** Reads each pool's account ranking: the order work would try its accounts now, then each
@@ -1339,6 +1349,12 @@ export function closeProjectWalls(id: string): Promise<Result<void>> {
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
+}
+
+/** Saves a project's "Stop the master when idle after" choice (DEC-117 Q4). Inputs: the
+ * project id and the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterIdleStop(id: string, choice: MasterIdleStop): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_idle_stop", { id, choice, generation: nextGeneration() });
 }
 
 /** Sets the project's "Reuse idle agents" setting: off starts a new agent for each new task, on

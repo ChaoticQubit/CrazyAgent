@@ -886,6 +886,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_catch_up_main(&id, &mode, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_master_idle_stop" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                choice: String,
+                generation: u64,
+            }
+            let Args { id, choice, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_master_idle_stop(&id, &choice, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_reuse_idle" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

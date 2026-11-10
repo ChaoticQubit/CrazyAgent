@@ -3,6 +3,7 @@ use super::*;
 use crate::engine::owner::{AccountProfileRequest, NativeAuthScope};
 use crate::master_session::MasterOwnerAction;
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, SessionId};
+use crate::scheduling::{OrderWhy, PoolRanking, RankedAccount, Standing, Strategy};
 use crate::usage::metrics::{AgentRow, Metrics};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -385,4 +386,76 @@ fn the_shared_refusal_text_explains_a_version_mismatch_as_the_desktop_app_does()
         crate::config::plain_problem(MISMATCH),
         Some("CrazyAgent's engine is a different version from this app. Restart the engine.")
     );
+}
+
+/// An account ranking reply. Input: the field an engine from before the why lines did not
+/// write, `why` on the account or `own_order_projects` on the pool, or None for today's
+/// shape. Output: the reply.
+fn ranking_reply(lacking: Option<&str>) -> Value {
+    let ranking = PoolRanking {
+        pool: CredentialRef::new("skew-pool").unwrap(),
+        strategy: Strategy::ManualRank,
+        accounts: vec![RankedAccount {
+            connection: CredentialRef::new("skew-connection").unwrap(),
+            standing: Standing::Next {
+                weekly_resets_ms: None,
+                weekly_left_percent: None,
+                use_last: false,
+                why: OrderWhy::NoReading,
+            },
+        }],
+        own_order_projects: 0,
+    };
+    let mut reply = serde_json::to_value(OwnerReply {
+        request_id: RequestId::new("skew-ranking").unwrap(),
+        response: OwnerResponse::Read {
+            state: OwnerReadReply {
+                revision: Cursor::new(0),
+                config_id: ConfigId::new("b".repeat(64)).unwrap(),
+                data: OwnerData::AccountRanking {
+                    pools: vec![ranking],
+                },
+            },
+        },
+    })
+    .unwrap();
+    let pool = &mut reply["response"]["state"]["data"]["pools"][0];
+    match lacking {
+        Some("why") => assert!(
+            pool["accounts"][0]["standing"]
+                .as_object_mut()
+                .unwrap()
+                .remove("why")
+                .is_some()
+        ),
+        Some(field) => assert!(pool.as_object_mut().unwrap().remove(field).is_some()),
+        None => {}
+    }
+    reply
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ranking_reply_from_before_the_why_lines_is_a_version_mismatch() {
+    let skewed = Skewed::start(vec![
+        ranking_reply(None),
+        ranking_reply(Some("why")),
+        ranking_reply(Some("own_order_projects")),
+    ])
+    .await;
+    let read = || {
+        owner_request(
+            "skew-ranking",
+            OwnerOperation::Read {
+                query: OwnerRead::AccountRanking,
+            },
+        )
+    };
+    let client = &skewed.client;
+    assert!(matches!(
+        client.request(read()).await.unwrap().response,
+        OwnerResponse::Read { .. }
+    ));
+    assert_eq!(refused(client.request(read()).await), MISMATCH);
+    assert_eq!(refused(client.request(read()).await), MISMATCH);
+    skewed.stop().await;
 }

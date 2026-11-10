@@ -2431,6 +2431,7 @@ const REMOVED_WITH_PROJECT: [&str; 42] = [
     "team_merge_ask",
     "team_master_lands",
     "team_reask_empty",
+    "team_master_idle_stop",
     "team_wall",
     "team_catch_up_main",
     "team_reuse_idle",

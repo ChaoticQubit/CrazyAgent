@@ -29,7 +29,7 @@ const GROUPS = [
 ];
 const MASTER = [
   ["Master", ["Harness", "Account"]],
-  ["Conversation", ["On master harness switch", "Apply a master harness change"]],
+  ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
