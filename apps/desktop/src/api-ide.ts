@@ -68,6 +68,7 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_platform_unqualified: UNQUALIFIED,
   ide_build_not_ready: "The IDE isn't ready yet. Wait for the download to finish.",
   ide_servers_full: "Too many project IDEs are open. Close another project, then try again.",
+  ide_settings_unavailable: "CrazyAgent's settings couldn't be read, so the IDE didn't start. Fix them, then try again.",
   ide_project_deleting: "This project is being deleted, so the IDE can't open.",
   ide_server_start_timeout: "The IDE took too long to start. Try again.",
   ide_server_start_failed: "The IDE couldn't start. Try again.",

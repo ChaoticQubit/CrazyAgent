@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
+use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::team::AgentRole;
 use crate::team::names::{self, AgentName};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -148,6 +149,54 @@ pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineErr
     let db = open(root)?;
     crate::sandbox::policy::load(&db, project.as_str())
         .map(|policy| policy.ide_git_hooks)
+        .map_err(unavailable)
+}
+
+/// What a project's IDE server starts from, as the owner saved it in the project's agent
+/// policy: the access level and the network choice an Own branch IDE follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdePolicy {
+    pub access: AgentAccess,
+    pub network: AgentNetwork,
+}
+
+impl IdePolicy {
+    /// Tells whether a server launched under this policy still honours the saved one: the
+    /// same level, and at Own branch the same network choice, which no other level reads.
+    /// Input: the saved policy. Output: true when the server may keep running.
+    pub fn holds(self, saved: Self) -> bool {
+        self.access == saved.access
+            && (saved.access != AgentAccess::OwnBranch || self.network == saved.network)
+    }
+}
+
+/// The loopback ports of the owner's configured local model endpoints, read from the engine's
+/// settings files at each launch, for a sandbox to keep free of the listeners of what it runs.
+/// Input: the two settings files, or none for an engine that has none. Output: the ports, or
+/// `ide_settings_unavailable` for files that do not read, so a refused read stops the launch.
+pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, EngineError> {
+    let Some((global, project)) = settings else {
+        return Ok(Vec::new());
+    };
+    let config = crate::config::resolve_config(global, project)
+        .map_err(|_| failure("ide_settings_unavailable"))?;
+    Ok(config
+        .settings
+        .model_access
+        .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)))
+}
+
+/// A project's [`IdePolicy`]; the default, Sandboxed with the Open network no Sandboxed IDE
+/// reads, when none is saved. Inputs: the engine root and the project. Output: the policy, or
+/// `ide_workspace_unavailable` for one that cannot be read, so a tampered one never widens
+/// the IDE.
+pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
+    let db = open(root)?;
+    crate::sandbox::policy::load(&db, project.as_str())
+        .map(|policy| IdePolicy {
+            access: policy.access,
+            network: policy.network,
+        })
         .map_err(unavailable)
 }
 

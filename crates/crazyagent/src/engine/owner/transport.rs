@@ -1323,6 +1323,7 @@ impl OwnerServer {
                 crate::ide::server::START_LIMIT,
                 Arc::clone(&ide),
                 root.path.join(SOCKET),
+                engine.settings_files(),
             );
             let authority = Arc::new(Authority {
                 root,

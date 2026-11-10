@@ -29,6 +29,10 @@ const TEAMMATES_NAME_BYTES: usize =
 /// ten digits of the largest pid.
 #[cfg(unix)]
 const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
+/// What a teammates' server pid record holds after the socket's name until the server first
+/// answers.
+#[cfg(unix)]
+const TEAMMATES_PIN_PENDING: &str = "pending";
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -704,8 +708,10 @@ pub fn teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, H
 /// Names a new socket for a native lead's teammates' server as the lead starts and keeps
 /// the name in the engine's own profiles folder, so no path a teammate's profile ever
 /// served is reused: a teammate still running from an earlier start cannot bind a listener
-/// where the lead's tmux clients now connect. Takes the engine root and the lead, whose
-/// profiles folder must exist. Returns the new path, or a plain code.
+/// where the lead's tmux clients now connect. The pin record is marked pending for the new
+/// name in the same step, so one that later goes missing or names another socket is refused
+/// (PLCC-L1). Takes the engine root and the lead, whose profiles folder must exist. Returns
+/// the new path, or a plain code.
 #[cfg(unix)]
 pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
     let id = lead
@@ -719,6 +725,12 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
     keep_record(
         &crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id),
         &name,
+    )?;
+    let pending = format!("{name} {TEAMMATES_PIN_PENDING}");
+    assert!(pending.len() <= TEAMMATES_PIN_BYTES_MAX);
+    keep_record(
+        &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
+        &pending,
     )?;
     lead_temp_socket(engine_root, lead, &name)
 }
@@ -753,9 +765,10 @@ fn keep_record(kept: &Path, text: &str) -> Result<(), HostError> {
 /// The pid a native lead's teammates' server at one socket was pinned to (PLC c, PC-L1),
 /// read without following a link from the record beside the socket's name, which outlives
 /// the engine and a kill of the lead. Takes the engine root, the lead and the socket.
-/// Returns the pid, none when no record names this socket, or
-/// `terminal_own_server_unavailable` for a record that is not this user's plain file as
-/// [`keep_teammates_server_pid`] writes one, so a damaged record refuses every server.
+/// Returns the pid, none while the record is pending for this socket, or
+/// `terminal_own_server_unavailable` for a record that is missing, names another socket or
+/// is not this user's plain file as [`renew_teammates_socket`] and
+/// [`keep_teammates_server_pid`] write one, so such a record refuses every server (PLCC-L1).
 #[cfg(unix)]
 fn teammates_server_pid(
     engine_root: &Path,
@@ -768,11 +781,7 @@ fn teammates_server_pid(
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
     let kept = crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id);
     let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
-    let metadata = match std::fs::symlink_metadata(&kept) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(unavailable()),
-    };
+    let metadata = std::fs::symlink_metadata(&kept).map_err(|_| unavailable())?;
     let plain = metadata.is_file()
         && metadata.uid() == rustix::process::getuid().as_raw()
         && u64::try_from(TEAMMATES_PIN_BYTES_MAX).is_ok_and(|bytes| metadata.len() <= bytes);
@@ -780,29 +789,32 @@ fn teammates_server_pid(
         return Err(unavailable());
     }
     let text = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
-    let (name, pid) = text
+    let (name, value) = text
         .split_once(' ')
-        .filter(|(name, pid)| {
+        .filter(|(name, value)| {
             teammates_name_valid(name)
-                && !pid.is_empty()
-                && pid.bytes().all(|byte| byte.is_ascii_digit())
+                && (*value == TEAMMATES_PIN_PENDING
+                    || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())))
         })
         .ok_or_else(unavailable)?;
-    let pid = pid
+    if socket.file_name().and_then(|kept| kept.to_str()) != Some(name) {
+        return Err(unavailable());
+    }
+    if value == TEAMMATES_PIN_PENDING {
+        return Ok(None);
+    }
+    let pid = value
         .parse::<u32>()
         .ok()
         .filter(|pid| *pid > 0)
         .ok_or_else(unavailable)?;
-    if socket.file_name().and_then(|kept| kept.to_str()) != Some(name) {
-        return Ok(None);
-    }
     Ok(Some(pid))
 }
 
 /// Records the pid a native lead's teammates' server at one socket first answered with
 /// (PLC c, PC-L1), beside the socket's name in the engine's profiles folder, in place of
-/// the record of an earlier start's socket. Takes the engine root, the lead, the socket and
-/// the pid. Returns Ok, or `terminal_own_server_unavailable`.
+/// the pending mark its start left. Takes the engine root, the lead, the socket and the
+/// pid. Returns Ok, or `terminal_own_server_unavailable`.
 #[cfg(unix)]
 fn keep_teammates_server_pid(
     engine_root: &Path,

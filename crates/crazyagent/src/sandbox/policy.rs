@@ -151,6 +151,18 @@ impl AgentNetwork {
     }
 }
 
+/// How far a sandboxed IDE server or terminal at a level reaches: nothing at Sandboxed, and
+/// the project's network choice at Own branch through [`AgentNetwork::sandbox`], with no
+/// model port. A Full access process has no Seatbelt for a choice to limit, so it never
+/// asks. Inputs: the level and the choice. Output: the sandbox's network.
+pub fn ide_network(level: AgentAccess, choice: AgentNetwork) -> super::SandboxNetwork {
+    assert_ne!(level, AgentAccess::Full);
+    match level {
+        AgentAccess::OwnBranch => choice.sandbox(None),
+        AgentAccess::Sandboxed | AgentAccess::Full => super::SandboxNetwork::Only(Vec::new()),
+    }
+}
+
 /// The owner's choice for one toolchain family; a family with no choice follows the
 /// project (on when the project uses it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

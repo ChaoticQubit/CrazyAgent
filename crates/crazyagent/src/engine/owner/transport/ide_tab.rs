@@ -53,6 +53,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_servers_closed",
     "ide_servers_full",
     "ide_settings_invalid",
+    "ide_settings_unavailable",
     "ide_settings_unwritable",
     "ide_state_unavailable",
     "ide_tab_outcome_unknown",

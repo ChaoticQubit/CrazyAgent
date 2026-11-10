@@ -14,7 +14,8 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onTerminalProfile:crazyagent.sandboxed"
+    "onTerminalProfile:crazyagent.sandboxed",
+    "onTerminalProfile:crazyagent.ownBranch"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -23,6 +24,11 @@
         {
           "id": "crazyagent.sandboxed",
           "title": "Sandboxed",
+          "icon": "shield"
+        },
+        {
+          "id": "crazyagent.ownBranch",
+          "title": "Own branch",
           "icon": "shield"
         }
       ]

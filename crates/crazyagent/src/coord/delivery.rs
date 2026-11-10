@@ -68,6 +68,7 @@ pub struct Reach<'a> {
 pub struct Deliveries {
     retry: BTreeMap<AgentId, i64>,
     refused: BTreeMap<AgentId, &'static str>,
+    bridge_refused: BTreeMap<AgentId, &'static str>,
     failed: Option<String>,
 }
 
@@ -76,21 +77,7 @@ impl Deliveries {
     /// names a refusal once until it changes or the agent is woken. Takes the agent and the
     /// refusal code, none once it was woken. Returns true when the refusal is new.
     pub fn wake_refused(&mut self, agent: AgentId, code: Option<&'static str>) -> bool {
-        let new = match code {
-            Some(code) => self.refused.insert(agent, code) != Some(code),
-            None => {
-                self.refused.remove(&agent);
-                false
-            }
-        };
-        while self.refused.len() > RETRIES_KEPT_MAX {
-            let first = self.refused.keys().next().copied();
-            if let Some(first) = first {
-                self.refused.remove(&first);
-            }
-        }
-        assert!(self.refused.len() <= RETRIES_KEPT_MAX);
-        new
+        note_refusal(&mut self.refused, agent, code)
     }
 
     /// Runs [`Deliveries::tick`] for the team loop, which goes on when it fails: a failure
@@ -138,7 +125,7 @@ impl Deliveries {
             if self.retry.get(&agent).is_some_and(|at| *at > now) {
                 continue;
             }
-            if deliver_to(db, project, agent, now, reach)? {
+            if deliver_to(db, project, agent, now, reach, &mut self.bridge_refused)? {
                 self.retry.remove(&agent);
             } else {
                 self.retry.insert(agent, now + RETRY_MS);
@@ -221,6 +208,7 @@ fn deliver_to(
     agent: AgentId,
     now: i64,
     reach: &Reach<'_>,
+    refused: &mut BTreeMap<AgentId, &'static str>,
 ) -> Result<bool, EngineError> {
     let row: Option<(String, String, String)> = db
         .query_row(
@@ -256,7 +244,9 @@ fn deliver_to(
         }
         (Some(HarnessKind::Codex), Delivery::TypingOnly) => messages.as_slice(),
         (Some(HarnessKind::Codex), _) => {
-            if let Some(done) = bridge(db, agent, &status, &messages, delivery, now, reach)? {
+            if let Some(done) =
+                bridge(db, agent, &status, &messages, delivery, now, reach, refused)?
+            {
                 return Ok(done);
             }
             messages.as_slice()
@@ -284,8 +274,11 @@ fn deliver_to(
 /// Hands a Codex agent's waiting messages to its app-server bridge (DEC-104 Q13), keeping
 /// the turn they went into with them (b19 P2); the owner's notices alone only steer a turn
 /// the agent runs while its status is working. Takes the database, the agent, its status,
-/// the messages, the Delivery setting, the time and the reach. Returns what [`deliver_to`]
-/// answers once the bridge took them or they wait, or none when they fall back to typing.
+/// the messages, the Delivery setting, the time, the reach and the memory of refused
+/// bridges, which writes a refusal to the engine log once until it changes or the bridge
+/// takes a message. Returns what [`deliver_to`] answers once the bridge took them or they
+/// wait, or none when they fall back to typing.
+#[allow(clippy::too_many_arguments)]
 fn bridge(
     db: &Connection,
     agent: AgentId,
@@ -294,6 +287,7 @@ fn bridge(
     delivery: Delivery,
     now: i64,
     reach: &Reach<'_>,
+    refused: &mut BTreeMap<AgentId, &'static str>,
 ) -> Result<Option<bool>, EngineError> {
     let alone = notices_alone(db, agent, messages, messages)?;
     if alone && status != "working" {
@@ -301,17 +295,51 @@ fn bridge(
     }
     let (text, carried) = batch(db, agent, messages)?;
     let home = crate::team::runtime::agent_home(reach.state, agent);
-    if let Bridged::Delivered(turn) = codex::deliver(&home, &text, !alone, pane_of(reach, agent)) {
-        mark_all(db, &carried, Receipt::Delivered, now)?;
-        if let Some(turn) = turn {
-            super::messages::delivered_into(db, &carried, &turn)?;
+    match codex::deliver(&home, &text, !alone, pane_of(reach, agent)) {
+        Bridged::Delivered(turn) => {
+            note_refusal(refused, agent, None);
+            mark_all(db, &carried, Receipt::Delivered, now)?;
+            if let Some(turn) = turn {
+                super::messages::delivered_into(db, &carried, &turn)?;
+            }
+            return Ok(Some(carried.len() == messages.len()));
         }
-        return Ok(Some(carried.len() == messages.len()));
+        Bridged::Unavailable(code) => {
+            if note_refusal(refused, agent, Some(code)) {
+                eprintln!("codex bridge refused for agent {agent}: {code}");
+            }
+        }
     }
     if alone || delivery == Delivery::NativeOnly {
         return Ok(Some(false));
     }
     Ok(None)
+}
+
+/// Remembers why something was refused for an agent, so the engine log names a refusal
+/// once until it changes or the thing refused works; at most `RETRIES_KEPT_MAX` agents are
+/// kept. Takes the memory, the agent and the plain code, none once it worked. Returns true
+/// when the refusal is new.
+fn note_refusal(
+    kept: &mut BTreeMap<AgentId, &'static str>,
+    agent: AgentId,
+    code: Option<&'static str>,
+) -> bool {
+    let new = match code {
+        Some(code) => kept.insert(agent, code) != Some(code),
+        None => {
+            kept.remove(&agent);
+            false
+        }
+    };
+    while kept.len() > RETRIES_KEPT_MAX {
+        let first = kept.keys().next().copied();
+        if let Some(first) = first {
+            kept.remove(&first);
+        }
+    }
+    assert!(kept.len() <= RETRIES_KEPT_MAX);
+    new
 }
 
 /// Reads the first process of an agent's pane, whose process group the agent's app-server
