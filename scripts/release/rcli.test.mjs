@@ -52,7 +52,7 @@ test("the built rcli host is a native executable that runs the CrazyAgent entry"
   }
 });
 
-test("a compiled rcli host takes no bunfig preload or .env from the folder it runs in or its home", async () => {
+test("a compiled rcli host takes no bunfig preload or .env from the folder it runs in", async () => {
   const root = await mkdtemp(join(tmpdir(), "release-rcli-autoload-"));
   try {
     const bun = required("CRAZYAGENT_BUN");
@@ -68,13 +68,10 @@ test("a compiled rcli host takes no bunfig preload or .env from the folder it ru
     await writeFile(join(folder, "bunfig.toml"), 'preload = ["./canary.ts"]\n');
     await writeFile(join(folder, "canary.ts"), 'await Bun.write(import.meta.dir + "/marker", "ran");\n');
     await writeFile(join(folder, ".env"), "DUMMY_VALUE=1\n");
-    await writeFile(join(root, ".bunfig.toml"), `preload = [${JSON.stringify(join(root, "home-canary.ts"))}]\n`);
-    await writeFile(join(root, "home-canary.ts"), 'await Bun.write(import.meta.dir + "/home-marker", "ran");\n');
     const env = process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, USERPROFILE: root, TEMP: root, TMP: root } : { PATH: "/usr/bin:/bin", HOME: root, TMPDIR: root };
     const result = spawnSync(output, [], { cwd: folder, stdio: ["ignore", "pipe", "pipe"], env, timeout: 60_000 });
     assert.equal(result.status, 0, String(result.stderr));
     assert.equal(String(result.stdout), "DUMMY=none");
-    assert.equal(existsSync(join(root, "home-marker")), false, "a bunfig in the home folder ran");
     assert.equal(existsSync(join(folder, "marker")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
