@@ -5201,7 +5201,12 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
+            let (waiting, carried) =
+                if prompt == super::master::WAKE_TASK && self.workers[&agent].fresh {
+                    crate::coord::delivery::next_turn_unread(&self.connection, agent)?
+                } else {
+                    crate::coord::delivery::next_turn(&self.connection, agent)?
+                };
             let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
                 super::master::WAKE_DELIVERED
             } else {
@@ -5272,6 +5277,7 @@ impl TeamRuntime {
             worker.busy = Some(Busy::Task(task));
             worker.reasked = None;
             worker.briefed |= worker.kept_session;
+            worker.fresh = false;
             if let Some(edit) = &edit {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }

@@ -501,11 +501,32 @@ fn batch(
 /// DEC-104 Q13. Mark them with [`delivered`] once that prompt went out. Takes the database
 /// and the agent. Returns the text, empty for none, and the ids it carries.
 pub fn next_turn(db: &Connection, agent: AgentId) -> Result<(String, Vec<MessageId>), EngineError> {
-    let messages = super::pending(db, agent, PENDING_MAX)?;
+    turn_text(db, &super::pending(db, agent, PENDING_MAX)?)
+}
+
+/// Takes, as [`next_turn`] does, every message an agent has not read, Delivered and Typed
+/// ones too, for a harness conversation that started fresh and so saw none of them: each
+/// went into an earlier conversation that ended, the rule [`super::requeue_dead`] applies
+/// to a session that died (HB-S5-C-RESIDUAL). Takes the database and the agent. Returns the
+/// text, empty for none, and the ids it carries.
+pub fn next_turn_unread(
+    db: &Connection,
+    agent: AgentId,
+) -> Result<(String, Vec<MessageId>), EngineError> {
+    turn_text(db, &super::unread(db, agent, PENDING_MAX)?)
+}
+
+/// Writes messages as the "Messages for you" lines a turn's prompt ends with, those that fit
+/// in `NEXT_TURN_BYTES_MAX`. Takes the database and the messages, oldest first. Returns the
+/// text, empty for none, and the ids it carries.
+fn turn_text(
+    db: &Connection,
+    messages: &[Message],
+) -> Result<(String, Vec<MessageId>), EngineError> {
     if messages.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
-    let (text, carried) = lines(db, &messages, NEXT_TURN_BYTES_MAX - 64)?;
+    let (text, carried) = lines(db, messages, NEXT_TURN_BYTES_MAX - 64)?;
     Ok((format!("\n\nMessages for you:\n{text}\n"), carried))
 }
 
