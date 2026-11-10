@@ -44,6 +44,9 @@ const RUN_NAME_BYTES_MAX: usize = 96;
 const ONBOARDED_MAX: i64 = 256;
 #[cfg(unix)]
 const REFRESH_PREFIX: &str = "graph-main-";
+/// How often a main graph refresh build looks for a waiting onboarding step to give way to.
+#[cfg(unix)]
+const STEP_POLL: Duration = Duration::from_secs(1);
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
     [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
@@ -307,7 +310,19 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
     )
 }
 
-/// Claims the oldest waiting step: a graph build, or a mapping once its
+/// The onboarding rows a worker may claim, as a condition on `onboarding o`: unclaimed, and
+/// a waiting graph build, or a waiting mapping once its graph step has finished either way,
+/// while the owner has not saved the setup and no account pause it waits on is still
+/// running, or that pause was last checked [`PAUSE_RECHECK_MS`] ago. Binds `?1` the first
+/// setup revision, `?2` the time now and `?3` the pause recheck cut-off.
+const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
+    OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
+        AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
+            OR updated_ms<=?3)
+        AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
+            AND json_extract(s.body,'$.revision')>?1)))";
+
+/// Claims the oldest waiting step ([`CLAIMABLE`]): a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
@@ -319,14 +334,10 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     let now = now_ms();
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms FROM onboarding o
-             WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
-                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
-                        OR updated_ms<=?3)
-                    AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
-                        AND json_extract(s.body,'$.revision')>?1)))
-             ORDER BY created_ms,project LIMIT 1",
+            &format!(
+                "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
+                 FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT 1"
+            ),
             params![
                 crate::project_setup::FIRST_REVISION as i64,
                 now,
@@ -637,10 +648,14 @@ fn refresh_step(
         if waits || !main_graph::due(main_graph::latest(repo).as_ref(), &tip) {
             continue;
         }
-        if refresh_build(work, database, project, repo, tip.clone(), halted) {
-            refresh.failed.remove(project);
-        } else {
-            refresh.failed.insert(project.clone(), (tip, now));
+        match refresh_build(work, database, project, repo, tip.clone(), halted) {
+            Refreshed::Published => {
+                refresh.failed.remove(project);
+            }
+            Refreshed::Failed => {
+                refresh.failed.insert(project.clone(), (tip, now));
+            }
+            Refreshed::GaveWay => {}
         }
         return true;
     }
@@ -659,6 +674,45 @@ fn graphs_wanted(database: &Connection) -> bool {
         .ok()
         .flatten();
     main_graph::wanted(switch, std::env::consts::OS)
+}
+
+/// Whether an onboarding step waits to be claimed ([`CLAIMABLE`]). Takes the worker's
+/// database. Returns the answer; a table that cannot be read counts as no step waiting,
+/// since the claim then fails too.
+#[cfg(unix)]
+fn step_waits(database: &Connection) -> bool {
+    let now = now_ms();
+    database
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM onboarding o WHERE {CLAIMABLE})"),
+            params![
+                crate::project_setup::FIRST_REVISION as i64,
+                now,
+                now - PAUSE_RECHECK_MS
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, or once
+/// an onboarding step waits to be claimed ([`step_waits`]), so a new project's onboarding
+/// never waits behind a refresh. The table is read at most every [`STEP_POLL`], and a yes
+/// stays yes. Takes the worker's database and `halted`. Returns the stop.
+#[cfg(unix)]
+fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl Fn() -> bool + 'a {
+    let read: Cell<Option<Instant>> = Cell::new(None);
+    let waits = Cell::new(false);
+    move || {
+        if halted() {
+            return true;
+        }
+        if !waits.get() && read.get().is_none_or(|at| at.elapsed() >= STEP_POLL) {
+            read.set(Some(Instant::now()));
+            waits.set(step_waits(database));
+        }
+        waits.get()
+    }
 }
 
 /// The onboarded projects whose graph step is over, with their folders, at most
@@ -692,11 +746,24 @@ fn main_tip(database: &Connection, project: &str, repo: &Path) -> Option<String>
         .filter(|tip| main_graph::tip_valid(tip))
 }
 
+/// How one main graph refresh ended (DEC-123).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refreshed {
+    /// Built and published.
+    Published,
+    /// Stopped for a waiting onboarding step or the engine's stop; never a failure, so the
+    /// project is tried again at its next check.
+    GaveWay,
+    /// Failed, timed out, did not start or was not published.
+    Failed,
+}
+
 /// Rebuilds one project's main graph in place through the confined graph build and
 /// publishes it at `tip` ([`publish_main`]), then removes the build's run folder and
-/// profile unless its processes may still run. Takes the work, the worker's database, the
-/// project, its folder, the tip read before the build and `halted`. Returns whether the
-/// graph was built and published.
+/// profile unless its processes may still run. The build stops as soon as an onboarding
+/// step waits ([`gives_way`]). Takes the work, the worker's database, the project, its
+/// folder, the tip read before the build and `halted`. Returns how the refresh ended.
 #[cfg(unix)]
 fn refresh_build(
     work: &Work,
@@ -705,12 +772,12 @@ fn refresh_build(
     repo: &Path,
     tip: String,
     halted: &dyn Fn() -> bool,
-) -> bool {
+) -> Refreshed {
     let Some(graphify) = (work.graphify)() else {
-        return false;
+        return Refreshed::Failed;
     };
     let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
-        return false;
+        return Refreshed::Failed;
     };
     let name = refresh_name(project, now_ms());
     let ending = graph::update(
@@ -720,12 +787,16 @@ fn refresh_build(
         &name,
         &hidden,
         work.limits.graph_time,
-        halted,
+        &gives_way(database, halted),
     );
     if !matches!(ending, Err(RunError::Uncertain(_))) {
         forget_run(work.runner.state(), &name);
     }
-    matches!(ending, Ok(GraphEnding::Built)) && publish_main(repo, tip)
+    match ending {
+        Ok(GraphEnding::Built) if publish_main(repo, tip) => Refreshed::Published,
+        Ok(GraphEnding::Stopped) => Refreshed::GaveWay,
+        _ => Refreshed::Failed,
+    }
 }
 
 /// The run name of one main graph refresh: `graph-main-`, the project id cut to fit, and

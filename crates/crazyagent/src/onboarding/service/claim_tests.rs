@@ -97,6 +97,35 @@ fn a_mapping_paused_with_no_end_in_sight_asks_for_its_account_again_after_a_whil
     assert_eq!(claimed(&database).as_deref(), Some("shop"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_waiting_onboarding_step_halts_a_refresh_build() {
+    let database = database();
+    let running = || false;
+    assert!(!gives_way(&database, &running)());
+    assert!(
+        gives_way(&database, &|| true)(),
+        "the engine's stop halts it"
+    );
+
+    waiting_to_map(&database, "paused", 1);
+    pause(&database, "paused", now_ms() + 60 * 60 * 1000);
+    assert!(
+        !gives_way(&database, &running)(),
+        "a step paused on its account lets the build run"
+    );
+
+    waiting_to_map(&database, "fresh", 2);
+    let stop = gives_way(&database, &running);
+    assert!(stop(), "a waiting step halts the build");
+    assert!(stop(), "and the stop stays");
+    assert_eq!(claimed(&database).as_deref(), Some("fresh"));
+    assert!(
+        !gives_way(&database, &running)(),
+        "a claimed step halts no later build"
+    );
+}
+
 #[test]
 fn run_names_differ_between_onboardings_of_one_project_id_and_stay_in_bound() {
     let database = database();
