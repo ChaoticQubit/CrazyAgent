@@ -39,6 +39,15 @@ export function quitHours(typed: string): number | null {
   return hours >= QUIT_HOURS_MIN && hours <= QUIT_HOURS_MAX ? hours : null;
 }
 
+/** The hours a save sends for the time limit shown. Inputs: the time limit picked, the typed
+ * hours and the stored hours. Output: the typed hours under the first limit, null when they
+ * are not 1 to 168; under No limit, which keeps the hours for later, the typed hours when
+ * valid, else the stored ones, so a bad entry never holds back the save of No limit. */
+export function savedHours(left: LeftRunning, typed: string, stored: number): number | null {
+  const hours = quitHours(typed);
+  return left === "after_hours" || hours === null || hours === stored ? hours : hours;
+}
+
 const QUIT_TOP = <div className="settings-top"><div>
   <h2>Quitting</h2>
   <p>What happens to team agents when CrazyAgent quits.</p>
@@ -68,8 +77,9 @@ export function QuittingSettingsView({ settings, onQuit, left, typed, saving, pr
   const quit = onQuit ?? settings.value.on_quit;
   const limit = left ?? settings.value.left_running;
   const text = typed ?? String(settings.value.hours);
-  const hours = quitHours(text);
-  const shownHours = hours ?? settings.value.hours;
+  const hours = savedHours(limit, text, settings.value.hours);
+  const shownHours = quitHours(text) ?? settings.value.hours;
+  const refused = limit === "after_hours" && hours === null;
   const changed = hours !== null
     && (quit !== settings.value.on_quit || limit !== settings.value.left_running || hours !== settings.value.hours);
   function submit(event: FormEvent) {
@@ -97,9 +107,9 @@ export function QuittingSettingsView({ settings, onQuit, left, typed, saving, pr
             <label htmlFor="left-running-hours">Hours after CrazyAgent quits</label>
             <input className="pj-input num" id="left-running-hours" type="number" min={QUIT_HOURS_MIN} max={QUIT_HOURS_MAX} value={text}
               disabled={saving || limit !== "after_hours"} onChange={(event) => onType(event.target.value)}
-              aria-invalid={hours === null || undefined} aria-describedby={hours === null ? "left-running-hours-error" : undefined} />
+              aria-invalid={refused || undefined} aria-describedby={refused ? "left-running-hours-error" : undefined} />
           </div>
-          {hours === null && <p className="pj-error" id="left-running-hours-error" role="alert">{`Enter a whole number of hours from ${QUIT_HOURS_MIN} to ${QUIT_HOURS_MAX}.`}</p>}
+          {refused && <p className="pj-error" id="left-running-hours-error" role="alert">{`Enter a whole number of hours from ${QUIT_HOURS_MIN} to ${QUIT_HOURS_MAX}.`}</p>}
         </SettingLine>
         <div className="set-body">
           {problem && <Notice tone="danger" alert>{problem}</Notice>}
@@ -123,13 +133,14 @@ export function QuittingSettings() {
   useEffect(() => { setOnQuit(null); setLeft(null); setTyped(null); }, [settings]);
   async function save() {
     if (settings.kind !== "ok") return;
-    const hours = quitHours(typed ?? String(settings.value.hours));
+    const limit = left ?? settings.value.left_running;
+    const hours = savedHours(limit, typed ?? String(settings.value.hours), settings.value.hours);
     if (hours === null) return;
     setSaving(true);
     setProblem("");
     const result = await saveQuitSettings({
       on_quit: onQuit ?? settings.value.on_quit,
-      left_running: left ?? settings.value.left_running,
+      left_running: limit,
       hours,
     });
     setSaving(false);

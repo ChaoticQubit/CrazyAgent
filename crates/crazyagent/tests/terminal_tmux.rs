@@ -6,7 +6,7 @@ use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
-    VIEWER_BUFFER_BYTES_MAX, VIEWERS_MAX, plain_reason, platform, quit,
+    VIEWER_BUFFER_BYTES_MAX, VIEWERS_MAX, plain_reason, platform, quit, renew_once,
 };
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
@@ -979,6 +979,51 @@ fn renewing_moves_the_server_deadline_to_the_time_given() {
             .unwrap();
         assert_eq!(modified, deadline);
     }
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&team));
+    quit(&host, false).unwrap();
+}
+
+/// FBTMUX-P1 r1 L2: a running engine whose saved quitting setting it cannot read still moves
+/// its server's deadline, to the default 24 hours ahead, so its own live agents never reach a
+/// deadline it set earlier; once the setting reads again its hours are used.
+#[test]
+fn an_unreadable_quitting_setting_renews_with_the_default_limit() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let team = AgentId::team(1).unwrap();
+    host.spawn(&team, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    let engine = root.path().join("engine");
+    std::fs::create_dir(&engine).unwrap();
+    let db = rusqlite::Connection::open(engine.join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE agent_quit_settings (singleton INTEGER PRIMARY KEY, on_quit TEXT NOT NULL, left_running TEXT NOT NULL, hours INTEGER NOT NULL);
+         INSERT INTO agent_quit_settings VALUES(1,'pause','never',1);",
+    )
+    .unwrap();
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let modified = || {
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    renew_once(&host, &engine, now).unwrap();
+    assert_eq!(modified(), now + Duration::from_secs(24 * 60 * 60));
+    db.execute(
+        "UPDATE agent_quit_settings SET on_quit='stop', left_running='after_hours', hours=2",
+        [],
+    )
+    .unwrap();
+    renew_once(&host, &engine, now).unwrap();
+    assert_eq!(modified(), now + Duration::from_secs(2 * 60 * 60));
     assert_eq!(host.alive().unwrap(), std::slice::from_ref(&team));
     quit(&host, false).unwrap();
 }

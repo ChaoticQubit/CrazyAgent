@@ -80,6 +80,24 @@ test("hours outside 1 to 168 or not whole are refused before anything is sent", 
   assert.equal(settings.quitHours(" 1 "), 1);
 });
 
+test("hours refused under the first limit never hold back No limit: Save follows the visible choice (FBTMUX-P1 r1 L1)", () => {
+  const bad = view(ok("keep_running", "after_hours", 24), { typed: "169" });
+  assert.ok(saveDisabled(bad));
+  assert.match(text(bad), /Enter a whole number of hours from 1 to 168\./);
+  const never = view(ok("keep_running", "after_hours", 24), { typed: "169", left: "never" });
+  assert.deepEqual(checked(never, "left-running"), ["never"]);
+  assert.ok(hoursDisabled(never));
+  assert.ok(!saveDisabled(never), "Save follows the visible choice");
+  assert.doesNotMatch(text(never), /Enter a whole number of hours/);
+  assert.doesNotMatch(never, /aria-invalid/);
+  assert.equal(settings.savedHours("never", "169", 24), 24, "a bad entry sends the stored hours");
+  assert.equal(settings.savedHours("never", "48", 24), 48, "a good entry is kept for later");
+  assert.equal(settings.savedHours("after_hours", "169", 24), null);
+  assert.equal(settings.savedHours("after_hours", "48", 24), 48);
+  const unchanged = view(ok("keep_running", "never", 24), { typed: "169" });
+  assert.ok(saveDisabled(unchanged), "No limit stored and nothing else changed leaves Save off");
+});
+
 test("loading, not ready, a failed read and a refused save each say so", () => {
   assert.doesNotMatch(view({ kind: "loading" }), /left-running-hours/);
   assert.match(view({ kind: "not_ready" }), /quitting setting/i);
