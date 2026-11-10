@@ -1726,6 +1726,7 @@ fn desktop_close_project_walls(
     terminal_window_for(&webview, &id)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     close_walls(&app, Some(&project));
+    ide::shut_own_windows(app, Some(project));
     Ok(())
 }
 
@@ -3101,6 +3102,7 @@ async fn desktop_usage_refresh(
 #[tauri::command]
 async fn desktop_ide_focus(
     webview: Webview,
+    app: AppHandle,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
 ) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
@@ -3110,7 +3112,9 @@ async fn desktop_ide_focus(
     }
     let call = lock(&state).await?.ide_focus()?;
     let focus = call.await?;
-    if focus.is_some() {
+    if let Some(revealed) = &focus
+        && !ide::focus_own_window(&app, &views, &revealed.project).unwrap_or(false)
+    {
         let window = webview.window();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -3440,7 +3444,7 @@ async fn desktop_ide_open(
     views: State<'_, ide::IdeViews>,
     project_id: String,
     bounds: ide::Bounds,
-) -> Result<(), BridgeError> {
+) -> Result<bool, BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
@@ -3491,18 +3495,72 @@ async fn desktop_ide_close<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    let closing = views.closing(&project);
-    ide::close(&app, &views, &project)?;
+    if views.keep_for_own_window(&project) {
+        return Ok(());
+    }
+    close_ide(&app, &state, &views, &project).await
+}
+
+/// Closes a project's IDE webview and stops its server, in the project's turn. Inputs: the app,
+/// the engine bridge, the views and the project. Output: Ok, or the engine's refusal.
+async fn close_ide<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &NativeState,
+    views: &ide::IdeViews,
+    project: &ProjectId,
+) -> Result<(), BridgeError> {
+    let closing = views.closing(project);
+    ide::close(app, views, project)?;
     let Some(closing) = closing else {
         return Ok(());
     };
     views
-        .stop_closed(&project, closing, || async {
-            let call = read(&state).await?.ide_stop(project.clone())?;
+        .stop_closed(project, closing, || async {
+            let call = read(state).await?.ide_stop(project.clone())?;
             call.await
         })
         .await
         .map(|_| ())
+}
+
+/// Moves a project's loaded IDE into a maximized window of its own. Inputs: the project and the
+/// height of the page, which measures the title bar. Output: Ok, or the refusal.
+#[tauri::command]
+async fn desktop_ide_window_open(
+    webview: Webview,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    viewport: f64,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::move_out(&app, &webview.window(), &views, &project, viewport)
+}
+
+/// Brings a project's own IDE window forward. Input: the project. Output: Ok, also when the
+/// project has none, or the refusal.
+#[tauri::command]
+async fn desktop_ide_window_focus(
+    webview: Webview,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::focus_own_window(&app, &views, &project).map(|_| ())
+}
+
+/// Whether a project's IDE sits in its own window. Input: the project. Output: true then.
+#[tauri::command]
+async fn desktop_ide_window_out(
+    webview: Webview,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    Ok(views.in_own_window(&bridge::ide::ide_project(&project_id)?))
 }
 
 #[tauri::command]
@@ -4198,6 +4256,9 @@ native_commands! {
     desktop_ide_hide,
     desktop_ide_close,
     desktop_ide_touch,
+    desktop_ide_window_open,
+    desktop_ide_window_focus,
+    desktop_ide_window_out,
     desktop_instruction_settings,
     desktop_save_instruction_settings,
     desktop_adoption,
@@ -4260,6 +4321,10 @@ pub fn run() {
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
                     close_walls(&handle, None);
+                    ide::shut_own_windows(handle.clone(), None);
+                }
+                if matches!(event, tauri::WindowEvent::Focused(true)) {
+                    ide::main_focused(&handle);
                 }
             });
             let handle = app.handle().clone();
