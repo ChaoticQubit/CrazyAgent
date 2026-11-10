@@ -594,8 +594,8 @@ fn graph_step(
     }
 }
 
-/// What the idle loop remembers between main graph checks (DEC-123): when each onboarded
-/// project was last looked at, and when its last build failed, so a project is checked at
+/// What the idle loop remembers between main graph checks (DEC-123): when each project
+/// was last looked at, and when its last build failed, so a project is checked at
 /// most every [`main_graph::CHECK_EVERY`] and built again after a failure only once
 /// [`main_graph::retry_waits`] lets it, whatever its tip.
 #[cfg(unix)]
@@ -606,8 +606,8 @@ struct Refresh {
 }
 
 /// Builds and publishes at most one project's main graph while no onboarding step waits
-/// (DEC-123): only while the code graph switch is on and the system builds graphs, for an
-/// onboarded project with a `.crazyagent` folder whose graph step is over and whose
+/// (DEC-123): only while the code graph switch is on and the system builds graphs, for a
+/// project ([`refreshable`]) whose absolute folder holds a `.crazyagent` folder and whose
 /// published graph is missing or was built at another tip than its main branch holds now,
 /// which covers every landing and the owner's own commits, or while the project hid other
 /// folders than it hides now. The first pass runs at engine start. Takes the work, the
@@ -622,7 +622,7 @@ fn refresh_step(
     if !graphs_wanted(database) {
         return false;
     }
-    let Ok(projects) = onboarded(database) else {
+    let Ok(projects) = refreshable(database) else {
         return false;
     };
     assert!(projects.len() <= ONBOARDED_MAX as usize);
@@ -636,7 +636,9 @@ fn refresh_step(
             continue;
         }
         refresh.checked.insert(project.clone(), now);
-        if crate::projects_home::state_folder(repo).as_path() == repo.as_path() {
+        if !repo.is_absolute()
+            || crate::projects_home::state_folder(repo).as_path() == repo.as_path()
+        {
             continue;
         }
         if main_graph::retry_waits(refresh.failed.get(project).copied(), now) {
@@ -723,15 +725,19 @@ fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl
     }
 }
 
-/// The onboarded projects whose graph step is over, with their folders, at most
-/// `ONBOARDED_MAX` in project order. Takes the worker's database. Returns the list.
+/// The projects whose main graph the refresh looks after, with their folders, at most
+/// `ONBOARDED_MAX` in project order: each onboarded project whose graph step is over, at its
+/// onboarding folder, and each project with no onboarding row that declares a repository,
+/// its first repository standing in for its folder as the trash guards read it. Takes the
+/// worker's database. Returns the list.
 #[cfg(unix)]
-fn onboarded(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>> {
+fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>> {
     let mut statement = database.prepare(
-        "SELECT o.project,o.repo FROM onboarding o
-         WHERE o.claimer IS NULL AND o.graph_state NOT IN ('waiting','running')
-           AND EXISTS (SELECT 1 FROM projects p WHERE p.id=o.project)
-         ORDER BY o.project LIMIT ?1",
+        "SELECT p.id,COALESCE(o.repo,json_extract(p.body,'$.spec.repositories[0]'))
+         FROM projects p LEFT JOIN onboarding o ON o.project=p.id
+         WHERE (o.project IS NULL AND json_type(p.body,'$.spec.repositories[0]')='text')
+            OR (o.claimer IS NULL AND o.graph_state NOT IN ('waiting','running'))
+         ORDER BY p.id LIMIT ?1",
     )?;
     let rows = statement.query_map([ONBOARDED_MAX], |row| {
         Ok((

@@ -126,6 +126,57 @@ fn a_waiting_onboarding_step_halts_a_refresh_build() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_project_with_no_onboarding_row_gets_its_main_graph_refreshed() {
+    let database = database();
+    database
+        .execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let projects: [(&str, &[&str]); 5] = [
+        ("alone", &["/repos/alone", "/repos/second"]),
+        ("bare", &[]),
+        ("building", &["/repos/building"]),
+        ("onboarded", &["/repos/declared"]),
+        ("taken", &["/repos/taken"]),
+    ];
+    for (id, repositories) in projects {
+        let body = serde_json::json!({
+            "project_id": id,
+            "spec": {"name": id, "repositories": repositories}
+        });
+        database
+            .execute(
+                "INSERT INTO projects(id,body) VALUES (?1,?2)",
+                params![id, body.to_string()],
+            )
+            .unwrap();
+    }
+    for (project, created_ms) in [("onboarded", 1), ("building", 2), ("taken", 3), ("gone", 4)] {
+        waiting_to_map(&database, project, created_ms);
+    }
+    database
+        .execute(
+            "UPDATE onboarding SET graph_state='waiting' WHERE project='building'",
+            [],
+        )
+        .unwrap();
+    database
+        .execute(
+            "UPDATE onboarding SET claimer='claim-test' WHERE project='taken'",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        refreshable(&database).unwrap(),
+        [
+            ("alone".to_owned(), PathBuf::from("/repos/alone")),
+            ("onboarded".to_owned(), PathBuf::from("/repos/onboarded")),
+        ]
+    );
+}
+
 #[test]
 fn run_names_differ_between_onboardings_of_one_project_id_and_stay_in_bound() {
     let database = database();
