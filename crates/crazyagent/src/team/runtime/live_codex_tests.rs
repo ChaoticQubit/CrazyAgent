@@ -1,12 +1,14 @@
 use super::live_claude_tests::processes_with;
 use super::managed_agent::{
-    Closing, ManagedAgent, SignedIn, codex, keep_rollouts, real_codex, shown,
+    Closing, Kept, ManagedAgent, SignedIn, codex, keep_rollouts, open_plain, real_codex,
+    rollout_files, shown,
 };
 use super::{Report, TurnEnd};
 use crate::team::{AgentRole, BackgroundAtEnd};
 use crate::terminal::tmux::{Tmux, installed};
 use crate::terminal::{AgentId, FOLDER, Host};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -31,36 +33,15 @@ const FOLDER_SCREEN_TITLE: &str = "Folder access";
 /// for at least the 700 ms its first screen must stay quiet before it answers.
 const SCREEN_LOOK: Duration = Duration::from_millis(100);
 
-/// Lists every `.jsonl` file below a folder, none when the folder does not exist.
-/// Input: the folder. Output: the files' paths.
-fn jsonl_files(folder: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut pending = vec![folder.to_path_buf()];
-    while let Some(folder) = pending.pop() {
-        let Ok(items) = std::fs::read_dir(&folder) else {
-            continue;
-        };
-        for item in items {
-            let path = item.unwrap().path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-            {
-                files.push(path);
-            }
-        }
-    }
-    files
-}
-
-/// Reads every rollout Codex wrote below a sessions folder. Input: the folder.
-/// Output: the rollouts' text, joined.
-fn rollouts(folder: &Path) -> String {
-    jsonl_files(folder)
+/// Reads every rollout Codex wrote below an agent home's sessions folder, through
+/// [`rollout_files`], which follows no link. Input: the agent home. Output: the rollouts'
+/// text, joined.
+fn rollouts(home: &Path) -> String {
+    rollout_files(home)
+        .unwrap()
+        .files
         .iter()
-        .map(|path| std::fs::read_to_string(path).unwrap())
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
         .collect()
 }
 
@@ -89,7 +70,7 @@ fn a_real_codex_agent_reads_its_developer_instructions_with_its_launch_files_rea
     );
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains("OK"), "{text}");
-    let written = rollouts(&agent.home.join("sessions"));
+    let written = rollouts(&agent.home);
     let quoted = serde_json::to_string(first).unwrap();
     assert!(
         written.contains(quoted.trim_matches('"')),
@@ -162,24 +143,26 @@ fn call_line(payload: &serde_json::Value) -> String {
     line.chars().take(CALL_SHOWN).collect()
 }
 
-/// What the real Codex wrote of its sessions under an agent home: each rollout's path, the
-/// `cli_version` each session record names, the text of each assistant message and each
-/// tool call and output as [`call_line`] prints it.
+/// What the real Codex wrote of its sessions under an agent home: each rollout's name, how
+/// many entries the no-link read skipped, the `cli_version` each session record names, the
+/// text of each assistant message and each tool call and output as [`call_line`] prints it.
 struct CodexTrace {
-    rollouts: Vec<PathBuf>,
+    rollouts: Vec<OsString>,
+    skipped: usize,
     versions: Vec<String>,
     said: Vec<String>,
     calls: Vec<String>,
 }
 
 impl CodexTrace {
-    /// Reads the rollouts under an agent home's `sessions` folder. Input: the agent home.
-    /// Output: the trace, empty when Codex wrote none.
+    /// Reads the rollouts under an agent home's `sessions` folder through [`rollout_files`],
+    /// which follows no link. Input: the agent home. Output: the trace, empty when Codex
+    /// wrote none or the sessions folder is a link.
     fn of(home: &Path) -> Self {
-        let rollouts = jsonl_files(&home.join("sessions"));
+        let read = rollout_files(home).unwrap();
         let (mut versions, mut said, mut calls) = (Vec::new(), Vec::new(), Vec::new());
-        for path in &rollouts {
-            for line in std::fs::read_to_string(path).unwrap().lines() {
+        for (_, bytes) in &read.files {
+            for line in String::from_utf8_lossy(bytes).lines() {
                 let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;
                 };
@@ -208,19 +191,20 @@ impl CodexTrace {
             }
         }
         Self {
-            rollouts,
+            rollouts: read.files.into_iter().map(|(name, _)| name).collect(),
+            skipped: read.skipped,
             versions,
             said,
             calls,
         }
     }
 
-    /// Prints the rollouts, the Codex versions and each tool record, one line each, so a
-    /// failed row's log shows what Codex ran. Output: none.
+    /// Prints the rollouts, the skipped count, the Codex versions and each tool record, one
+    /// line each, so a failed row's log shows what Codex ran. Output: none.
     fn print(&self) {
         println!(
-            "codex rollouts={:?} cli_version={:?}",
-            self.rollouts, self.versions
+            "codex rollouts={:?} skipped={} cli_version={:?}",
+            self.rollouts, self.skipped, self.versions
         );
         for call in &self.calls {
             assert!(call.chars().count() <= CALL_SHOWN);
@@ -401,15 +385,18 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
     );
 }
 
-/// G1-DIAG: the live keep copies each regular `.jsonl` file below an agent home's sessions
-/// folder, nested ones too, under its own name, and nothing else: no other file, no file or
-/// folder reached through a link the agent could plant, and nothing for a home with no
-/// sessions folder.
+/// G1-DIAG: the live keep and the trace read each plain `.jsonl` file below an agent home's
+/// sessions folder, nested ones too, and nothing through a link the agent could plant: not a
+/// linked file or folder inside, not a hard-linked file, not a file swapped for a link after
+/// it was listed, and not a sessions folder that is itself a link. A second keep never writes
+/// over a kept file, and a home with no sessions folder keeps nothing.
 #[test]
 fn the_live_keep_copies_only_the_rollouts_under_the_agent_home() {
+    use rustix::fs::{CWD, Mode, OFlags};
     let root = tempfile::tempdir().unwrap();
-    let sessions = root.path().join("home").join("sessions");
-    let (keep, outside) = (root.path().join("keep"), root.path().join("outside"));
+    let base = root.path().canonicalize().unwrap();
+    let (home, outside, keep) = (base.join("home"), base.join("outside"), base.join("keep"));
+    let sessions = home.join("sessions");
     std::fs::create_dir_all(sessions.join("2026").join("11")).unwrap();
     std::fs::create_dir_all(outside.join("deeper")).unwrap();
     std::fs::write(
@@ -423,17 +410,60 @@ fn the_live_keep_copies_only_the_rollouts_under_the_agent_home() {
     std::fs::write(outside.join("deeper").join("owner.jsonl"), "{}\n").unwrap();
     std::os::unix::fs::symlink(outside.join("owner.jsonl"), sessions.join("linked.jsonl")).unwrap();
     std::os::unix::fs::symlink(&outside, sessions.join("linked")).unwrap();
-    assert_eq!(keep_rollouts(&sessions, &keep).unwrap(), 2);
+    std::fs::hard_link(outside.join("owner.jsonl"), sessions.join("hard.jsonl")).unwrap();
+    assert_eq!(
+        keep_rollouts(&home, &keep).unwrap(),
+        Kept {
+            copied: 2,
+            skipped: 4
+        },
+        "notes.txt, the linked file, the linked folder and the hard link are skipped"
+    );
     let mut kept: Vec<String> = std::fs::read_dir(&keep)
         .unwrap()
         .map(|item| item.unwrap().file_name().into_string().unwrap())
         .collect();
     kept.sort();
     assert_eq!(kept, ["rollout-a.jsonl", "rollout-b.jsonl"]);
-    let none = root.path().join("keep-none");
     assert_eq!(
-        keep_rollouts(&root.path().join("no-home").join("sessions"), &none).unwrap(),
-        0
+        keep_rollouts(&home, &keep).unwrap(),
+        Kept {
+            copied: 0,
+            skipped: 6
+        },
+        "a second keep never writes over a kept file"
+    );
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let listed = rustix::fs::openat(CWD, &sessions, folders, Mode::empty()).unwrap();
+    assert!(open_plain(&listed, c"rollout-b.jsonl").is_some());
+    assert!(
+        open_plain(&listed, c"linked.jsonl").is_none(),
+        "a name listed as a file and swapped for a link by the time it opens"
+    );
+    assert!(open_plain(&listed, c"hard.jsonl").is_none());
+    let linked_home = base.join("linked-home");
+    std::fs::create_dir_all(&linked_home).unwrap();
+    std::os::unix::fs::symlink(&sessions, linked_home.join("sessions")).unwrap();
+    let none = base.join("keep-none");
+    assert_eq!(
+        keep_rollouts(&linked_home, &none).unwrap(),
+        Kept {
+            copied: 0,
+            skipped: 1
+        }
+    );
+    assert!(!none.exists());
+    let traced = CodexTrace::of(&linked_home);
+    assert!(traced.rollouts.is_empty() && traced.calls.is_empty());
+    assert_eq!(traced.skipped, 1);
+    let bare = base.join("bare-home");
+    std::fs::create_dir_all(&bare).unwrap();
+    assert_eq!(
+        keep_rollouts(&bare, &none).unwrap(),
+        Kept {
+            copied: 0,
+            skipped: 0
+        }
     );
     assert!(!none.exists());
 }

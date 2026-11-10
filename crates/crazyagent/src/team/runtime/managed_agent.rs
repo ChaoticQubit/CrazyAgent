@@ -17,7 +17,9 @@ use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
 use crate::terminal::{AgentId, Host};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{CStr, OsStr, OsString};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -206,8 +208,14 @@ pub(crate) struct ManagedAgent {
 /// row's test folder goes (G1-DIAG).
 pub(crate) const LIVE_KEEP: &str = "CRAZYAGENT_LIVE_KEEP";
 
-/// The most rollouts one test folder copies into the [`LIVE_KEEP`] folder.
+/// The most rollouts [`rollout_files`] reads from one agent home.
 const ROLLOUTS_KEPT_MAX: usize = 64;
+/// The most bytes one rollout may hold for [`rollout_files`] to read it.
+const ROLLOUT_BYTES_MAX: u64 = 32 * 1024 * 1024;
+/// The most entries [`rollout_files`] looks at below one sessions folder.
+const SESSION_ENTRIES_MAX: usize = 4096;
+/// The most folders [`rollout_files`] holds open while it walks.
+const SESSION_FOLDERS_OPEN_MAX: usize = 64;
 
 /// A managed agent's test folder, removed when dropped. When [`LIVE_KEEP`] names an absolute
 /// folder, it first copies the Codex rollouts under the agent home there with
@@ -229,45 +237,145 @@ impl Drop for Root {
             eprintln!("live_keep_not_absolute");
             return;
         }
-        match keep_rollouts(&self.home.join("sessions"), &keep) {
-            Ok(copied) => eprintln!("live_keep_rollouts copied={copied}"),
+        match keep_rollouts(&self.home, &keep) {
+            Ok(kept) => eprintln!(
+                "live_keep_rollouts copied={} skipped={}",
+                kept.copied, kept.skipped
+            ),
             Err(error) => eprintln!("live_keep_failed kind={:?}", error.kind()),
         }
     }
 }
 
-/// Copies each regular `.jsonl` file below `sessions` into `keep`, made when missing, under
-/// its own file name, at most [`ROLLOUTS_KEPT_MAX`] files. Links are neither followed nor
-/// copied, so an agent's planted link never copies a file from outside its home. Inputs: the
-/// sessions folder and the keep folder. Output: how many files were copied, none when
-/// `sessions` does not exist, or the first error.
-pub(super) fn keep_rollouts(sessions: &Path, keep: &Path) -> std::io::Result<usize> {
-    let (mut pending, mut copied) = (vec![sessions.to_path_buf()], 0);
-    while let Some(folder) = pending.pop() {
-        let items = match std::fs::read_dir(&folder) {
-            Ok(items) => items,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        for item in items {
-            let item = item?;
-            let (kind, path) = (item.file_type()?, item.path());
-            if kind.is_dir() {
-                pending.push(path);
-            } else if kind.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-                && copied < ROLLOUTS_KEPT_MAX
-            {
-                std::fs::create_dir_all(keep)?;
-                std::fs::copy(&path, keep.join(item.file_name()))?;
-                copied += 1;
+/// The Codex rollouts [`rollout_files`] read from an agent home: each file's name and bytes,
+/// and how many entries it skipped as a link, another kind, a file that is not plainly this
+/// user's, or one past a bound.
+pub(super) struct Rollouts {
+    pub(super) files: Vec<(OsString, Vec<u8>)>,
+    pub(super) skipped: usize,
+}
+
+/// What [`keep_rollouts`] did: the files it wrote and the entries it skipped, a name already
+/// in the keep folder included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Kept {
+    pub(super) copied: usize,
+    pub(super) skipped: usize,
+}
+
+/// Opens one entry of an open folder as a plain rollout: never through a link, and only a
+/// regular file this user owns, with one name and at most `ROLLOUT_BYTES_MAX` bytes, checked
+/// on the open handle. Inputs: the folder and the entry's name. Output: the file, or none.
+pub(super) fn open_plain(folder: &OwnedFd, name: &CStr) -> Option<std::fs::File> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = rustix::fs::openat(folder, name, flags, Mode::empty()).ok()?;
+    let stat = rustix::fs::fstat(&file).ok()?;
+    let plain = FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+        && stat.st_uid == rustix::process::getuid().as_raw()
+        && stat.st_nlink == 1
+        && u64::try_from(stat.st_size).is_ok_and(|size| size <= ROLLOUT_BYTES_MAX);
+    plain.then(|| std::fs::File::from(file))
+}
+
+/// Reads the `.jsonl` files below `<home>/sessions`, opening the home, the sessions folder,
+/// every folder below and each file through its open parent without following a link, so a
+/// planted or swapped link never reads a file from outside the home. Input: the agent home.
+/// Output: the rollouts, none when the home has no sessions folder, a skip for a sessions
+/// folder that is a link or not a folder, or the first error opening the home or listing.
+pub(super) fn rollout_files(home: &Path) -> std::io::Result<Rollouts> {
+    use rustix::fs::{CWD, Dir, FileType, Mode, OFlags};
+    use std::io::Read;
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut rollouts = Rollouts {
+        files: Vec::new(),
+        skipped: 0,
+    };
+    let home = rustix::fs::openat(CWD, home, folders, Mode::empty())?;
+    let sessions = match rustix::fs::openat(&home, "sessions", folders, Mode::empty()) {
+        Ok(sessions) => sessions,
+        Err(rustix::io::Errno::NOENT) => return Ok(rollouts),
+        Err(_) => {
+            rollouts.skipped += 1;
+            return Ok(rollouts);
+        }
+    };
+    let (mut pending, mut seen) = (vec![sessions], 0);
+    'walk: while let Some(folder) = pending.pop() {
+        for entry in Dir::read_from(&folder)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            if seen == SESSION_ENTRIES_MAX {
+                rollouts.skipped += 1;
+                break 'walk;
+            }
+            seen += 1;
+            let rollout = name.to_bytes().ends_with(b".jsonl");
+            match entry.file_type() {
+                FileType::Directory if pending.len() < SESSION_FOLDERS_OPEN_MAX => {
+                    match rustix::fs::openat(&folder, name, folders, Mode::empty()) {
+                        Ok(below) => pending.push(below),
+                        Err(_) => rollouts.skipped += 1,
+                    }
+                }
+                FileType::RegularFile if rollout && rollouts.files.len() < ROLLOUTS_KEPT_MAX => {
+                    let mut bytes = Vec::new();
+                    let read = open_plain(&folder, name).is_some_and(|file| {
+                        file.take(ROLLOUT_BYTES_MAX + 1)
+                            .read_to_end(&mut bytes)
+                            .is_ok()
+                    }) && u64::try_from(bytes.len())
+                        .is_ok_and(|size| size <= ROLLOUT_BYTES_MAX);
+                    if read {
+                        let name = OsStr::from_bytes(name.to_bytes()).to_owned();
+                        rollouts.files.push((name, bytes));
+                    } else {
+                        rollouts.skipped += 1;
+                    }
+                }
+                _ => rollouts.skipped += 1,
             }
         }
     }
-    assert!(copied <= ROLLOUTS_KEPT_MAX);
-    Ok(copied)
+    assert!(rollouts.files.len() <= ROLLOUTS_KEPT_MAX && seen <= SESSION_ENTRIES_MAX);
+    Ok(rollouts)
+}
+
+/// Writes each rollout [`rollout_files`] reads from `home` into `keep`, made when missing,
+/// under its own name: a file created new, never through a link and never over a file
+/// already there. Inputs: the agent home and the keep folder. Output: what was written and
+/// skipped, or the first error.
+pub(super) fn keep_rollouts(home: &Path, keep: &Path) -> std::io::Result<Kept> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    use std::io::Write;
+    let rollouts = rollout_files(home)?;
+    let mut kept = Kept {
+        copied: 0,
+        skipped: rollouts.skipped,
+    };
+    if rollouts.files.is_empty() {
+        return Ok(kept);
+    }
+    std::fs::create_dir_all(keep)?;
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let folder = rustix::fs::openat(CWD, keep, folders, Mode::empty())?;
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    for (name, bytes) in &rollouts.files {
+        match rustix::fs::openat(&folder, name.as_os_str(), create, Mode::RUSR | Mode::WUSR) {
+            Ok(file) => {
+                std::fs::File::from(file).write_all(bytes)?;
+                kept.copied += 1;
+            }
+            Err(rustix::io::Errno::EXIST) => kept.skipped += 1,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert!(kept.copied <= rollouts.files.len());
+    Ok(kept)
 }
 
 fn reference(value: &str) -> CredentialRef {
