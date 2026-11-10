@@ -26,7 +26,9 @@ struct WorkRow {
 /// a file another agent's work holds starts nothing: it records the wait and is refused
 /// with `coord_claim_waits`, unless that wait would close a cycle of waits; then the start
 /// goes ahead without the files other agents' live claims hold, their overlaps marked
-/// `left_out`, and the owner is told of the pair once (OS-8).
+/// `left_out`, and the owner is told of the pair once (OS-8). The wait is written in the
+/// transaction that checked for the cycle, so two starts on each other's file never both
+/// wait (T9-R2-F2).
 pub fn start_work(
     db: &Connection,
     project: &ProjectId,
@@ -42,6 +44,7 @@ pub fn start_work(
     if !agent_in(tx, project, agent)?.live() {
         return Err(failure("coord_agent_stopped"));
     }
+    let started = Change::begin(tx)?;
     tx.execute(
         "INSERT INTO coord_work(project,title,owner_agent,state,version,created,updated)
          VALUES (?1,?2,?3,'active',1,?4,?4)",
@@ -61,12 +64,14 @@ pub fn start_work(
             super::claims::leave_out(tx, &mut overlaps)?;
         } else {
             let (holder, pattern) = (held.theirs.work, held.theirs.pattern.clone());
-            drop(change);
-            super::claims::wait_for(db, project, agent, holder, &file, &pattern, now)?;
+            drop(started);
+            super::claims::wait_for(tx, project, agent, holder, &file, &pattern, now)?;
+            change.commit()?;
             return Err(failure("coord_claim_waits"));
         }
     }
     super::presence::seen(tx, agent, now)?;
+    started.commit()?;
     change.commit()?;
     Ok((work, overlaps))
 }

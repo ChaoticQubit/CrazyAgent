@@ -1259,6 +1259,53 @@ fn under_wait_an_overlapping_start_waits_and_its_agent_is_told_when_the_file_lan
     assert_eq!(prompts(&connection, ada).len(), 1, "one prompt per wait");
 }
 
+/// OS-8 Wait, T9-R2-F2: a waiting start keeps its wait and nothing of the start, on its own
+/// and inside a caller's transaction, since the wait commits with the check that allowed it.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_waiting_start_keeps_only_its_wait_alone_or_nested() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    let claims = |who: AgentId| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM coord_claims WHERE agent=?1",
+                [who],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let waited = Some((grace, grace_work, "src/lexer.rs".to_owned()));
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(works_owned(&connection, ada), 0);
+    assert_eq!(claims(ada), 0);
+    assert_eq!(latest_wait(&connection, ada).unwrap(), waited);
+    connection.execute("DELETE FROM coord_waits", []).unwrap();
+    let outer = Change::begin(&connection).unwrap();
+    assert_eq!(
+        code(start_on(outer.db(), ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    outer.commit().unwrap();
+    assert_eq!(
+        works_owned(&connection, ada),
+        0,
+        "nested, the start is undone"
+    );
+    assert_eq!(claims(ada), 0, "nested, its claims are undone");
+    assert_eq!(
+        latest_wait(&connection, ada).unwrap(),
+        waited,
+        "nested, the wait stays"
+    );
+}
+
 /// OS-8 Wait: an owner releasing the held work wakes the agent waiting for its file.
 #[cfg(unix)]
 #[test]

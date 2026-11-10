@@ -25941,6 +25941,67 @@ fn the_wait_cycle_note_says_who_keeps_editing_the_file() {
     );
 }
 
+/// OS-8 Wait, T9-R2-L2: a wait cycle note the store refuses once marks no pair told without
+/// its note, so the next sweep tells the owner of every pair once and none is lost.
+#[test]
+fn a_refused_wait_cycle_note_loses_no_pair() {
+    let fixture = Fixture::new(1);
+    let ada = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let grace = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let lin = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO coord_wait_cycles(project,first,second,holder,file,created) VALUES
+                ('{PROJECT}',{ada},{grace},{grace},'src/first.rs',1),
+                ('{PROJECT}',{grace},{lin},{lin},'src/second.rs',2);
+             CREATE TRIGGER refuse_first BEFORE INSERT ON team_messages
+                WHEN NEW.text LIKE '%src/first.rs%' BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+        ))
+        .unwrap();
+    let label = |agent: i64| super::super::events::label(&fixture.connection, agent).unwrap();
+    let pairs = [(ada, grace, "src/first.rs"), (grace, lin, "src/second.rs")];
+    let notes = |file: &str| -> usize {
+        let (starter, holder, _) = pairs.iter().find(|pair| pair.2 == file).unwrap();
+        let text = wait_cycle_note(&label(*starter), &label(*holder), file);
+        fixture
+            .status()
+            .messages
+            .iter()
+            .filter(|message| message.state == MessageState::Note && message.text == text)
+            .count()
+    };
+    let told = || -> Vec<String> {
+        fixture
+            .connection
+            .prepare("SELECT file FROM coord_wait_cycles WHERE told IS NOT NULL ORDER BY file")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.tend_claims(&project);
+    assert_eq!(notes("src/first.rs"), 0, "the store refused this note");
+    for file in told() {
+        assert_eq!(notes(&file), 1, "{file} is told only with its note");
+    }
+    fixture
+        .connection
+        .execute_batch("DROP TRIGGER refuse_first;")
+        .unwrap();
+    team.claims_next.clear();
+    team.tend_claims(&project);
+    team.shutdown().unwrap();
+    for (_, _, file) in pairs {
+        assert_eq!(notes(file), 1, "the owner hears of {file} once");
+    }
+    assert_eq!(told(), vec!["src/first.rs", "src/second.rs"]);
+}
+
 /// SECAUDIT coord-delivery-raw-body-forges-owner-line: a line of a coordination message from
 /// a sub-agent never reaches the live master looking like the owner's.
 #[cfg(target_os = "macos")]
