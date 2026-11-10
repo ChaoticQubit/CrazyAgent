@@ -255,7 +255,10 @@ async fn a_removal_slower_than_the_owner_deadline_answers_with_the_agents_it_rem
         }
     );
     assert!(!worktree.exists());
-    assert!(!folder.exists());
+    assert!(
+        folder.exists(),
+        "the agent's folder with its conversations stays as history"
+    );
     let db = crate::landing::open(&owner.engine_root).unwrap();
     let recorded: i64 = db
         .query_row(
