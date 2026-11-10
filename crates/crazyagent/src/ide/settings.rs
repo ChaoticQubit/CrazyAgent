@@ -300,7 +300,7 @@ fn pretty(body: &Value) -> Result<Vec<u8>, EngineError> {
 /// syncs it and renames it over the target. Inputs: the folder, the temporary name, the
 /// target, the bytes and the mode. Output: Ok once renamed, or `ide_settings_unwritable`.
 #[cfg(unix)]
-fn replace(
+pub(super) fn replace(
     folder: &Path,
     temporary: &str,
     target: &Path,

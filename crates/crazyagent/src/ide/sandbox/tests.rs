@@ -583,6 +583,7 @@ fn server_git(
         &home.join("owner.sock"),
         &home.join("locked-settings.json"),
         &crate::ide::git::ceiling(root, older_agents).unwrap(),
+        &home.join("gitconfig"),
     );
     let mut command = super::command(profile, shim);
     command
