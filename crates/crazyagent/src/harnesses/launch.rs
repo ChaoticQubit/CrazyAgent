@@ -1434,7 +1434,8 @@ impl Session {
                 (command, Some(installed))
             }
             None => {
-                let installed = crate::launch_context::lock_only(request.account.home())?;
+                let installed =
+                    crate::launch_context::lock_only(request.account.home(), &request.harness)?;
                 (command(&request)?, Some(installed))
             }
         };

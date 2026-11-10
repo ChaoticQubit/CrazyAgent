@@ -1783,8 +1783,9 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
 /// install takes, installing no files. The guard keeps a second launch out of the home
 /// while this one runs, so writing the launch key never lands on a home an agent already
-/// runs on. Input: the agent's home. Output: the lock guard, or `launch_home_busy`.
-pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
+/// runs on. Inputs: the agent's home and the harness id. Output: the lock guard, or
+/// `launch_home_busy`.
+pub fn lock_only(home: &Path, _harness: &str) -> Result<Installed, LaunchError> {
     crate::harnesses::launch::validate_home(home)?;
     let lock = lock(home)?;
     Ok(Installed {
