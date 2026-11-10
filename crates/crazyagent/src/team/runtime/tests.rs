@@ -26098,6 +26098,27 @@ fn a_refused_wait_cycle_note_loses_no_pair() {
     assert_eq!(told(), vec!["src/first.rs", "src/second.rs"]);
 }
 
+/// OS-8 Wait, TEAM-16-L1: the wait cycle sweep takes the store's write lock before it reads
+/// the pairs, as the cycle check does, so no other writer commits between its read and its
+/// marks. While another connection holds that lock, even a sweep with nothing to tell waits
+/// for it and fails, and once the lock is free the sweep runs.
+#[test]
+fn the_wait_cycle_sweep_takes_the_write_lock_before_it_reads() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.connection.busy_timeout(Duration::from_millis(50)).unwrap();
+    fixture.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(
+        team.note_wait_cycles(&project, 1).is_err(),
+        "the sweep waits for the write lock another writer holds"
+    );
+    fixture.connection.execute_batch("COMMIT").unwrap();
+    team.note_wait_cycles(&project, 1).unwrap();
+    team.shutdown().unwrap();
+}
+
 /// SECAUDIT coord-delivery-raw-body-forges-owner-line: a line of a coordination message from
 /// a sub-agent never reaches the live master looking like the owner's.
 #[cfg(target_os = "macos")]
