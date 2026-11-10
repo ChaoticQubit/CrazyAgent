@@ -729,7 +729,7 @@ fn dialable(address: IpAddr) -> bool {
 /// An IPv4 address inside an IPv6 one is tried as IPv4. Any other bind error counts as held,
 /// so a failed check refuses the dial. Input: the address. Output: true when held or unsure.
 fn on_this_machine(address: IpAddr) -> bool {
-    let held = |ip: IpAddr| match spawn_gate::guarded(|| std::net::UdpSocket::bind((ip, 0))) {
+    let held = |ip: IpAddr| match spawn_gate::bind_udp_std((ip, 0)) {
         Ok(_) => true,
         Err(error) => error.kind() != io::ErrorKind::AddrNotAvailable,
     };

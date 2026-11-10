@@ -510,8 +510,7 @@ fn a_tunnel_dials_no_address_on_this_machine_but_keeps_the_local_network() {
 /// connect, which only picks a route and sends nothing. Output: the address, or none on a
 /// machine with no such route.
 fn routed_address() -> Option<Ipv4Addr> {
-    let socket =
-        spawn_gate::guarded(|| std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))).ok()?;
+    let socket = spawn_gate::bind_udp_std((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
     match socket.local_addr().ok()?.ip() {
         IpAddr::V4(ip) if !ip.is_unspecified() => Some(ip),
