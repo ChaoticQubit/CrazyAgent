@@ -158,12 +158,22 @@ async function steadyPaste(terminal, before) {
   throw new Error("the paste never drew on the master terminal: Enter was not pressed");
 }
 
+/** The first characters of a message. Input: the text. Output: nothing yet. */
+export function messageStart(text) {
+  return text;
+}
+
+/** The rows of the input area. Input: the terminal rows. Output: nothing yet. */
+export function inputRows(rows) {
+  return [];
+}
+
 /** Pastes a message and presses Enter until its turn has started: a long paste followed at once
  * by Enter can sit unsent, and a first Enter can only clear a notice. The turn has started when
  * the caller's read says so or, with no such read, once the drawn paste left the terminal.
  * Inputs: the terminal, { rows, paste, enter, pause }, and the read for a terminal that draws no
  * echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
-export async function pasteAndSend(terminal, started) {
+export async function pasteAndSend(terminal, text, started) {
   const before = await terminal.rows();
   await terminal.paste();
   const drawn = started ? [] : await steadyPaste(terminal, before);
@@ -201,7 +211,7 @@ export async function sendToMaster(kit, text, started) {
     },
     enter: () => browser.keys(KEYS.enter),
     pause: () => pause(READ_MS),
-  }, started);
+  }, text, started);
   return "terminal";
 }
 
