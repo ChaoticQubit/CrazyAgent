@@ -534,7 +534,7 @@ struct Worker {
     input_ready: bool,
     background_held: bool,
     kept_session: bool,
-    fresh: bool,
+    fresh: Option<i64>,
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
@@ -5201,12 +5201,12 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            let (waiting, carried) =
-                if prompt == super::master::WAKE_TASK && self.workers[&agent].fresh {
+            let (waiting, carried) = match self.workers[&agent].fresh {
+                Some(_) if prompt == super::master::WAKE_TASK => {
                     crate::coord::delivery::next_turn_unread(&self.connection, agent)?
-                } else {
-                    crate::coord::delivery::next_turn(&self.connection, agent)?
-                };
+                }
+                _ => crate::coord::delivery::next_turn(&self.connection, agent)?,
+            };
             let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
                 super::master::WAKE_DELIVERED
             } else {
@@ -5277,7 +5277,7 @@ impl TeamRuntime {
             worker.busy = Some(Busy::Task(task));
             worker.reasked = None;
             worker.briefed |= worker.kept_session;
-            worker.fresh = false;
+            worker.fresh = None;
             if let Some(edit) = &edit {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }
@@ -6124,7 +6124,7 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
         };
         assert!(!(kept_session && live));
-        let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none());
+        let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none()).then(now_ms);
         let (access, toolchains, network) = match &launch {
             Launch::Fresh(plan, _) => (plan.access, Some(plan.toolchains.clone()), plan.network),
             Launch::Adopt(adoption) => (

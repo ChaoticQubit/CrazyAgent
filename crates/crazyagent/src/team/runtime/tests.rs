@@ -14510,7 +14510,7 @@ fn between_turns(
         input_ready: true,
         background_held: false,
         kept_session,
-        fresh: false,
+        fresh: None,
         own_turn: None,
         own_rules: None,
         turn_started: None,
@@ -15639,7 +15639,7 @@ fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only()
         );
 
         let mut worker = between_turns(&project, AgentRole::Sub, true, true);
-        worker.fresh = fresh;
+        worker.fresh = fresh.then(now_ms);
         let (orders, turns) = channel();
         worker.orders = orders;
         team.workers.insert(woken, worker);
