@@ -361,8 +361,9 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total, money
   </Panel>;
 }
 
-/** The once-only offer: old and new side by side and the two choices. Inputs: the comparison,
- * the money view, what to do once chosen and how a choice reaches the engine. Output: the panel. */
+/** The once-only offer: old and new side by side and the two choices, both off while a choice
+ * is with the engine and after it applied. Inputs: the comparison, the money view, what to do
+ * once chosen and how a choice reaches the engine. Output: the panel. */
 export function RecountPanel({ status, money, onDone, decide = decideRecount }: { status: RecountStatus; money: MoneyView; onDone: () => void; decide?: (useNew: boolean) => Promise<Result<void>> }) {
   const priced = money.settings.prices !== "off";
   const row = (name: string, tokens: Tokens, cost: string) => <tr>
@@ -372,10 +373,15 @@ export function RecountPanel({ status, money, onDone, decide = decideRecount }: 
     {priced && <td className="num">{cost}</td>}
   </tr>;
   const [refused, setRefused] = useState("");
-  const choose = (useNew: boolean) => void decide(useNew).then((result) => {
-    setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
-    if (result.kind === "ok") onDone();
-  });
+  const [waiting, setWaiting] = useState(false);
+  const choose = (useNew: boolean) => {
+    setWaiting(true);
+    void decide(useNew).then((result) => {
+      setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
+      if (result.kind === "ok") onDone();
+      else setWaiting(false);
+    });
+  };
   return <Panel title="We recounted your history">
     {refused && <LoadError message={refused} onRetry={() => { setRefused(""); onDone(); }} />}
     <table className="pj-table mx-table">
@@ -385,8 +391,8 @@ export function RecountPanel({ status, money, onDone, decide = decideRecount }: 
     <p>{status.sessions_recounted} sessions recounted. {status.sessions_kept_old} keep their old numbers because their transcripts are gone or could not be read to the end.{status.homes_partial > 0 ? ` ${status.homes_partial} agent folders held more than one pass reads, and part of their history keeps its old numbers.` : ""} Recounted sessions count under the account their agent last used.</p>
     {priced && <p>New dollars cover recounted sessions only. Sessions that keep their old numbers have no estimate.</p>}
     <div className="pj-row">
-      <button type="button" className="btn primary" onClick={() => choose(true)}>Use new numbers</button>
-      <button type="button" className="btn" onClick={() => choose(false)}>Keep old numbers</button>
+      <button type="button" className="btn primary" disabled={waiting} onClick={() => choose(true)}>Use new numbers</button>
+      <button type="button" className="btn" disabled={waiting} onClick={() => choose(false)}>Keep old numbers</button>
     </div>
   </Panel>;
 }
