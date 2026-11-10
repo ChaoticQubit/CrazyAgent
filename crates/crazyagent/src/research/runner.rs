@@ -2229,12 +2229,11 @@ pub(crate) fn add_worktree_at(
     add_worktree(sandbox, profile, worktree)
 }
 
-/// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
-/// git under the installed profile so that no command the repository configures runs: the
-/// worktree is added without a checkout and made local-only, its effective config is
-/// listed in the worktree's own context, and the checkout blanks every filter driver that
-/// listing names.
-/// Takes the sandbox, its installed profile and the new worktree path.
+/// Adds a detached git worktree at `worktree` in the project folder, running git under the
+/// sandbox's profile, which it installs at `profile` as the only one that may make a
+/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. The
+/// worktree is added without a checkout and made local-only, and the checkout blanks every
+/// filter driver its own effective config names. Takes the sandbox, profile path, worktree.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
@@ -2264,6 +2263,7 @@ pub(crate) fn add_worktree_at(
         return Err(RunError::Invalid("worktree must sit in worktrees/".into()));
     }
     fs::create_dir_all(&worktrees)?;
+    sandbox.clone().adding_worktrees().install(profile)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
