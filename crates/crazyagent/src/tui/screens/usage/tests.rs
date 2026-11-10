@@ -830,6 +830,10 @@ fn every_tui_dollar_carries_the_label() {
         money_text(4_000_000),
         "<$0.01 (Estimated cost at API prices)"
     );
+    assert_eq!(
+        money_text(5_000_000),
+        "$0.01 (Estimated cost at API prices)"
+    );
     assert_eq!(money_text(0), "$0.00 (Estimated cost at API prices)");
     assert_eq!(
         money_text(i64::MAX),

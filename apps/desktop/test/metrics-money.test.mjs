@@ -17,6 +17,7 @@ test("dollars read in dollars and cents and a sliver is not zero", () => {
   assert.equal(money.dollarText(1_234_560_000_000), "$1,234.56");
   assert.equal(money.dollarText(0), "$0.00");
   assert.equal(money.dollarText(4_000_000), "<$0.01");
+  assert.equal(money.dollarText(5_000_000), "$0.01");
 });
 
 test("the main number leads, the other stands beside it, every dollar is labeled", () => {

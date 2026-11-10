@@ -11,6 +11,7 @@ export interface Tokens {
 export interface UsageRow {
   key: string;
   tokens: Tokens;
+  cost_nanos: number;
   runs: number;
   last_ms: number;
   not_reported_by?: string | null;
@@ -102,11 +103,13 @@ export interface UsageReport {
   not_reported_by?: string[];
   health?: StepHealth[];
   partial_homes: number;
+  money: MoneyView;
 }
 
 export interface MetricsBucket {
   start_ms: number;
   tokens: Tokens;
+  cost_nanos: number;
 }
 
 export interface MetricsRun {
@@ -119,11 +122,13 @@ export interface MetricsRun {
   status: string | null;
   last_ms: number;
   tokens: Tokens;
+  cost_nanos: number;
 }
 
 export interface MetricsGroup {
   key: string;
   tokens: Tokens;
+  cost_nanos: number;
   agents: number;
   runs: number;
   projects: string[];
@@ -140,6 +145,7 @@ export interface MetricsAgent {
   accounts: string[];
   more_accounts: number;
   tokens: Tokens;
+  cost_nanos: number;
   turns?: number | null;
 }
 
@@ -238,4 +244,9 @@ export function setMoney(settings: MoneySettings): Promise<Result<void>> {
  * account id, the window and the time in milliseconds, null to clear it. */
 export function setManualReset(account: string, windowKind: WindowKind, atMs: number | null): Promise<Result<void>> {
   return call<void>("desktop_usage_set_reset", { account, windowKind, atMs });
+}
+
+/** Reads the notices for the code the app adapts from others. Output: the text. */
+export function loadNotices(): Promise<Result<string>> {
+  return call<string>("desktop_usage_notices");
 }

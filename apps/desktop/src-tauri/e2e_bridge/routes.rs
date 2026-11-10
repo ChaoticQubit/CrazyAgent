@@ -2458,6 +2458,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_refresh()?; call.await }.await;
             routed(result)
         }
+        "desktop_usage_notices" => {
+            let result: Result<_, BridgeError> = async { Ok(crazyagent::usage::THIRD_PARTY_NOTICES) }.await;
+            routed(result)
+        }
         "desktop_usage_set_money" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

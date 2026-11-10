@@ -211,6 +211,7 @@
     "allow-desktop-usage-report",
     "allow-desktop-usage-metrics",
     "allow-desktop-usage-refresh",
+    "allow-desktop-usage-notices",
     "allow-desktop-usage-set-money",
     "allow-desktop-usage-set-reset",
     "allow-desktop-ide-extension-asks",

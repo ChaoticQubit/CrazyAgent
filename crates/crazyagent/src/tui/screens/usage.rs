@@ -9,7 +9,7 @@ use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
 use crate::usage::health::{StepHealth, UsageStep};
-use crate::usage::money::MoneyView;
+use crate::usage::money::{MainNumber, MoneyView, PriceSource};
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
 use ratatui::Frame;
@@ -22,14 +22,26 @@ const ROWS_SHOWN: usize = 5;
 const UNITS: [(f64, &str); 3] = [(1e3, "K"), (1e6, "M"), (1e9, "B")];
 
 /// One dollar figure with its label. Input: nanodollars. Output: the text every TUI dollar uses.
-pub fn money_text(_cost_nanos: i64) -> String {
-    String::new()
+pub fn money_text(cost_nanos: i64) -> String {
+    let cents = cost_nanos.saturating_add(5_000_000) / 10_000_000;
+    let amount = if cost_nanos > 0 && cost_nanos < 5_000_000 {
+        "<$0.01".to_owned()
+    } else {
+        format!("${}.{:02}", cents / 100, cents % 100)
+    };
+    format!("{amount} (Estimated cost at API prices)")
 }
 
 /// One row's figures in the order the owner chose. Inputs: the tokens text, the row's dollars
 /// and the view. Output: the text. With no price date only the tokens are shown.
-pub fn figures_text(tokens: &str, _cost_nanos: i64, _money: &MoneyView) -> String {
-    tokens.to_owned()
+pub fn figures_text(tokens: &str, cost_nanos: i64, money: &MoneyView) -> String {
+    if money.as_of.is_none() {
+        return tokens.to_owned();
+    }
+    match money.shown {
+        MainNumber::Dollars => format!("{}  {tokens}", money_text(cost_nanos)),
+        MainNumber::Tokens => format!("{tokens}  {}", money_text(cost_nanos)),
+    }
 }
 
 /// The range the Usage summary covers.
@@ -333,6 +345,8 @@ fn group(
     title: &str,
     rows: &[UsageRow],
     name: impl Fn(&str) -> String,
+    money: &MoneyView,
+    limit: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     if rows.is_empty() {
@@ -350,17 +364,26 @@ fn group(
         let label: String = name(&row.key).chars().take(width).collect();
         let runs = if row.runs == 1 { "run" } else { "runs" };
         let counted = format!(
-            "  {label:<width$}  {:>6} tokens  {} {runs}",
-            compact(row.tokens.headline()),
+            "  {label:<width$}  {}  {} {runs}",
+            figures_text(
+                &format!("{:>6} tokens", compact(row.tokens.headline())),
+                row.cost_nanos,
+                money
+            ),
             row.runs
         );
-        lines.push(Line::raw(match &row.not_reported_by {
+        let shown = match &row.not_reported_by {
             None => counted,
             Some(harness) if row.tokens.headline() == 0 => {
                 format!("  {label:<width$}  usage not reported by {harness}")
             }
             Some(harness) => format!("{counted}  + usage not reported by {harness}"),
-        }));
+        };
+        lines.extend(
+            wrap(shown.trim_start(), limit.saturating_sub(2).max(8))
+                .into_iter()
+                .map(|part| Line::raw(format!("  {part}"))),
+        );
     }
     if rows.len() > ROWS_SHOWN {
         lines.push(styled(
@@ -421,6 +444,9 @@ pub fn summary(
             compact(removed)
         )));
     } else {
+        if report.money.as_of.is_some() {
+            lines.push(Line::raw(money_text(report.money.cost_nanos)));
+        }
         lines.push(Line::raw(format!(
             "Tokens {} ({} input, {} cache write, {} output)",
             compact(total.headline()),
@@ -487,18 +513,24 @@ pub fn summary(
         "By project",
         &report.projects,
         |key| shown(&names.projects, key).to_owned(),
+        &report.money,
+        limit,
         theme,
     ));
     lines.extend(group(
         "By pool",
         &report.pools,
         |key| shown(&names.pools, key).to_owned(),
+        &report.money,
+        limit,
         theme,
     ));
     lines.extend(group(
         "By account",
         &report.accounts,
         |key| shown(&names.accounts, key).to_owned(),
+        &report.money,
+        limit,
         theme,
     ));
     lines
@@ -624,6 +656,8 @@ impl Screen for UsagePage {
             hint("t", "Range"),
             hint("r", "Read again"),
             hint("c", "Check limits now"),
+            hint("m", "Dollars or tokens"),
+            hint("p", "Prices on or off"),
             hint("Esc", "Back"),
         ]
     }
@@ -637,6 +671,26 @@ impl Screen for UsagePage {
             }
             Key::Char('r') => self.reload(ctx),
             Key::Char('c') => send(ctx, SettingsJob::RefreshUsage),
+            Key::Char('m') => {
+                if let Some((_, report)) = &self.report {
+                    let mut settings = report.money.settings;
+                    settings.main_number = match settings.main_number {
+                        MainNumber::Dollars => MainNumber::Tokens,
+                        MainNumber::Tokens => MainNumber::Dollars,
+                    };
+                    send(ctx, SettingsJob::SetMoney(settings));
+                }
+            }
+            Key::Char('p') => {
+                if let Some((_, report)) = &self.report {
+                    let mut settings = report.money.settings;
+                    settings.prices = match settings.prices {
+                        PriceSource::Bundled => PriceSource::Off,
+                        PriceSource::Off => PriceSource::Bundled,
+                    };
+                    send(ctx, SettingsJob::SetMoney(settings));
+                }
+            }
             _ => return Flow::Ignored,
         }
         Flow::Handled
@@ -652,6 +706,11 @@ impl Screen for UsagePage {
             Some(SettingsEvent::UsageRefreshed(Err(code))) => {
                 ctx.say(Message::error("Could not check limits.", refusal(code)))
             }
+            Some(SettingsEvent::MoneySet(Ok(()))) => self.reload(ctx),
+            Some(SettingsEvent::MoneySet(Err(code))) => ctx.say(Message::error(
+                "Could not change the setting.",
+                refusal(code),
+            )),
             _ => {}
         }
         Flow::Handled
