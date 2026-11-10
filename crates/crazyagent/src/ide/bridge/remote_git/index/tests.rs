@@ -500,6 +500,54 @@ fn a_refresh_runs_no_filter_and_no_hook() {
     assert!(hook_mark.exists(), "the control ran no hook");
 }
 
+/// Waits until just after a new second starts, so the steps after it share that second.
+/// Output: none.
+fn start_of_a_second() {
+    let into = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    std::thread::sleep(Duration::from_nanos(u64::from(1_000_000_000 - into)));
+    std::thread::sleep(Duration::from_millis(5));
+}
+
+/// A change saved in the second the index was written, at the old size, looks clean by its
+/// stat data, so git keeps the entry racy and compares the file. The apply cannot compare
+/// from the git folder and must not end that racy status, or the change leaves the owner's
+/// status and a later `add -u` or checkout passes over it.
+#[test]
+fn a_same_size_change_beside_a_stage_stays_in_the_owners_status() {
+    let case = Case::new();
+    let path = case.project.join("b.txt");
+    let second = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let held = (0..5).any(|_| {
+        start_of_a_second();
+        let started = second();
+        fs::write(&path, "BBBB\n").unwrap();
+        ok(&case.project, None, &["add", "b.txt"]);
+        fs::write(&path, "CCCC\n").unwrap();
+        second() == started
+    });
+    assert!(held, "the three steps never fit one second");
+    std::thread::sleep(Duration::from_millis(1100));
+    let work = case.seed("501");
+    fs::write(case.project.join("a.txt"), "changed\n").unwrap();
+    ok(&case.project, Some(&work), &["add", "a.txt"]);
+
+    let outcome = case.carried("501");
+    assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    assert_eq!(
+        ok(&case.project, None, &["status", "--porcelain"]),
+        "M  a.txt\nMM b.txt\n",
+        "the change to b.txt left the owner's status"
+    );
+}
+
 /// The exec limit of a refresh, seen in the one trace its write limit leaves: a filter that
 /// rewrites what it reads would make the entry look changed and leave its stat data unsaved.
 /// The refresh never starts it, so the file hashes as itself and the stat data is saved.

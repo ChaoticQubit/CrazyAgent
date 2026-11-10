@@ -1730,6 +1730,37 @@ fn source_control_works_through_the_private_index() {
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }
 
+/// A new checkout keeps its own index: `git worktree add` runs a child `reset --hard` and
+/// `git clone` its checkout, and on the private index both would lose it, and a carry would
+/// then unstage the project's files. Both run directly, so the project's real index is
+/// untouched and no private file is made.
+#[test]
+fn a_worktree_and_a_clone_through_the_shim_keep_their_own_index() {
+    let s = server();
+    fs::write(s.root.join("staged"), "staged\n").unwrap();
+    setup(&s.root, &["add", "staged"]);
+    let before = fs::read(s.index()).unwrap();
+    let checked = |args: &[&str], folder: &str, index: &str| {
+        let (worked, said) = s.git(args);
+        assert!(worked, "git {args:?}: {said}");
+        assert!(s.no_private_files(), "git {args:?} made a private file");
+        assert_eq!(fs::read(s.index()).unwrap(), before, "git {args:?}");
+        assert!(s.root.join(index).exists(), "git {args:?} left no index");
+        assert_eq!(setup(&s.root.join(folder), &["status", "--porcelain"]), "");
+    };
+    checked(
+        &["worktree", "add", "-q", "wtree", "-b", "other", "HEAD"],
+        "wtree",
+        ".git/worktrees/wtree/index",
+    );
+    checked(
+        &["clone", "-q", ".", "cloned"],
+        "cloned",
+        "cloned/.git/index",
+    );
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
 /// A read-only command runs on the real index, so Source Control sees what is staged, and
 /// makes no private copy.
 #[test]
