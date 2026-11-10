@@ -8785,6 +8785,15 @@ fn a_message_is_not_typed_into_the_running_turn_after_a_held_turn_ended() {
     choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
     let host = fixture.host();
     let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
     let mut team = check_runtime(&fixture, &host, &held_then_running(), None, Some(agents));
     fixture.until(&mut team, "the held task ends", |f| check_end(f).is_some());
     let agent = subs(&fixture)[0];
