@@ -11762,6 +11762,7 @@ fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
         runs_for_the_engine(program),
         "{program} is not installed for the engine, so this row cannot run"
     );
+    let mut case = Case::new();
     let (id, landed) = tool_clash_at_turn_end(&mut case, tool);
     assert_eq!(
         landed,
