@@ -267,6 +267,10 @@ impl Host for FirstLookFails {
         self.real.unkept(agent)
     }
 
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        self.real.end_kept_server(agent)
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.real.alive()
     }

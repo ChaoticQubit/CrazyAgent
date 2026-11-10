@@ -522,9 +522,10 @@ impl Tmux {
 
     /// Connects a control client to the server, starting the server with its holder
     /// session only when `may_start` is set; otherwise tmux -N refuses an ended server. A
-    /// teammates host starts its server through [`Self::start_in`] and always connects with
-    /// -N, so its client, inside the lead's profile, never starts one. Takes whether it may
-    /// start one. Output: the control, or a plain code.
+    /// confined host always connects with -N, so its client, inside the lead's profile, never
+    /// starts a server: a teammates host starts its server through [`Self::start_in`], and a
+    /// lead's own server starts under its keeper (KEEPER (b), `Servers`). Takes whether it
+    /// may start one. Output: the control, or a plain code.
     fn connect(&self, may_start: bool) -> Result<Control, HostError> {
         let executable = self
             .executable
@@ -551,7 +552,7 @@ impl Tmux {
         let mut child = crate::spawn_gate::spawn(
             command
                 .args(["-u", "-f", "/dev/null"])
-                .args((!may_start || self.starts_in.is_some()).then_some("-N"))
+                .args((!may_start || self.confined.is_some()).then_some("-N"))
                 .arg("-S")
                 .arg(&socket)
                 .args(["-C", "new-session", "-A", "-s", SESSION, "-n", HOLDER])
@@ -1402,17 +1403,18 @@ impl Tmux {
         }
     }
 
-    /// Ends every terminal not in `keep` and, with none kept, the server itself; `close` runs
-    /// it and then waits for the reapers. Takes the names to keep. Returns the first failure.
+    /// Ends every terminal not in `keep` and, with none kept, the server itself, unless the
+    /// listing found it ended, as a lead's own server its keeper ended; `close` runs it and
+    /// then waits for the reapers. Takes the names to keep. Returns the first failure.
     fn end_server(&self, keep: &[AgentId]) -> Result<(), HostError> {
         if self.executable.is_none() || !self.running() {
             return Ok(());
         }
         end_except(self, keep)?;
-        if !keep.is_empty() {
+        if !keep.is_empty() || !self.running() {
             return Ok(());
         }
-        let control = self.control_with(self.starts_in.is_none())?;
+        let control = self.control_with(self.confined.is_none())?;
         let panes: Vec<PaneInfo> = control
             .ask(&format!("list-panes -a -F '{PANE_FIELDS}{FORMAT_END}'"))
             .map(|lines| {
@@ -1894,6 +1896,14 @@ impl Tmux {
     /// variables that point a native lead's app at its teammates' server. Takes the agent,
     /// the command and those variables, none off a lead's server. Returns where it runs, or
     /// the plain code.
+    /// Has a server that runs in the foreground, as a lead's own server under its keeper
+    /// does, end once its last session ends, as a server a client started does (FBTMUX-P1),
+    /// since `tmux -D` turns exit-empty off. Its control, connecting, makes the holder
+    /// session first. Output: Ok, or the code the control or the command failed with.
+    pub(super) fn exit_when_empty(&self) -> Result<(), HostError> {
+        self.control()?.run("set-option -s exit-empty on").map(drop)
+    }
+
     pub(super) fn spawn_with(
         &self,
         agent: &AgentId,

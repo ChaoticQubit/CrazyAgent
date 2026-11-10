@@ -8,8 +8,9 @@ use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The most agent folders the engine reads when it looks for native-mode leads whose own
 /// servers still run, such as after an engine restart.
@@ -18,6 +19,17 @@ const LEADS_SCAN_MAX: usize = 4096;
 const LEADS_KEPT_MAX: usize = 256;
 /// The most adopted teammates the engine remembers the lead of at once.
 const MEMBERS_KEPT_MAX: usize = LEADS_KEPT_MAX * PANES_LISTED_MAX;
+/// How long a lead's own server, just started under its keeper, has to accept connections.
+#[cfg(target_os = "macos")]
+const KEEPER_READY: Duration = Duration::from_secs(5);
+/// How often the engine looks whether that server accepts connections yet.
+#[cfg(target_os = "macos")]
+const KEEPER_READY_POLL: Duration = Duration::from_millis(20);
+/// How long the engine waits for a server keeper it asked to stop to exit: the keeper reads
+/// its warden's report for up to 4 s.
+const KEEPER_WAIT: Duration = Duration::from_secs(6);
+/// How often the engine looks whether that keeper exited.
+const KEEPER_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's terminal host across its tmux servers: its own private server, and per
 /// native-mode lead one server started inside that lead's Seatbelt profile and one inside
@@ -27,6 +39,8 @@ const MEMBERS_KEPT_MAX: usize = LEADS_KEPT_MAX * PANES_LISTED_MAX;
 /// teammates' server, or its lead's own for a lead started without one; every other call
 /// goes to the engine's server. So team code, viewers and stops reach a native lead and its
 /// teammates by name, and no unconfined client ever connects to a server a lead controls.
+/// A lead's own server this engine started runs under a keeper, the engine's own child,
+/// kept here until the lead's stop ends it (KEEPER (b)).
 pub struct Servers {
     engine: Tmux,
     root: PathBuf,
@@ -35,6 +49,7 @@ pub struct Servers {
     mates: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     members: Mutex<BTreeMap<AgentId, AgentId>>,
     pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
+    keepers: Mutex<BTreeMap<AgentId, Child>>,
 }
 
 /// Whether a lead's own socket is a live socket of this user, read without following a link.
@@ -104,6 +119,39 @@ fn lead_panes(own: &Tmux, mates: &Tmux, lead: &AgentId) -> Result<Vec<PaneInfo>,
     Ok(panes)
 }
 
+/// Asks a lead's server keeper to stop with terminate and waits up to `KEEPER_WAIT` for it to
+/// exit. The keeper's warden then kills every process in the lead's sandbox, the server and
+/// its panes included, and the keeper exits cleanly only once the warden confirmed that or
+/// found signals not confined. The keeper is the engine's own child, not reaped before it
+/// exits, so its id names no other process. Takes the keeper. Returns whether it exited
+/// cleanly in time.
+fn end_keeper(keeper: &mut Child) -> bool {
+    if let Ok(Some(status)) = keeper.try_wait() {
+        return status.success();
+    }
+    let Some(pid) = i32::try_from(keeper.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    let deadline = Instant::now() + KEEPER_WAIT;
+    loop {
+        match keeper.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(KEEPER_POLL),
+            _ => return false,
+        }
+    }
+}
+
+/// Whether a keeper still runs, not yet reaped. Takes the keeper. Returns the answer; a
+/// keeper whose state cannot be read counts as running, so it is never dropped unreaped.
+fn keeper_runs(keeper: &mut Child) -> bool {
+    !matches!(keeper.try_wait(), Ok(Some(_)))
+}
+
 impl Servers {
     /// Opens the host on the engine's own server and finds lead servers by name. Takes the
     /// engine's server host, the engine root and the tmux program. Returns the host; nothing
@@ -117,7 +165,91 @@ impl Servers {
             mates: Mutex::new(BTreeMap::new()),
             members: Mutex::new(BTreeMap::new()),
             pins: Mutex::new(BTreeMap::new()),
+            keepers: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Starts a lead's own server under the [`crate::sandbox::KEEPER`] when none listens at
+    /// its socket (KEEPER (b)): `tmux -D`, in the foreground inside the lead's profile, after
+    /// the [`crate::sandbox::PANE_SHIM`] forked the run's warden, so the keeper's stop has the
+    /// warden kill every process in the lead's sandbox. The keeper runs outside the sandbox
+    /// with a fixed argv and only `PATH`. A server already listening, as one an earlier
+    /// engine left, gets no keeper and stays unkept. Takes the lead and its socket. Returns
+    /// whether a keeper started now, `terminal_folder_unsafe` for a socket path that is not
+    /// this user's socket, or `terminal_unavailable`.
+    #[cfg(target_os = "macos")]
+    fn keep_server(&self, lead: &AgentId, socket: &Path) -> Result<bool, HostError> {
+        use std::os::unix::process::CommandExt;
+        let program = self
+            .program
+            .as_deref()
+            .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
+        let folder = socket
+            .parent()
+            .ok_or_else(|| failure("terminal_folder_unsafe"))?;
+        let profile = profile_of(&self.root, lead)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(socket)
+            && (!metadata.file_type().is_socket() || metadata.uid() != user())
+        {
+            return Err(failure("terminal_folder_unsafe"));
+        }
+        let mut keepers = self
+            .keepers
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if crate::spawn_gate::connect_unix_std(socket).is_ok() {
+            return Ok(false);
+        }
+        if let Some(mut earlier) = keepers.remove(lead)
+            && !end_keeper(&mut earlier)
+            && keeper_runs(&mut earlier)
+        {
+            keepers.insert(lead.clone(), earlier);
+            return Err(failure("terminal_unavailable"));
+        }
+        keepers.retain(|_, keeper| keeper_runs(keeper));
+        if keepers.len() >= LEADS_KEPT_MAX {
+            return Err(failure("terminal_unavailable"));
+        }
+        let mut keeper = crate::spawn_gate::spawn(
+            std::process::Command::new(crate::sandbox::KEEPER[0])
+                .args(&crate::sandbox::KEEPER[1..])
+                .arg(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(&profile)
+                .args(crate::sandbox::PANE_SHIM)
+                .arg(program)
+                .args(["-D", "-u", "-f", "/dev/null", "-S"])
+                .arg(socket)
+                .env_clear()
+                .env("PATH", super::SERVER_PATH)
+                .current_dir(folder)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0),
+        )
+        .map_err(|_| failure("terminal_unavailable"))?;
+        let deadline = Instant::now() + KEEPER_READY;
+        while crate::spawn_gate::connect_unix_std(socket).is_err() {
+            if !keeper_runs(&mut keeper) || Instant::now() >= deadline {
+                if !end_keeper(&mut keeper) && keeper_runs(&mut keeper) {
+                    keepers.insert(lead.clone(), keeper);
+                }
+                return Err(failure("terminal_unavailable"));
+            }
+            std::thread::sleep(KEEPER_READY_POLL);
+        }
+        keepers.insert(lead.clone(), keeper);
+        assert!(keepers.len() <= LEADS_KEPT_MAX);
+        Ok(true)
+    }
+
+    /// A lead's own server with no keeper, off macOS, where no lead runs on one. Takes the
+    /// lead and its socket. Returns `terminal_own_server_unavailable`.
+    #[cfg(not(target_os = "macos"))]
+    fn keep_server(&self, _lead: &AgentId, _socket: &Path) -> Result<bool, HostError> {
+        Err(failure(OWN_SERVER_UNAVAILABLE))
     }
 
     /// The lead's own server when one listens for it now, else none; a name that is not a
@@ -417,7 +549,17 @@ impl Host for Servers {
         let pane_env = self
             .mates_host(agent, &teammates_socket(&self.root, agent)?)?
             .anchor_for(agent, command)?;
-        server.spawn_with(agent, command, &pane_env)
+        let started = self.keep_server(agent, &socket)?;
+        let ready = if started {
+            server.exit_when_empty()
+        } else {
+            Ok(())
+        };
+        let spawned = ready.and_then(|()| server.spawn_with(agent, command, &pane_env));
+        if spawned.is_err() && started {
+            let _ = self.end_kept_server(agent);
+        }
+        spawned
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
@@ -520,8 +662,27 @@ impl Host for Servers {
     }
 
     fn unkept(&self, agent: &AgentId) -> bool {
+        if self
+            .keepers
+            .lock()
+            .is_ok_and(|keepers| keepers.contains_key(agent))
+        {
+            return false;
+        }
         self.on(agent, |server| Ok(server.unkept(agent)))
             .unwrap_or(true)
+    }
+
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        let mut keeper = self.keepers.lock().ok()?.remove(agent)?;
+        let ended = end_keeper(&mut keeper);
+        if !ended
+            && keeper_runs(&mut keeper)
+            && let Ok(mut keepers) = self.keepers.lock()
+        {
+            keepers.entry(agent.clone()).or_insert(keeper);
+        }
+        Some(ended)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
