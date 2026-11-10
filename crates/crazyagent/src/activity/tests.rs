@@ -780,3 +780,48 @@ fn backfilled_accepts_read_as_yours_and_name_a_numbered_set_by_its_number() {
         ]
     );
 }
+
+/// MOCKC-R1-S1: a backfilled Accept names its set by the words a live Accept row uses: the
+/// set's message before its prompt, and "Changes from <agent>" when it has neither, never the
+/// prompt alone (rv-code L2).
+#[test]
+fn a_backfilled_accept_names_its_set_as_a_live_accept_row_does() {
+    let (_folder, db) = db();
+    let worker = agent(&db, "sub");
+    for (id, message, prompt, updated) in [
+        ("cs-m", "Land the checkout", "Change cs-m", 2_000),
+        ("cs-e", "", "", 3_000),
+    ] {
+        db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,message)
+             VALUES (?1,?2,'sub',?3,?4,'/r',?5,'/g','b','h','accepted','succeeded','t',?6,2,1,0,'[]',1,?7,?8)",
+            params![
+                id,
+                PROJECT,
+                worker.to_string(),
+                format!("Sub-agent {worker}"),
+                format!("/w/{id}"),
+                prompt,
+                updated,
+                message
+            ],
+        )
+        .unwrap();
+    }
+    backfill(&db, &project()).unwrap();
+    let texts: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            format!(
+                "You accepted the changes of Sub-agent {worker}: Changes from Sub-agent {worker}"
+            ),
+            format!("You accepted the changes of Sub-agent {worker}: Land the checkout"),
+        ]
+    );
+}
