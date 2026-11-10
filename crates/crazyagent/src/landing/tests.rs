@@ -11684,6 +11684,215 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
+/// One lockfile tool a row runs for real on a workspace whose packages are all local, so no
+/// registry is asked. Fields: the program, its lockfile, the manifest both sides edit, that
+/// manifest and the lockfile at the start, the owner's and the agent's, the other files, what
+/// the tool's lockfile must name and what the landed manifest must hold.
+struct RealTool {
+    program: &'static str,
+    lockfile: &'static str,
+    manifest: &'static str,
+    start: (String, String),
+    owner: (String, String),
+    agent: (String, String),
+    others: Vec<(&'static str, String)>,
+    locks: [&'static str; 2],
+    keeps: [&'static str; 2],
+}
+
+/// Whether a program runs on the PATH the engine gives its tools. Input: the program.
+/// Output: the answer.
+fn runs_for_the_engine(program: &str) -> bool {
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/env")
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+            )
+            .env("HOME", "/tmp")
+            .args([program, "--version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
+}
+
+/// A clash in one tool's lockfile alone is rewritten by the real tool in its sandbox, and
+/// the set lands with both sides locked; only `cargo update` ran in a row before
+/// (T8-R1-TOOLS). A tool this machine does not have is skipped. Input: the tool.
+fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
+    let program = tool.program;
+    if !runs_for_the_engine(program) {
+        eprintln!("skipped: {program} is not installed");
+        return;
+    }
+    let mut case = Case::new();
+    seat_team_agent(&mut case);
+    for (path, text) in &tool.others {
+        write(&case.repo.join(path), text);
+    }
+    write(&case.repo.join(tool.manifest), &tool.start.0);
+    write(&case.repo.join(tool.lockfile), &tool.start.1);
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Start a workspace"]);
+    case.agent(&["checkout", "-q", "--detach", "main"]);
+    case.start();
+    write(&case.repo.join(tool.manifest), &tool.owner.0);
+    write(&case.repo.join(tool.lockfile), &tool.owner.1);
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Depend on a"]);
+    case.edit(tool.manifest, &tool.agent.0);
+    case.edit(tool.lockfile, &tool.agent.1);
+    let landed = turn_end_within(&case, "turn-1", TURN_END_WITHIN);
+    let id = list(&case.db, &case.workspace.project)
+        .unwrap()
+        .first()
+        .expect("the agent's turn kept a change set")
+        .id
+        .clone();
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone())),
+        "{program}"
+    );
+    let subject = format!("Regenerate {} on main", tool.lockfile);
+    let head_subject = |set: &ChangeSetView| {
+        case.owner(&["log", "-1", "--format=%s", &set.head])
+            .trim()
+            .to_owned()
+    };
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || head_subject(set) == subject
+    });
+    assert_eq!(
+        (head_subject(&set), set.state),
+        (subject, ChangeState::Pending),
+        "{program}: its lockfile did not land"
+    );
+    let lock = case.owner(&["show", &format!("{}:{}", set.head, tool.lockfile)]);
+    for name in tool.locks {
+        assert!(lock.contains(name), "{program}: {name} in\n{lock}");
+    }
+    assert_eq!(
+        regenerate_leftovers(&case),
+        Vec::<String>::new(),
+        "{program}"
+    );
+    let outcome = case.accept(&id).unwrap();
+    assert!(
+        matches!(outcome, AcceptOutcome::Landed { .. }),
+        "{program}: {outcome:?}"
+    );
+    let manifest = std::fs::read_to_string(case.repo.join(tool.manifest)).unwrap();
+    for kept in tool.keeps {
+        assert!(manifest.contains(kept), "{program}: {kept} in\n{manifest}");
+    }
+}
+
+/// A package.json whose two dependency lists sit far enough apart for git to merge edits to
+/// each. Inputs: the two lists' entries. Output: the text.
+fn node_app(dependencies: &str, dev_dependencies: &str) -> String {
+    format!(
+        "{{\n  \"name\": \"app\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {{{dependencies}}},\n  \"private\": true,\n  \"license\": \"MIT\",\n  \"devDependencies\": {{{dev_dependencies}}}\n}}\n"
+    )
+}
+
+/// The packages a Node workspace links, beside its root manifest. Input: extra root fields.
+/// Output: the files.
+fn node_packages(root_fields: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "package.json",
+            format!("{{\"name\":\"root\",\"version\":\"1.0.0\",\"private\":true{root_fields}}}\n"),
+        ),
+        (
+            "packages/a/package.json",
+            "{\"name\":\"a\",\"version\":\"1.0.0\"}\n".to_owned(),
+        ),
+        (
+            "packages/b/package.json",
+            "{\"name\":\"b\",\"version\":\"1.0.0\"}\n".to_owned(),
+        ),
+    ]
+}
+
+#[test]
+fn real_npm_rewrites_a_clashing_package_lock() {
+    let lock = |version: &str| {
+        format!(
+            "{{\"name\":\"root\",\"version\":\"{version}\",\"lockfileVersion\":3,\"requires\":true,\"packages\":{{}}}}\n"
+        )
+    };
+    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
+        program: "npm",
+        lockfile: "package-lock.json",
+        manifest: "packages/app/package.json",
+        start: (node_app("", ""), lock("1.0.0")),
+        owner: (node_app("\"a\": \"1.0.0\"", ""), lock("1.0.1")),
+        agent: (node_app("", "\"b\": \"1.0.0\""), lock("1.0.2")),
+        others: node_packages(",\"workspaces\":[\"packages/*\"]"),
+        locks: [
+            "\"resolved\": \"packages/a\"",
+            "\"resolved\": \"packages/b\"",
+        ],
+        keeps: ["\"a\": \"1.0.0\"", "\"b\": \"1.0.0\""],
+    });
+}
+
+#[test]
+fn real_pnpm_rewrites_a_clashing_lockfile() {
+    let lock = |importers: &str| format!("lockfileVersion: '9.0'\nimporters: {importers}\n");
+    let mut others = node_packages("");
+    others.push((
+        "pnpm-workspace.yaml",
+        "packages:\n  - \"packages/*\"\n".to_owned(),
+    ));
+    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
+        program: "pnpm",
+        lockfile: "pnpm-lock.yaml",
+        manifest: "packages/app/package.json",
+        start: (node_app("", ""), lock("{}")),
+        owner: (node_app("\"a\": \"workspace:*\"", ""), lock("{.: {}}")),
+        agent: (
+            node_app("", "\"b\": \"workspace:*\""),
+            lock("{packages/app: {}}"),
+        ),
+        others,
+        locks: ["version: link:../a", "version: link:../b"],
+        keeps: ["\"a\": \"workspace:*\"", "\"b\": \"workspace:*\""],
+    });
+}
+
+#[test]
+fn real_uv_rewrites_a_clashing_lockfile() {
+    let manifest = |dependencies: &str, dev: &str| {
+        format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nrequires-python = \">=3.9\"\ndependencies = [{dependencies}]\n\n[dependency-groups]\ndev = [{dev}]\n\n[tool.uv.sources]\na = {{ workspace = true }}\nb = {{ workspace = true }}\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n"
+        )
+    };
+    let lock = |python: &str| format!("version = 1\nrequires-python = \">={python}\"\n");
+    let member = |name: &str| {
+        format!(
+            "[project]\nname = \"{name}\"\nversion = \"1.0.0\"\nrequires-python = \">=3.9\"\ndependencies = []\n"
+        )
+    };
+    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
+        program: "uv",
+        lockfile: "uv.lock",
+        manifest: "pyproject.toml",
+        start: (manifest("", ""), lock("3.9")),
+        owner: (manifest("\"a\"", ""), lock("3.10")),
+        agent: (manifest("", "\"b\""), lock("3.11")),
+        others: vec![
+            ("packages/a/pyproject.toml", member("a")),
+            ("packages/b/pyproject.toml", member("b")),
+        ],
+        locks: ["name = \"a\"", "name = \"b\""],
+        keeps: ["dependencies = [\"a\"]", "dev = [\"b\"]"],
+    });
+}
+
 /// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
 /// nothing: the set goes back to its agent through Task 7's update (OS-8).
 #[test]
