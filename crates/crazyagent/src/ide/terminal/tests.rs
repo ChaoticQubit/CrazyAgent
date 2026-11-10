@@ -373,10 +373,10 @@ fn the_sandboxed_terminal_cannot_commit() {
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
-/// Runs a confined IDE terminal's pane as the host would and answers what it says first, which
-/// is printed inside the pane because the pane host repaints the terminal as it attaches and
-/// wipes anything written from outside. Inputs: the project's level and the terminal's.
-/// Output: the pane's first line.
+/// Runs a confined IDE terminal's pane as the host would, pins that its shell then starts,
+/// and answers what it says first, which is printed inside the pane because the pane host
+/// repaints the terminal as it attaches and wipes anything written from outside. Inputs: the
+/// project's level and the terminal's. Output: the pane's first line.
 #[cfg(target_os = "macos")]
 fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
     let case = Case::new();
@@ -411,6 +411,7 @@ fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
         .stderr(std::process::Stdio::piped());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(said.lines().nth(1), Some("started"), "{output:?}");
     said.lines().next().unwrap_or_default().to_owned()
 }
 
@@ -443,7 +444,6 @@ fn a_full_access_projects_narrower_pane_is_not_told_to_raise_access() {
         pane_first_line(AgentAccess::Full, AgentAccess::Sandboxed),
         "This terminal can't stage or commit. Use Source Control, or a Full access terminal."
     );
-    assert_eq!(said.lines().nth(1), Some("started"), "{output:?}");
 }
 
 /// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
