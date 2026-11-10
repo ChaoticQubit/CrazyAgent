@@ -379,24 +379,31 @@ const NOTHING = tokens(0, 0, 0, 0);
 const agentRow = (project, agent, value) => ({ project, agent, harnesses: ["codex"], accounts: ["acct-a"], tokens: value });
 const agentsRead = (rows, used) => ({ ...withUsage({ agents: used }), metrics: { kind: "ok", value: { ...metrics, agents: rows } } });
 
-test("one agent key on two projects' rows leaves Runs and Last used blank on both (r1 M1)", () => {
-  const rows = [agentRow("alpha", "onboarding", ALPHA), agentRow("beta", "onboarding", NOTHING)];
-  const table = tableText(render(agentsRead(rows, [usageRow("onboarding", ALPHA, { runs: 42, last_ms: NOW - HOUR })])), "agent");
-  assert.match(table, /Runs Last used/);
-  assert.doesNotMatch(table, /\b42\b/);
-  assert.doesNotMatch(table, / ago /);
+test("one agent key used in two projects keeps each project's own Runs and Last used (METRICS-AGENT-RUNS)", () => {
+  const rows = [agentRow("alpha", "onboarding", ALPHA), agentRow("beta", "onboarding", BETA)];
+  const used = [
+    usageRow("onboarding", ALPHA, { project: "alpha", runs: 42, last_ms: NOW - 5 * MINUTE }),
+    usageRow("onboarding", BETA, { project: "beta", runs: 7, last_ms: NOW - 3 * MINUTE }),
+  ];
+  const part = panel(render(agentsRead(rows, used)), "By agent");
+  const lines = [...part.slice(part.indexOf("<table")).matchAll(/<tr[^>]*>.*?<\/tr>/gsu)].map((match) => text(match[0]));
+  const of = (project) => lines.find((line) => line.includes(`Onboarding ${project} `)) ?? "";
+  assert.match(of("Alpha"), / 42 5 min ago /, "alpha's row shows alpha's runs and last use");
+  assert.match(of("Beta"), / 7 3 min ago /, "beta's row shows beta's runs and last use");
+  assert.equal(lines.filter((line) => line.includes("Onboarding")).length, 2, "each project lists the key once");
 });
 
-test("an agent key whose usage holds more than its one listed row leaves Runs and Last used blank (r1 M1)", () => {
+test("an agent's Runs and Last used come from its own project's usage row, and an agent that reported nothing names its project (METRICS-AGENT-RUNS)", () => {
   const rows = [agentRow("alpha", "onboarding", BETA)];
-  const table = tableText(render(agentsRead(rows, [usageRow("onboarding", ALPHA, { runs: 42, last_ms: NOW - HOUR })])), "agent");
-  assert.doesNotMatch(table, /\b42\b/);
-  assert.doesNotMatch(table, / ago /);
+  const used = [usageRow("onboarding", ALPHA, { project: "alpha", runs: 42, last_ms: NOW - 5 * MINUTE }), usageRow("team-44", NOTHING, { project: "beta", not_reported_by: "rcli" })];
+  const part = text(panel(render(agentsRead(rows, used)), "By agent"));
+  assert.match(part, / 42 5 min ago /);
+  assert.match(part, /Agent 44 Beta /);
 });
 
 test("an agent on one project keeps its Runs and Last used, and one that reported nothing lists once (r1 L1)", () => {
   const rows = [agentRow("alpha", "team-8", ALPHA), agentRow("beta", "team-9", BETA)];
-  const used = [usageRow("team-8", ALPHA, { runs: 5, last_ms: NOW - 3 * MINUTE }), usageRow("team-9", BETA, { not_reported_by: "rcli" })];
+  const used = [usageRow("team-8", ALPHA, { project: "alpha", runs: 5, last_ms: NOW - 3 * MINUTE }), usageRow("team-9", BETA, { project: "beta", not_reported_by: "rcli" })];
   const markup = render(agentsRead(rows, used));
   assert.match(tableText(markup, "agent"), /5 3 min ago/);
   assert.equal([...panel(markup, "By agent").matchAll(/class="mx-row"/gu)].length, 2);

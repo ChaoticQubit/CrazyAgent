@@ -9,8 +9,8 @@ const DAYS_SHOWN = 7;
 const BAR_PERCENT_MIN = 2;
 
 /** One breakdown row: its name, its project when the breakdown spans projects, its tokens, its
- * dollars, the cells of the breakdown's own columns, the key the usage read names it by when that differs
- * from `key`, and the harness that ran for it without reporting usage. */
+ * dollars, the cells of the breakdown's own columns and the harness that ran for it without
+ * reporting usage. */
 export interface BreakdownRow {
   key: string;
   name: string;
@@ -18,7 +18,6 @@ export interface BreakdownRow {
   tokens: Tokens;
   cost_nanos: number;
   extra: string[];
-  usageKey?: string;
   notReportedBy?: string | null;
 }
 
