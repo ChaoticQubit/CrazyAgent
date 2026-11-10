@@ -6357,7 +6357,7 @@ fn activity_lines(fixture: &Fixture, kind: &str) -> Vec<String> {
 /// Inserts a task an agent runs, as the engine leaves it while the agent works on it, with
 /// the owner's cancel asked for when `cancel` is set. Inputs: the fixture, the agent, the
 /// prompt and the cancel. Output: the task id.
-fn running_task(fixture: &Fixture, agent: i64, prompt: &str, cancel: bool) -> i64 {
+fn task_in_flight(fixture: &Fixture, agent: i64, prompt: &str, cancel: bool) -> i64 {
     fixture
         .connection
         .execute(
@@ -6378,8 +6378,8 @@ fn running_task(fixture: &Fixture, agent: i64, prompt: &str, cancel: bool) -> i6
 fn a_task_left_running_at_an_engine_start_is_told_back_in_the_queue_or_stopped() {
     let fixture = Fixture::new(1);
     let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    let requeued = running_task(&fixture, agent, "Write the page", false);
-    let cancelled = running_task(&fixture, agent, "Write the index", true);
+    let requeued = task_in_flight(&fixture, agent, "Write the page", false);
+    let cancelled = task_in_flight(&fixture, agent, "Write the index", true);
 
     let _team = fixture.runtime();
 
@@ -6403,9 +6403,9 @@ fn a_task_turn_that_ends_cancelled_or_back_in_the_queue_is_told_so() {
     let fixture = Fixture::new(1);
     let mut team = fixture.runtime();
     let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    let cancelled = running_task(&fixture, agent, "Write the page", false);
-    let interrupted = running_task(&fixture, agent, "Write the index", false);
-    let limited = running_task(&fixture, agent, "Write the notes", false);
+    let cancelled = task_in_flight(&fixture, agent, "Write the page", false);
+    let interrupted = task_in_flight(&fixture, agent, "Write the index", false);
+    let limited = task_in_flight(&fixture, agent, "Write the notes", false);
 
     team.finish_task(cancelled, "", TurnEnd::Cancelled, None)
         .unwrap();
@@ -6434,8 +6434,8 @@ fn a_released_task_is_told_back_in_the_queue_or_stopped() {
     let fixture = Fixture::new(1);
     let mut team = fixture.runtime();
     let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    let requeued = running_task(&fixture, agent, "Write the page", false);
-    let cancelled = running_task(&fixture, agent, "Write the index", true);
+    let requeued = task_in_flight(&fixture, agent, "Write the page", false);
+    let cancelled = task_in_flight(&fixture, agent, "Write the index", true);
 
     team.release(Some(agent), Busy::Task(requeued)).unwrap();
     team.release(Some(agent), Busy::Task(cancelled)).unwrap();
