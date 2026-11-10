@@ -1005,6 +1005,66 @@ fn a_lead_worker_takes_in_its_lead_s_gitlink_and_its_own_is_still_refused() {
     );
 }
 
+/// Removes the owner repository's `.git/info`, as a clone or `init --template=` leaves a
+/// project, and writes a grafts file into a case variant of it that gives `child` the only
+/// parent `parent`, as a project-root agent could (land-19 r2 M1). The owner's own git then
+/// answers ancestry from it. Inputs: the case, the grafted commit and its claimed parent.
+fn forge_grafts(case: &Case, child: &str, parent: &str) {
+    let git = case.repo.join(".git");
+    std::fs::remove_dir_all(git.join("info")).unwrap();
+    write(
+        &git.join("INFO").join("grafts"),
+        &format!("{child} {parent}\n"),
+    );
+    case.owner(&["merge-base", "--is-ancestor", parent, child]);
+}
+
+/// land-19 r2 M1: a grafts file claiming the agent's gitlink commit is on the landing tip
+/// changes nothing for the engine, whose git reads no grafts, so the gitlink is refused at
+/// the turn end and, in a set whose head moved past its turn-end checks, at Accept.
+#[test]
+fn a_grafts_file_does_not_hide_an_agent_gitlink_at_the_turn_end_or_at_accept() {
+    {
+        let case = Case::new();
+        case.start();
+        let agent = numbered_agent(&case, 3);
+        record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir)
+            .unwrap();
+        let gitlinked = commit_own_gitlink(&case, &agent.worktree, &case.tip());
+        write(&agent.worktree.join("own.txt"), "own\n");
+        git_in(&case.home, &agent.worktree, &["add", "own.txt"]);
+        git_in(
+            &case.home,
+            &agent.worktree,
+            &["commit", "-q", "-m", "Own work"],
+        );
+        let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
+        forge_grafts(&case, &tip, &gitlinked);
+        assert_eq!(
+            refused(record_turn_end(&case.db, &agent, &merge_turn())),
+            "changes_embedded_repository"
+        );
+    }
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let gitlinked = commit_own_gitlink(&case, &case.workspace.worktree, &case.tip());
+    case.edit("OWN", "own\n");
+    case.agent_commit("Own work");
+    let head = case.agent(&["rev-parse", "HEAD"]).trim().to_owned();
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET head=?1 WHERE id=?2",
+            [head.as_str(), id.as_str()],
+        )
+        .unwrap();
+    let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
+    forge_grafts(&case, &tip, &gitlinked);
+    assert_eq!(refused(case.accept(&id)), "changes_embedded_repository");
+    assert_eq!(case.tip(), tip);
+}
+
 /// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
 fn plant_links(folder: &Path, links: &[(&str, &str)]) {
     for (link, target) in links {

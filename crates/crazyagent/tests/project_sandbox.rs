@@ -70,6 +70,32 @@ fn quoted(path: &Path) -> String {
     format!("'{text}'")
 }
 
+/// land-19 r2 M1: in a project with no `.git/info`, as a clone or `init --template=` leaves
+/// it, no confined process makes `.git/info` or `.git/shallow` in any letter case, from which
+/// the owner's git would read grafts or shallow cuts through the case-insensitive volume.
+#[test]
+fn sandboxed_child_cannot_make_git_info_or_shallow_in_any_letter_case() {
+    let case = case();
+    let git = case.project.join(".git");
+    fs::create_dir_all(git.join("objects")).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("info.sb");
+    for script in [
+        format!("mkdir {}", quoted(&git.join("INFO"))),
+        format!("mkdir {}", quoted(&git.join("info"))),
+        format!("echo x > {}", quoted(&git.join("SHALLOW"))),
+        format!("echo x > {}", quoted(&git.join("shallow"))),
+        format!(
+            "echo x > {}",
+            quoted(&case.project.join(".GIT").join("Shallow"))
+        ),
+    ] {
+        let output = run(&sandbox, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+    }
+    assert_eq!(fs::read_dir(&git).unwrap().count(), 1);
+}
+
 /// land-19 r1 M1: no confined process writes a commit-graph file into the project's object
 /// store, in any letter case, since git answers ancestry from it without reading commits.
 #[test]
