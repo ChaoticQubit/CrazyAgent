@@ -42,9 +42,13 @@ impl Case {
         )
         .unwrap();
         let engine = Arc::new(
-            Engine::open(&root.path().join("engine.db"), config.clone())
-                .await
-                .unwrap(),
+            Engine::open_with_settings_sources(
+                &root.path().join("engine.db"),
+                &root.path().join("global.toml"),
+                &root.path().join("project.toml"),
+            )
+            .await
+            .unwrap(),
         );
         let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -1787,6 +1791,29 @@ async fn a_terminal_asked_above_the_projects_level_never_starts_a_pane() {
     assert_eq!(
         exchange(&socket, ide, &body).await,
         rejected("ide_terminal_above_project")
+    );
+    assert!(!case.root.path().join("ide-shell").exists());
+    case.stop().await;
+}
+
+/// Settings that stop reading after the engine started stop a new terminal, which never starts
+/// with no local model port kept.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_settings_file_that_cannot_be_read_stops_the_terminal() {
+    let mut case = Case::start().await;
+    std::fs::write(case.root.path().join("global.toml"), "not = = toml").unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
+    );
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    assert_eq!(
+        exchange(&socket, ide, &body).await,
+        rejected("ide_settings_unavailable")
     );
     assert!(!case.root.path().join("ide-shell").exists());
     case.stop().await;

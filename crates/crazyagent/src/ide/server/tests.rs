@@ -41,6 +41,7 @@ fn servers_in(data: &Path, idle: Duration) -> Servers {
         START_LIMIT,
         Arc::default(),
         data.join("engine").join("owner.sock"),
+        None,
     )
 }
 
@@ -681,6 +682,7 @@ async fn an_open_cut_while_its_server_starts_stops_at_its_start_limit_well_befor
         CUT_START_LIMIT,
         Arc::default(),
         data.path().join("engine").join("owner.sock"),
+        None,
     );
     let project = project("cut-start");
     let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
@@ -1084,6 +1086,7 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
             root,
             socket: &servers.socket,
             policy: ide_policy(servers.folder.parent().unwrap(), project).unwrap(),
+            kept_ports: &[],
         },
         &info,
         writer,
@@ -1300,6 +1303,7 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
                 access: AgentAccess::Sandboxed,
                 network: AgentNetwork::Open,
             },
+            kept_ports: &[],
         },
         &info,
         writer,
@@ -1488,6 +1492,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
                 access: AgentAccess::Sandboxed,
                 network: AgentNetwork::Open,
             },
+            kept_ports: &[],
         },
         &info,
         writer,
@@ -1632,6 +1637,7 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
         START_LIMIT,
         Arc::clone(&grants),
         socket,
+        None,
     );
     let project = project("built-in");
     let info = servers
@@ -1921,18 +1927,105 @@ fn a_project_with_no_saved_policy_opens_sandboxed() {
     assert_eq!(policy.access, AgentAccess::Sandboxed);
 }
 
-#[test]
-fn a_saved_policy_that_cannot_be_read_never_reaches_a_launch() {
-    let data = scratch();
-    set_level(data.path(), &project("bad"), AgentAccess::Full);
+/// A saved policy that cannot be read stops the open and records no launch. The checkout
+/// stands in for the build, since the policy is read before a build is looked at.
+#[tokio::test]
+async fn a_saved_policy_that_cannot_be_read_never_reaches_a_launch() {
+    let (checkout, data) = (scratch(), scratch());
+    let bad = project("bad");
+    set_level(data.path(), &bad, AgentAccess::Full);
     let db = crate::landing::open(data.path()).unwrap();
     db.execute(
         "UPDATE project_agent_policy SET body='tampered' WHERE project='bad'",
         [],
     )
     .unwrap();
-    let refused = ide_policy(data.path(), &project("bad")).unwrap_err();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let refused = servers
+        .open(&bad, checkout.path(), checkout.path(), false)
+        .await
+        .unwrap_err();
     assert_eq!(refused.0, "ide_workspace_unavailable");
+    assert_eq!(servers.group(&bad), None);
+}
+
+/// A port on this machine that the settings rows name as the owner's local model.
+const LOCAL_MODEL_PORT: u16 = 47_011;
+
+/// The global settings of an owner with one local model connection on a port of this machine.
+/// Input: the port. Output: the file's text.
+fn local_model_settings(port: u16) -> String {
+    format!(
+        r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-account"]
+connections = [{{ id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:{port}/v1" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}]
+pools = [{{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }}]
+"#
+    )
+}
+
+/// The servers of an engine whose global settings hold `text`. Inputs: the data folder and the
+/// text. Output: the register.
+fn servers_reading(data: &Path, text: &str) -> Servers {
+    let global = data.join("global.toml");
+    fs::write(&global, text).unwrap();
+    Servers::new(
+        data,
+        IDLE_LIMIT,
+        START_LIMIT,
+        Arc::default(),
+        data.join("engine").join("owner.sock"),
+        Some((global, data.join("project.toml"))),
+    )
+}
+
+/// The owner's local model ports come from the engine's settings files.
+#[test]
+fn the_owners_local_model_ports_are_read_from_the_settings_files() {
+    let data = scratch();
+    let global = data.path().join("global.toml");
+    fs::write(&global, local_model_settings(LOCAL_MODEL_PORT)).unwrap();
+    let files = (global, data.path().join("project.toml"));
+    assert_eq!(
+        crate::ide::workspace::kept_ports(Some(&files)).unwrap(),
+        vec![LOCAL_MODEL_PORT]
+    );
+}
+
+/// Settings that cannot be read stop the start, which never goes on with no port kept.
+#[tokio::test]
+async fn a_settings_file_that_cannot_be_read_stops_the_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_reading(data.path(), "not = = toml");
+    let id = project("broken-settings");
+    let refused = servers
+        .open(&id, checkout.path(), checkout.path(), false)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "ide_settings_unavailable");
+    assert_eq!(servers.group(&id), None);
+}
+
+/// A real open of an Own branch project keeps the owner's local model port in the profile the
+/// server runs under.
+#[tokio::test]
+async fn an_own_branch_server_keeps_the_owners_local_model_port_in_its_profile() {
+    let (checkout, data) = (scratch(), scratch());
+    let build = cached_build();
+    let id = project("kept");
+    set_level(data.path(), &id, AgentAccess::OwnBranch);
+    let servers = servers_reading(data.path(), &local_model_settings(LOCAL_MODEL_PORT));
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    servers.open(&id, &root, &build, false).await.unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+    servers.stop_all().await;
+    let rule = format!("(local ip \"*:{LOCAL_MODEL_PORT}\")");
+    assert!(profile.contains(&rule), "{profile}");
 }
 
 #[test]

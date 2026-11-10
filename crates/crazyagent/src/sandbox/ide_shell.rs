@@ -60,7 +60,8 @@ pub struct Place {
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
 /// terminal variables the engine passes, the project's extra read-only folders, the level
-/// the terminal runs at and the project's network choice.
+/// the terminal runs at, the project's network choice and the owner's local model ports the
+/// terminal keeps free.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -73,6 +74,7 @@ pub struct Launch<'a> {
     pub extra_reads: &'a [PathBuf],
     pub level: AgentAccess,
     pub network: AgentNetwork,
+    pub kept_ports: &'a [u16],
 }
 
 /// Reads the project's folder and its extra read-only folders from the engine database,

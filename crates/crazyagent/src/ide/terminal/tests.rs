@@ -106,6 +106,20 @@ fn in_terminal_at(
     level: AgentAccess,
     network: AgentNetwork,
 ) -> std::process::Output {
+    in_terminal_keeping(case, script, level, network, &[])
+}
+
+/// Runs a script in a terminal of the project that keeps `kept_ports`, through the real launch
+/// and the real `sandbox-exec`. Inputs: the case, the script, the level, the network choice and
+/// the ports. Output: the finished process.
+#[cfg(target_os = "macos")]
+fn in_terminal_keeping(
+    case: &Case,
+    script: &str,
+    level: AgentAccess,
+    network: AgentNetwork,
+    kept_ports: &[u16],
+) -> std::process::Output {
     let project = ProjectId::new(PROJECT).unwrap();
     let shell_arguments = arguments(&["-c", script]);
     let launch = ide_shell::Launch {
@@ -119,6 +133,7 @@ fn in_terminal_at(
         extra_reads: &[],
         level,
         network,
+        kept_ports,
     };
     let mut command = ide_shell::command(&launch).unwrap();
     command
@@ -207,6 +222,39 @@ fn a_sandboxed_terminal_has_no_network_even_on_open() {
     assert!(!output.status.success(), "{output:?}");
 }
 
+/// The script that listens on a port of this machine and prints `bound` only if it could.
+/// Input: the port. Output: the script.
+#[cfg(target_os = "macos")]
+fn binds(port: u16) -> String {
+    format!(
+        "/usr/bin/nc -l 127.0.0.1 {port} & p=$!; /bin/sleep 1; \
+         if kill -0 $p 2>/dev/null; then kill $p; echo bound; fi"
+    )
+}
+
+/// An Own branch terminal on the Open choice cannot listen on a port the owner's local model
+/// uses, and still can listen on any other.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_terminal_on_open_cannot_bind_a_configured_local_model_port() {
+    let case = Case::new();
+    let (first, kept) = local_listener();
+    let (second, free) = local_listener();
+    drop((first, second));
+    let at = |port| {
+        let output = in_terminal_keeping(
+            &case,
+            &binds(port),
+            AgentAccess::OwnBranch,
+            AgentNetwork::Open,
+            &[kept],
+        );
+        String::from_utf8_lossy(&output.stdout).contains("bound")
+    };
+    assert!(!at(kept), "the local model's port is refused");
+    assert!(at(free), "any other port still binds");
+}
+
 /// The engine never runs a Full access terminal: that one is the IDE server's own shell.
 #[cfg(target_os = "macos")]
 #[test]
@@ -224,6 +272,7 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
         extra_reads: &[],
         level: AgentAccess::Full,
         network: AgentNetwork::Open,
+        kept_ports: &[],
     };
     let refused = ide_shell::command(&launch).unwrap_err();
     assert!(
@@ -337,6 +386,7 @@ fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
         extra_reads: &[],
         level: AgentAccess::Sandboxed,
         network: AgentNetwork::Open,
+        kept_ports: &[],
     })
     .unwrap();
     let mut command = std::process::Command::new(&pane.argv[0]);
@@ -448,6 +498,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         extra_reads: &[],
         level: AgentAccess::Sandboxed,
         network: AgentNetwork::Open,
+        kept_ports: &[],
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -541,6 +592,7 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         extra_reads: &[],
         level: AgentAccess::Sandboxed,
         network: AgentNetwork::Open,
+        kept_ports: &[],
     };
     match ide_shell::command(&launch) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {

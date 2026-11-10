@@ -12,7 +12,7 @@ use crate::terminal::{
     TerminalRequest, TerminalStream,
 };
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -100,13 +100,14 @@ async fn open(
     level: AgentAccess,
 ) -> Result<(Arc<dyn Host>, Arc<Mutex<Terminals>>, TerminalStream), EngineError> {
     let root = runtime.ide()?.root;
+    let settings = runtime.ide_servers().settings_files();
     let host = runtime.terminal()?;
     let registry = runtime.ide_grants().terminals.clone();
     let name = pane_name()?;
     let project = project.clone();
     let (started_host, started_registry) = (host.clone(), registry.clone());
     let started = tokio::task::spawn_blocking(move || {
-        let command = prepare(&root, &project, level)?;
+        let command = prepare(&root, &project, level, settings.as_ref())?;
         claim(&started_registry, started_host.as_ref(), &name)?;
         let viewer = start(started_host.as_ref(), &name, &command, size);
         if viewer.is_err() {
@@ -183,18 +184,21 @@ pub(super) fn terminal_level(
 }
 
 /// Builds the pane command for the owner's login shell under the project's agent sandbox,
-/// starting in the project folder. Inputs: the engine root, the project and the level asked
-/// for. Output: the command, or `ide_terminal_project_unavailable`,
-/// `ide_terminal_above_project`, `ide_terminal_level_refused`, `ide_terminal_shell_unknown`,
+/// starting in the project folder. Inputs: the engine root, the project, the level asked for
+/// and the engine's settings files. Output: the command, or
+/// `ide_terminal_project_unavailable`, `ide_terminal_above_project`,
+/// `ide_terminal_level_refused`, `ide_settings_unavailable`, `ide_terminal_shell_unknown`,
 /// `ide_terminal_unavailable` or `ide_terminal_refused`.
 fn prepare(
     root: &Path,
     project: &ProjectId,
     asked: AgentAccess,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<InteractiveCommand, EngineError> {
     let place = ide_shell::project_place(root, project)
         .map_err(|_| failure("ide_terminal_project_unavailable"))?;
     let level = terminal_level(place.access, asked).map_err(failure)?;
+    let kept_ports = crate::ide::workspace::kept_ports(settings)?;
     let shell = ide_shell::owner_shell().map_err(|_| failure("ide_terminal_shell_unknown"))?;
     let incoming: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(variable, _)| {
@@ -214,6 +218,7 @@ fn prepare(
         extra_reads: &place.extra_reads,
         level,
         network: place.network,
+        kept_ports: &kept_ports,
     })
     .map_err(|error| match error {
         SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),

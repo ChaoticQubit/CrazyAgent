@@ -522,6 +522,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         &grants,
         45_733,
         crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        &[],
     )
     .unwrap();
     let mut shell = command(&profile, Path::new("/bin/sh"));
