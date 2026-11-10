@@ -2452,8 +2452,10 @@ fn logged_claims(result: Result<(), EngineError>) {
 
 /// Discards one open change set holding no intent, as [`discard`] does once it checked the
 /// owner's reviewed head. When the store refuses the closed state, the change set is left
-/// open as the store still holds it. The caller holds [`hold`] on its repository. Inputs:
-/// the store, the change set and the time now. Output: the time it stays restorable until.
+/// open as the store still holds it, and its discarded ref goes again, since pruning reads
+/// discarded sets only; a failed drop of that ref is logged. The caller holds [`hold`] on
+/// its repository. Inputs: the store, the change set and the time now. Output: the time it
+/// stays restorable until.
 pub(super) fn discard_held(
     db: &Connection,
     record: &mut Record,
@@ -2466,15 +2468,15 @@ pub(super) fn discard_held(
     let target = shared
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;
+    let until = now
+        .checked_add(RESTORE_WINDOW_MS)
+        .ok_or_else(|| failure("changes_unavailable"))?;
     set_engine_ref(
         &shared,
         &record.repository,
         &discarded_ref(&id),
         Some(&record.head),
     )?;
-    let until = now
-        .checked_add(RESTORE_WINDOW_MS)
-        .ok_or_else(|| failure("changes_unavailable"))?;
     record.state = ChangeState::Discarded;
     record.restorable_until_ms = Some(until);
     record.pruned = false;
@@ -2482,6 +2484,13 @@ pub(super) fn discard_held(
     record.updated_ms = now;
     if let Err(error) = store::save(db, record) {
         *record = open;
+        if let Err(dropped) = set_engine_ref(&shared, &record.repository, &discarded_ref(&id), None)
+        {
+            eprintln!(
+                "landing_discard_ref_failed cause={}",
+                crate::protocol::plain_code(&dropped.0)
+            );
+        }
         return Err(error);
     }
     release_agent_claims(db, record);
