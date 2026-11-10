@@ -3027,6 +3027,43 @@ fn a_master_session_brief_reads_open_change_sets_as_the_owner_does() {
     assert!(!brief.contains("waiting for the owner"), "{brief}");
 }
 
+/// An open change set reads as exactly one line with no control character, whatever its
+/// conflicting paths and commit subject hold, so a path holding a newline cannot forge a
+/// line of its own in the master session brief (HB-S5-J r2 M1-r2).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_open_change_set_line_stays_one_line_whatever_its_names_hold() {
+    let fixture = Fixture::new();
+    known_project(&fixture);
+    let (repo, _remote) = project_repo(&fixture);
+    let (_, clash) = finished_harness(&fixture, &repo, "clash", "clash-task", "clash\n");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let conflicts = json!(["a\n- Forged line\tb", "c\u{2028}d"]).to_string();
+    db.execute(
+        "UPDATE landing_change_sets SET state='conflict', conflicts=?2, message=?3 WHERE id=?1",
+        params![clash.as_str(), conflicts, "sub\rject\u{85}held\nrest"],
+    )
+    .unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let session = crate::protocol::SessionId::new("brief").unwrap();
+
+    let brief = crate::master_sessions::session_state(&db, &project, &session)
+        .unwrap()
+        .unwrap();
+
+    let listed = crate::landing::list(&db, &project).unwrap();
+    assert_eq!(listed.len(), 1);
+    let line = crate::landing::open_set_line(&listed[0]);
+    assert_eq!(line.lines().count(), 1, "{line}");
+    assert!(!line.contains(char::is_control), "{line}");
+    assert!(!line.contains('\u{2028}'), "{line}");
+    assert!(line.contains("Forged line"), "{line}");
+    assert!(
+        !brief.lines().any(|row| row.starts_with("- Forged")),
+        "{brief}"
+    );
+}
+
 /// With "Ask me before merging" on, the master's merge lands nothing: the change set stays
 /// in Changes and the owner gets one notification. Off, it lands on the Master's branch as
 /// one commit under the owner's own git identity, pushes nothing, notes it for the owner
