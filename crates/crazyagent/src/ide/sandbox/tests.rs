@@ -2232,8 +2232,11 @@ fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
 /// IDE-SANDBOX-AGENT-FOLDERS (a) under the installed `server.sb`: the IDE writes nothing
 /// under the project's `.git/worktrees`, in any letter case, nor below an agent folder's
 /// `.git`, whatever makes the write: a shell, real git by path, or git through the shim,
-/// an alias included, and no hard link of an admin file into the project carries a write
-/// to it. Agents' admin files keep their bytes and nothing is planted there. Status,
+/// an alias included, a Kelvin sign or long s spelling of `worktrees` included, and no
+/// hard link of an admin file into the project carries a write to it. Agents' admin files
+/// keep their bytes and nothing is planted there. `branch -m` of an agent's branch stops
+/// at the agent's admin `HEAD`, which keeps its bytes, but the branch ref itself is
+/// renamed: the row pins that partial rename (IDE-ADMIN-BRANCH-RENAME). Status,
 /// `worktree list`, a commit at the project folder and a gc, with agent reflogs and
 /// without, still work.
 #[test]
@@ -2346,6 +2349,19 @@ fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
         &admins.join("agent-4").join("HEAD")
     ));
     assert!(!s.root.join("h").exists());
+    for spelling in ["wor\u{212a}trees", "worktree\u{17f}"] {
+        let head = s
+            .root
+            .join(".git")
+            .join(spelling)
+            .join("agent-4")
+            .join("HEAD");
+        assert!(
+            !sh(&s.profile, "printf x > \"$1\"", &head),
+            "{}",
+            head.display()
+        );
+    }
     let commit = setup(&s.root, &["rev-parse", "agent-4"]);
     let (moved, said) = ide_git(
         &s.profile,
@@ -2371,8 +2387,27 @@ fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
         fs::remove_file(file).unwrap();
     }
     collect("without agent reflogs");
+    let renamed_from = setup(
+        &s.root,
+        &["rev-parse", "--verify", "-q", "refs/heads/agent-6"],
+    );
     let (moved, said) = s.git(&["branch", "-m", "agent-6", "agent-x"]);
     assert!(!moved, "{said}");
+    assert!(said.contains("HEAD is not updated"), "{said}");
+    let (kept, _) = setup_git(
+        &s.root,
+        &[],
+        &["rev-parse", "--verify", "-q", "refs/heads/agent-6"],
+    );
+    assert!(!kept, "IDE-ADMIN-BRANCH-RENAME: the ref agent-6 moved");
+    assert_eq!(
+        setup(
+            &s.root,
+            &["rev-parse", "--verify", "-q", "refs/heads/agent-x"]
+        ),
+        renamed_from,
+        "IDE-ADMIN-BRANCH-RENAME: agent-x holds agent-6's commit"
+    );
     let (removed, said) = s.git(&[
         "-c",
         "alias.x=worktree remove --force --force",
