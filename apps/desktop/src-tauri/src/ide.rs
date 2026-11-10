@@ -1,7 +1,7 @@
 use crate::bridge::{BridgeError, open};
 use crazyagent::engine::owner::IdeTabServer;
 use crazyagent::protocol::ProjectId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -117,6 +117,15 @@ impl Bounds {
             size: LogicalSize::new(self.width, self.height).into(),
         }
     }
+}
+
+/// What an IDE open tells the tab: whether the IDE stays in its own window, and what the
+/// project's last Full access server left running after its stop, named once.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Opened {
+    pub own_window: bool,
+    pub left: Option<String>,
 }
 
 /// Where one project's IDE webview loads: the workbench URL with the session token and the
@@ -980,6 +989,7 @@ mod tests {
             webview_port: 47913,
             token_path: token_path.clone(),
             workspace: workspace.clone(),
+            left: None,
         };
         let built = workbench(&opened).unwrap_or_else(|error| panic!("{}", error.code));
         let pairs: Vec<(String, String)> = built.url.query_pairs().into_owned().collect();

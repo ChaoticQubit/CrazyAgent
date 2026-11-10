@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
@@ -269,6 +269,30 @@ async function atLevel(t, level, shared) {
         for (const word of report) assert.match(said, new RegExp(`^${word}$`, "m"), `${picked}: ${said}`);
       }
     });
+
+    if (level.access === "full") {
+      await t.test("Full access: a process its terminal left running is named when the IDE opens again", async () => {
+        const said = await ran("level-left.txt", `nohup node -e "setInterval(() => {}, 1000)" > /dev/null 2>&1 & echo $!`);
+        const pid = said.split("\n")[0];
+        assert.match(pid, /^\d+$/, said);
+        try {
+          await setLevel(bridge, project, "own_branch", next);
+          for (const deadline = Date.now() + STEP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
+            assert.ok(Date.now() < deadline, "the Full access server kept running after its level was lowered");
+          }
+          await setLevel(bridge, project, "full", next);
+          const reopened = await value(bridge, "e2e_ide_open", { projectId: project });
+          writeFileSync(join(evidence, "level-full-left.txt"), `${reopened.left ?? "none"}\n`);
+          const named = (reopened.left ?? "").split(", ").some((item) => item.startsWith(`${pid} `));
+          assert.ok(named, `the open named ${JSON.stringify(reopened.left)}, not ${pid}`);
+        } finally {
+          try {
+            process.kill(Number(pid), "SIGKILL");
+          } catch {
+          }
+        }
+      });
+    }
   });
 }
 

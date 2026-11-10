@@ -419,3 +419,16 @@ test("the IDE ask polls run only while the IDE can open, and reach the engine on
     assert.ok(body.indexOf("views.any_loaded()") < body.indexOf(engine), `${name}: no engine read before the check`);
   }
 });
+
+test("an open that names what the last Full access IDE left running shows it above the IDE", () => withOpenTab('[], [], false, false, "4242 /opt/homebrew/bin/node"', async (evaluate) => {
+  await evaluate("Fixture.frames()");
+  const shown = await evaluate("Fixture.tab()");
+  assert.ok(shown.text.includes("Still running after this IDE stopped: 4242 /opt/homebrew/bin/node"), shown.text);
+  assert.equal(shown.panelHidden, false, "the IDE still opens");
+}));
+
+test("an open that names nothing shows no leftover line", () => withOpenTab("[]", async (evaluate) => {
+  await evaluate("Fixture.frames()");
+  const shown = await evaluate("Fixture.tab()");
+  assert.ok(!shown.text.includes("Still running after this IDE stopped"), shown.text);
+}));
