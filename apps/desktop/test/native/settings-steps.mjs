@@ -80,6 +80,11 @@ export function toasts() {
     .map((node) => [...node.childNodes].filter((child) => child.nodeType === Node.TEXT_NODE).map((child) => child.textContent).join("")));
 }
 
+/** Selects a pool on Settings, Pools. Input: its name. Output: none. */
+export async function selectPool(name) {
+  await click(`//button[contains(concat(" ", normalize-space(@class), " "), " pool-item ")][.//span[normalize-space(.)=${literal(name)}]]`);
+}
+
 /** Waits for a condition and fails with what the window shows when it never holds.
  * Inputs: the condition, the time limit in ms and the failure label. Output: none. */
 export async function until(condition, timeout, label) {

@@ -1823,6 +1823,200 @@ fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_of
     );
 }
 
+/// A message for an agent that has stopped waits for its next session, so its sender is
+/// told that, not that it arrives at a next turn (HB-S5-E). A note, a message, a reply and
+/// a question that went to a stopped lead all say so.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sender_is_told_its_message_waits_for_an_agent_that_stopped() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let stopped = named_sub(&fixture, "api", "stopped");
+    let failed = named_sub(&fixture, "docs", "failed");
+    let peer = named_sub(&fixture, "peer", "working");
+    let waits = |fixture: &Fixture, agent: i64| {
+        let label = super::super::events::label(&fixture.connection, agent).unwrap();
+        format!("{label} has stopped, so it waits until {label} is woken")
+    };
+    for (target, sent) in [
+        (
+            stopped,
+            json!({"kind": "note", "to": stopped.to_string(), "text": "The schema moved."}),
+        ),
+        (
+            failed,
+            json!({"kind": "note", "to": failed.to_string(), "text": "The schema moved."}),
+        ),
+        (
+            stopped,
+            json!({"to": stopped.to_string(), "text": "Use the v2 schema."}),
+        ),
+    ] {
+        let (said, refused) = as_sub(&mut fixture, peer, tool::UPDATE_WORK_TOOL, sent);
+        assert!(!refused, "{said}");
+        assert!(said.contains(&waits(&fixture, target)), "{said}");
+        assert!(!said.contains("at its next turn"), "{said}");
+    }
+    let asker = named_sub(&fixture, "asker", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        asker,
+        tool::UPDATE_WORK_TOOL,
+        json!({"to": peer.to_string(), "text": "Which schema?"}),
+    );
+    assert!(!refused, "{said}");
+    let asked: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE from_agent=?1 AND to_agent=?2",
+            [asker, peer],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [asker],
+        )
+        .unwrap();
+    let (said, refused) = as_sub(
+        &mut fixture,
+        peer,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": asked, "text": "The v2 schema."}),
+    );
+    assert!(!refused, "{said}");
+    assert!(said.contains(&waits(&fixture, asker)), "{said}");
+    let lead = named_sub(&fixture, "lead-gone", "stopped");
+    let worker = named_sub(&fixture, "worker", "working");
+    lead_of(&fixture, lead, worker);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        worker,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "lead", "severity": "normal", "text": "Which way?"}),
+    );
+    assert!(!refused, "{said}");
+    assert!(said.contains(&waits(&fixture, lead)), "{said}");
+    let present = named_sub(&fixture, "lead-here", "working");
+    let helper = named_sub(&fixture, "helper", "working");
+    lead_of(&fixture, present, helper);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        helper,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "lead", "severity": "normal", "text": "Which way?"}),
+    );
+    assert!(!refused, "{said}");
+    assert!(!said.contains("has stopped"), "{said}");
+}
+
+/// Finishing work that already waits for review says so, not a rule about who may finish
+/// it (HB-S5-F).
+#[cfg(target_os = "macos")]
+#[test]
+fn finishing_work_already_waiting_for_review_says_so() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let sub = named_sub(&fixture, "api", "working");
+    no_worktree(&fixture, sub);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        sub,
+        tool::START_WORK_TOOL,
+        json!({"title": "API", "claims": ["API.md"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "API");
+    let review = |version: i64| json!({"work": work, "version": version, "outcome": "review_ready", "evidence": "cargo test passed"});
+    let (said, refused) = as_sub(&mut fixture, sub, tool::FINISH_WORK_TOOL, review(1));
+    assert!(!refused, "{said}");
+    assert_eq!(
+        as_sub(&mut fixture, sub, tool::FINISH_WORK_TOOL, review(2)),
+        (
+            "Not finished: that work already waits for review; it can only be completed or closed now.".to_owned(),
+            true
+        )
+    );
+}
+
+/// One start overlapping many claims of one agent writes that agent one note saying how
+/// many more there are, not one note per claim (HB-S5-G, ten notes from one start), and an
+/// agent past the first ten overlaps still gets its note.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_start_writes_one_overlap_note_to_each_agent() {
+    let mut fixture = Fixture::new();
+    let busy = named_sub(&fixture, "add-fn", "working");
+    let other = named_sub(&fixture, "mul-fn", "working");
+    let starter = named_sub(&fixture, "sub-fn", "working");
+    let many: Vec<String> = (0..12).map(|index| format!("f{index}.py")).collect();
+    let mut all = many.clone();
+    all.push("last.py".to_owned());
+    for (agent, title, claims) in [
+        (busy, "Many", many),
+        (other, "One", vec!["last.py".to_owned()]),
+        (starter, "All", all),
+    ] {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": title, "claims": claims}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let notes =
+        "SELECT body FROM coord_messages WHERE to_agent=?1 AND kind='note' AND from_kind='engine'";
+    let to_busy = bodies(&fixture, notes, busy);
+    assert_eq!(to_busy.len(), 1, "{to_busy:?}");
+    assert!(
+        to_busy[0].contains(", and 11 more between this work and yours. This note takes no reply"),
+        "{}",
+        to_busy[0]
+    );
+    let to_other = bodies(&fixture, notes, other);
+    assert_eq!(to_other.len(), 1, "{to_other:?}");
+    assert!(!to_other[0].contains(" more between "), "{}", to_other[0]);
+}
+
+/// One start tells at most ten agents of an overlap, however many it overlaps.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_start_notes_at_most_ten_agents() {
+    let mut fixture = Fixture::new();
+    let holders: Vec<i64> = (0..11)
+        .map(|index| named_sub(&fixture, &format!("holder-{index}"), "working"))
+        .collect();
+    let starter = named_sub(&fixture, "starter", "working");
+    for agent in holders {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": format!("Holder {agent}"), "claims": ["same.py"]}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let (said, refused) = as_sub(
+        &mut fixture,
+        starter,
+        tool::START_WORK_TOOL,
+        json!({"title": "Last start", "claims": ["same.py"]}),
+    );
+    assert!(!refused, "{said}");
+    let noted: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE from_kind='engine' AND kind='note' AND body LIKE '%\"Last start\"%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(noted, 10);
+}
+
 /// Adds `count` claims `more/<i>.rs` to one unit of work, as a long backlog would. Takes the
 /// fixture, the work and the count.
 #[cfg(target_os = "macos")]
@@ -2358,11 +2552,11 @@ fn finish_work_tells_the_lead_or_master_of_review_and_the_master_finishes_unchec
 }
 
 /// The stop tool: a lead stops only its own workers and never itself, the master stops
-/// any sub-agent, each stop is the owner's stop, and once it ends a message to the
-/// stopped agent cannot wake it.
+/// any sub-agent, neither stop is the owner's, and a message from the lead that stopped
+/// its worker wakes it again (HB-S5-B).
 #[cfg(target_os = "macos")]
 #[test]
-fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owner() {
+fn a_lead_stops_only_its_own_workers_and_wakes_the_one_it_stopped() {
     let mut fixture = Fixture::new();
     master_row(&fixture);
     fixture
@@ -2413,7 +2607,9 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
             json!({"agent": worker.to_string()})
         ),
         (
-            format!("Stopping {worker_label}. Only the owner can wake it again."),
+            format!(
+                "Stopping {worker_label}. Its unfinished tasks fail, and you can wake it again."
+            ),
             false
         )
     );
@@ -2424,7 +2620,9 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
             json!({"agent": other.to_string()})
         ),
         (
-            format!("Stopping {other_label}. Only the owner can wake it again."),
+            format!(
+                "Stopping {other_label}. Its unfinished tasks fail, and you can wake it again."
+            ),
             false
         )
     );
@@ -2434,6 +2632,12 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
         lead,
     );
     assert_eq!(stops, vec![worker.to_string(), other.to_string()]);
+    for stopped in [worker, other] {
+        assert!(
+            !crate::team::owner_stopped(&fixture.connection, stopped).unwrap(),
+            "a stop by an agent is not the owner's"
+        );
+    }
     fixture
         .connection
         .execute(
@@ -2447,11 +2651,49 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
         tool::UPDATE_WORK_TOOL,
         json!({"to": worker.to_string(), "text": "Go on."}),
     );
+    assert!(
+        !refused
+            && said.starts_with("Sent #")
+            && said.contains(&format!(". Waking {worker_label}:")),
+        "{said}"
+    );
+    assert_eq!(pinned(&fixture, worker).len(), 1);
+}
+
+/// A worker the master stopped stays stopped for its lead: the lead's message is refused
+/// and stores nothing, and the master's own message wakes it (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_the_master_stopped_wakes_for_the_master_and_not_for_its_lead() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    lead_of(&fixture, lead, worker);
+    let label = super::super::events::label(&fixture.connection, worker).unwrap();
+    let stop = json!({"agent": worker.to_string()});
+    assert!(!as_master(&mut fixture, tool::STOP_TOOL, stop).1);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [worker],
+        )
+        .unwrap();
+    let go_on = json!({"to": worker.to_string(), "text": "Go on."});
     assert_eq!(
-        (said.as_str(), refused),
+        as_sub(&mut fixture, lead, tool::UPDATE_WORK_TOOL, go_on.clone()),
         (
-            format!("Not sent: the owner stopped {worker_label}. Only the owner can wake it.")
-                .as_str(),
+            format!(
+                "Not sent: the master stopped {label}. Only the master or the owner can wake it."
+            ),
             true
         )
     );
@@ -2465,6 +2707,50 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
         )
         .unwrap();
     assert_eq!(stored, 0, "a refused message is not stored");
+    let (said, refused) = as_master(&mut fixture, tool::UPDATE_WORK_TOOL, go_on);
+    assert!(
+        !refused && said.starts_with("Sent #") && said.contains(&format!(". Waking {label}:")),
+        "{said}"
+    );
+    assert_eq!(pinned(&fixture, worker).len(), 1);
+}
+
+/// A stop of an agent a higher stop already holds says who holds it and who can wake it,
+/// instead of offering a wake that would be refused (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_under_a_higher_stop_says_who_holds_it() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    lead_of(&fixture, lead, worker);
+    let label = super::super::events::label(&fixture.connection, worker).unwrap();
+    let stop = json!({"agent": worker.to_string()});
+    assert!(!as_master(&mut fixture, tool::STOP_TOOL, stop.clone()).1);
+    assert_eq!(
+        as_sub(&mut fixture, lead, tool::STOP_TOOL, stop.clone()),
+        (
+            format!(
+                "The master stopped {label} already. Only the master or the owner can wake it."
+            ),
+            false
+        )
+    );
+    crate::team::owner_stop(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        worker,
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        as_master(&mut fixture, tool::STOP_TOOL, stop),
+        (
+            format!("The owner stopped {label} already. Only the owner can wake it."),
+            false
+        )
+    );
 }
 
 /// A message to a finished agent that cannot wake, here one whose worktree is gone, is
@@ -3218,9 +3504,14 @@ fn lead_tools_reach_only_its_workers() {
     .unwrap();
     assert!(!refused, "{text}");
     assert!(text.starts_with("Stopping "), "{text}");
-    assert!(crate::team::owner_stopped(&fixture.connection, mine).unwrap());
+    assert_eq!(
+        crate::team::stop_of(&fixture.connection, mine)
+            .unwrap()
+            .map(|stop| stop.0),
+        Some(crate::team::StoppedBy::Lead)
+    );
     for other in [theirs, sibling, lead] {
-        assert!(!crate::team::owner_stopped(&fixture.connection, other).unwrap());
+        assert!(!crate::team::stopped(&fixture.connection, other).unwrap());
     }
 }
 

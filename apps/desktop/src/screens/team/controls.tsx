@@ -1,8 +1,8 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
@@ -15,7 +15,6 @@ import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam,
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
 export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
-export const MASTER_IDLE_STOP_SECS = 900;
 const ANY_HARNESS = "";
 const NO_LIMIT = "off";
 const encoder = new TextEncoder();
@@ -76,6 +75,12 @@ export function taskInput(text: string): { kind: "ok"; prompt: string } | { kind
 export const SWITCH_OPTIONS: SelectOption[] = [
   { value: "carry", label: "Carry conversation over" },
   { value: "fresh", label: "Start fresh" },
+];
+
+export const MASTER_IDLE_OPTIONS: SelectOption[] = [
+  { value: "off", label: "Off" },
+  { value: "fifteen_minutes", label: "15 min" },
+  { value: "one_hour", label: "1 h" },
 ];
 
 /** The On harness switch mode a team status holds, Carry over when an older engine sends none.
@@ -305,6 +310,49 @@ export function OnSwitchSetting({ projectId, status, reload }: { projectId: stri
   return <SettingRow label="On master harness switch">
     <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={shown} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** What an idle master does under its own idle stop choice, for the sub-agent idle stop's
+ * helper. Input: the team status. Output: the sentence. */
+function masterIdleWords(status: TeamStatus): string {
+  const choice = status.master_idle_stop ?? "fifteen_minutes";
+  if (choice === "off") return "An idle master keeps running until the team stops.";
+  const label = choice === "one_hour" ? "1 h" : "15 min";
+  return `An idle master stops ${label} after its work is done and is never stopped while that work is still going.`;
+}
+
+/** The Stop the master when idle after setting as one row of the master's settings: Off, 15
+ * min or 1 h, showing the engine's choice for this project (DEC-117 Q4). Inputs: the project
+ * id, the team status and a reload. Output: the row. */
+export function MasterIdleSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<MasterIdleStop>(status.master_idle_stop ?? "fifteen_minutes");
+
+  const choose = (choice: MasterIdleStop) => change(() => setMasterIdleStop(projectId, choice), "the master idle stop setting", () => hold(choice));
+
+  return <SettingRow label="Stop the master when idle after">
+    <Select id={`tg-master-idle-${projectId}`} label="Stop the master when idle after" value={shown} options={MASTER_IDLE_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "off" || value === "fifteen_minutes" || value === "one_hour")) void choose(value); }}
+      helper="A master in a live terminal stops too, once no turn is open and you have no unsent line." />
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** The Live terminal setting as one row of the master's settings: on, the master runs in its
+ * own terminal; off, the area shows the conversation and a running live master ends at its next
+ * stop (DEC-117 Q4). Inputs: the project id, the team status and a reload. Output: the row. */
+export function LiveTerminalSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on");
+
+  const choose = (on: boolean) => change(() => setMasterLiveTerminal(projectId, on), "the Live terminal setting", () => hold(on ? "on" : "off"));
+
+  return <SettingRow label="Live terminal">
+    <span className="set-label" aria-hidden="true">Live terminal</span>
+    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
+    <span className="tg-terminal-note">You see and type into the master's own terminal.</span>
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }
@@ -680,7 +728,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <SettingRow label="Stop an idle sub-agent after">
             <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
               onValue={(value) => void limit("idle", value)}
-              helper={`Off keeps an idle sub-agent running until the team stops. An idle master stops ${limitLabel(MASTER_IDLE_STOP_SECS)} after its work is done and is never stopped while that work is still going.`} />
+              helper={`Off keeps an idle sub-agent running until the team stops. ${masterIdleWords(status)}`} />
           </SettingRow>
           <SettingRow label="Background commands at task end">
             <Select id={`tg-background-${projectId}`} label="Background commands at task end" value={backgroundShown.mode} options={BACKGROUND_OPTIONS}

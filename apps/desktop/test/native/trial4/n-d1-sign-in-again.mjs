@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { click, menu, shown } from "../settings-steps.mjs";
+import { OWNER_MS } from "../trial4-checks.mjs";
 import { SCRATCH, accounts, closeDialog, command, dropScratch, findAccount, scratchAccount, statusOf, tidy, windowText } from "../trial4-accounts.mjs";
 
-const OWNER_MS = Number(process.env.TRIAL_OWNER_MS ?? 600000);
 const START = "//dialog[@open]//button[normalize-space(.)=\"Open Claude sign-in\" or normalize-space(.)=\"Try again\" or normalize-space(.)=\"Get a new code\"]";
 const CANCEL = "//dialog[@open]//button[normalize-space(.)=\"Cancel sign-in\"]";
 const CONFLICT = "native_profile_binding_conflict";
@@ -68,8 +68,9 @@ export const checks = [{
   title: "Sign in again after an interrupted sign-in",
   why: "owner: \"Sign-in didn't finish. Try again. (native_profile_binding_conflict) ... I can't even sign in.\"",
   after: "end",
+  only: "asked",
   run: async (kit) => {
-    if (!(OWNER_MS > 0)) throw new Error("not run: TRIAL_OWNER_MS is 0, so no one is here to finish a browser sign-in");
+    assert(OWNER_MS > 0, "the plan leaves N-D1 out unless TRIAL_OWNER_MS is set");
     const account = await scratchAccount("signin");
     return tidy(async () => {
       await start(kit, account);

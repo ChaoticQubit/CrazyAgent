@@ -131,6 +131,14 @@ test("By agent leaves Turns empty for an agent the engine gives no turns: a row 
   }
 });
 
+test("By agent lists an agent that ended turns but used no tokens in the range, with its turns and a zero share", () => {
+  const [juniper, master] = metrics().agents;
+  const ash = { project: "alpha", agent: "team-9", label: "Ash", harnesses: [], more_harnesses: 0, accounts: [], more_accounts: 0, tokens: tokens({}), turns: 5 };
+  const table = tableText(render({ metrics: { kind: "ok", value: metrics({ agents: [juniper, master, ash] }) } }));
+  assert.match(table, /Juniper · Codex 1\.4K 700 500 200 3K 12 44 37 6 61%/);
+  assert.match(table, /Ash 0 0 0 0 0 5 0%/, table);
+});
+
 test("By run titles each run by its task and shows its agent, end and result", () => {
   const table = tableText(render({ by: "run" }));
   assert.match(table, /^ Run Tokens Input Cache write Output Cache read Agent Ended Result Share of tokens /);

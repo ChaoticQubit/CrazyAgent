@@ -46,6 +46,7 @@ export async function mountTab(element, answer, theme, sessionParts = {}) {
   const session = { noteResult: (result) => result, showToast: () => {}, ...sessionParts };
   await act(async () => { root.render(createElement(SessionContext.Provider, { value: session }, element)); });
   await settle(60);
+  return () => root.unmount();
 }
 
 const words = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();

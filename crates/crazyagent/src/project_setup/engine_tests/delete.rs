@@ -653,6 +653,64 @@ async fn a_pending_home_move_holds_a_home_switch_until_it_is_forgotten() {
     engine.stop().await;
 }
 
+/// A projects home move whose record and first settle both fail is finished by a later try,
+/// so its row does not refuse every home change until a restart. The failures last 90 ms from
+/// the plan's write, which is less than the two gaps before the third try.
+#[tokio::test]
+async fn a_home_move_is_finished_when_its_record_and_first_settle_fail() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    project(&mut owner).await;
+    let mut desktop =
+        OwnerController::attach(engine.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
+    let scratch_home = || {
+        let dir = tempfile::Builder::new()
+            .prefix("ca-next-home-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        (dir, path)
+    };
+    let (_next, next_path) = scratch_home();
+    let (_other, other_path) = scratch_home();
+    write_db(
+        &engine,
+        "CREATE TABLE settle_gate(until REAL);
+         CREATE TRIGGER settle_gate_opens AFTER INSERT ON projects_home_move
+         BEGIN
+           DELETE FROM settle_gate;
+           INSERT INTO settle_gate VALUES ((julianday('now') - 2440587.5) * 86400.0 + 0.09);
+         END;
+         CREATE TRIGGER settle_fails_at_first BEFORE DELETE ON projects_home_move
+         WHEN (julianday('now') - 2440587.5) * 86400.0 < (SELECT until FROM settle_gate)
+         BEGIN
+           SELECT RAISE(FAIL, 'settle fails at first');
+         END;",
+    );
+    let _ = desktop.move_projects_home(next_path, true, 1).await;
+    let waiting = || engine.rows("SELECT count(*) FROM projects_home_move");
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while waiting() != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(waiting(), 0, "a later settle finishes the move");
+    let picked = owner.set_projects_home(other_path, 2).await.unwrap();
+    assert_eq!(
+        result(picked),
+        OwnerResult::Applied,
+        "a finished move holds no later home change"
+    );
+    drop(desktop);
+    drop(owner);
+    engine.stop().await;
+}
+
 /// When every settle before the reply fails the reply still goes, and the settle after it
 /// forgets the plan, so a home move is not refused until a restart.
 #[tokio::test]

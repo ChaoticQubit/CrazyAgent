@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -642,8 +642,17 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+/** Why a ready account stands where it does in its pool's ranking. */
+export type OrderWhy =
+  | { kind: "use_last" } | { kind: "limit_reported" } | { kind: "no_reading" }
+  | { kind: "resets_soonest"; resets_ms: number } | { kind: "resets_later"; resets_ms: number }
+  | { kind: "least_used" } | { kind: "more_used" } | { kind: "more_five_hour_used" }
+  | { kind: "ranked"; rank: number } | { kind: "unranked" }
+  | { kind: "tied_rank"; rank: number | null } | { kind: "tied_order" };
+
 export type AccountStanding =
-  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean; why: OrderWhy }
+  | { kind: "not_signed_in" }
   | { kind: "paused"; until_ms: number }
   | { kind: "never_use" }
   | { kind: "five_hour_cap"; until_ms: number | null }
@@ -658,6 +667,7 @@ export interface PoolRanking {
   pool: string;
   strategy: AccountStrategy;
   accounts: RankedAccount[];
+  own_order_projects: number;
 }
 
 /** Reads each pool's account ranking: the order work would try its accounts now, then each
@@ -672,7 +682,8 @@ export function setAccountSchedule(scheduleChange: ScheduleChange, version: numb
   return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-function poolId(): string {
+/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
+export function newPoolId(): string {
   const bytes = new Uint8Array(10);
   crypto.getRandomValues(bytes);
   return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -705,32 +716,31 @@ export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Res
   return poolInput(renamed ? saved.name : now.name, [...kept, ...added]);
 }
 
-/** Creates a pool, or saves the owner's changes to an existing one while keeping its project
- * assignments and any change made elsewhere since the owner read it (see `mergePool`).
- * Inputs: pool id (absent for a new pool), name, member ids, and for an existing pool its
- * name and members as the owner read them. Output: ok once the engine saved it. */
-export async function savePool(id: string | undefined, name: string, members: string[], opened?: PoolBase): Promise<Result<void>> {
-  assert(id === undefined || opened !== undefined, "saving an existing pool needs the read it was edited from");
+/** Creates a pool with its first accounts. Inputs: its new id, name and member ids. Output: ok
+ * once the engine saved it. */
+export async function createPool(id: string, name: string, members: string[]): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  let ticket: string;
-  let edit: ModelAccessEdit;
-  if (id === undefined) {
-    const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
-    if (page.kind !== "ok") return page;
-    ticket = page.value.ticket;
-    edit = { kind: "create_pool", pool: { id: poolId(), name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
-  } else {
-    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-    if (detail.kind !== "ok") return detail;
-    if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
-    const now = detail.value.record.pool;
-    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened!, input.value);
-    if (merged.kind !== "ok") return merged;
-    ticket = detail.value.ticket;
-    edit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
-  }
-  return change("desktop_edit_model_access", { ticket, edit, generation: nextGeneration() });
+  const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
+  if (page.kind !== "ok") return page;
+  const edit: ModelAccessEdit = { kind: "create_pool", pool: { id, name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
+  return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+}
+
+/** Saves the owner's changes to a pool while keeping its project assignments and any change made
+ * elsewhere since the owner read it (see `mergePool`). Inputs: pool id, name, member ids, and its
+ * name and members as the owner read them. Output: ok once the engine saved it. */
+export async function savePool(id: string, name: string, members: string[], opened: PoolBase): Promise<Result<void>> {
+  const input = poolInput(name, members);
+  if (input.kind !== "ok") return input;
+  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+  if (detail.kind !== "ok") return detail;
+  if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
+  const now = detail.value.record.pool;
+  const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
+  if (merged.kind !== "ok") return merged;
+  const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
+  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
 }
 
 /** Deletes a pool and takes it off every project that uses it, in one engine change.
@@ -1339,6 +1349,18 @@ export function closeProjectWalls(id: string): Promise<Result<void>> {
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
+}
+
+/** Saves a project's "Stop the master when idle after" choice (DEC-117 Q4). Inputs: the
+ * project id and the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterIdleStop(id: string, choice: MasterIdleStop): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_idle_stop", { id, choice, generation: nextGeneration() });
+}
+
+/** Saves a project's "Live terminal" setting (DEC-117 Q4). Inputs: the project id and whether
+ * it is on. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLiveTerminal(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_live_terminal", { id, on, generation: nextGeneration() });
 }
 
 /** Sets the project's "Reuse idle agents" setting: off starts a new agent for each new task, on

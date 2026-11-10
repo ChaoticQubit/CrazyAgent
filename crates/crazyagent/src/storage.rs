@@ -299,10 +299,19 @@ impl Storage {
                 };
                 let mut custody = Some(custody);
                 let mut config = config;
-                if !readonly
-                    && let Err(e) =
-                        settings::recover(&mut connection, &mut config, sources.as_ref())
-                {
+                let recovered = if readonly {
+                    Ok(())
+                } else {
+                    settings::recover(&mut connection, &mut config, sources.as_ref()).and_then(
+                        |()| {
+                            trash::sweep_at_start(
+                                &connection,
+                                config.settings.model_access.as_ref(),
+                            )
+                        },
+                    )
+                };
+                if let Err(e) = recovered {
                     drop(connection);
                     drop(custody.take());
                     drop(lock);
@@ -990,7 +999,6 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
-        trash::sweep(&connection, &canonical_root)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -2741,6 +2749,39 @@ fn stored_setup(
     crate::project_setup::load_setup(tx, project_id)?.ok_or_else(|| error("project_setup_missing"))
 }
 
+/// Whether a native managed connection's latest sign-in ended authenticated. Takes the store
+/// and the connection. Returns false for any other connection or a latest operation that did
+/// not end so; a stored fact past its bound is a `native_auth_fact_bounds` failure.
+pub(crate) fn latest_sign_in_authenticated(
+    connection: &Connection,
+    model: &crate::config::ModelConnection,
+) -> Result<bool, EngineError> {
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
+        return Ok(false);
+    };
+    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let fact: Option<Option<Vec<u8>>> = connection
+        .query_row(
+            "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+            [&key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(bytes) = fact else {
+        return Ok(false);
+    };
+    let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
+    let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+    Ok(
+        fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
+            && matches!(
+                fact.action,
+                crate::engine::owner::NativeAuthAction::SignIn { .. }
+            ),
+    )
+}
+
 /// Reads one page of the plain pool list with each member's sign-in status.
 /// Input: the read transaction, current config and the index of the first pool.
 /// Output: pools from that index while the reply stays within 30000 bytes, and
@@ -2753,30 +2794,8 @@ fn pool_summaries(
     let catalog = config.settings.model_access.clone().unwrap_or_default();
     let mut signed_in = std::collections::BTreeSet::new();
     for connection in &catalog.connections {
-        let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth
-        else {
-            continue;
-        };
-        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
-        let fact: Option<Option<Vec<u8>>> = tx
-            .query_row(
-                "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-                [&key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(error)?;
-        if let Some(bytes) = fact {
-            let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
-            let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-            if fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
-                && matches!(
-                    fact.action,
-                    crate::engine::owner::NativeAuthAction::SignIn { .. }
-                )
-            {
-                signed_in.insert(connection.id.clone());
-            }
+        if latest_sign_in_authenticated(tx, connection)? {
+            signed_in.insert(connection.id.clone());
         }
     }
     let all = crate::pools::summarize(&catalog, |connection| signed_in.contains(&connection.id));

@@ -20,8 +20,8 @@ const GROUPS = [
   ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER_GROUPS = [
-  ["Master", ["Harness", "Account"]],
-  ["Conversation", ["On master harness switch", "Apply a master harness change"]],
+  ["Master", ["Harness", "Account", "Live terminal"]],
+  ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
@@ -175,7 +175,7 @@ test("the Master settings drawer holds Master, Conversation, Messages and Access
   assert.match(account, /<option value="pool-b"[^>]*>Any in Pool B<\/option>/);
   assert.match(plain(account), /From the project's pool; fails over to the next account\./);
   assert.doesNotMatch(found[0].body, />(Change master|Change pool|Choose pool)</, "no button leaves the drawer to pick the harness or account");
-  assert.doesNotMatch(html, /Stop the master when idle after/, "no idle-stop row while it has no setting");
+  assert.match(plain(row(html, "Stop the master when idle after")), /A master in a live terminal stops too, once no turn is open and you have no unsent line\./, "the idle-stop row says a live master stops too");
   assert.match(found[3].body, />Change in Agent settings</);
 });
 

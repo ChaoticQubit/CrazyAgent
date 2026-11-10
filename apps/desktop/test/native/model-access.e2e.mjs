@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { closedPort } from "./e2e-harness.mjs";
-import { checked, click, finishWelcome, menu, observeModelAccess, pick, says, settingsTab, shot, shown, texts, toasts, type, until } from "./settings-steps.mjs";
+import { checked, click, finishWelcome, menu, observeModelAccess, pick, says, selectPool, settingsTab, shot, shown, texts, toasts, type, until } from "./settings-steps.mjs";
 
 const LOCAL = "Local closed";
 const RENAMED = "Local renamed";
@@ -18,7 +18,7 @@ async function listed(names, count) {
 
 async function pools(rows) {
   await until(async () => !(await shown("#pool-name")) &&
-    same([await texts("main .set-row .set-label"), (await texts("main .set-row .set-help")).map((help) => help.match(/\d+ of 15/)?.[0])], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
+    same([await texts("main .pool-item-label"), await texts("main .pool-item-count")], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
   30000, `the pool list did not show exactly ${JSON.stringify(rows)}`);
 }
 
@@ -117,6 +117,7 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
   });
 
   it("edits the pool: renames it and takes one account out", async () => {
+    await selectPool(POOL);
     await click(`button[aria-label=${JSON.stringify(`Edit pool ${POOL}`)}]`);
     await until(() => shown("#pool-name"), 15000, "the pool editor did not open");
     await type("#pool-name", POOL_RENAMED);
@@ -137,6 +138,7 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await until(() => says("dialog[open] h2", `Delete ${RENAMED}?`), 15000, "the delete question did not open");
     assert.deepEqual(await texts("dialog[open] p .stack-small > span"), [
       `${RENAMED} and its saved sign-in or key are removed from CrazyAgent. A running sign-in is cancelled first.`,
+      "An agent using this account keeps running. Its sign-in goes after that agent stops and the app restarts.",
       `It leaves pool ${POOL_RENAMED}. ${POOL_RENAMED} has no other account, so it is deleted too and its projects have no pool.`,
     ]);
     await click("button=Remove from pools and delete");
@@ -155,6 +157,7 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await click("button=Save pool");
     await toast(`${POOL} saved.`);
     await pools([[POOL, "1 of 15"]]);
+    await selectPool(POOL);
     await click(`button[aria-label=${JSON.stringify(`Delete pool ${POOL}`)}]`);
     await until(() => says("dialog[open] p", "Its accounts stay in your list. Only the pool goes away."), 15000, "the pool delete question did not open");
     await click('//dialog[@open]//button[normalize-space(.)="Delete pool"]');

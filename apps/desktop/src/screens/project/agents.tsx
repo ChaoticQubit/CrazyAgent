@@ -75,11 +75,11 @@ export function agentsView(section: string | undefined): { view: "team" | "setti
 
 const AGENTS_VIEWS: { value: "team" | "settings"; label: string }[] = [{ value: "team", label: "Team" }, { value: "settings", label: "Agent settings" }];
 
-/** Pause all on Agents, beside Open all terminals: the project menu's Pause all agents, the
- * same confirm and the same engine call, which stops every running team task and cancels
- * every waiting one. Research agents keep running. Input: the project data. Output: the
- * button and its confirm. */
-export function PauseAll({ data }: { data: ProjectData }) {
+/** The one Pause all of a project, behind the Agents button and the project menu: the confirm
+ * and the engine call that stops every running team task and cancels every waiting one. Research
+ * agents keep running. Input: the project data. Output: ask, which opens the confirm or says why
+ * there is nothing to confirm, and the confirm. */
+export function usePauseAll(data: ProjectData): { ask: () => void; dialog: ReactNode } {
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const team = data.team.result;
@@ -104,13 +104,21 @@ export function PauseAll({ data }: { data: ProjectData }) {
     if (state.kind === "applied") return data.notify("Paused. Running tasks are stopping and waiting tasks are cancelled.");
     data.notify(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the Agents tab before trying again.");
   }
+  const dialog = <ConfirmDialog open={asking} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
+    onCancel={() => setAsking(false)} onConfirm={() => void pause()}>
+    {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
+    {researching ? " Research agents keep running." : ""}
+  </ConfirmDialog>;
+  return { ask, dialog };
+}
+
+/** Pause all on Agents, beside Open all terminals. Input: the project data. Output: the button
+ * and its confirm. */
+export function PauseAll({ data }: { data: ProjectData }) {
+  const pause = usePauseAll(data);
   return <>
-    <Button size="small" icon="circle-pause" onClick={ask}>Pause all</Button>
-    <ConfirmDialog open={asking} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
-      onCancel={() => setAsking(false)} onConfirm={() => void pause()}>
-      {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
-      {researching ? " Research agents keep running." : ""}
-    </ConfirmDialog>
+    <Button size="small" icon="circle-pause" onClick={pause.ask}>Pause all</Button>
+    {pause.dialog}
   </>;
 }
 

@@ -36,6 +36,8 @@ pub(crate) use native_profiles::MAX_PROFILES;
 pub(crate) use native_profiles::{
     AgentCredential, NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose,
 };
+#[cfg(unix)]
+pub(crate) use native_profiles::{remove_generated_home, remove_sign_in};
 
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]

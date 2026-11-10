@@ -189,9 +189,9 @@ pub fn transfer(
 
 /// Ends a unit of work with evidence (Concord's finish_work): its owner marks Accepted or
 /// Active work ReviewReady, Complete or Closed, and work waiting for review is Completed
-/// or Closed by its owner or whoever supervises it. A master's claims are released at
-/// every end; any other agent's hold at every end until the change set carrying its edits
-/// lands or is rejected, or its turn ends with nothing to land (OS-8, DEC-117 Q7).
+/// or Closed by its owner or whoever supervises it. An agent's claims hold at every end
+/// until the change set carrying its edits lands or is rejected, or its turn ends with
+/// nothing to land (OS-8, DEC-117 Q7); a master is no exception (T5-R2-L1).
 /// Checks that belong to a role, such as a lead's unmerged sub-agent branches, run
 /// before this. Takes the database, the work, the version the caller read, the outcome,
 /// the evidence, who finishes and the time in ms. Returns the new version or a plain
@@ -213,9 +213,11 @@ pub fn finish(
     let owns = row.owner == Some(by);
     let allowed = match row.state {
         WorkState::Accepted | WorkState::Active => owns,
+        WorkState::ReviewReady if outcome == Finish::ReviewReady => {
+            return Err(failure("coord_work_review_ready"));
+        }
         WorkState::ReviewReady => {
-            outcome != Finish::ReviewReady
-                && (owns || supervisor(tx, &row.project, Party::Agent(by), row.owner)?)
+            owns || supervisor(tx, &row.project, Party::Agent(by), row.owner)?
         }
         _ => return Err(failure("coord_transfer_invalid")),
     };
@@ -228,7 +230,7 @@ pub fn finish(
         Finish::Closed => (WorkState::Closed, "finish_closed"),
     };
     if let Some(owner) = row.owner
-        && super::store::agent(tx, owner)?.is_none_or(|found| found.master())
+        && super::store::agent(tx, owner)?.is_none()
     {
         super::claims::release_claims(tx, owner, work, now)?;
     }

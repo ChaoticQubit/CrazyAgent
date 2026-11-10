@@ -139,7 +139,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .engine-state.running { color: var(--ok); }
 .engine-state.down { color: var(--danger); }
 .engine-state.connecting { color: var(--text-3); }
-.main { overflow: auto; min-width: 0; min-height: 0; background: var(--bg); }
+.main { position: relative; overflow: auto; min-width: 0; min-height: 0; background: var(--bg); }
 .main:focus { outline: none; }
 .page { padding: 0 var(--space-6) var(--space-10); }
 

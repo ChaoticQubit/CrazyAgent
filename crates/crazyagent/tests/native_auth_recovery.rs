@@ -845,3 +845,24 @@ async fn cancelling_a_codex_sign_in_before_its_harness_is_spawned_settles_cancel
     );
     case.no_fence().await;
 }
+
+/// SECAUDIT account-removal-leaves-native-managed-profile-credentials: removing a signed-in
+/// native account leaves no sign-in in its profile, with no restart, and its slot stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_signed_in_account_leaves_no_sign_in_in_its_profile() {
+    let case = Case::new();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Claude, "dummy-managed").await;
+    let (scope, profile) = scope(&client, &database, &account).await;
+    let begun = waiting(&client, &scope).await;
+    cancel(&client, &scope, &begun).await;
+    settle(&client, &scope, &begun, ended).await;
+    case.no_fence().await;
+    let slot = case.root().join("native-profiles").join(&profile);
+    let placeholder = slot.join("home").join("auth.json");
+    std::fs::write(&placeholder, "dummy").unwrap();
+    std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o600)).unwrap();
+    client.remove_account(account).await.unwrap();
+    assert!(!placeholder.exists(), "the sign-in is still there");
+    assert!(slot.join("identity.json").exists(), "the slot stays");
+}

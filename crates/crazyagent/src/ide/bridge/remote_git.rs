@@ -560,11 +560,17 @@ pub(super) fn transport_allowed(url: &str) -> bool {
 }
 
 /// Reads the configuration git will use in the folder, with [`HARDENING`] and the owner's
-/// environment, every entry with the file it came from. Inputs: the folder and environment.
+/// environment, every entry with the file it came from. A `.git/commondir` is refused first:
+/// no project folder has one, it would send git to another folder's configuration, and the
+/// lookup finds every spelling a case-insensitive volume folds together, where git reads it
+/// too. Inputs: the folder and environment.
 /// Output: the entries, or `ide_git_config_refused` when git fails, prints more than
 /// `CONFIG_BYTES_MAX` bytes or prints something else than `-z` entries.
 fn config(folder: &Path, env: &[(OsString, OsString)]) -> Result<Vec<Entry>, EngineError> {
     let refused = || failure("ide_git_config_refused");
+    if std::fs::symlink_metadata(folder.join(".git").join("commondir")).is_ok() {
+        return Err(refused());
+    }
     let ran = ran(
         git(folder, env, &["config", "--list", "--show-origin", "-z"]),
         CONFIG_BYTES_MAX,

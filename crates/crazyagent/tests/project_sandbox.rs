@@ -2959,3 +2959,151 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
 }
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
+/// the arguments nor the environment of a process outside its sandbox through either
+/// process-arguments sysctl, and still reads a process of its own sandbox and an ordinary
+/// sysctl value.
+#[test]
+fn a_confined_child_reads_no_process_arguments_by_sysctl() {
+    const NAME: &str = "a_confined_child_reads_no_process_arguments_by_sysctl";
+    const CANARY: &str = "DUMMY_CANARY=dummy-value";
+    const PLATFORM_ARGUMENT: &str = "30.0417";
+    const PROBE: &str = r#"$m=pack("i3",1,shift,shift);$b="\0"x262144;$l=pack("Q",262144);syscall(202,$m,3,$b,$l,0,0)==0 or exit 3;print $b"#;
+    const NCPU: &str = r#"$m=pack("i2",6,3);$b="\0"x4;$l=pack("Q",4);syscall(202,$m,2,$b,$l,0,0)==0 or exit 3;print "cpus=",unpack("i",$b)"#;
+    if std::env::var_os("DUMMY_PROCARGS_CHILD").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    let quiet = |command: &mut std::process::Command| {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crazyagent::spawn_gate::spawn(command).unwrap()
+    };
+    let mut dummy = quiet(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env_clear()
+            .env("DUMMY_PROCARGS_CHILD", "1")
+            .env("DUMMY_CANARY", "dummy-value"),
+    );
+    let mut apple = quiet(
+        std::process::Command::new("/usr/bin/env")
+            .env_clear()
+            .args(["DUMMY_CANARY=dummy-value", "/bin/sleep", PLATFORM_ARGUMENT]),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let holds =
+        |output: &Output, text: &str| String::from_utf8_lossy(&output.stdout).contains(text);
+    let mut problems = Vec::new();
+    for mib in [49, 38] {
+        let probe = |name: &str, target: u32| {
+            run(
+                &confined,
+                &case.profiles.join(format!("{name}-{mib}.sb")),
+                &format!("/usr/bin/perl -e '{PROBE}' {mib} {target}"),
+            )
+        };
+        let plain = |target: u32| {
+            crazyagent::spawn_gate::output(
+                std::process::Command::new("/usr/bin/perl")
+                    .args(["-e", PROBE, &mib.to_string(), &target.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let plain_platform = plain(apple.id());
+        if !plain_platform.status.success() || !holds(&plain_platform, PLATFORM_ARGUMENT) {
+            problems.push(format!(
+                "{mib}: inconclusive, the unconfined probe read no platform argument"
+            ));
+        }
+        let unconfined = plain(dummy.id());
+        if !unconfined.status.success() || !holds(&unconfined, NAME) {
+            problems.push(format!(
+                "{mib}: inconclusive, the unconfined probe read nothing"
+            ));
+        }
+        let across = probe("across", dummy.id());
+        if holds(&across, CANARY) || holds(&across, NAME) {
+            problems.push(format!("{mib}: read a process outside the sandbox"));
+        }
+        let platform = probe("apple", apple.id());
+        if holds(&platform, CANARY) || holds(&platform, PLATFORM_ARGUMENT) {
+            problems.push(format!(
+                "{mib}: read a platform binary's arguments or environment"
+            ));
+        }
+    }
+    let ordinary = run(
+        &confined,
+        &case.profiles.join("ncpu.sb"),
+        &format!("/usr/bin/perl -e '{NCPU}'"),
+    );
+    let inside = run(
+        &confined,
+        &case.profiles.join("inside.sb"),
+        &format!("/bin/sleep 30 & p=$!; /usr/bin/perl -e '{PROBE}' 49 $p; c=$?; kill $p; exit $c"),
+    );
+    for child in [&mut dummy, &mut apple] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if !inside.status.success() || !holds(&inside, "sleep") {
+        problems.push(format!(
+            "a process of the same sandbox was not readable: {inside:?}"
+        ));
+    }
+    if !ordinary.status.success() || !holds(&ordinary, "cpus=") {
+        problems.push(format!("an ordinary sysctl read failed: {ordinary:?}"));
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: `lsof` lists process ids
+/// before it reads one, so listing them stays open and a confined agent can still ask what
+/// its own process holds.
+#[test]
+fn a_confined_lsof_on_its_own_process_succeeds() {
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let output = run(
+        &confined,
+        &case.profiles.join("lsof.sb"),
+        "/usr/sbin/lsof -p $$",
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(text.contains("COMMAND") && text.contains("cwd"), "{text}");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: a confined shell lists its
+/// own running child, the list a harness walks to stop a tool's processes. The probe makes
+/// the `proc_info` list call with the parent-only filter, which `proc_listchildpids` wraps.
+#[test]
+fn a_confined_shell_lists_its_own_running_child() {
+    const LIST: &str = r#"$b="\0"x65536;$n=syscall(336,1,6,getppid(),0,$b,65536);$n>=0 or exit 3;print join(" ",grep{$_}unpack("i*",substr($b,0,$n))),"\n""#;
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let output = run(
+        &confined,
+        &case.profiles.join("children.sb"),
+        &format!(
+            "/bin/sleep 30 & p=$!; echo child=$p; /usr/bin/perl -e '{LIST}'; c=$?; kill $p; exit $c"
+        ),
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    let child = text
+        .lines()
+        .find_map(|line| line.strip_prefix("child="))
+        .unwrap();
+    let listed = text.lines().last().unwrap();
+    assert!(listed.split(' ').any(|pid| pid == child), "{text}");
+}
