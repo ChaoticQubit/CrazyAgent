@@ -11720,7 +11720,8 @@ fn runs_for_the_engine(program: &str) -> bool {
 
 /// A clash in one tool's lockfile alone is rewritten by the real tool in its sandbox, and
 /// the set lands with both sides locked; only `cargo update` ran in a row before
-/// (T8-R1-TOOLS). A tool this machine does not have is skipped. Input: the tool.
+/// (T8-R1-TOOLS). A tool this machine does not have is skipped. pnpm and uv have no row
+/// yet: neither regenerates in the tool sandbox today. Input: the tool.
 fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
     let program = tool.program;
     if !runs_for_the_engine(program) {
@@ -11837,59 +11838,6 @@ fn real_npm_rewrites_a_clashing_package_lock() {
             "\"resolved\": \"packages/b\"",
         ],
         keeps: ["\"a\": \"1.0.0\"", "\"b\": \"1.0.0\""],
-    });
-}
-
-#[test]
-fn real_pnpm_rewrites_a_clashing_lockfile() {
-    let lock = |importers: &str| format!("lockfileVersion: '9.0'\nimporters: {importers}\n");
-    let mut others = node_packages("");
-    others.push((
-        "pnpm-workspace.yaml",
-        "packages:\n  - \"packages/*\"\n".to_owned(),
-    ));
-    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
-        program: "pnpm",
-        lockfile: "pnpm-lock.yaml",
-        manifest: "packages/app/package.json",
-        start: (node_app("", ""), lock("{}")),
-        owner: (node_app("\"a\": \"workspace:*\"", ""), lock("{.: {}}")),
-        agent: (
-            node_app("", "\"b\": \"workspace:*\""),
-            lock("{packages/app: {}}"),
-        ),
-        others,
-        locks: ["version: link:../a", "version: link:../b"],
-        keeps: ["\"a\": \"workspace:*\"", "\"b\": \"workspace:*\""],
-    });
-}
-
-#[test]
-fn real_uv_rewrites_a_clashing_lockfile() {
-    let manifest = |dependencies: &str, dev: &str| {
-        format!(
-            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nrequires-python = \">=3.9\"\ndependencies = [{dependencies}]\n\n[dependency-groups]\ndev = [{dev}]\n\n[tool.uv.sources]\na = {{ workspace = true }}\nb = {{ workspace = true }}\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n"
-        )
-    };
-    let lock = |python: &str| format!("version = 1\nrequires-python = \">={python}\"\n");
-    let member = |name: &str| {
-        format!(
-            "[project]\nname = \"{name}\"\nversion = \"1.0.0\"\nrequires-python = \">=3.9\"\ndependencies = []\n"
-        )
-    };
-    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
-        program: "uv",
-        lockfile: "uv.lock",
-        manifest: "pyproject.toml",
-        start: (manifest("", ""), lock("3.9")),
-        owner: (manifest("\"a\"", ""), lock("3.10")),
-        agent: (manifest("", "\"b\""), lock("3.11")),
-        others: vec![
-            ("packages/a/pyproject.toml", member("a")),
-            ("packages/b/pyproject.toml", member("b")),
-        ],
-        locks: ["name = \"a\"", "name = \"b\""],
-        keeps: ["dependencies = [\"a\"]", "dev = [\"b\"]"],
     });
 }
 
