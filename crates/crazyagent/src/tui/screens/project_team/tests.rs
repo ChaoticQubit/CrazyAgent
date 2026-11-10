@@ -2788,6 +2788,30 @@ fn capital_v_says_why_for_a_master_with_no_live_terminal() {
     assert!(!view.help().contains(&("V", "Live terminal")));
 }
 
+/// A project with no master yet still stores the Live terminal choice: V sends it, and the
+/// settings strip and the help offer it. "No live terminal" is only for a master that lacks
+/// one (rv-secreview q4-3 F2).
+#[test]
+fn capital_v_stores_the_choice_with_no_master_yet() {
+    let mut shown = team();
+    shown
+        .harnesses
+        .retain(|harness| harness.role != crate::team::AgentRole::Master);
+    let on = !shown.master_live_terminal;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(shown))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('V'))),
+        TeamReply::Change(TeamAction::MasterLiveTerminal {
+            project_id: project(),
+            on,
+        })
+    );
+    assert!(shows(&view, "Live terminal"), "the strip offers it");
+    assert!(view.help().contains(&("V", "Live terminal")));
+}
+
 /// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
 /// and then On, each with its plain notice (DEC-111).
 #[test]
