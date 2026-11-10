@@ -267,9 +267,6 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     case.close().await;
 }
 
-/// A schedule larger than one owner reply still takes changes and can be shrunk: a change
-/// reads only the small owner profile for freshness, never the whole schedule. The schedule
-/// is then read whole, page by page.
 /// Registers projects in the engine's store, past the count `CreateProject` admits, because
 /// a schedule over one reply needs more project rows than one snapshot may hold. Inputs: the
 /// engine root and the ids. Output: none.
@@ -294,6 +291,9 @@ fn register_projects(root: &Path, ids: impl Iterator<Item = String>) {
     tx.commit().unwrap();
 }
 
+/// A schedule larger than one owner reply still takes changes and can be shrunk: a change
+/// reads only the small owner profile for freshness, never the whole schedule. The schedule
+/// is then read whole, page by page.
 #[tokio::test]
 async fn a_schedule_larger_than_one_reply_takes_changes_and_is_read_whole() {
     let case = Case::new().await;

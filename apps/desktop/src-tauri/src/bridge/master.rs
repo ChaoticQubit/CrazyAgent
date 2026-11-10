@@ -1296,4 +1296,43 @@ fallback_allowed = false
         assert_eq!(turns.page.turns[0].id.as_str(), sent.intent.operation_id);
         Ok(())
     }
+
+    /// PROTO-LOWS r1 L1: both default master open routes map the open's refusal through
+    /// `open_failure`, which keeps an engine version mismatch, and the TUI's open keeps that
+    /// code from its project setup read, so neither route turns a skew back into the
+    /// pick-a-pool prompt. A live skewed engine on this path is PROTO-SKEW-LIVE's row.
+    #[test]
+    fn both_default_master_open_routes_keep_an_engine_version_mismatch() {
+        let source = include_str!("master.rs");
+        let product = source.split("#[cfg(all(test, unix))]").next().unwrap();
+        let open = "crazyagent::tui::default_master_open(self.controller()?, &project_id)\n            .await\n            .map_err(|reason| open_failure(&reason))?;";
+        assert_eq!(
+            product.matches(open).count(),
+            2,
+            "open_default_master and new_master_session"
+        );
+        assert_eq!(product.matches("default_master_open(").count(), 2);
+        assert_eq!(
+            product
+                .matches(".map_err(|_| failure(\"master_open_unavailable\"))")
+                .count(),
+            0,
+            "neither open route maps every failure to master_open_unavailable"
+        );
+        let tui = include_str!("../../../../../crates/crazyagent/src/tui/master_session.rs");
+        let opened = tui
+            .split("pub async fn default_master_open(")
+            .nth(1)
+            .unwrap();
+        let setup = opened
+            .split(".project_setup(project_id.clone())")
+            .nth(1)
+            .unwrap();
+        let kept = ".await\n        .map_err(|error| match error.0.as_str() {\n            \"engine_version_mismatch\" => error.0,";
+        assert!(setup.trim_start().starts_with(kept), "{setup}");
+        assert_eq!(
+            open_failure("engine_version_mismatch").code,
+            "engine_version_mismatch"
+        );
+    }
 }

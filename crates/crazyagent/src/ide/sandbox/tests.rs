@@ -2586,22 +2586,30 @@ fn every_agent_folders_choice_keeps_the_agent_admin_deny() {
     }
 }
 
-/// DEC-124 r1 rv-code L1: a `.CRAZYAGENT` folder the IDE makes before the first agent, which
-/// the engine's agent then lands in on a case-insensitive volume, is never moved aside under a
+/// DEC-124 r1 rv-code L1: a `.CRAZYAGENT` folder made before the first agent, which the
+/// engine's agent then lands in on a case-insensitive volume, is never moved aside under a
 /// protecting choice, so the agent's files stay under the rule; under Read only the IDE cannot
-/// make it at all (sandbox-exec probe, agent-files/l1code-probe).
+/// make it at all. Under No delete or rename the base `.crazyagent` write deny may refuse the
+/// IDE's own mkdir of the variant, so the row notes that result and makes the folder outside
+/// the sandbox when it was refused (DEC124-R2-L1).
 #[test]
 fn a_case_variant_crazyagent_folder_made_before_the_first_agent_stays_in_place() {
-    for (choice, made) in [
-        (IdeAgentFiles::NoDeleteOrRename, true),
-        (IdeAgentFiles::ReadOnly, false),
+    for (choice, ide_makes) in [
+        (IdeAgentFiles::NoDeleteOrRename, None),
+        (IdeAgentFiles::ReadOnly, Some(false)),
     ] {
         let s = server_with(AgentFilesRule {
             choice,
             older_agents: false,
         });
         let variant = s.root.join(".CRAZYAGENT");
-        assert_eq!(sh(&s.profile, "mkdir \"$1\"", &variant), made, "{choice:?}");
+        let made = sh(&s.profile, "mkdir \"$1\"", &variant);
+        eprintln!("{choice:?}: the IDE's own mkdir of .CRAZYAGENT made it: {made}");
+        match ide_makes {
+            Some(expected) => assert_eq!(made, expected, "{choice:?}"),
+            None if !made => fs::create_dir(&variant).unwrap(),
+            None => {}
+        }
         let agent = s.root.join(".crazyagent").join("worktrees").join("agent-4");
         setup(
             &s.root,
