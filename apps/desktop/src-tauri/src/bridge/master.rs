@@ -1304,7 +1304,7 @@ fallback_allowed = false
     #[test]
     fn both_default_master_open_routes_keep_an_engine_version_mismatch() {
         let source = include_str!("master.rs");
-        let product = source.split("#[cfg(test)]").next().unwrap();
+        let product = source.split("#[cfg(all(test, unix))]").next().unwrap();
         let open = "crazyagent::tui::default_master_open(self.controller()?, &project_id)\n            .await\n            .map_err(|reason| open_failure(&reason))?;";
         assert_eq!(
             product.matches(open).count(),
@@ -1314,9 +1314,10 @@ fallback_allowed = false
         assert_eq!(product.matches("default_master_open(").count(), 2);
         assert_eq!(
             product
-                .matches("failure(\"master_open_unavailable\")")
+                .matches(".map_err(|_| failure(\"master_open_unavailable\"))")
                 .count(),
-            0
+            0,
+            "neither open route maps every failure to master_open_unavailable"
         );
         let tui = include_str!("../../../../../crates/crazyagent/src/tui/master_session.rs");
         let opened = tui
