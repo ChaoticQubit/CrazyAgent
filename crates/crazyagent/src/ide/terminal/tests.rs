@@ -907,3 +907,16 @@ fn ide_shell_finds_the_project_folder_and_its_read_folders_in_the_engine_databas
     assert!(ide_shell::project_place(&root, &ProjectId::new("beta").unwrap()).is_err());
     assert!(ide_shell::project_place(&base.join("missing"), &project).is_err());
 }
+
+/// The built-in extension keeps working in Restricted Mode, where a Full access IDE starts
+/// until the owner trusts the folder: it runs none of the project's code.
+#[test]
+fn the_extension_declares_it_runs_in_restricted_mode() {
+    let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
+    assert_eq!(name, "package.json");
+    let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    assert_eq!(
+        manifest["capabilities"]["untrustedWorkspaces"]["supported"],
+        json!(true)
+    );
+}

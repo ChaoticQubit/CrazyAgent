@@ -2361,3 +2361,25 @@ async fn a_saved_policy_that_cannot_be_read_stops_the_running_server() {
     assert!(servers.follow_level(&id).await);
     assert!(servers.group(&id).is_none());
 }
+
+/// Workspace trust stays off below Full access, where the sandbox limits the project's code,
+/// and is on at Full access, where nothing else does.
+#[test]
+fn only_a_full_access_launch_has_workspace_trust_on() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let (sandboxed, _) = built_server(&servers, &project("kept"), &root);
+    set_level(data.path(), &project("wide"), AgentAccess::Full);
+    let (full, _) = built_server(&servers, &project("wide"), &root);
+    assert!(
+        sandboxed
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust")
+    );
+    assert!(
+        !full
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust")
+    );
+}

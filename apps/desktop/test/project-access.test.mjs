@@ -178,3 +178,15 @@ test("Settings says beside the toolchain switches that turning one off stops age
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${access.TOOLCHAIN_OFF_STOPS_AGENTS}"`));
 });
+
+test("Full access says what it means for the IDE wherever it asks, and the hooks line says it has no effect there", () => {
+  assert.equal(access.FULL_ACCESS_IDE, "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on.");
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  assert.match(read("../src/screens/project/access.tsx"), /{value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}<\/p>}/);
+  for (const page of ["../src/screens/project/settings.tsx", "../src/screens/team/setup-rows.tsx"]) {
+    assert.match(read(page), /{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}\n\s*<\/ConfirmDialog>/, page);
+  }
+  assert.ok(read("../../../crates/crazyagent/src/tui/screens/project_access.rs").includes(`"${access.FULL_ACCESS_IDE}"`));
+  assert.ok(access.IDE_GIT_HOOKS_LINE.includes("No effect at Full access: git runs as yours."), access.IDE_GIT_HOOKS_LINE);
+  assert.match(access.IDE_GIT_HOOKS_LINE, /Applies when the IDE next starts\.$/);
+});
