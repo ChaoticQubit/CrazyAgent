@@ -4276,6 +4276,25 @@ fn a_master_idle_stopped_under_stop_all_offers_no_start_again() {
     );
 }
 
+/// UI-11-L2: opening the master view under Stop all with the switch off asks for no start,
+/// so the switch is not written behind a stopped team, and the read after Start all starts
+/// it.
+#[test]
+fn opening_the_master_view_under_stop_all_asks_for_no_start_until_the_team_runs() {
+    for on in [None, Some(false)] {
+        let mut shell = master_view(80, 24);
+        requests(&mut shell);
+        shell.arrive(paused_read(on));
+        assert_eq!(
+            starts_asked(&mut shell),
+            0,
+            "Stop all holds the switch: {on:?}"
+        );
+        shell.arrive(switch(on, None));
+        assert_eq!(starts_asked(&mut shell), 1, "the team runs again: {on:?}");
+    }
+}
+
 /// A master that stopped for any other reason keeps today's words and s does nothing.
 #[test]
 fn a_master_stopped_for_another_reason_offers_no_start_again() {

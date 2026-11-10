@@ -519,6 +519,70 @@ mod own_turns {
         assert!(!pane.session.held());
         assert_eq!(pane.session.stop().unwrap(), None);
     }
+
+    /// Leaves a turn held for two background commands, `bgcheck1` and `bgcheck2`. Input: the
+    /// pane. Output: the second command's notice line.
+    fn held_for_two(pane: &mut Pane) -> String {
+        let second = |line: &str| {
+            line.replace("toolu_bg", "toolu_bg2")
+                .replace("bgcheck1", "bgcheck2")
+        };
+        type_turn(pane, "Run the checks.");
+        pane.write(&[
+            &user("Run the checks."),
+            BACKGROUND_USE,
+            BACKGROUND_STARTED,
+            &second(BACKGROUND_USE),
+            &second(BACKGROUND_STARTED),
+            &reply("Waiting for the checks."),
+        ]);
+        let first = events(pane);
+        assert!(!ended(&first), "{first:?}");
+        assert!(pane.session.held(), "{first:?}");
+        second(BACKGROUND_NOTICE)
+    }
+
+    /// DOCS-LOWS-2-F1: a turn that follows a command's notice is a notice turn even while a
+    /// second command runs, so when the second ends inside it and it fails, the task fails
+    /// and its rate limit is given.
+    #[test]
+    fn a_notice_turn_that_fails_after_the_second_command_ended_in_it_ends_its_task_as_failed() {
+        let mut pane = start("over-hold-7");
+        let second = held_for_two(&mut pane);
+
+        pane.write(&[BACKGROUND_NOTICE, &second, RATE_LIMITED]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnError { rate_limited: true }),
+            "{last:?}"
+        );
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: false }),
+            "{last:?}"
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// A notice turn that fails while another command still runs is no turn typed over the
+    /// hold either: its failure is given and it ends the task.
+    #[test]
+    fn a_notice_turn_that_fails_while_a_second_command_runs_ends_its_task_as_failed() {
+        let mut pane = start("over-hold-8");
+        held_for_two(&mut pane);
+
+        pane.write(&[BACKGROUND_NOTICE, RATE_LIMITED]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnError { rate_limited: true }),
+            "{last:?}"
+        );
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: false }),
+            "{last:?}"
+        );
+        assert!(!pane.session.held());
+    }
 }
 
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.

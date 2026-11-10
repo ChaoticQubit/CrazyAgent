@@ -99,6 +99,15 @@ export function mountAreaOff(master, on) {
   flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, team, CATALOG) })));
 }
 
+/** Mounts the project's master area for a team stopped by Stop all. Inputs: the master
+ * harness and the engine's live switch. Output: none. */
+export function mountAreaStopped(master, on) {
+  const panel = page();
+  root = createRoot(panel);
+  const team = { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, paused: true }) };
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, team, CATALOG) })));
+}
+
 /** Renders the mounted master area again with the engine's live switch read as `on`, as the
  * team read after an idle stop does. Inputs: the master harness, the switch and more fields
  * of the read. Output: none. */
