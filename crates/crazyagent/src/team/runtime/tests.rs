@@ -19556,22 +19556,15 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
         !team.workers[&lead].stopping,
         "with the idle stop Off the lead keeps running"
     );
-    let mut started: Vec<String> = activity_lines(&fixture, "task_started")
-        .into_iter()
-        .filter_map(|line| {
-            line.split_once(" started ")
-                .map(|(_, title)| title.to_owned())
-        })
-        .collect();
-    started.sort();
+    let label = crate::team::events::label(&fixture.connection, lead).unwrap();
     assert_eq!(
-        started,
+        activity_lines(&fixture, "task_started"),
         [
-            "\u{201c}Then write the index\u{201d}",
-            "\u{201c}Write the release notes\u{201d}"
+            format!("{label} started \u{201c}Then write the index\u{201d}"),
+            format!("{label} started \u{201c}Write the release notes\u{201d}"),
         ],
-        "the resumed task tells its start as a dispatched one does (T10-R2-F2); the seeded \
-         lead has no kept name until its first dispatch, so only the titles are compared"
+        "the resumed task tells its start under the lead's kept name, as a dispatched one \
+         does (T10-R2-F2, TEAM-17-L1)"
     );
     team.shutdown().unwrap();
 }

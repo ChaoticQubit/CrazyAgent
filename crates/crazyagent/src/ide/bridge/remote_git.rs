@@ -24,8 +24,9 @@ const PASSED: [&str; 7] = [
     "TMPDIR",
     "XDG_CONFIG_HOME",
 ];
-const FIXED: [(&str, &str); 9] = [
+const FIXED: [(&str, &str); 10] = [
     ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_GRAFT_FILE", "/dev/null"),
     ("GIT_ASKPASS", ""),
     ("SSH_ASKPASS_REQUIRE", "never"),
     ("GIT_ALLOW_PROTOCOL", PROTOCOLS),
@@ -35,7 +36,7 @@ const FIXED: [(&str, &str); 9] = [
     ("LANG", "en_US.UTF-8"),
     ("LC_ALL", "en_US.UTF-8"),
 ];
-const HARDENING: [&str; 21] = [
+const HARDENING: [&str; 25] = [
     "--no-replace-objects",
     "-c",
     "core.hooksPath=/dev/null",
@@ -57,6 +58,10 @@ const HARDENING: [&str; 21] = [
     "gc.auto=0",
     "-c",
     "maintenance.auto=false",
+    "-c",
+    "core.commitGraph=false",
+    "-c",
+    "advice.graftFileDeprecated=false",
 ];
 /// The most bytes of each of git's two output streams an answer carries, its last ones, so
 /// both fit one bridge frame once escaped for JSON.

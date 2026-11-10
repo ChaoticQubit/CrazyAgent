@@ -1,12 +1,14 @@
 use super::settings::{applied, problem};
 use super::*;
+use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
 use crate::projects_home::ProjectsHome;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, default-pack changes,
-/// the projects home folder, the GitHub account and the sandbox settings.
+/// the projects home folder, the GitHub account, the sandbox settings and when finished
+/// agents' worktrees go.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -35,6 +37,11 @@ pub(in crate::tui) enum AppSetupJob {
         settings: SandboxSettings,
         generation: u64,
     },
+    Cleanup,
+    SetCleanup {
+        settings: CleanupSettings,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -57,6 +64,8 @@ pub(in crate::tui) enum AppSetupEvent {
     GitHubSignedOut(Result<GitHubStatus, String>),
     Sandbox(Result<SandboxSettings, String>),
     SandboxSet(Result<(), String>),
+    Cleanup(Result<CleanupSettings, String>),
+    CleanupSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -74,6 +83,8 @@ impl AppSetupJob {
             Self::GitHubSignOut => "GitHubSignOut",
             Self::Sandbox => "Sandbox",
             Self::SetSandbox { .. } => "SetSandbox",
+            Self::Cleanup => "Cleanup",
+            Self::SetCleanup { .. } => "SetCleanup",
         }
     }
 }
@@ -93,6 +104,8 @@ impl AppSetupEvent {
             AppSetupJob::GitHubSignOut => Self::GitHubSignedOut(Err(problem)),
             AppSetupJob::Sandbox => Self::Sandbox(Err(problem)),
             AppSetupJob::SetSandbox { .. } => Self::SandboxSet(Err(problem)),
+            AppSetupJob::Cleanup => Self::Cleanup(Err(problem)),
+            AppSetupJob::SetCleanup { .. } => Self::CleanupSet(Err(problem)),
         }
     }
 }
@@ -177,6 +190,20 @@ impl NativeOwner {
             } => AppSetupEvent::SandboxSet(applied(
                 controller.set_sandbox_settings(settings, generation).await,
                 "sandbox_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::Cleanup => AppSetupEvent::Cleanup(
+                controller
+                    .cleanup_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetCleanup {
+                settings,
+                generation,
+            } => AppSetupEvent::CleanupSet(applied(
+                controller.set_cleanup_settings(settings, generation).await,
+                "cleanup_settings_outcome_unknown",
                 lost,
             )),
         }

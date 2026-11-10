@@ -6392,7 +6392,6 @@ impl TeamRuntime {
             return teammates::keep_worktrees(&self.connection, project, lead);
         };
         let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
-        let linked = git_dir != crate::agent_git::git_dir(&worktree);
         let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
             .unwrap_or_default();
         let mut wanted = Vec::new();
@@ -6415,7 +6414,7 @@ impl TeamRuntime {
         if wanted.is_empty() {
             return teammates::keep_worktrees(&self.connection, project, lead);
         }
-        match self.teammates_git(Path::new(&repository), &worktree, lead, linked) {
+        match self.teammates_git(Path::new(&repository), &worktree, &git_dir, lead) {
             Ok((sandbox, profile)) => {
                 let git = crate::landing::LeadGit {
                     sandbox: &sandbox,
@@ -6458,15 +6457,15 @@ impl TeamRuntime {
 
     /// The sandbox and installed profile the engine's git runs under to make a lead's native
     /// teammates' worktrees: the lead's own launch profile for its own clone, or for a
-    /// linked lead its teammates' setup profile, installed now (OP-9b). Takes the project
-    /// folder, the lead's worktree, the lead and whether the worktree is linked. Returns
-    /// both, or the plain cause.
+    /// linked lead its teammates' setup profile on the lead's recorded branch, installed
+    /// now (OP-9b, AGENT-REF-ALLOW-NARROW). Takes the project folder, the lead's worktree,
+    /// its git folder and the lead. Returns both, or the plain cause.
     fn teammates_git(
         &self,
         repository: &Path,
         worktree: &Path,
+        git_dir: &Path,
         lead: i64,
-        linked: bool,
     ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
         let unavailable = |_| "lead_sandbox_unavailable";
         let sandbox = ProjectSandbox::new(
@@ -6478,12 +6477,16 @@ impl TeamRuntime {
             SandboxNetwork::Only(Vec::new()),
         )
         .map_err(unavailable)?;
-        if !linked {
+        if git_dir == crate::agent_git::git_dir(worktree) {
             return Ok((sandbox, agent_profile(&self.state, lead)));
         }
         let setup = |_| "teammates_setup_unavailable";
+        let branch = crate::landing::agent_branch(&self.connection, worktree, git_dir)
+            .ok()
+            .flatten()
+            .ok_or("teammates_setup_unavailable")?;
         let sandbox = sandbox
-            .confine_to_teammates_setup(worktree)
+            .confine_to_teammates_setup(worktree, &branch)
             .map_err(setup)?;
         let profile = agent_teammates_setup_profile(&self.state, lead);
         sandbox.install(&profile).map_err(setup)?;
@@ -7320,6 +7323,18 @@ impl TeamRuntime {
                     NATIVE_NEEDS_SANDBOX,
                     Some("team_native_needs_sandbox"),
                 ));
+            }
+            #[cfg(unix)]
+            if layout == Layout::Clone
+                && let Some(branch) = crate::landing::agent_branch(
+                    &self.connection,
+                    &working_dir,
+                    &crate::agent_git::git_dir(&working_dir),
+                )
+                .map_err(|e| with_code("the lead's branch could not be read", Some(&e.0)))?
+                .filter(|branch| crate::agent_git::is_agent_branch(branch))
+            {
+                sandbox = sandbox.lead_branch(&branch).map_err(sandboxed)?;
             }
             let (lead, mates, tmux) =
                 self.native_sandboxes(id, &scratch, &home, &homes, &working_dir, sandbox)?;

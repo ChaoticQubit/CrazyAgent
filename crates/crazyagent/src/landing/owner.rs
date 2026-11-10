@@ -1274,9 +1274,7 @@ fn accept_held(
         Target::Ref => {}
         Target::Agent(agent) => {
             let teammates = format!("/{}/", crate::agent_git::TEAMMATES_FOLDER);
-            if agent.head()? != tip
-                || !flow::holds_only_except(&agent.repo, &tip, Some(&teammates))?
-            {
+            if agent.head()? != tip || !flow::holds_only_except(&agent.repo, &tip, &[&teammates])? {
                 return Err(failure("changes_agent_busy"));
             }
         }
@@ -2016,17 +2014,40 @@ pub(super) fn measured_from(
     record: &Record,
     tip: &str,
 ) -> Result<String, EngineError> {
-    let output = owner.exec(&["merge-base", tip, &record.head], None, &[], 256)?;
+    measured_base(
+        db,
+        owner,
+        &record.project,
+        &record.repository,
+        &record.base,
+        &record.head,
+        tip,
+    )
+}
+
+/// [`measured_from`] for a set's project, repository, start and head, also before the set
+/// is stored, as the turn end's change checks read it (LAND-17-L1). Inputs: the store, the
+/// repository opened for objects, the project, the owner checkout, the start, the head and
+/// the tip. Output: the commit.
+pub(super) fn measured_base(
+    db: &Connection,
+    owner: &Repo,
+    project: &ProjectId,
+    repository: &Path,
+    base: &str,
+    head: &str,
+    tip: &str,
+) -> Result<String, EngineError> {
+    let output = owner.exec(&["merge-base", tip, head], None, &[], 256)?;
     let joined = match output.code {
         0 => super::git::object_id(&output.stdout)?,
-        1 => return Ok(record.base.clone()),
+        1 => return Ok(base.to_owned()),
         _ => return Err(failure("changes_git_failed")),
     };
-    if joined == record.base {
+    if joined == base {
         return Ok(joined);
     }
-    let Some(landed) = store::landed_head(db, &record.project, &record.repository, &record.base)?
-    else {
+    let Some(landed) = store::landed_head(db, project, repository, base)? else {
         return Ok(joined);
     };
     if owner.commit_of(&landed)?.as_deref() != Some(landed.as_str()) {
@@ -2034,11 +2055,8 @@ pub(super) fn measured_from(
     }
     let ancestor =
         |older: &str, newer: &str| owner.test(&["merge-base", "--is-ancestor", older, newer]);
-    if ancestor(&landed, tip)?
-        && ancestor(&joined, &record.base)?
-        && ancestor(&record.base, &record.head)?
-    {
-        return Ok(record.base.clone());
+    if ancestor(&landed, tip)? && ancestor(&joined, base)? && ancestor(base, head)? {
+        return Ok(base.to_owned());
     }
     Ok(joined)
 }

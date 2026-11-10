@@ -9,7 +9,7 @@ use crate::project_setup::StoredSetup;
 use crate::protocol::CredentialRef;
 use crate::recovery::{self, HeldItem, Interrupted, RunState};
 use crate::team::master::{self, InputRefused};
-use crate::team::{AgentRole, AgentStatus, launch_harness, now_ms};
+use crate::team::{AgentRole, AgentStatus, launch_harness, names, now_ms};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
@@ -488,6 +488,12 @@ impl TeamRuntime {
                 assert!(started <= 1);
                 if started == 1 {
                     let project = &run.project;
+                    let named = names::name(&self.connection, run.agent)?
+                        .and_then(|name| name.handle)
+                        .is_some();
+                    if !named {
+                        names::assign_task_role(&self.connection, project, run.agent, task)?;
+                    }
                     crate::activity::note_task(&self.connection, project, run.agent, task, now);
                 }
                 self.mark_agent(run.agent, AgentStatus::Working, Some(task))?;

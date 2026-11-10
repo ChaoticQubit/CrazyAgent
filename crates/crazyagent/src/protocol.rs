@@ -208,6 +208,10 @@ pub enum Command {
         settings: crate::sandbox_settings::SandboxSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerAgentCleanup {
+        settings: crate::cleanup_settings::CleanupSettings,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

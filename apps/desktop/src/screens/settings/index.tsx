@@ -2,6 +2,7 @@ import { useLayoutEffect, type ReactNode } from "react";
 import { PageHeader, formatRoute, type SettingsTab } from "../../ui";
 import { SETTINGS_TABS, type SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
+import { FinishedAgentsSettings } from "./finished-agents";
 import { GitHubSettings } from "./github";
 import { Harnesses } from "./harnesses";
 import { MemorySettings } from "./memory";
@@ -30,6 +31,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   { title: "Agents", items: [
     { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
     { id: "process", label: "Process" }, { id: "pack", label: "Pack" }, { id: "memory", label: "Memory" },
+    { id: "finished", label: "Finished agents" },
   ] },
   { title: "App", items: [
     { id: "home", label: "Projects folder" }, { id: "sandbox", label: "Sandbox" },
@@ -85,6 +87,7 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
       : tab === "github" ? <GitHubSettings />
       : tab === "sandbox" ? <SandboxSettingsTab />
       : tab === "memory" ? <MemorySettings />
+      : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "alerts" ? <TeamAlertsSettings />
       : tab === "updates" ? <UpdatesSettings />
       : <ProfileSettings />}

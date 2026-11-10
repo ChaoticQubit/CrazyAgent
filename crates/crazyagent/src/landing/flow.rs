@@ -808,17 +808,18 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 /// config the engine did not write. Inputs: the worktree and the commit. Output: true
 /// when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
-    holds_only_except(repo, commit, None)
+    holds_only_except(repo, commit, &[])
 }
 
 /// Says whether an agent worktree holds exactly a commit as [`holds_only`] does, leaving
-/// one more pattern out of its untracked files, such as a harness clone's teammates'
-/// worktree folder, which cleanup checks on its own. Inputs: the worktree, the commit and
-/// the pattern, in git's `--exclude` form, or None. Output: the answer.
+/// more patterns out of its untracked files, such as a harness clone's teammates' worktree
+/// folder, which cleanup checks on its own, or the code graph's copy, which is never the
+/// agent's work. Inputs: the worktree, the commit and the patterns, in git's `--exclude`
+/// form. Output: the answer.
 pub(super) fn holds_only_except(
     repo: &Repo,
     commit: &str,
-    excluded: Option<&str>,
+    excluded: &[&str],
 ) -> Result<bool, EngineError> {
     repo.run(&["update-index", "-q", "--refresh"])?;
     if !repo.test(&[
@@ -830,9 +831,12 @@ pub(super) fn holds_only_except(
     ])? {
         return Ok(false);
     }
-    let exclude = excluded.map(|pattern| format!("--exclude={pattern}"));
+    let exclude: Vec<String> = excluded
+        .iter()
+        .map(|pattern| format!("--exclude={pattern}"))
+        .collect();
     let mut listing = vec!["ls-files", "-z", "--others", "--exclude-standard"];
-    listing.extend(exclude.as_deref());
+    listing.extend(exclude.iter().map(String::as_str));
     let untracked = repo.exec(&listing, None, &[], 1)?;
     if untracked.code != 0 {
         return Err(failure("changes_git_failed"));
@@ -1124,59 +1128,55 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
 /// and the owner's own git would enter unsandboxed (SM1-R backstop to the sandbox deny),
 /// a folder the change makes into a layout git would open as a bare repository
 /// (`repository_layout`, SM-R1), or a link pointing outside the tree or into the agents'
-/// folder (`check_links`, SR1-2).
-/// Inputs: the repository, the owner's checkout, the trees the set spans, the tree its
-/// newest part starts from and the bounds. Output: Ok within the bounds.
+/// folder (`check_links`, SR1-2). The bounds count the whole range from `from`; the gitlink,
+/// layout, link and ignore checks read only the agent's own work from `owned`, so owner work
+/// the agent took in from the landing tip is not refused as its own (LAND-17-L1).
+/// Inputs: the repository, the owner's checkout, the trees the set spans, the commit its own
+/// work starts from, the tree its newest part starts from and the bounds. Output: Ok within
+/// the bounds.
 fn check_change(
     repo: &Repo,
     checkout: &Path,
     from: &str,
+    owned: &str,
     to: &str,
     fresh: &str,
     bounds: &TreeBounds,
 ) -> Result<(), EngineError> {
-    let output = repo.exec(
-        &["diff-tree", "-r", "-z", "--no-renames", from, to],
-        None,
-        &[],
-        LISTING_BYTES_MAX,
-    )?;
-    if output.code != 0 {
-        return Err(failure("changes_git_failed"));
-    }
-    if output.overflow {
-        return Err(failure("changes_too_large"));
-    }
-    let mut fields = output.stdout.split(|byte| *byte == 0);
-    let (mut blobs, mut added) = (Vec::new(), Vec::new());
-    let (mut folders, mut links): (BTreeSet<String>, BTreeSet<String>) =
-        (BTreeSet::new(), BTreeSet::new());
-    let mut paths: usize = 0;
-    while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
-        let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
-        let header = std::str::from_utf8(header).map_err(|_| failure("changes_git_failed"))?;
-        let parts: Vec<&str> = header
-            .strip_prefix(':')
-            .unwrap_or_default()
-            .split(' ')
-            .collect();
-        let [_, mode, _, id, status] = parts[..] else {
-            return Err(failure("changes_git_failed"));
-        };
-        paths += 1;
-        if paths > bounds.files {
+    let listing = changes_listing(repo, from, to)?;
+    let whole = changed_entries(&listing)?;
+    let mut blobs = Vec::new();
+    for (count, &(mode, id, _, path)) in whole.iter().enumerate() {
+        if count >= bounds.files {
             return Err(failure("changes_too_large"));
         }
         let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
         if path.len() > PATH_BYTES_MAX || path.split('/').count() > bounds.components {
             return Err(failure("changes_too_large"));
         }
-        if mode == "160000" {
-            return Err(failure("changes_embedded_repository"));
-        }
         if matches!(mode, "100644" | "100755" | "120000") {
             blobs.push(id);
         }
+    }
+    assert!(whole.len() <= bounds.files && blobs.len() <= whole.len());
+    let own_listing = if owned == from {
+        Vec::new()
+    } else {
+        changes_listing(repo, owned, to)?
+    };
+    let own = if owned == from {
+        whole
+    } else {
+        changed_entries(&own_listing)?
+    };
+    let mut added = Vec::new();
+    let (mut folders, mut links): (BTreeSet<String>, BTreeSet<String>) =
+        (BTreeSet::new(), BTreeSet::new());
+    for &(mode, _, status, path) in &own {
+        if mode == "160000" {
+            return Err(failure("changes_embedded_repository"));
+        }
+        let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
         if status == "A" {
             added.push(path);
         }
@@ -1187,16 +1187,15 @@ fn check_change(
             }
         }
     }
-    assert!(paths <= bounds.files && blobs.len() <= paths && added.len() <= paths);
+    assert!(added.len() <= own.len() && links.len() <= own.len());
     if repository_layout(repo, to, &folders)? {
         return Err(failure("changes_bare_repository"));
     }
-    assert!(links.len() <= blobs.len());
     check_links(repo, checkout, to, &links)?;
     if blob_bytes(repo, &blobs)? > bounds.bytes {
         return Err(failure("changes_too_large"));
     }
-    if fresh != from && !added.is_empty() {
+    if fresh != owned && !added.is_empty() {
         let since = repo.run(&[
             "diff-tree",
             "-r",
@@ -1214,6 +1213,50 @@ fn check_change(
         return Err(failure("changes_ignored_files"));
     }
     Ok(())
+}
+
+/// Lists what changed between two trees, `diff-tree -r -z --no-renames`. Inputs: the
+/// repository and the two trees. Output: the listing, `changes_git_failed` when git fails,
+/// or `changes_too_large` past `LISTING_BYTES_MAX`.
+fn changes_listing(repo: &Repo, from: &str, to: &str) -> Result<Vec<u8>, EngineError> {
+    let output = repo.exec(
+        &["diff-tree", "-r", "-z", "--no-renames", from, to],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Err(failure("changes_too_large"));
+    }
+    Ok(output.stdout)
+}
+
+/// One entry of a `changes_listing`: the changed path's new mode, new object, status
+/// letter and path.
+type Changed<'a> = (&'a str, &'a str, &'a str, &'a [u8]);
+
+/// The entries of a `changes_listing`. Input: the listing. Output: the entries, or
+/// `changes_git_failed` for a field git would not write.
+fn changed_entries(listing: &[u8]) -> Result<Vec<Changed<'_>>, EngineError> {
+    let mut fields = listing.split(|byte| *byte == 0);
+    let mut entries = Vec::new();
+    while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
+        let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
+        let header = std::str::from_utf8(header).map_err(|_| failure("changes_git_failed"))?;
+        let parts: Vec<&str> = header
+            .strip_prefix(':')
+            .unwrap_or_default()
+            .split(' ')
+            .collect();
+        let [_, mode, _, id, status] = parts[..] else {
+            return Err(failure("changes_git_failed"));
+        };
+        entries.push((mode, id, status, path));
+    }
+    Ok(entries)
 }
 
 /// Refuses a change set in which one new top-level folder, one the owner's branch does
@@ -1317,15 +1360,17 @@ fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
     }
 }
 
-/// Refuses a merged tree in which a change completes a bare-repository layout (SR1-1)
-/// or links the owner could follow out of the project (SR1-2): Accept's merge can join a
+/// Refuses a merged tree in which a change adds or changes a gitlink, which no set may land
+/// and the turn end's checks may have read from another start (land-19 r1 M1, L1), completes
+/// a bare-repository layout (SR1-1) or links the owner could follow out of the project
+/// (SR1-2): Accept's merge can join a
 /// change set's half of a layout or of a link chain with the other half another change set
 /// already landed. A layout the merge makes holds a name the change added or changed, and a
 /// chain the merge makes passes through a link the change added or changed, so the
 /// change's own kept paths name every folder and link to check.
 /// Inputs: the repository, the owner's checkout, the change's start and end commits and
-/// the merged tree. Output: Ok, else `changes_bare_repository`, `changes_link_outside` or
-/// the listing failure.
+/// the merged tree. Output: Ok, else `changes_embedded_repository`,
+/// `changes_bare_repository`, `changes_link_outside` or the listing failure.
 pub(super) fn check_merged(
     repo: &Repo,
     checkout: &Path,
@@ -1358,8 +1403,12 @@ pub(super) fn check_merged(
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
         let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
         let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
+        let mode = header.split(|byte| *byte == b' ').nth(1);
+        if mode == Some(b"160000".as_slice()) {
+            return Err(failure("changes_embedded_repository"));
+        }
         layout_folders(&mut folders, path);
-        if header.split(|byte| *byte == b' ').nth(1) == Some(b"120000".as_slice()) {
+        if mode == Some(b"120000".as_slice()) {
             links.insert(path.to_owned());
         }
     }
@@ -1809,14 +1858,17 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
 
 /// Stages everything in an agent worktree and makes it a commit object above `head`
 /// without moving any ref, or nothing when the tree equals `head`'s. The whole change
-/// set from `above` must stay within the bounds, staged files included.
-/// Inputs: the worktree, its root, the owner's checkout, the set's start, HEAD, the
-/// bounds and the message. Output: the commit.
+/// set from `above` must stay within the bounds, staged files included, and its own work
+/// from `owned` must pass the change checks.
+/// Inputs: the worktree, its root, the owner's checkout, the set's start, where its own
+/// work starts, HEAD, the bounds and the message. Output: the commit.
+#[allow(clippy::too_many_arguments)]
 fn commit_worktree(
     repo: &Repo,
     worktree: &Path,
     checkout: &Path,
     above: &str,
+    owned: &str,
     head: &str,
     bounds: &TreeBounds,
     message: &str,
@@ -1828,7 +1880,7 @@ fn commit_worktree(
     if tree == repo.tree_of(head)? {
         return Ok(None);
     }
-    if let Err(refusal) = check_change(repo, checkout, above, &tree, head, bounds) {
+    if let Err(refusal) = check_change(repo, checkout, above, owned, &tree, head, bounds) {
         repo.run(&["read-tree", head])?;
         return Err(refusal);
     }
@@ -1967,7 +2019,10 @@ fn restarted_base(
 /// must stay within the bounds before anything is stored. With no set open, a head already
 /// on the landing tip is not checked, since all its commits are on that branch: it opens no
 /// set, and files left uncommitted above it are still checked with the whole range by the
-/// commit that takes them in (LAND-8-L2). The change set is stored
+/// commit that takes them in (LAND-8-L2). The gitlink, layout, link and ignore checks read
+/// the set's own work from where Accept measures it against the tip
+/// (`owner::measured_base`), so owner work the agent took in from the tip is not refused as
+/// its own, while the bounds count the whole set (LAND-17-L1). The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
 /// commits the same tree again. Its counts are measured against the tip it lands on,
 /// read before the hold as the clone fetch is (`owner::landing_tip`, DEC-107).
@@ -2058,8 +2113,28 @@ pub(super) fn record(
     }
     let fast_forwarded =
         open.is_none() && above != head && already_on_tip(&shared, &head, tip.as_deref())?;
+    let owned = match tip.as_deref() {
+        Some(tip) => super::owner::measured_base(
+            db,
+            &shared,
+            &workspace.project,
+            &workspace.repository,
+            above,
+            &head,
+            tip,
+        )?,
+        None => above.to_owned(),
+    };
     if above != head && !fast_forwarded {
-        check_change(repo, &workspace.repository, above, &head, fresh, bounds)?;
+        check_change(
+            repo,
+            &workspace.repository,
+            above,
+            &owned,
+            &head,
+            fresh,
+            bounds,
+        )?;
     }
     super::merges::refuse_outside_merges(db, workspace, &shared, &head)?;
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
@@ -2075,6 +2150,7 @@ pub(super) fn record(
             &workspace.worktree,
             &workspace.repository,
             above,
+            &owned,
             &head,
             bounds,
             &message,

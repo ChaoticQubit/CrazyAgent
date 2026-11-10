@@ -2765,7 +2765,7 @@ async fn an_agent_waiting_for_removal_in_the_home_holds_a_home_move() {
     )
     .unwrap();
     assert!(
-        crazyagent::team::cleanup::finished(&db, &bench.root.join("team"), &project, now)
+        crazyagent::team::cleanup::finished(&db, &project, now)
             .unwrap()
             .is_empty()
     );

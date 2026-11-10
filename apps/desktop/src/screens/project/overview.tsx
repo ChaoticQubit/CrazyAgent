@@ -48,6 +48,7 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
   research_waiting: { icon: "hourglass", tone: "" },
   task_started: { icon: "circle-dashed", tone: "" },
   task_finished: { icon: "circle-check", tone: "ok" },
+  task_failed: { icon: "circle-x", tone: "bad" },
   task_stopped: { icon: "circle-stop", tone: "warn" },
   changes_ready: { icon: "inbox", tone: "" },
   accepted: { icon: "check", tone: "ok" },

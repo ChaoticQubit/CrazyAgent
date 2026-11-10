@@ -3234,6 +3234,7 @@ fn finished(id: i64, label: &str, bytes: u64) -> crate::team::cleanup::FinishedA
         stopped_ms: Some(2),
         bytes,
         counted_all: true,
+        kept: None,
     }
 }
 
@@ -3273,7 +3274,10 @@ fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
     shell.arrive(cleanup_reply(read, Ok(CleanupReply::Finished(agents))));
     let rows = render(&mut shell);
     let text = rows.join("\n");
-    assert!(text.contains("Clean up 2 finished agents (4 MB)"), "{text}");
+    assert!(
+        text.contains("Worktrees of 2 finished agents (4 MB)"),
+        "{text}"
+    );
     assert_eq!(
         pane_row(&rows, 3),
         padded("Ada (@login-page)  sub-agent, Codex  3 MB")
@@ -3314,8 +3318,11 @@ fn c_lists_the_finished_agents_with_their_size_and_y_removes_every_one() {
         })),
     ));
     let message = shell.ctx.message().unwrap();
-    assert_eq!(message.lead, "Removed 2 finished agents.");
-    assert_eq!(message.rest, "Freed 4 MB.");
+    assert_eq!(message.lead, "Removed the worktrees of 2 finished agents.");
+    assert_eq!(
+        message.rest,
+        "Freed 4 MB. Their conversations, history and logs stay."
+    );
     let rows = render(&mut shell);
     assert_eq!(
         pane_row(&rows, 3),
@@ -3340,19 +3347,26 @@ fn twenty_agents_at_80x24_keep_the_question_and_y_removes_every_one_read() {
     let rows = render(&mut shell);
     let text = rows.join("\n");
     assert!(
-        text.contains("Clean up 20 finished agents (20 MB)"),
+        text.contains("Worktrees of 20 finished agents (20 MB)"),
         "{text}"
     );
-    for (y, id) in (3..13).zip(1..) {
+    for (y, id) in (3..11).zip(1..) {
         assert_eq!(
             pane_row(&rows, y),
             padded(&format!("Agent {id} (@task-{id})  sub-agent, Codex  1 MB")),
             "{text}"
         );
     }
-    assert_eq!(pane_row(&rows, 13), padded("and 10 more (10 MB)"), "{text}");
-    assert_eq!(pane_row(&rows, 14), padded(""), "{text}");
-    assert!(pane_row(&rows, 15).starts_with("Each agent's working copy"));
+    assert_eq!(pane_row(&rows, 11), padded("and 12 more (12 MB)"), "{text}");
+    assert_eq!(pane_row(&rows, 12), padded(""), "{text}");
+    assert_eq!(
+        pane_row(&rows, 13),
+        padded("Each agent's worktree, its code checkout")
+    );
+    assert_eq!(
+        pane_row(&rows, 15),
+        padded("conversations, history and logs stay, and")
+    );
     assert_eq!(
         pane_row(&rows, 20),
         padded("y Remove and free 20 MB   n Keep them"),
@@ -3410,7 +3424,7 @@ fn a_removal_that_stopped_part_way_says_how_many_went_and_why_one_stayed() {
         })),
     ));
     let message = shell.ctx.message().unwrap();
-    assert_eq!(message.lead, "Removed 2, kept 1:");
+    assert_eq!(message.lead, "Removed 2 worktrees, kept 1:");
     assert_eq!(
         message.rest,
         "An agent's working copy has changes that are not saved anywhere else."
@@ -5045,5 +5059,113 @@ fn a_terminal_attach_the_full_queue_refuses_says_busy_and_enter_attaches_again()
             Request::TerminalAttach { agent } if agent.as_str() == "team-1"
         )),
         "Enter on the agent asks for its terminal again: {sent:?}"
+    );
+}
+
+fn held(id: i64, label: &str, code: &str) -> crate::team::cleanup::FinishedAgent {
+    crate::team::cleanup::FinishedAgent {
+        bytes: 0,
+        kept: Some(code.into()),
+        ..finished(id, label, 0)
+    }
+}
+
+#[test]
+fn an_agent_a_check_keeps_is_listed_with_its_reason_and_y_removes_only_the_others() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    let agents = vec![
+        finished(4, "Ada (@login-page)", 3 * 1024 * 1024),
+        held(3, "Lin (@docs)", "cleanup_commits_unlanded"),
+    ];
+    shell.arrive(cleanup_reply(read, Ok(CleanupReply::Finished(agents))));
+    let rows = render(&mut shell);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Worktrees of 1 finished agent (3 MB)"),
+        "{text}"
+    );
+    assert_eq!(
+        pane_row(&rows, 3),
+        padded("Ada (@login-page)  sub-agent, Codex  3 MB")
+    );
+    assert_eq!(
+        pane_row(&rows, 4),
+        padded("Lin (@docs) stays: it has commits that have")
+    );
+    assert_eq!(pane_row(&rows, 5), padded("not landed"));
+    assert!(
+        text.contains("y Remove and free 3 MB   n Keep them"),
+        "{text}"
+    );
+    shell.key(Key::Char('y'));
+    assert_eq!(
+        cleanup_sent(&mut shell),
+        vec![CleanupQuery::Remove {
+            project: project(),
+            agents: vec![4],
+        }],
+        "an agent a check keeps is never sent"
+    );
+}
+
+#[test]
+fn when_a_check_keeps_every_finished_agent_the_box_says_why_and_y_removes_nothing() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    shell.arrive(cleanup_reply(
+        read,
+        Ok(CleanupReply::Finished(vec![held(
+            3,
+            "Lin (@docs)",
+            "cleanup_changes_open",
+        )])),
+    ));
+    let rows = render(&mut shell);
+    let text = rows.join("\n");
+    assert!(text.contains("Finished agents"), "{text}");
+    assert_eq!(
+        pane_row(&rows, 3),
+        padded("Lin (@docs) stays: its changes wait for")
+    );
+    assert_eq!(pane_row(&rows, 4), padded("your review"));
+    assert!(text.contains("Nothing can go now.   Esc Close"), "{text}");
+    assert!(!text.contains("y Remove"), "{text}");
+    shell.key(Key::Char('y'));
+    assert!(requests(&mut shell).is_empty(), "y removes nothing");
+    assert!(render(&mut shell).join("\n").contains("Lin (@docs) stays"));
+    shell.key(Key::Esc);
+    assert!(!render(&mut shell).join("\n").contains("Lin (@docs) stays"));
+}
+
+#[test]
+fn every_code_a_check_keeps_an_agent_with_has_its_own_reason() {
+    for code in [
+        "cleanup_agent_has_task",
+        "cleanup_agent_not_found",
+        "cleanup_agent_running",
+        "cleanup_changes_open",
+        "cleanup_changes_restorable",
+        "cleanup_commits_unlanded",
+        "cleanup_refs_unlanded",
+        "cleanup_worktree_dirty",
+        "cleanup_worktree_invalid",
+        "cleanup_worktree_leftover",
+        "cleanup_worktree_unreadable",
+    ] {
+        assert!(
+            !super::cleanup::kept_reason(code).starts_with("a check keeps it"),
+            "{code}"
+        );
+    }
+    assert_eq!(
+        super::cleanup::kept_reason("cleanup_new_check"),
+        "a check keeps it (cleanup_new_check)"
     );
 }

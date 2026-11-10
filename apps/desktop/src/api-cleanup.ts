@@ -1,8 +1,9 @@
 import { call, knownError, namedFailure } from "./api";
 import type { Result } from "./api";
 
-/** A finished agent whose worktree and agent folder the owner can remove, with the bytes
- * both hold on disk; `counted_all` is false when the engine stopped counting at its bound. */
+/** A finished agent that still holds a worktree, with the bytes its worktree holds on disk;
+ * `counted_all` is false when the engine stopped counting at its bound, and `kept` is the code
+ * of the check that keeps its worktree, null when the owner can remove it. */
 export interface FinishedAgent {
   id: number;
   role: "master" | "sub";
@@ -11,6 +12,7 @@ export interface FinishedAgent {
   stopped_ms: number | null;
   bytes: number;
   counted_all: boolean;
+  kept: string | null;
 }
 
 /** What one removal did: the agents it removed, in the order asked, and the code of the agent
@@ -38,6 +40,31 @@ const REFUSALS: Record<string, string> = {
   cleanup_worktree_unreadable: "Git couldn't read an agent's working copy, for example because of a leftover lock file. CrazyAgent kept it and stopped there.",
 };
 
+/** Why a check keeps a finished agent's worktree, as the Agents tab shows it after "<agent>
+ * stays: ", for each code the Clean up button answers with. */
+const KEPT_REASONS: Record<string, string> = {
+  cleanup_agent_has_task: "a task is waiting for it",
+  cleanup_agent_not_found: "it is no longer in this project",
+  cleanup_agent_running: "it is the master this project starts again",
+  cleanup_changes_open: "its changes wait for your review",
+  cleanup_changes_restorable: "its discarded changes can still be restored",
+  cleanup_commits_unlanded: "it has commits that haven't landed",
+  cleanup_refs_unlanded: "its worktree has a stash, branch or tag that isn't saved anywhere else",
+  cleanup_worktree_dirty: "its worktree has changes that aren't saved anywhere else",
+  cleanup_worktree_invalid: "its worktree isn't where the engine recorded it",
+  cleanup_worktree_leftover: "git left files in its worktree that CrazyAgent couldn't delete",
+  cleanup_worktree_unreadable: "git couldn't read its worktree",
+};
+
+/** The codes a kept agent can show with their own reason. */
+export const KEPT_CODES = Object.keys(KEPT_REASONS);
+
+/** The reason a check keeps a finished agent's worktree. Input: the code. Output: the
+ * reason, or one naming the code when this build has no words for it. */
+export function keptReason(code: string): string {
+  return Object.hasOwn(KEPT_REASONS, code) ? KEPT_REASONS[code] : `a check keeps it (${code})`;
+}
+
 /** The refusal codes of the cleanup protocol that have their own sentence. */
 export const CLEANUP_REFUSALS = Object.keys(REFUSALS);
 
@@ -54,15 +81,17 @@ export function cleanupNotReady<T>(result: Result<T>): boolean {
   return result.kind === "not_ready" || (result.kind === "error" && result.code === "cleanup_unavailable");
 }
 
-/** Reads a project's finished agents that can be removed, newest first. Input: the project id.
- * Output: the agents with their size on disk. */
+/** Reads a project's finished agents that still hold a worktree, newest first: the ones whose
+ * worktree can go with its size on disk, and the ones a check keeps with its code. Input: the
+ * project id. Output: the agents. */
 export function loadFinishedAgents(projectId: string): Promise<Result<FinishedAgent[]>> {
   return call<FinishedAgent[]>("desktop_finished_agents", { projectId });
 }
 
-/** Removes the worktrees and folders of finished agents the owner confirmed; the engine checks
- * each one again first and stops at the first one that changed. Inputs: the project id and the
- * agent ids. Output: what the removal did, or the code when it removed none. */
+/** Removes the worktrees of finished agents the owner confirmed, keeping their conversations,
+ * history and logs; the engine checks each one again first and stops at the first one that
+ * changed. Inputs: the project id and the agent ids. Output: what the removal did, or the code
+ * when it removed none. */
 export function removeFinishedAgents(projectId: string, agents: number[]): Promise<Result<Removal>> {
   return call<Removal>("desktop_remove_finished_agents", { projectId, agents });
 }
