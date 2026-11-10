@@ -601,9 +601,35 @@ fn a_transcript_reading_orders_an_account_after_the_others_but_never_leaves_it_o
     assert_eq!(
         standings(&pools[0]),
         [
-            ("c", next(Some(NOW_MS + 24 * HOUR_MS), Some(50), false)),
-            ("a", next(Some(NOW_MS + HOUR_MS), Some(90), false)),
-            ("b", next(Some(NOW_MS + 2 * HOUR_MS), Some(0), false)),
+            (
+                "c",
+                next(
+                    Some(NOW_MS + 24 * HOUR_MS),
+                    Some(50),
+                    false,
+                    OrderWhy::ResetsSoonest {
+                        resets_ms: NOW_MS + 24 * HOUR_MS,
+                    }
+                )
+            ),
+            (
+                "a",
+                next(
+                    Some(NOW_MS + HOUR_MS),
+                    Some(90),
+                    false,
+                    OrderWhy::LimitReported
+                )
+            ),
+            (
+                "b",
+                next(
+                    Some(NOW_MS + 2 * HOUR_MS),
+                    Some(0),
+                    false,
+                    OrderWhy::LimitReported
+                )
+            ),
             (
                 "d",
                 Standing::FiveHourCap {
@@ -859,11 +885,12 @@ fn limits_come_from_the_usage_store_with_the_owners_manual_reset_applied() {
     assert_eq!(ordered(&choice, &list), ["a", "b"]);
 }
 
-fn next(resets_ms: Option<i64>, left: Option<u8>, use_last: bool) -> Standing {
+fn next(resets_ms: Option<i64>, left: Option<u8>, use_last: bool, why: OrderWhy) -> Standing {
     Standing::Next {
         weekly_resets_ms: resets_ms,
         weekly_left_percent: left,
         use_last,
+        why,
     }
 }
 
@@ -924,8 +951,26 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
     assert_eq!(
         standings(&pools[0]),
         [
-            ("b", next(Some(NOW_MS + 24 * HOUR_MS), Some(60), false)),
-            ("a", next(Some(NOW_MS + 72 * HOUR_MS), Some(60), true)),
+            (
+                "b",
+                next(
+                    Some(NOW_MS + 24 * HOUR_MS),
+                    Some(60),
+                    false,
+                    OrderWhy::ResetsSoonest {
+                        resets_ms: NOW_MS + 24 * HOUR_MS,
+                    }
+                )
+            ),
+            (
+                "a",
+                next(
+                    Some(NOW_MS + 72 * HOUR_MS),
+                    Some(60),
+                    true,
+                    OrderWhy::UseLast
+                )
+            ),
             (
                 "c",
                 Standing::ReserveReached {
@@ -961,8 +1006,24 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
     assert_eq!(
         standings(&balanced[0])[..2],
         [
-            ("b", next(Some(NOW_MS + 24 * HOUR_MS), Some(60), false)),
-            ("a", next(Some(NOW_MS + 72 * HOUR_MS), Some(60), true)),
+            (
+                "b",
+                next(
+                    Some(NOW_MS + 24 * HOUR_MS),
+                    Some(60),
+                    false,
+                    OrderWhy::LeastUsed
+                )
+            ),
+            (
+                "a",
+                next(
+                    Some(NOW_MS + 72 * HOUR_MS),
+                    Some(60),
+                    true,
+                    OrderWhy::UseLast
+                )
+            ),
         ]
     );
 }
@@ -975,8 +1036,8 @@ fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
     assert_eq!(
         standings(&pools[0]),
         [
-            ("a", next(None, None, false)),
-            ("b", next(None, None, false))
+            ("a", next(None, None, false, OrderWhy::NoReading)),
+            ("b", next(None, None, false, OrderWhy::NoReading))
         ]
     );
     assert!(
@@ -984,4 +1045,435 @@ fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
             .unwrap()
             .is_empty()
     );
+}
+
+const RESET_MS: i64 = NOW_MS + 24 * HOUR_MS;
+const LATER_RESET_MS: i64 = NOW_MS + 72 * HOUR_MS;
+
+/// The reason each ready account of the only pool carries, in the real order. Input: the
+/// ranking. Output: account and reason pairs.
+fn reasons(pools: &[PoolRanking]) -> Vec<(String, OrderWhy)> {
+    assert_eq!(pools.len(), 1);
+    pools[0]
+        .accounts
+        .iter()
+        .filter_map(|account| match account.standing {
+            Standing::Next { why, .. } => Some((account.connection.as_str().to_owned(), why)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Ranks accounts a and b through the real engine read. Inputs: the pool's strategy, the
+/// usage readings and each account's rank. Output: the reason each ready account carries.
+fn why_under(
+    strategy: Strategy,
+    rows: &[LimitsRow<'_>],
+    ranks: [Option<u16>; 2],
+) -> Vec<(String, OrderWhy)> {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b"]);
+    limits(&connection, rows);
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::PoolStrategy {
+            pool: reference("pool-a"),
+            strategy: Some(strategy),
+        },
+    );
+    for (id, rank) in ["a", "b"].into_iter().zip(ranks) {
+        plan(
+            &mut connection,
+            &access,
+            id,
+            AccountPlan {
+                rank,
+                reserve_percent: 0,
+                pin: None,
+            },
+        );
+    }
+    reasons(&ranking(&connection, &access, NOW_MS).unwrap())
+}
+
+/// Two reasons with the accounts named, for comparing with `why_under`. Inputs: the first
+/// and second account with their reasons. Output: the pairs.
+fn pair(first: (&str, OrderWhy), second: (&str, OrderWhy)) -> Vec<(String, OrderWhy)> {
+    vec![
+        (first.0.to_owned(), first.1),
+        (second.0.to_owned(), second.1),
+    ]
+}
+
+const SOONEST: OrderWhy = OrderWhy::ResetsSoonest {
+    resets_ms: RESET_MS,
+};
+
+#[test]
+fn use_it_or_lose_it_says_which_account_resets_soonest_and_which_later() {
+    assert_eq!(
+        why_under(
+            Strategy::UseItOrLoseIt,
+            &[
+                ("a", 10.0, None, 40.0, Some(LATER_RESET_MS)),
+                ("b", 10.0, None, 30.0, Some(RESET_MS)),
+            ],
+            [None, None],
+        ),
+        pair(
+            ("b", SOONEST),
+            (
+                "a",
+                OrderWhy::ResetsLater {
+                    resets_ms: LATER_RESET_MS,
+                }
+            ),
+        )
+    );
+}
+
+#[test]
+fn balanced_says_which_account_is_least_used_and_which_more() {
+    assert_eq!(
+        why_under(
+            Strategy::Balanced,
+            &[
+                ("a", 10.0, None, 40.0, Some(RESET_MS)),
+                ("b", 10.0, None, 10.0, Some(RESET_MS)),
+            ],
+            [None, None],
+        ),
+        pair(("b", OrderWhy::LeastUsed), ("a", OrderWhy::MoreUsed))
+    );
+}
+
+#[test]
+fn balanced_with_equal_weekly_use_names_the_five_hour_use_that_set_them_apart() {
+    assert_eq!(
+        why_under(
+            Strategy::Balanced,
+            &[
+                ("a", 30.0, None, 40.0, Some(RESET_MS)),
+                ("b", 10.0, None, 40.0, Some(RESET_MS)),
+            ],
+            [None, None],
+        ),
+        pair(
+            ("b", OrderWhy::LeastUsed),
+            ("a", OrderWhy::MoreFiveHourUsed)
+        )
+    );
+}
+
+#[test]
+fn manual_rank_says_the_rank_and_an_unranked_account_says_it_has_none() {
+    assert_eq!(
+        why_under(Strategy::ManualRank, &[], [None, Some(2)]),
+        pair(
+            ("b", OrderWhy::Ranked { rank: 2 }),
+            ("a", OrderWhy::Unranked),
+        )
+    );
+}
+
+#[test]
+fn a_later_row_with_the_same_reset_says_its_rank_set_it_apart() {
+    let same = [
+        ("a", 10.0, None, 40.0, Some(RESET_MS)),
+        ("b", 10.0, None, 40.0, Some(RESET_MS)),
+    ];
+    assert_eq!(
+        why_under(Strategy::UseItOrLoseIt, &same, [Some(2), Some(1)]),
+        pair(("b", SOONEST), ("a", OrderWhy::TiedRank { rank: Some(2) }),)
+    );
+    assert_eq!(
+        why_under(Strategy::UseItOrLoseIt, &same, [None, Some(1)]),
+        pair(("b", SOONEST), ("a", OrderWhy::TiedRank { rank: None }))
+    );
+    assert_eq!(
+        why_under(Strategy::Balanced, &same, [None, Some(1)]),
+        pair(
+            ("b", OrderWhy::LeastUsed),
+            ("a", OrderWhy::TiedRank { rank: None }),
+        )
+    );
+}
+
+#[test]
+fn a_later_row_with_nothing_to_set_it_apart_keeps_its_pool_order() {
+    let same = [
+        ("a", 10.0, None, 40.0, Some(RESET_MS)),
+        ("b", 10.0, None, 40.0, Some(RESET_MS)),
+    ];
+    assert_eq!(
+        why_under(Strategy::UseItOrLoseIt, &same, [None, None]),
+        pair(("a", SOONEST), ("b", OrderWhy::TiedOrder))
+    );
+    assert_eq!(
+        why_under(Strategy::Balanced, &same, [Some(3), Some(3)]),
+        pair(("a", OrderWhy::LeastUsed), ("b", OrderWhy::TiedOrder))
+    );
+}
+
+#[test]
+fn an_account_with_no_reading_says_so_under_the_strategies_that_need_one() {
+    for strategy in [Strategy::UseItOrLoseIt, Strategy::Balanced] {
+        assert_eq!(
+            why_under(strategy, &[], [None, None]),
+            pair(("a", OrderWhy::NoReading), ("b", OrderWhy::NoReading))
+        );
+    }
+}
+
+/// A store with the real sign-in tables, where a native account is not signed in until a
+/// row records it. Output: the store's folder and connection.
+fn signed_out_database() -> (tempfile::TempDir, Connection) {
+    let (directory, connection) = database();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    (directory, connection)
+}
+
+/// Records one account's latest sign-in as the native sign-in flow stores it. Inputs: the
+/// store, the account, its action and the phase it ended in. Output: none.
+fn sign_in_ended(
+    connection: &Connection,
+    id: &str,
+    action: crate::engine::owner::NativeAuthAction,
+    phase: crate::engine::owner::NativeAuthPhase,
+) {
+    use crate::engine::owner::{NativeAuthFact, NativeAuthPhase, NativeProfileBinding};
+    let model = managed(id);
+    let ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
+        unreachable!("every account in these rows is native managed");
+    };
+    let column = match phase {
+        NativeAuthPhase::AuthenticatedObserved => "authenticated_observed",
+        NativeAuthPhase::UnauthenticatedObserved => "unauthenticated_observed",
+        other => unreachable!("these rows end a sign-in, not {other:?}"),
+    };
+    let operation = format!("operation-{id}");
+    let fact = crate::engine::owner::native_auth::encode_fact(&NativeAuthFact {
+        operation_id: crate::protocol::RequestId::new(operation.clone()).unwrap(),
+        action,
+        binding: NativeProfileBinding {
+            database_instance: "a".repeat(64),
+            engine_epoch: "b".repeat(64),
+            config_id: crate::protocol::ConfigId::new("c".repeat(64)).unwrap(),
+            source_hash: "d".repeat(64),
+            at_revision: crate::protocol::Cursor::new(1),
+            connection: model.clone(),
+            custody_id: "e".repeat(64),
+        },
+        generation: 1,
+        phase,
+        code: None,
+    })
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact)
+             VALUES (?1,?2,1,?3,X'01',?4)",
+            params![
+                operation,
+                crate::memory::hash(profile_ref.as_str().as_bytes()),
+                column,
+                fact
+            ],
+        )
+        .unwrap();
+}
+
+/// Records a finished sign-in that ended authenticated. Inputs: the store and the account.
+/// Output: none.
+fn signed_in(connection: &Connection, id: &str) {
+    sign_in_ended(
+        connection,
+        id,
+        crate::engine::owner::NativeAuthAction::SignIn {
+            method: crate::engine::owner::NativeAuthMethod::ClaudeOfficial,
+        },
+        crate::engine::owner::NativeAuthPhase::AuthenticatedObserved,
+    );
+}
+
+/// Records a provider's rejection of an account's sign-in as the model gateway stores it.
+/// Inputs: the store and the account. Output: none.
+fn provider_rejected(connection: &Connection, id: &str) {
+    let model = managed(id);
+    let at_ms = u64::try_from(NOW_MS).unwrap();
+    let observation = crate::model_gateway::Observation {
+        id: crate::protocol::RequestId::new(format!("rejected-{id}")).unwrap(),
+        connection: model.clone(),
+        sequence: 1,
+        observed_at_ms: at_ms,
+        valid_until_ms: at_ms + 1,
+        kind: crate::model_gateway::ObservationKind::InvalidAuthentication,
+    };
+    connection
+        .execute(
+            "INSERT INTO model_gateway_observations(id,connection_revision,sequence,body)
+             VALUES (?1,?2,1,?3)",
+            params![
+                observation.id.as_str(),
+                crate::memory::hash(&serde_json::to_vec(&model).unwrap()),
+                serde_json::to_string(&observation).unwrap()
+            ],
+        )
+        .unwrap();
+}
+
+/// Every account's standing in the only pool's ranking, in ranking order. Inputs: the store
+/// and the access. Output: the standings.
+fn held_as(connection: &Connection, access: &ModelAccess) -> Vec<Standing> {
+    ranking(connection, access, NOW_MS).unwrap()[0]
+        .accounts
+        .iter()
+        .map(|account| account.standing)
+        .collect()
+}
+
+#[test]
+fn an_account_with_no_sign_in_is_held_as_not_signed_in_and_a_signed_in_one_is_next() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a", "b"]);
+    signed_in(&connection, "b");
+    assert_eq!(
+        standings(&ranking(&connection, &access, NOW_MS).unwrap()[0]),
+        [
+            ("b", next(None, None, false, OrderWhy::NoReading)),
+            ("a", Standing::NotSignedIn),
+        ]
+    );
+}
+
+#[test]
+fn never_use_is_what_a_never_used_account_reads_even_when_it_is_not_signed_in() {
+    let (_directory, mut connection) = signed_out_database();
+    let access = access(&["a"]);
+    plan(
+        &mut connection,
+        &access,
+        "a",
+        AccountPlan {
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        },
+    );
+    assert_eq!(held_as(&connection, &access), [Standing::NeverUse]);
+}
+
+#[test]
+fn not_signed_in_is_what_a_paused_account_reads_when_it_has_no_sign_in() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a"]);
+    connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('a',?1)",
+            [NOW_MS + HOUR_MS],
+        )
+        .unwrap();
+    assert_eq!(held_as(&connection, &access), [Standing::NotSignedIn]);
+}
+
+#[test]
+fn a_sign_in_a_provider_rejected_reads_not_signed_in() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a"]);
+    signed_in(&connection, "a");
+    provider_rejected(&connection, "a");
+    assert_eq!(held_as(&connection, &access), [Standing::NotSignedIn]);
+}
+
+#[test]
+fn a_latest_sign_in_that_did_not_end_authenticated_reads_not_signed_in() {
+    use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a", "b"]);
+    sign_in_ended(
+        &connection,
+        "a",
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::ClaudeOfficial,
+        },
+        NativeAuthPhase::UnauthenticatedObserved,
+    );
+    sign_in_ended(
+        &connection,
+        "b",
+        NativeAuthAction::Logout,
+        NativeAuthPhase::AuthenticatedObserved,
+    );
+    assert_eq!(
+        held_as(&connection, &access),
+        [Standing::NotSignedIn, Standing::NotSignedIn]
+    );
+}
+
+#[test]
+fn an_authenticated_account_being_checked_again_stays_ready_as_the_real_pick_reads_it() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a"]);
+    signed_in(&connection, "a");
+    let ModelAuthentication::NativeManaged { profile_ref } = &managed("a").auth else {
+        unreachable!("every account in these rows is native managed");
+    };
+    connection
+        .execute(
+            "INSERT INTO native_auth_fences(profile_key,operation_id,generation,db_instance,
+             engine_epoch,custody_id,owner_id,owner_epoch) VALUES (?1,'operation-a',1,?2,?2,?2,?2,1)",
+            params![
+                crate::memory::hash(profile_ref.as_str().as_bytes()),
+                "a".repeat(64)
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        held_as(&connection, &access),
+        [next(None, None, false, OrderWhy::NoReading)]
+    );
+}
+
+#[test]
+fn an_account_with_no_native_sign_in_is_never_held_for_one() {
+    let (_directory, connection) = signed_out_database();
+    let mut access = access(&["a"]);
+    access.connections[0].auth = ModelAuthentication::ApiKey {
+        credential_ref: reference("a-key"),
+    };
+    assert_eq!(
+        held_as(&connection, &access),
+        [next(None, None, false, OrderWhy::NoReading)]
+    );
+}
+
+#[test]
+fn a_ranking_counts_only_this_pools_projects_that_set_their_own_order() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a"]);
+    for id in ["project-a", "project-b"] {
+        known_project(&connection, id);
+    }
+    let count = |connection: &Connection| {
+        ranking(connection, &access, NOW_MS).unwrap()[0].own_order_projects
+    };
+    assert_eq!(count(&connection), 0);
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::ProjectStrategy {
+            project: reference("project-b"),
+            strategy: Some(Strategy::Balanced),
+        },
+    );
+    assert_eq!(count(&connection), 0);
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::ProjectStrategy {
+            project: reference("project-a"),
+            strategy: Some(Strategy::Balanced),
+        },
+    );
+    assert_eq!(count(&connection), 1);
 }

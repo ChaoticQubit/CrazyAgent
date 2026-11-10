@@ -917,9 +917,28 @@ fn limit_reached(
         })
 }
 
+/// Why a ready account stands where it does: the first field of the real sort key that
+/// sets it apart from the account above it, so the words cannot drift from the order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OrderWhy {
+    UseLast,
+    LimitReported,
+    NoReading,
+    ResetsSoonest { resets_ms: i64 },
+    ResetsLater { resets_ms: i64 },
+    LeastUsed,
+    MoreUsed,
+    MoreFiveHourUsed,
+    Ranked { rank: u16 },
+    Unranked,
+    TiedRank { rank: Option<u16> },
+    TiedOrder,
+}
+
 /// Where one account stands in its pool's ranking now: next in line, with its weekly
-/// reset and the weekly percent it may still use before its reserve, or held with why
-/// and until when, in ms since the epoch.
+/// reset, the weekly percent it may still use before its reserve and why it stands there,
+/// or held with why and until when, in ms since the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Standing {
@@ -927,7 +946,9 @@ pub enum Standing {
         weekly_resets_ms: Option<i64>,
         weekly_left_percent: Option<u8>,
         use_last: bool,
+        why: OrderWhy,
     },
+    NotSignedIn,
     Paused {
         until_ms: i64,
     },
@@ -950,13 +971,15 @@ pub struct RankedAccount {
 }
 
 /// One pool's ranking: the strategy that orders it, the accounts work would try now in
-/// that order, then every held account in pool order.
+/// that order, then every held account in pool order, and how many of the pool's projects
+/// set their own order, which this ranking does not show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolRanking {
     pub pool: CredentialRef,
     pub strategy: Strategy,
     pub accounts: Vec<RankedAccount>,
+    pub own_order_projects: u32,
 }
 
 /// Ranks every pool's accounts with the same choice team, research and master work make
@@ -994,7 +1017,7 @@ pub fn ranking(
             .iter()
             .map(|&at| RankedAccount {
                 connection: candidates[at].connection.clone(),
-                standing: choice.next(&candidates[at]),
+                standing: choice.next(&candidates[at], OrderWhy::TiedOrder),
             })
             .collect();
         held.extend(
@@ -1013,6 +1036,7 @@ pub fn ranking(
             pool: pool.id.clone(),
             strategy: choice.strategy,
             accounts,
+            own_order_projects: 0,
         });
     }
     Ok(pools)
@@ -1038,7 +1062,7 @@ fn paused_until(
 }
 
 impl Choice {
-    fn next(&self, candidate: &Candidate) -> Standing {
+    fn next(&self, candidate: &Candidate, why: OrderWhy) -> Standing {
         let plan = self.schedule.plan(&candidate.connection);
         let (_, weekly) = self.windows(candidate);
         Standing::Next {
@@ -1049,6 +1073,7 @@ impl Choice {
                 room.floor() as u8
             }),
             use_last: plan.pin == Some(Pin::UseLast),
+            why,
         }
     }
 
