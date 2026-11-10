@@ -364,6 +364,18 @@ test("pressing Add on one account twice on a draft puts it in once", async () =>
   assert.equal(seen.says, "", "the second press is no refusal");
 });
 
+test("picking another pool clears a refusal left on the screen", async () => {
+  const seen = await onPools({ ...LIVE, refuseEdit: "pool_name_bounds" }, async (page) => {
+    await press(page, REMOVE("Account 0"));
+    const before = await alert(page);
+    await press(page, ITEM(2));
+    return { before, after: await alert(page), items: await items(page) };
+  });
+  assert.equal(seen.before, "Use a pool name of 1 to 60 characters on one line.");
+  assert.equal(seen.after, "");
+  assert.deepEqual(seen.items.map((item) => [item.name, item.current]), [["Main pool", null], ["Spare", "true"]]);
+});
+
 test("a refused first Add keeps the draft and shows the engine's sentence", async () => {
   const seen = await onPools({ ...LIVE, refuseEdit: "pool_name_bounds" }, async (page) => {
     await press(page, NEW, "New pool");
@@ -460,6 +472,21 @@ test("a rename the engine refuses puts the saved name back and shows its sentenc
   });
   assert.match(seen.alert, /pool name/i);
   assert.equal(seen.value, "Main pool");
+  assert.equal(seen.section, "Main pool");
+});
+
+test("deleting a pool just created, before the list has read it, leaves no pool behind", async () => {
+  const seen = await onPools(LIVE, async (page) => {
+    await page.evaluate('Fixture.gate("desktop_pool_summaries")');
+    await press(page, NEW, "New pool");
+    await typeName(page, "Fresh");
+    await press(page, ADD("Account 4"));
+    await press(page, 'button[aria-label="Delete pool Fresh"]');
+    await press(page, "dialog[open] button", "Delete pool");
+    await page.evaluate("Fixture.openGate()");
+    return { items: await items(page), section: await heading(page) };
+  });
+  assert.deepEqual(seen.items.map((item) => [item.name, item.current]), [["Main pool", "true"], ["Spare", null]]);
   assert.equal(seen.section, "Main pool");
 });
 
