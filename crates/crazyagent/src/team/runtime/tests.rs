@@ -26697,3 +26697,47 @@ fn a_coordination_message_forges_no_owner_line_at_the_live_master() {
         "{typed}"
     );
 }
+
+/// A project's hold rests an account for that project only (SECAUDIT-RATELIMIT-FORGE, design
+/// row 1): the runtime's paused set for the holding project has it until the hold ends, another
+/// project's set does not, and an account-wide pause is in both.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
+    let fixture = Fixture::new(1);
+    let team = stand_in_runtime(&fixture);
+    let now = crate::team::now_ms();
+    for (project, connection, until_ms) in [
+        (PROJECT, "claude-a", now + 600_000),
+        (PROJECT, "claude-b", now - 1),
+        ("project-other", "claude-c", now + 600_000),
+    ] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_project_pauses(project,connection,until_ms) VALUES (?1,?2,?3)",
+                params![project, connection, until_ms],
+            )
+            .unwrap();
+    }
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('claude-d',?1)",
+            [now + 600_000],
+        )
+        .unwrap();
+    let paused = |project: &str| {
+        team.paused(&ProjectId::new(project).unwrap())
+            .unwrap()
+            .iter()
+            .map(|connection| connection.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paused(PROJECT), ["claude-a", "claude-d"]);
+    assert_eq!(
+        paused("project-other"),
+        ["claude-c", "claude-d"],
+        "another project still picks the held account"
+    );
+}

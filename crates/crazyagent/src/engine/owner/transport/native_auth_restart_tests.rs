@@ -346,6 +346,26 @@ impl Restart {
                 rusqlite::params![connection().as_str(), now_ms() + 600_000],
             )
             .unwrap();
+        database
+            .execute(
+                "INSERT INTO team_project_pauses(project,connection,until_ms) VALUES ('project-z',?1,?2)
+                 ON CONFLICT(project,connection) DO UPDATE SET until_ms=excluded.until_ms",
+                rusqlite::params![connection().as_str(), now_ms() + 600_000],
+            )
+            .unwrap();
+    }
+
+    /// Whether project-z still holds the account after a limit its own agent reported
+    /// (SECAUDIT-RATELIMIT-FORGE). Output: the answer.
+    fn project_held(&self) -> bool {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_project_pauses WHERE project='project-z' AND connection=?1)",
+                [connection().as_str()],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     /// Records the provider's rejection of one account's sign-in as its newest gateway
@@ -950,10 +970,15 @@ async fn a_fresh_sign_in_lifts_the_pause_and_rejection_that_a_sign_in_check_keep
             restart.held(),
             (true, crate::model_gateway::Health::InvalidAuthentication)
         );
+        assert!(restart.project_held());
         first.sign_in(&restart).await;
         assert_eq!(
             restart.held(),
             (false, crate::model_gateway::Health::Unknown)
+        );
+        assert!(
+            !restart.project_held(),
+            "a fresh sign-in lifts a project's hold on the account too"
         );
         restart.hold();
         first.stop().await;
@@ -1004,6 +1029,7 @@ async fn a_rejected_account_reads_rejected_until_it_signs_in_again_on_the_same_a
             restart.held(),
             (false, crate::model_gateway::Health::Unknown)
         );
+        assert!(!restart.project_held());
         run.stop().await;
     })
     .await
