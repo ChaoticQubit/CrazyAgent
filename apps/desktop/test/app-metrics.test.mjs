@@ -59,7 +59,7 @@ const render = (patch = {}) => renderToStaticMarkup(createElement(view.MetricsPa
   onRange: forbidden, onBy: forbidden, onRetry: forbidden, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
-const TITLES = { project: "By project", agent: "By agent", run: "By run", account: "By account", harness: "By harness" };
+const TITLES = { project: "By project", agent: "By agent", run: "By run", account: "By account", pool: "By pool", harness: "By harness" };
 const panel = (markup, title) => {
   const start = markup.indexOf(`<h2>${title}</h2>`);
   assert.ok(start >= 0, `no ${title} panel`);
@@ -431,4 +431,19 @@ test("a row that reported nothing lines up with the table's columns (r1 L1)", ()
   const row = rows.find((one) => one.includes("Usage not reported by rcli"));
   assert.ok(row, "the row is in the table");
   assert.equal(width(row), width(rows[0]));
+});
+
+test("a failed metrics read keeps the usage notices, Account limits, By pool, Lines and By day on the app page, with the error above them (METRICS-4-F1)", () => {
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const markup = render({ ...withUsage({ counting_notice: "Counting moved to the new rules.", limits: [limitsFor()], pools: [usageRow("pool-a", ALPHA)], days: [{ day_ms: SINCE, tokens: ALPHA }] }), metrics: failed });
+  const words = text(markup);
+  assert.match(words, /Counting moved to the new rules\./, "the usage notice stays");
+  assert.match(words, /Account limits/);
+  assert.equal(markup.split("Check limits now").length - 1, 1, "one Check limits now");
+  for (const title of ["By pool", "Lines changed by project", "By day"]) assert.ok(markup.includes(`<h2>${title}</h2>`), `${title} stays`);
+  assert.match(tableText(markup, "pool"), /pool-a/, "the pool row shows");
+  assert.ok(words.indexOf("Try again") >= 0 && words.indexOf("Try again") < words.indexOf("Account limits"), "the error sits above what the usage read keeps");
+  for (const gone of ["By project", "By agent", "By run", "By account", "By harness"]) assert.ok(!markup.includes(`<h2>${gone}</h2>`), `${gone} needs the metrics read`);
+  const both = text(render({ usage: failed, metrics: failed }));
+  assert.doesNotMatch(both, /By pool|By day/, "no usage read, no usage panels");
 });
