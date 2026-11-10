@@ -50,6 +50,9 @@ enum Action {
         window: WindowKind,
         at_ms: Option<i64>,
     },
+    SetMoney {
+        settings: MoneySettings,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,8 +151,11 @@ impl OwnerClient {
     }
 
     /// Stores the owner's main number and price source. Input: the settings. Output: done.
-    pub async fn usage_set_money(&self, _settings: MoneySettings) -> Result<(), EngineError> {
-        Ok(())
+    pub async fn usage_set_money(&self, settings: MoneySettings) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetMoney { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
     }
 
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
@@ -211,6 +217,7 @@ enum Prepared {
 enum Change {
     Refresh,
     SetReset(CredentialRef, WindowKind, Option<i64>),
+    SetMoney(MoneySettings),
 }
 
 /// Serves one usage request. The report is built first; then, under the owner barrier, the
@@ -302,6 +309,7 @@ async fn prepare(
             window,
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
+        Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
     })
 }
 
@@ -352,6 +360,7 @@ async fn finish(
             Change::SetReset(account, window, at_ms) => {
                 usage::set_reset_override(&db, &account, window, at_ms)
             }
+            Change::SetMoney(settings) => usage::money::write(&db, settings),
         }
     })
     .await

@@ -74,6 +74,19 @@ export interface AccountLimits {
   weekly_left_out_label: string | null;
 }
 
+export interface MoneySettings {
+  main_number: "dollars" | "tokens";
+  prices: "bundled" | "off";
+}
+
+export interface MoneyView {
+  settings: MoneySettings;
+  shown: "dollars" | "tokens";
+  as_of: string | null;
+  cost_nanos: number;
+  unpriced_tokens: number;
+}
+
 export interface UsageReport {
   since_ms: number | null;
   total: Tokens;
@@ -214,6 +227,11 @@ export function loadMetrics(sinceMs: number, projectId: string | null): Promise<
 /** Asks the engine to read every signed-in account's limits now. */
 export function refreshUsage(): Promise<Result<void>> {
   return call<void>("desktop_usage_refresh");
+}
+
+/** Stores the owner's main number and price source. Input: the settings. Output: done. */
+export function setMoney(settings: MoneySettings): Promise<Result<void>> {
+  return call<void>("desktop_usage_set_money", { settings });
 }
 
 /** Sets or clears the owner's manual reset time of one account's window. Inputs: the
