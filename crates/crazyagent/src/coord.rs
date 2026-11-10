@@ -46,7 +46,7 @@ pub use claims::{
 };
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
-pub use store::{ensure, forget_project, master_of, message};
+pub use store::{ensure, forget_project, is_master, master_of, message};
 pub use work::{finish, start_work, transfer, work, works};
 
 /// A team agent's id, the `team_agents` row id.
