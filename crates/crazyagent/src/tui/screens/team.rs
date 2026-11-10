@@ -448,7 +448,7 @@ impl Team {
                 }
                 let off = switch.on != Some(true);
                 self.switch = Some(switch);
-                if off && !self.asked {
+                if off && !self.asked && !self.paused {
                     self.start_live(ctx);
                 } else if !off && !self.paused && !self.asked && !self.checked {
                     self.check_session(ctx);

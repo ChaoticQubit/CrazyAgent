@@ -513,6 +513,43 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
     assert!(upgraded.shutdown().unwrap().is_empty());
 }
 
+/// With Full access and Merges saved, a policy body the engine cannot read offers no master
+/// landing, says the access is unreadable rather than below Full, and land time refuses
+/// (FBT3-S1, FB-T3 r1 L1 and L2).
+#[test]
+fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
+    use crate::team::MasterLands;
+    let fixture = Fixture::new(1);
+    let full = crate::sandbox::policy::AgentPolicy {
+        access: AgentAccess::Full,
+        ..crate::sandbox::policy::AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&fixture.connection, PROJECT, &full).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::team::set_master_lands(&fixture.connection, &project, MasterLands::Merges).unwrap();
+    let status = fixture.status();
+    assert_eq!(
+        (status.master_lands, status.access_unreadable),
+        (Some(MasterLands::Merges), false)
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_agent_policy SET body='{' WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    let status = fixture.status();
+    assert_eq!(
+        (status.master_lands, status.access_unreadable),
+        (None, true),
+        "an unreadable body offers nothing and says so"
+    );
+    assert!(crate::team::master_lands(&fixture.connection, &project).is_err());
+    crate::sandbox::policy::save(&fixture.connection, PROJECT, &full).unwrap();
+    assert!(!fixture.status().access_unreadable);
+}
+
 /// An agent holding a toolchain is stopped under a reason that says what happened: a
 /// policy the engine cannot read is named as unreadable, and a toolchain the saved policy
 /// no longer allows without an owner choice turning it off is never called turned off.
@@ -19368,6 +19405,55 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
     team.shutdown().unwrap();
 }
 
+/// S4B-B1: a native lead taken over and then stopped is proven gone like any other pane.
+/// One whose pane process ignores terminate is not confirmed, so the worker reports the
+/// cleanup uncertain instead of a clean stop.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let agent = AgentId::team(id).unwrap();
+    let adoption = Adoption {
+        host: host.clone(),
+        agent: agent.clone(),
+        record,
+        limits: LaunchLimits::default(),
+        live: false,
+        managed: Some(Managed {
+            home: fixture.base.join(format!("lead-home-{id}")),
+            executable: PathBuf::from("/bin/sh"),
+        }),
+        access: AgentAccess::Sandboxed,
+        toolchains: Some(Vec::new()),
+        network: crate::sandbox::policy::AgentNetwork::Open,
+        proxy: None,
+        task_start: None,
+    };
+    let (orders, ordered) = channel();
+    let (reports, _reported) = channel();
+    orders.send(Order::Stop).unwrap();
+
+    let problem = native_adopted(
+        adoption,
+        &ordered,
+        &reports,
+        &AtomicBool::new(false),
+        &AtomicBool::new(false),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        problem,
+        Some(with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(crate::harnesses::leftovers::UNCERTAIN),
+        ))
+    );
+    assert!(!host.alive().unwrap().contains(&agent));
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
 /// lead an earlier engine left running. A Stop before any order, or a first order without
 /// the signed-in account, ends its pane; a Stop while the engine leaves panes running
@@ -22441,6 +22527,53 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
     team.shutdown().unwrap();
 }
 
+/// S4B-B1: a native teammate a stop ends is proven gone like any other pane. One whose
+/// pane process ignores terminate is not confirmed, so its row says the cleanup is
+/// uncertain, and its pane is still closed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+
+    assert_eq!(team.stop_unmanaged().unwrap().len(), 1);
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
+    );
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(mate).unwrap())
+    );
+    team.shutdown().unwrap();
+}
+
 #[test]
 #[should_panic(expected = "the owner wakes through WakeAgent")]
 fn the_owner_never_wakes_through_admit_wake() {
@@ -24435,6 +24568,55 @@ fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() 
     );
 }
 
+/// TEAM-8-R2-L1: a live harness whose pane closes while a process it started in a group of
+/// its own, still in the pane's session where the stop's listing finds it, runs on reports
+/// both through `live_serve`, with the close last, so the agent reads as failed and the owner
+/// still sees what runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_last() {
+    let script = LEAVING_CLAUDE.replace(
+        "POSIX::setsid() > 0 or die;",
+        "defined(POSIX::setpgid(0, 0)) or die; $SIG{HUP} = 'IGNORE';",
+    );
+    assert_ne!(script, LEAVING_CLAUDE);
+    let (problem, running) = ended_native_lead(&script, |session, host, lead| {
+        let AgentSession::Terminal(session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        host.kill(lead).unwrap();
+        let (_orders, receive) = std::sync::mpsc::channel();
+        let (reports, _reported) = std::sync::mpsc::channel();
+        let (cancel, leave) = (AtomicBool::new(false), AtomicBool::new(false));
+        let (ended, watched) = std::sync::mpsc::channel::<()>();
+        let cancelling = &cancel;
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                if watched
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                    .is_err()
+                {
+                    cancelling.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            let problem = live_serve(*session, &receive, &reports, &cancel, &leave, false, None);
+            let _ = ended.send(());
+            problem
+        })
+    });
+    assert!(
+        running,
+        "the lead's own process outlived the close: {problem:?}"
+    );
+    let problem = problem.expect("a close with a command left reports a problem");
+    assert!(problem.contains("harness_sandbox_left"), "{problem}");
+    assert!(problem.contains(PROCESS_CLOSED), "{problem}");
+    assert!(
+        !only_left_running(&problem),
+        "the close comes last: {problem}"
+    );
+}
+
 /// Keeper r1 F1: a native lead's pane an earlier engine left, ended with no session, is not
 /// confirmed gone while a process the lead started in a session of its own still runs.
 #[cfg(target_os = "macos")]
@@ -25890,6 +26072,67 @@ fn the_wait_cycle_note_says_who_keeps_editing_the_file() {
         wait_cycle_note("Ada (@api)", "Grace (@ui)", "src/parser.rs"),
         "Ada (@api) and Grace (@ui) would have waited on each other under Overlapping edits Wait, so Ada (@api)'s start went ahead without src/parser.rs: Grace (@ui) keeps editing it, and Ada (@api)'s edits of it stay refused until Grace (@ui)'s work on it lands or is discarded."
     );
+}
+
+/// OS-8 Wait, T9-R2-L2: a wait cycle note the store refuses once marks no pair told without
+/// its note, so the next sweep tells the owner of every pair once and none is lost.
+#[test]
+fn a_refused_wait_cycle_note_loses_no_pair() {
+    let fixture = Fixture::new(1);
+    let ada = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let grace = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let lin = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO coord_wait_cycles(project,first,second,holder,file,created) VALUES
+                ('{PROJECT}',{ada},{grace},{grace},'src/first.rs',1),
+                ('{PROJECT}',{grace},{lin},{lin},'src/second.rs',2);
+             CREATE TRIGGER refuse_first BEFORE INSERT ON team_messages
+                WHEN NEW.text LIKE '%src/first.rs%' BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+        ))
+        .unwrap();
+    let label = |agent: i64| super::super::events::label(&fixture.connection, agent).unwrap();
+    let pairs = [(ada, grace, "src/first.rs"), (grace, lin, "src/second.rs")];
+    let notes = |file: &str| -> usize {
+        let (starter, holder, _) = pairs.iter().find(|pair| pair.2 == file).unwrap();
+        let text = wait_cycle_note(&label(*starter), &label(*holder), file);
+        fixture
+            .status()
+            .messages
+            .iter()
+            .filter(|message| message.state == MessageState::Note && message.text == text)
+            .count()
+    };
+    let told = || -> Vec<String> {
+        fixture
+            .connection
+            .prepare("SELECT file FROM coord_wait_cycles WHERE told IS NOT NULL ORDER BY file")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    team.tend_claims(&project);
+    assert_eq!(notes("src/first.rs"), 0, "the store refused this note");
+    for file in told() {
+        assert_eq!(notes(&file), 1, "{file} is told only with its note");
+    }
+    fixture
+        .connection
+        .execute_batch("DROP TRIGGER refuse_first;")
+        .unwrap();
+    team.claims_next.clear();
+    team.tend_claims(&project);
+    team.shutdown().unwrap();
+    for (_, _, file) in pairs {
+        assert_eq!(notes(file), 1, "the owner hears of {file} once");
+    }
+    assert_eq!(told(), vec!["src/first.rs", "src/second.rs"]);
 }
 
 /// SECAUDIT coord-delivery-raw-body-forges-owner-line: a line of a coordination message from

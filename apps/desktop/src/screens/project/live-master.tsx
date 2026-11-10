@@ -105,10 +105,12 @@ export function liveTerminalOff(team: Result<TeamStatus> | undefined, projectId:
 /** Whether opening the area turns the live master on now: only once a team read shows a
  * switch that is not on, nothing was asked and the read is newer than a start the engine
  * refused as stale, so a refused start waits for the fresh read instead of retrying the old
- * one. Inputs: the switch shown, whether a change was asked, the read's settings version and
- * the version last refused, -1 when none. Output: true to start. */
-export function autoStart(on: boolean | null | undefined, asked: boolean, read: number, refused: number): boolean {
-  return on !== undefined && on !== true && !asked && read > refused;
+ * one. A stopped team (Stop all) starts nothing, so opening its area leaves the switch alone
+ * until a read shows the team running. Inputs: the switch shown, whether a change was asked,
+ * the read's settings version, the version last refused, -1 when none, and whether the team
+ * is stopped. Output: true to start. */
+export function autoStart(on: boolean | null | undefined, asked: boolean, read: number, refused: number, paused: boolean): boolean {
+  return on !== undefined && on !== true && !asked && read > refused && !paused;
 }
 
 /** The owner's switch change while it is the switch the area shows: from the click until a
@@ -260,7 +262,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
       checked.current = true;
       void start(false, false);
     }
-    if (autoStart(on, asked.current, engine?.version ?? 0, refused.current)) void start(true, false);
+    if (autoStart(on, asked.current, engine?.version ?? 0, refused.current, teamPaused(data.team.result, data.id))) void start(true, false);
   }, [on, data.team.at]);
 
   useEffect(() => {

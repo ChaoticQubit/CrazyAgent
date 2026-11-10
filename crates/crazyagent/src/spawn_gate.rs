@@ -277,6 +277,13 @@ pub fn bind_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::ne
     guarded(|| std::net::TcpListener::bind(address))
 }
 
+/// Binds a blocking UDP socket inside the gate.
+/// Input: the address. Output: the socket.
+#[allow(clippy::disallowed_methods)]
+pub fn bind_udp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::UdpSocket> {
+    guarded(|| std::net::UdpSocket::bind(address))
+}
+
 /// Connects a blocking TCP stream inside the gate, so the gate is held for the
 /// whole connect; use it for loopback peers only.
 /// Input: the address. Output: the stream.

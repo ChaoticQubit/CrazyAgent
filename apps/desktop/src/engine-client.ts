@@ -927,6 +927,7 @@ export interface TeamStatus {
   background_at_end?: BackgroundAtEnd;
   ask_before_merge?: boolean;
   master_lands?: MasterLands | null;
+  access_unreadable?: boolean;
   reask_empty_reply?: boolean;
   master_idle_stop?: MasterIdleStop;
   master_live_terminal?: boolean;

@@ -160,6 +160,7 @@ fn team() -> TeamStatus {
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         master_lands: None,
+        access_unreadable: false,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
@@ -4386,6 +4387,23 @@ fn w_moves_terminals_per_window_through_four_six_and_nine() {
             )))
         );
     }
+}
+
+/// FBT3-S1: with the project's agent access unreadable, E says so instead of calling the
+/// project below Full access.
+#[test]
+fn e_says_the_agent_access_cannot_be_read_when_it_cannot() {
+    let mut view = loaded();
+    let mut unreadable = team();
+    unreadable.access_unreadable = true;
+    reread(&mut view, unreadable, NOW + MINUTE);
+    assert_eq!(view.key(press(KeyCode::Char('E'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "This project's agent access can't be read, so the master's conflict fixes wait for your Accept."
+        ))
+    );
 }
 
 #[test]

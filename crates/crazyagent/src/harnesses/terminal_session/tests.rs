@@ -499,6 +499,28 @@ mod own_turns {
         assert_eq!(pane.session.stop().unwrap(), None);
     }
 
+    /// DOCS-LOWS-2-L1: an Esc pressed in the agent's own terminal, in a turn typed over the
+    /// hold after the held command ended, is not given either. No notice turn is left, so the
+    /// task ends as the held turn did: well, with no interrupt.
+    #[test]
+    fn an_interrupt_in_a_turn_typed_over_a_hold_after_its_command_ended_ends_as_the_held_turn_did()
+    {
+        let mut pane = start("over-hold-9");
+        held_turn(&mut pane);
+
+        pane.write(&[
+            &user("[crazyagent msg 1] Status?"),
+            BACKGROUND_NOTICE,
+            &user("[Request interrupted by user]"),
+        ]);
+        assert_eq!(
+            events(&mut pane),
+            vec![LaunchEvent::TurnFinished { success: true }]
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
     /// The notice turn starts once the last command ended, so it is no turn typed over the
     /// hold: it decides the task, and its failure and rate limit are given.
     #[test]
@@ -518,6 +540,70 @@ mod own_turns {
         );
         assert!(!pane.session.held());
         assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// Leaves a turn held for two background commands, `bgcheck1` and `bgcheck2`. Input: the
+    /// pane. Output: the second command's notice line.
+    fn held_for_two(pane: &mut Pane) -> String {
+        let second = |line: &str| {
+            line.replace("toolu_bg", "toolu_bg2")
+                .replace("bgcheck1", "bgcheck2")
+        };
+        type_turn(pane, "Run the checks.");
+        pane.write(&[
+            &user("Run the checks."),
+            BACKGROUND_USE,
+            BACKGROUND_STARTED,
+            &second(BACKGROUND_USE),
+            &second(BACKGROUND_STARTED),
+            &reply("Waiting for the checks."),
+        ]);
+        let first = events(pane);
+        assert!(!ended(&first), "{first:?}");
+        assert!(pane.session.held(), "{first:?}");
+        second(BACKGROUND_NOTICE)
+    }
+
+    /// DOCS-LOWS-2-F1: a turn that follows a command's notice is a notice turn even while a
+    /// second command runs, so when the second ends inside it and it fails, the task fails
+    /// and its rate limit is given.
+    #[test]
+    fn a_notice_turn_that_fails_after_the_second_command_ended_in_it_ends_its_task_as_failed() {
+        let mut pane = start("over-hold-7");
+        let second = held_for_two(&mut pane);
+
+        pane.write(&[BACKGROUND_NOTICE, &second, RATE_LIMITED]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnError { rate_limited: true }),
+            "{last:?}"
+        );
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: false }),
+            "{last:?}"
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// A notice turn that fails while another command still runs is no turn typed over the
+    /// hold either: its failure is given and it ends the task.
+    #[test]
+    fn a_notice_turn_that_fails_while_a_second_command_runs_ends_its_task_as_failed() {
+        let mut pane = start("over-hold-8");
+        held_for_two(&mut pane);
+
+        pane.write(&[BACKGROUND_NOTICE, RATE_LIMITED]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnError { rate_limited: true }),
+            "{last:?}"
+        );
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: false }),
+            "{last:?}"
+        );
+        assert!(!pane.session.held());
     }
 }
 

@@ -13,6 +13,8 @@ import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coord
 import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
+/** What the master settings say while the project's agent access cannot be read. */
+export const ACCESS_UNREADABLE = "This project's agent access can't be read, so the master's conflict fixes wait for your Accept.";
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
 export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
 const ANY_HARNESS = "";
@@ -641,7 +643,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
             </div>
-            {!status.master_lands && <span className="tg-terminal-note">Only at Full access.</span>}
+            {!status.master_lands && <span className="tg-terminal-note">{status.access_unreadable ? ACCESS_UNREADABLE : "Only at Full access."}</span>}
           </SettingRow>
           <SettingRow label="Ask me before merging into the master's branch">
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>

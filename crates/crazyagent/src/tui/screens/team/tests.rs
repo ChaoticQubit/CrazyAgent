@@ -1131,6 +1131,7 @@ fn finished_team() -> crate::team::TeamStatus {
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         master_lands: None,
+        access_unreadable: false,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
@@ -1847,6 +1848,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         master_lands: None,
+        access_unreadable: false,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
@@ -2282,6 +2284,7 @@ fn master_status(
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         master_lands: None,
+        access_unreadable: false,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
@@ -4274,6 +4277,25 @@ fn a_master_idle_stopped_under_stop_all_offers_no_start_again() {
         0,
         "s asks for no start under Stop all"
     );
+}
+
+/// UI-11-L2: opening the master view under Stop all with the switch off asks for no start,
+/// so the switch is not written behind a stopped team, and the read after Start all starts
+/// it.
+#[test]
+fn opening_the_master_view_under_stop_all_asks_for_no_start_until_the_team_runs() {
+    for on in [None, Some(false)] {
+        let mut shell = master_view(80, 24);
+        requests(&mut shell);
+        shell.arrive(paused_read(on));
+        assert_eq!(
+            starts_asked(&mut shell),
+            0,
+            "Stop all holds the switch: {on:?}"
+        );
+        shell.arrive(switch(on, None));
+        assert_eq!(starts_asked(&mut shell), 1, "the team runs again: {on:?}");
+    }
 }
 
 /// A master that stopped for any other reason keeps today's words and s does nothing.

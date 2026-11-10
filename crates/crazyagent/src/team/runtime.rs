@@ -1811,25 +1811,32 @@ impl TeamRuntime {
         Ok(stopped)
     }
 
-    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host and
-    /// marks its row stopped with the reason. Takes the agent and the reason. Returns
-    /// whether it ended: false while the host could not end it, so the next tick tries
-    /// again, or a SQLite failure.
+    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host as
+    /// any left pane ends, and marks its row stopped with the reason, plus the uncertain
+    /// cleanup code when the host could not prove its processes gone (S4B-B1). Takes the
+    /// agent and the reason. Returns whether it ended: false while the host could not end
+    /// it, so the next tick tries again, or a SQLite failure.
     fn end_unmanaged(&self, id: i64, reason: &str) -> Result<bool, EngineError> {
         assert!(!self.workers.contains_key(&id));
+        let mut confirmed = true;
         if let Some(host) = &self.terminal {
             let name = AgentId::team(id).map_err(EngineError::from)?;
-            match host.kill(&name) {
-                Ok(()) => {}
+            match end_left_pane(host.as_ref(), &name, "team") {
+                Ok(ended) => confirmed = ended,
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(_) => return Ok(false),
             }
         }
+        let note = if confirmed {
+            reason.to_owned()
+        } else {
+            with_code(reason, Some(crate::harnesses::leftovers::UNCERTAIN))
+        };
         self.connection
             .execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?3
                  WHERE id=?1 AND status IN ('starting','idle','working')",
-                params![id, reason, now_ms()],
+                params![id, note, now_ms()],
             )
             .map_err(error)?;
         Ok(true)
@@ -3049,17 +3056,25 @@ impl TeamRuntime {
     }
 
     /// Tells the owner once of each pair of agents whose waits under Wait would have closed
-    /// a cycle, so a start went ahead without the file the other holds (OS-8). Inputs: the
-    /// project and the time in ms. Output: Ok or the first failure.
+    /// a cycle, so a start went ahead without the file the other holds (OS-8). The pairs are
+    /// marked told in the transaction that writes their notes, so a failure leaves every pair
+    /// untold for the next sweep (T9-R2-L2). Inputs: the project and the time in ms. Output:
+    /// Ok or the first failure.
     fn note_wait_cycles(&mut self, project: &ProjectId, now: i64) -> Result<(), EngineError> {
-        for (starter, holder, file) in
-            crate::coord::wait_cycle_notices(&self.connection, project, now)?
-        {
-            let starter = crate::team::events::label(&self.connection, starter)?;
-            let holder = crate::team::events::label(&self.connection, holder)?;
-            self.note(project, &wait_cycle_note(&starter, &holder, &file))?;
+        let tx = self.connection.transaction().map_err(error)?;
+        for (starter, holder, file) in crate::coord::wait_cycle_notices(&tx, project, now)? {
+            let starter = crate::team::events::label(&tx, starter)?;
+            let holder = crate::team::events::label(&tx, holder)?;
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &wait_cycle_note(&starter, &holder, &file),
+                MessageState::Note,
+                now_ms(),
+            )?;
         }
-        Ok(())
+        tx.commit().map_err(error)
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -9135,8 +9150,10 @@ fn native_session(
 /// in its own server: waits for the runtime's first order, a turn or a start, which carries
 /// a fresh custody use of the account, hands the credential to the lead's home again, then
 /// serves turns on the running session, so the lead and its teammates never run on without
-/// the account. A first order without the account ends the lead. Takes the adoption and the
-/// worker's channels and flags. Returns the problem that ended it, if any.
+/// the account. A first order without the account ends the lead. A lead's end not proven
+/// gone reports the uncertain cleanup, and keeps a credential already handed over held
+/// (S4B-B1). Takes the adoption and the worker's channels and flags. Returns the problem
+/// that ended it, if any.
 fn native_adopted(
     adoption: Adoption,
     orders: &Receiver<Order>,
@@ -9157,23 +9174,29 @@ fn native_adopted(
     assert!(!live);
     let managed = managed.expect("a managed adoption names its home");
     let end = |taken: bool, cause: Option<String>| {
-        let _ = host.kill(&agent);
+        let ended = match end_left_pane(host.as_ref(), &agent, "team") {
+            Ok(confirmed) => confirmed,
+            Err(problem) => problem.0 == "terminal_agent_unknown",
+        };
         record.remove_context_files();
         turn_closed(reports, taken, cause);
+        ended
     };
     let (first, grant) = match next_turn(orders, cancel, None) {
         Next::Turn(prompt, grant, rules) => (Some((prompt, rules)), grant),
         Next::Start(_, grant) => (None, grant),
         Next::Stop | Next::Closed(_) => {
-            if !leave.load(Ordering::SeqCst) {
-                end(false, None);
+            if !leave.load(Ordering::SeqCst) && !end(false, None) {
+                return settle_stop(Err(Unstopped::Uncertain), None);
             }
             return None;
         }
     };
     let taken = first.is_some();
     let Some(grant) = grant else {
-        end(taken, None);
+        if !end(taken, None) {
+            return settle_stop(Err(Unstopped::Uncertain), None);
+        }
         return Some("The native lead was taken over without its signed-in account".into());
     };
     let Grant { profile, .. } = *grant;
@@ -9184,7 +9207,9 @@ fn native_adopted(
     ) {
         Ok(credential) => credential,
         Err(problem) => {
-            end(taken, Some(problem.0.clone()));
+            if !end(taken, Some(problem.0.clone())) {
+                return settle_stop(Err(Unstopped::Uncertain), None);
+            }
             return Some(with_code(
                 "The signed-in account could not reach the agent",
                 Some(&problem.0),
@@ -9205,7 +9230,9 @@ fn native_adopted(
             leave,
         ),
         Err(problem) => {
-            end(taken, Some(problem.0.clone()));
+            if !end(taken, Some(problem.0.clone())) {
+                return settle_stop(Err(Unstopped::Uncertain), Some((credential, profile)));
+            }
             Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),

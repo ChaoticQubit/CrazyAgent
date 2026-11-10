@@ -158,6 +158,13 @@ test("the Agents tab opens Agent settings from the route, at a group when the ro
   assert.deepEqual(agents.agentsView("bogus"), { view: "team", group: null });
 });
 
+test("the Master settings say the agent access cannot be read when it cannot", () => {
+  const data = project({ team: { result: { kind: "ok", value: status({ master_lands: null, access_unreadable: true }) }, at: 0 } });
+  const html = plain(renderToStaticMarkup(createElement(conversation.MasterSettings, { data })));
+  assert.ok(html.includes("This project's agent access can't be read, so the master's conflict fixes wait for your Accept."), html);
+  assert.ok(!html.includes("Not at Full access"), "the access is unknown, not below Full");
+});
+
 test("the Master settings drawer holds Master, Conversation, Messages and Access in the Agent settings layout", () => {
   const routes = [];
   const data = project({ navigate: (route) => routes.push(route) });

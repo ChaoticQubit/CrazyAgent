@@ -15,7 +15,7 @@ import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, de
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Button, Drawer, Menu, type Tone } from "../../ui";
-import { LiveTerminalSetting, MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
+import { ACCESS_UNREADABLE, LiveTerminalSetting, MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
 import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordination";
 import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
 import { ApplySwitch } from "./settings";
@@ -370,7 +370,8 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
         <span className="set-ctl"><Button size="small" onClick={() => go(`${base}/agents?section=access`)}>Change in Agent settings</Button></span>
         <span className="tg-terminal-note">{status.master_lands === "merges" ? "Full access: the master resolves conflicts and merges into main itself."
           : status.master_lands === "waits" ? "Full access: the master resolves conflicts, then waits for your Accept."
-            : "Not at Full access: the master's conflict fixes wait for your Accept."}</span>
+            : status.access_unreadable ? ACCESS_UNREADABLE
+              : "Not at Full access: the master's conflict fixes wait for your Accept."}</span>
       </SettingRow>
     </SettingGroup>
   </div>;
