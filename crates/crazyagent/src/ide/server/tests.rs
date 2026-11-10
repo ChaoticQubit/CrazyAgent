@@ -2207,6 +2207,42 @@ async fn a_saved_level_change_stops_the_running_server() {
     assert!(servers.group(&id).is_none());
 }
 
+/// A level saved while an open is still starting waits for that open under the start lock,
+/// so a launch that read the older level is judged once it is up and stopped
+/// (v21-ide-level-3 r1 F2).
+#[tokio::test]
+async fn a_level_saved_while_an_open_is_starting_stops_what_it_started() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let starting = project("starting");
+    set_policy(data.path(), &starting, AgentAccess::Sandboxed, false);
+    let recorded = data.path().join("ide").join("starting").join(GROUP);
+    let build = cached_build();
+    let opening = servers.open(&starting, checkout.path(), &build);
+    let following = async {
+        let deadline = Instant::now() + START_LIMIT;
+        let group = loop {
+            if let Some((group, _)) = recorded_group(&recorded) {
+                break group.as_raw_nonzero().get();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launch never recorded its group"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        set_level(data.path(), &starting, AgentAccess::Full);
+        (group, servers.follow_level(&starting).await)
+    };
+    let (opened, (group, stopped)) = tokio::join!(opening, following);
+    assert!(opened.is_ok(), "{opened:?}");
+    assert!(stopped, "the launch that read the older level kept running");
+    gone(group).await;
+    assert!(servers.group(&starting).is_none());
+    servers.stop_all().await;
+}
+
 #[tokio::test]
 async fn a_save_that_keeps_the_level_leaves_the_server_running() {
     let (_checkout, data, servers, id) = open_at("same", AgentAccess::Sandboxed, false).await;
