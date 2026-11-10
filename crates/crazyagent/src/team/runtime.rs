@@ -5202,8 +5202,8 @@ impl TeamRuntime {
                 .map_err(error)?;
             let folder = stored.project_folder();
             let (waiting, carried) = match self.workers[&agent].fresh {
-                Some(_) if prompt == super::master::WAKE_TASK => {
-                    crate::coord::delivery::next_turn_unread(&self.connection, agent)?
+                Some(started) if prompt == super::master::WAKE_TASK => {
+                    crate::coord::delivery::next_turn_unread(&self.connection, agent, started)?
                 }
                 _ => crate::coord::delivery::next_turn(&self.connection, agent)?,
             };

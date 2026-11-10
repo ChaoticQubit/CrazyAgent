@@ -504,16 +504,19 @@ pub fn next_turn(db: &Connection, agent: AgentId) -> Result<(String, Vec<Message
     turn_text(db, &super::pending(db, agent, PENDING_MAX)?)
 }
 
-/// Takes, as [`next_turn`] does, every message an agent has not read, Delivered and Typed
-/// ones too, for a harness conversation that started fresh and so saw none of them: each
-/// went into an earlier conversation that ended, the rule [`super::requeue_dead`] applies
-/// to a session that died (HB-S5-C-RESIDUAL). Takes the database and the agent. Returns the
-/// text, empty for none, and the ids it carries.
+/// Takes, as [`next_turn`] does, every message an agent has not read, for a harness
+/// conversation that started fresh at `started`: Delivered and Typed ones too when that
+/// happened at or before its start, since each went into an earlier conversation that
+/// ended, the rule [`super::requeue_dead`] applies to a session that died
+/// (HB-S5-C-RESIDUAL). One typed into this conversation stays out. Takes the database, the
+/// agent and the conversation's start in ms. Returns the text, empty for none, and the ids
+/// it carries.
 pub fn next_turn_unread(
     db: &Connection,
     agent: AgentId,
+    started: i64,
 ) -> Result<(String, Vec<MessageId>), EngineError> {
-    turn_text(db, &super::unread(db, agent, PENDING_MAX)?)
+    turn_text(db, &super::unseen(db, agent, started, PENDING_MAX)?)
 }
 
 /// Writes messages as the "Messages for you" lines a turn's prompt ends with, those that fit
