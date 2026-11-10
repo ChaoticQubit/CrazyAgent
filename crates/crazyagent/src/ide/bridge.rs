@@ -494,7 +494,7 @@ pub(crate) struct Grants {
 /// One project's capability for one IDE server launch. Until `taken`, the token is the
 /// file's and admits only `ide.session`; after it, the token is the session's, the file
 /// is gone, every other call is admitted and `spent` keeps the file's token only to know
-/// a second try to take the session.
+/// a second try to take the session. Dropping `ended` wakes the grant's terminals.
 struct Grant {
     project: ProjectId,
     token: [u8; 32],
@@ -503,6 +503,8 @@ struct Grant {
     identity: (u64, u64),
     taken: bool,
     events: broadcast::Sender<IdeEvent>,
+    #[cfg(unix)]
+    ended: tokio::sync::watch::Sender<()>,
 }
 
 impl Grants {
@@ -542,6 +544,8 @@ impl Grants {
             identity,
             taken: false,
             events,
+            #[cfg(unix)]
+            ended: tokio::sync::watch::channel(()).0,
         });
         assert!(live.len() <= GRANTS_MAX);
         assert_eq!(
@@ -640,6 +644,20 @@ impl Grants {
             let receiver = grant.events.subscribe();
             assert!(grant.events.receiver_count() <= SUBSCRIBERS_MAX);
             Ok(receiver)
+        })
+    }
+
+    /// Watches the grant a handshake's session token names, for one of its terminals: the
+    /// receiver's `changed` ends once the grant is revoked, replaced or ended, so the
+    /// terminal stops then, not at its next grant check (V21-SEC-2-L1). Input: the packet.
+    /// Output: the receiver, `ide_session_required` or `ide_capability_refused`.
+    #[cfg(unix)]
+    fn watch(&self, packet: &[u8; 37]) -> Result<tokio::sync::watch::Receiver<()>, EngineError> {
+        self.find(packet, |grant| {
+            if !grant.taken {
+                return Err(failure("ide_session_required"));
+            }
+            Ok(grant.ended.subscribe())
         })
     }
 
