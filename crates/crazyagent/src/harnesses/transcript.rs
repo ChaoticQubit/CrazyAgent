@@ -542,15 +542,19 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
         }
         Some("user") if value["isMeta"] != true => {
             let texts = content_texts(&message["content"]);
-            let mut facts: Vec<TranscriptEvent> =
-                conversation_id(&value["toolUseResult"]["backgroundTaskId"])
-                    .map(|id| TranscriptEvent::BackgroundStarted { id })
-                    .into_iter()
-                    .chain(
-                        conversation_id(&value["toolUseResult"]["task_id"])
-                            .map(|id| TranscriptEvent::BackgroundEnded { id }),
-                    )
-                    .collect();
+            let result = &value["toolUseResult"];
+            let settled = matches!(result["status"].as_str(), Some("completed" | "cancelled"));
+            let mut facts: Vec<TranscriptEvent> = conversation_id(&result["backgroundTaskId"])
+                .filter(|_| result["backgroundEndsWithFinalResponse"] != true)
+                .map(|id| TranscriptEvent::BackgroundStarted { id })
+                .into_iter()
+                .chain(
+                    conversation_id(&result["task_id"])
+                        .into_iter()
+                        .chain(conversation_id(&result["taskId"]).filter(|_| settled))
+                        .map(|id| TranscriptEvent::BackgroundEnded { id }),
+                )
+                .collect();
             facts.extend(
                 texts
                     .iter()

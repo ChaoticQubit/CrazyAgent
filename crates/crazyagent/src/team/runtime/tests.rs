@@ -9032,6 +9032,85 @@ fn a_message_to_an_agent_in_a_running_turn_is_not_typed_into_it() {
     host.close(&[]).unwrap();
 }
 
+/// The stand-in of [`long_background`] with a 2 s command, whose later turns run as those of
+/// [`running_turn`] do: 20 s with no command in the background. Returns the script.
+#[cfg(target_os = "macos")]
+fn held_then_running() -> String {
+    let start =
+        "  printf '{\"type\":\"user\",\"message\":{\"content\":\"Owner turn\"}}\\n' >> \"$f\"\n";
+    let running = running_turn();
+    let (_, tail) = running.split_once(start).unwrap();
+    let body = tail.strip_suffix("done\n").unwrap();
+    let later =
+        format!("{start}  if [ -e \"$CLAUDE_CONFIG_DIR/held\" ]; then\n{body}  continue\n  fi\n");
+    long_background(2).replace(start, &later)
+}
+
+/// S2 (DEC-119, HB-R2-S1): once a held turn has ended the agent's next turn really runs, so a
+/// message to it waits, even on a quiet screen, and is typed only after that turn ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_is_not_typed_into_the_running_turn_after_a_held_turn_ended() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    let mut team = check_runtime(&fixture, &host, &held_then_running(), None, Some(agents));
+    fixture.until(&mut team, "the held task ends", |f| check_end(f).is_some());
+    let agent = subs(&fixture)[0];
+    assert!(stand_in_file(&fixture, agent, "held").exists());
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &claude_access(&fixture),
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("claude-code".into()),
+                prompt: "Run the second check.".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the second turn runs", |f| {
+        stand_in_file(f, agent, "running").exists()
+    });
+    let message = typed_prompt(&fixture, agent, "End your turn now.");
+    let quiet = Instant::now() + crate::coord::delivery::typing::APP_QUIET * 2;
+    while Instant::now() < quiet {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        receipt(&fixture, message),
+        "sent",
+        "typed into a running turn"
+    );
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    assert!(!typed.contains("End your turn now."), "{typed}");
+    fixture.until(&mut team, "the second task ends", |f| {
+        task_of(f, "Run the second check.").0 == "done"
+    });
+    fixture.until(&mut team, "the message is typed after the turn", |f| {
+        receipt(f, message) == "typed"
+    });
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// The queued command attachment Claude Code 2.1.309 writes when a background command ends
 /// while its agent is still in the turn, for task `bgcheck1`, with the fields of the line in
 /// the HackerBlog transcript (task 177); the freeze live pass checks it end to end.
@@ -9106,6 +9185,85 @@ fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_st
         "{changed:?}"
     );
     assert_ne!(fixture.agent_status(agent).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// S3 at a level that can commit (DEC-119, HB-F3B): the commit an Own branch agent makes
+/// while its turn waits on a background command is in the change set the task's end posts.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::OwnBranch,
+            network: crate::sandbox::policy::AgentNetwork::default(),
+            toolchains: Vec::new(),
+            ide_git_hooks: false,
+        },
+    )
+    .unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let write = "    printf mine > background.txt\n";
+    let script = mid_turn_background().replace(
+        write,
+        &format!(
+            "{write}    {git} add background.txt > /dev/null 2>&1\n    {git} commit -q -m work > /dev/null 2>&1\n    printf $? > \"$CLAUDE_CONFIG_DIR/commit-code\"\n"
+        ),
+    );
+    assert!(script.contains("commit-code"));
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &script, None, None);
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let agent = subs(&fixture)[0];
+    assert_eq!(
+        std::fs::read_to_string(stand_in_file(&fixture, agent, "commit-code")).unwrap(),
+        "0",
+        "the agent's commit failed"
+    );
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let folder = fixture.base.join("project").join(&worktree);
+    assert!(
+        std::fs::symlink_metadata(folder.join(".git")).is_ok_and(|found| found.is_dir()),
+        "an Own branch agent works in its own clone"
+    );
+    let subject = level_git(
+        &folder,
+        &fixture.base,
+        &["log", "-1", "--format=%s", &sets[0].head],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout),
+        "work\n",
+        "{subject:?}"
+    );
+    let changed = level_git(
+        &folder,
+        &fixture.base,
+        &["diff", "--name-only", &sets[0].base, &sets[0].head],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&changed.stdout),
+        "background.txt\n",
+        "{changed:?}"
+    );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
