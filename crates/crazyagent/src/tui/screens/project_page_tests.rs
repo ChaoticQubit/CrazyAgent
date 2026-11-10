@@ -3463,6 +3463,64 @@ async fn tool_jobs_round_trip_through_the_tui_client_with_their_changed_flags() 
     assert_eq!(result.unwrap_err(), "tool_unknown");
 }
 
+/// PROTO-4 r1 F3: an account order save for a project the engine no longer knows is refused
+/// by the real engine, and that reply reaches the project page as the plain sentence, never
+/// the code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_account_order_for_a_gone_project_reaches_the_page_as_its_sentence() {
+    use crate::scheduling::{ScheduleChange, Strategy};
+    use crate::tui::client::settings::SettingsEvent;
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    owner_ready(&mut connection).await;
+    let SettingsEvent::Schedule(Ok(schedule)) =
+        settings_reply(&mut connection, SettingsJob::Schedule).await
+    else {
+        panic!("a schedule reply expected");
+    };
+    owner_ready_after(&mut connection).await;
+    let refused = settings_reply(
+        &mut connection,
+        SettingsJob::SetSchedule {
+            change: ScheduleChange::ProjectStrategy {
+                project: CredentialRef::new("project-gone").unwrap(),
+                strategy: Some(Strategy::Balanced),
+            },
+            version: schedule.version,
+            generation: 2,
+        },
+    )
+    .await;
+    let SettingsEvent::ScheduleSet(_, Err(code)) = &refused else {
+        panic!("a refused save expected");
+    };
+    assert_eq!(code, "project_not_found");
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes,
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    while shell.ctx.next_request().is_some() {}
+    shell.arrive(owner_arrival(OwnerEvent::Settings(Box::new(refused))));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the page says why the save failed");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(
+        message.lead,
+        "This project no longer exists. Refresh and try again."
+    );
+}
+
 async fn owner_ready_after(connection: &mut Connection) {
     let deadline = Instant::now() + Duration::from_secs(8);
     while connection.busy() {
