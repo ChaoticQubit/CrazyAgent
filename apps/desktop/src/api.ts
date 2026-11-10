@@ -653,6 +653,7 @@ export type OrderWhy =
 export type AccountStanding =
   | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean; why: OrderWhy }
   | { kind: "not_signed_in" }
+  | { kind: "sign_in_unconfirmed" }
   | { kind: "paused"; until_ms: number }
   | { kind: "never_use" }
   | { kind: "five_hour_cap"; until_ms: number | null }

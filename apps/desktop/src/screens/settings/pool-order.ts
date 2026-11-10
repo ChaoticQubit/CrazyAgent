@@ -51,6 +51,7 @@ export function heldLine(standing: AccountStanding, nowMs: number): string {
   switch (standing.kind) {
     case "next": throw new Error("a ready account is not held");
     case "not_signed_in": return "Not signed in. Agents skip it until you sign in again.";
+    case "sign_in_unconfirmed": return "Its sign-in needs a check before agents can use it.";
     case "paused": return `Paused until ${at(standing.until_ms)}`;
     case "never_use": return "Never use. You pinned it.";
     case "five_hour_cap": return standing.until_ms === null ? "5-hour cap reached" : `5-hour cap until ${at(standing.until_ms)}`;

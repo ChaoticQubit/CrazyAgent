@@ -9,6 +9,7 @@ test("actual model access profile requires a pinned service that forbids app rep
   const evidence = mkdtempSync(join(tmpdir(), "ca-zero-retry-unit-"));
   t.after(() => rmSync(evidence, { recursive: true }));
   process.env.CRAZYAGENT_DESKTOP_TEST_APP = process.execPath;
+  process.env.CRAZYAGENT_DESKTOP_TEST_SUITE = "model-access";
   process.env.CRAZYAGENT_DESKTOP_TEST_PORT = "19259";
   process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = evidence;
   const { config } = await import("./model-access.wdio.conf.mjs");

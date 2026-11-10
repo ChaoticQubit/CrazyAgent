@@ -23,8 +23,9 @@ const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
-assert(["model-access", "model-access-read-only", "native-auth"].includes(suite),
+assert(["model-access", "model-access-read-only", "native-auth", "pools-screen"].includes(suite),
   "closed native suite required");
+const WEBDRIVER_SECONDS = suite === "pools-screen" ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {
@@ -205,8 +206,8 @@ async function execute() {
   const projects = join(env.HOME, "Projects");
   mkdirSync(projects, { mode: 0o700 });
   const engine = launch("engine", fixture,
-    [suite === "model-access" || suite === "native-auth" ? "serve-model-access" : "serve",
-      engineRoot, projects], env, 330);
+    [suite === "model-access-read-only" ? "serve" : "serve-model-access",
+      engineRoot, projects], env, WEBDRIVER_SECONDS + 30);
   let failure = null;
   let code = 1;
   try {
@@ -217,7 +218,7 @@ async function execute() {
         join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run",
         suite === "native-auth" ? "test/native/native-auth.wdio.conf.mjs"
           : "test/native/model-access.wdio.conf.mjs"],
-      env, 300);
+      env, WEBDRIVER_SECONDS);
     const result = await test.done;
     assert(!test.reason && result.code !== null, "native test process did not exit normally");
     code = result.code;

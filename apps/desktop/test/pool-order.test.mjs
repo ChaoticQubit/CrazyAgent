@@ -27,6 +27,7 @@ const WHY = [
 
 const HELD = [
   [{ kind: "not_signed_in" }, "Not signed in. Agents skip it until you sign in again."],
+  [{ kind: "sign_in_unconfirmed" }, "Its sign-in needs a check before agents can use it."],
   [{ kind: "paused", until_ms: LATER }, `Paused until ${AT}`],
   [{ kind: "never_use" }, "Never use. You pinned it."],
   [{ kind: "five_hour_cap", until_ms: LATER }, `5-hour cap until ${AT}`],

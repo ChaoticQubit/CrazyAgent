@@ -10,6 +10,7 @@ import { SevereServiceError } from "webdriverio";
 
 const evidence = mkdtempSync(join(tmpdir(), "ca-zero-retry-unit-"));
 process.env.CRAZYAGENT_DESKTOP_TEST_APP = process.execPath;
+process.env.CRAZYAGENT_DESKTOP_TEST_SUITE = "model-access";
 process.env.CRAZYAGENT_DESKTOP_TEST_PORT = "19259";
 process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = evidence;
 after(() => rmSync(evidence, { recursive: true }));
