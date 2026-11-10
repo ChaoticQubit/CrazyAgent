@@ -24247,7 +24247,7 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
             crate::terminal::renew_teammates_socket(&fixture.base, &AgentId::team(lead).unwrap())
                 .unwrap();
         if socket_stays {
-            drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+            drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
             assert_eq!(
                 crate::spawn_gate::connect_unix_std(&socket)
                     .unwrap_err()
