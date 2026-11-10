@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -179,6 +179,29 @@ async function atLevel(t, level, shared) {
       writeFileSync(join(evidence, `level-${level.access}.txt`), said);
       for (const word of level.report) assert.match(said, new RegExp(`^${word}$`, "m"), said);
     });
+
+    if (level.access === "own_branch") {
+      await t.test("Own branch: Source Control stages and unstages through the engine into the project's real index", async () => {
+        const name = "staged-at-own-branch.md";
+        writeFileSync(join(repo, name), "Own branch\n");
+        const staged = () => git(repo, "diff", "--cached", "--name-only");
+        const through = async (command, reached, what) => {
+          await ide.run(command);
+          for (const deadline = Date.now() + STEP_MS; !reached(staged()); await pause(POLL_MS)) {
+            const picker = await page.evaluate(ide.rows);
+            if (picker && picker.some((label) => label.includes(basename(repo)))) await ide.pick(basename(repo));
+            assert.ok(Date.now() < deadline, `${what}: the real index shows ${JSON.stringify(staged())}`);
+          }
+        };
+        await ide.run("View: Show Changes");
+        await ide.until("the Source Control view", ide.sidebar(/source control/i));
+        await ide.until("the new file in Source Control", `(document.querySelector(".scm-view")?.textContent ?? "").includes(${JSON.stringify(name)})`);
+        assert.equal(staged(), "", "nothing is staged before the IDE stages");
+        await through("Git: Stage All Changes", (list) => list.split("\n").includes(name), "the IDE's stage");
+        await me.capture("level-own_branch-staged");
+        await through("Git: Unstage All Changes", (list) => list === "", "the IDE's unstage");
+      });
+    }
 
     await t.test(`${level.label}: the terminal menu offers each level and greys the higher ones`, async () => {
       await keys.click(await ide.until("the terminal menu in the panel's title", MENU_ACTION));
