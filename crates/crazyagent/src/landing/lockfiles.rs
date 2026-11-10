@@ -31,6 +31,8 @@ const LISTING_BYTES_MAX: usize = 1 << 20;
 const VERSION_TIME: Duration = Duration::from_secs(30);
 const REGENERATE_TIME: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(20);
+/// The most regenerations one repository runs at once; further sets go to Task 7's update.
+const RUNNING_PER_REPOSITORY_MAX: usize = 2;
 const ENV: &str = "/usr/bin/env";
 const SCRATCH_FOLDER: &str = "regenerate";
 
@@ -185,7 +187,8 @@ fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 
 /// Starts rewriting a clash made of known lockfiles only off the caller's thread (OS-8), so
 /// a turn end never waits on a tool or holds the repository while one runs. One runs at a
-/// time for each set; a set already being rewritten counts as started. When it ends without
+/// time for each set and at most `RUNNING_PER_REPOSITORY_MAX` for a repository, past which
+/// none starts; a set already being rewritten counts as started. When it ends without
 /// landing, `after` gets the set and whether another regeneration may start: false after a
 /// refusal, which hands the clash to the agent, true after the set or main moved. Inputs:
 /// the store, the set, its clashing paths and what runs after. Output: whether one runs now.
@@ -206,11 +209,19 @@ pub(super) fn regenerate_later(
     let Some(runtime) = runtime_of(db) else {
         return Ok(false);
     };
-    if running()
-        .insert(record.id.as_str().to_owned(), record.repository.clone())
-        .is_some()
     {
-        return Ok(true);
+        let mut running = running();
+        if running.contains_key(record.id.as_str()) {
+            return Ok(true);
+        }
+        let here = running
+            .values()
+            .filter(|repository| **repository == record.repository)
+            .count();
+        if here >= RUNNING_PER_REPOSITORY_MAX {
+            return Ok(false);
+        }
+        running.insert(record.id.as_str().to_owned(), record.repository.clone());
     }
     let guard = Running(record.id.as_str().to_owned());
     let (id, paths) = (record.id.clone(), paths.to_vec());
