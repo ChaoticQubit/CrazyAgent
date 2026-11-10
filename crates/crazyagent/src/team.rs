@@ -1563,6 +1563,15 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 task INTEGER,
                 at_ms INTEGER NOT NULL
             );
+            CREATE TRIGGER IF NOT EXISTS team_status_logged
+            AFTER UPDATE OF status ON team_agents
+            WHEN NEW.status <> OLD.status
+            BEGIN
+                INSERT INTO team_status_log(project,agent,status,task,at_ms)
+                VALUES (NEW.project,NEW.id,NEW.status,NEW.task,
+                        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER));
+                DELETE FROM team_status_log WHERE id <= last_insert_rowid() - 20000;
+            END;
             CREATE TABLE IF NOT EXISTS team_caps (
                 project TEXT PRIMARY KEY,
                 harnesses INTEGER CHECK(harnesses IS NULL OR harnesses BETWEEN 1 AND 15),
