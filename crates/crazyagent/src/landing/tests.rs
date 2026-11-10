@@ -535,6 +535,172 @@ fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder
     );
 }
 
+/// Starts team agent 3 above an owner submodule, then makes one owner change on main the
+/// change checks refuse in an agent's own work, and has the agent take main in by a
+/// fast-forward or, above an edit of its own, a merge. Inputs: the case, the owner change
+/// ("gitlink bump" or "link out of the tree") and how main is taken in ("fast-forward" or
+/// "merge"). Output: the agent's workspace.
+fn agent_above_owner_change(case: &Case, owner_change: &str, taken_in: &str) -> Workspace {
+    let first = case.tip();
+    case.owner(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{first},vendor"),
+    ]);
+    case.owner(&["commit", "-q", "-m", "Owner adds a submodule"]);
+    case.start();
+    let agent = numbered_agent(case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    if taken_in == "merge" {
+        write(&agent.worktree.join("early.txt"), "early\n");
+        git_in(&case.home, &agent.worktree, &["add", "early.txt"]);
+        git_in(
+            &case.home,
+            &agent.worktree,
+            &["commit", "-q", "-m", "Agent starts"],
+        );
+    }
+    if owner_change == "gitlink bump" {
+        let bumped = case.owner_commit("BUMP", "bump\n", "Owner moves on");
+        case.owner(&[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{bumped},vendor"),
+        ]);
+    } else {
+        std::os::unix::fs::symlink("/etc", case.repo.join("outside")).unwrap();
+        case.owner(&["add", "outside"]);
+    }
+    case.owner(&["commit", "-q", "-m", "Owner changes one"]);
+    let take = if taken_in == "merge" {
+        ["merge", "-q", "--no-edit", "main"]
+    } else {
+        ["merge", "-q", "--ff-only", "main"]
+    };
+    git_in(&case.home, &agent.worktree, &take);
+    agent
+}
+
+/// LAND-17-L1: an owner gitlink bump or an owner link out of the tree that an agent took in
+/// from main, by a fast-forward or a merge, is the landing tip's and is not checked as the
+/// agent's own, so the agent's later edit opens a set, committed or left in the worktree.
+#[test]
+fn owner_work_taken_in_from_main_is_not_checked_as_the_agents_own() {
+    for owner_change in ["gitlink bump", "link out of the tree"] {
+        for taken_in in ["fast-forward", "merge"] {
+            for committed in [true, false] {
+                let case = Case::new();
+                let agent = agent_above_owner_change(&case, owner_change, taken_in);
+                write(&agent.worktree.join("own.txt"), "own\n");
+                if committed {
+                    git_in(&case.home, &agent.worktree, &["add", "own.txt"]);
+                    git_in(
+                        &case.home,
+                        &agent.worktree,
+                        &["commit", "-q", "-m", "Own work"],
+                    );
+                }
+                let opened =
+                    record_turn_end(&case.db, &agent, &merge_turn()).map_err(|problem| problem.0);
+                assert!(
+                    matches!(opened, Ok(Some(_))),
+                    "{owner_change}, {taken_in}, committed {committed}: {opened:?}"
+                );
+            }
+        }
+    }
+}
+
+/// LAND-17-L1: after an agent took owner work in from main, a link out of the tree or a
+/// gitlink of its own is still refused, committed or left in the worktree.
+#[test]
+fn the_agents_own_link_or_gitlink_after_taking_main_in_is_still_refused() {
+    for taken_in in ["fast-forward", "merge"] {
+        for (own_change, refusal) in [
+            ("committed link", "changes_link_outside"),
+            ("uncommitted link", "changes_link_outside"),
+            ("gitlink", "changes_embedded_repository"),
+        ] {
+            let case = Case::new();
+            let agent = agent_above_owner_change(&case, "gitlink bump", taken_in);
+            if own_change == "gitlink" {
+                let tip = case.tip();
+                git_in(
+                    &case.home,
+                    &agent.worktree,
+                    &[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("160000,{tip},mine"),
+                    ],
+                );
+                git_in(
+                    &case.home,
+                    &agent.worktree,
+                    &["commit", "-q", "-m", "Own submodule"],
+                );
+            } else {
+                std::os::unix::fs::symlink("/etc", agent.worktree.join("mine")).unwrap();
+                if own_change == "committed link" {
+                    git_in(&case.home, &agent.worktree, &["add", "mine"]);
+                    git_in(
+                        &case.home,
+                        &agent.worktree,
+                        &["commit", "-q", "-m", "Own link"],
+                    );
+                }
+            }
+            assert_eq!(
+                refused(record_turn_end(&case.db, &agent, &merge_turn())),
+                refusal,
+                "{taken_in}, {own_change}"
+            );
+        }
+    }
+}
+
+/// LAND-17-L1: the bounds still count the whole range above the set's start, owner files
+/// taken in from main included.
+#[test]
+fn the_bounds_still_count_owner_files_taken_in_from_main() {
+    let case = Case::new();
+    case.start();
+    let agent = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    for name in ["one", "two", "three"] {
+        case.owner_commit(name, "x\n", "Owner adds a file");
+    }
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    write(&agent.worktree.join("own.txt"), "own\n");
+    git_in(&case.home, &agent.worktree, &["add", "own.txt"]);
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["commit", "-q", "-m", "Own work"],
+    );
+    let bounds = crate::worktrees::TreeBounds {
+        files: 3,
+        bytes: 1024,
+        components: 3,
+    };
+    assert_eq!(
+        refused(flow::record(
+            &case.db,
+            &agent,
+            &merge_turn(),
+            &bounds,
+            NOW_MS
+        )),
+        "changes_too_large"
+    );
+}
+
 /// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
 fn plant_links(folder: &Path, links: &[(&str, &str)]) {
     for (link, target) in links {
