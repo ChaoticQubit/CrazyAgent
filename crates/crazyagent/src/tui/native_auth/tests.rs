@@ -1836,6 +1836,7 @@ async fn unit_healthy_recheck_leaves_the_notice_the_owner_was_reading() {
     run(|case| async move {
         let (basis, connection) = case.selected("b-claude").await;
         let (mut state, job) = unit_started(basis.clone(), connection);
+        let started = job.clone();
         let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
         reply.fact.phase = NativeAuthPhase::AwaitingOwner;
         reply.account = None;
@@ -1851,7 +1852,11 @@ async fn unit_healthy_recheck_leaves_the_notice_the_owner_was_reading() {
         moved.config_id = ConfigId::new("other-config").unwrap();
         assert!(state.recheck(Some(&moved)));
         let read = state.request().unwrap();
-        let mut healthy = unit_signed_out_reply(&read, "unit@example.invalid");
+        let Command::Read(query) = &read.command else {
+            panic!("a recheck reads the held sign-in");
+        };
+        let mut healthy = unit_signed_out_reply(&started, "unit@example.invalid");
+        healthy.request_id = query.request_id.clone();
         healthy.fact.phase = NativeAuthPhase::AwaitingOwner;
         healthy.account = None;
         state

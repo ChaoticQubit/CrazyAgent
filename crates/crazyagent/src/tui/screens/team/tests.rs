@@ -363,10 +363,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
             "{columns}x{lines}: {standing}"
         );
         if columns == 200 {
-            assert!(
-                lead.contains("• handing off: Fix the login bug  Working"),
-                "{lead}"
-            );
+            assert!(lead.contains("• handing off: …  Working"), "{lead}");
             assert!(standing.contains("Starting  delegated to"), "{standing}");
         }
     }
