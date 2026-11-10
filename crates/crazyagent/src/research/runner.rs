@@ -3656,6 +3656,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_research_codex_records_its_folders_untrusted() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir(worktree.join(".git")).unwrap();
+        let wanted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
+            worktree.display()
+        );
+        for tools in [false, true] {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                &worktree,
+                &worktree.join("report.md"),
+                Path::new("/home"),
+                tools,
+                &account,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap())
+                .collect();
+            assert!(
+                args.windows(2).any(|pair| pair == ["-c", wanted.as_str()]),
+                "{tools}: {args:?}"
+            );
+        }
+    }
+
     /// A research job's lease names the job as a holder of its account in the agent
     /// register while the lease lives, and no longer once it ends.
     #[test]

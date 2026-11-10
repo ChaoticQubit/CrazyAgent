@@ -1240,6 +1240,63 @@ mod tests {
     }
 
     #[test]
+    fn master_command_records_its_folders_untrusted_and_the_policy_requires_that() {
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap().join("repo/sub");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let repo = worktree.parent().unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let wanted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}},\"{}\"={{trust_level=\"untrusted\"}}}}",
+            worktree.display(),
+            repo.display()
+        );
+        let command = master_command(
+            Path::new("/registered/codex"),
+            Path::new("/private/profile"),
+            &worktree,
+            "admitted-model",
+            None,
+        )
+        .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted),
+            "{args:?}"
+        );
+        assert_eq!(require_master_tool_policy(&command, None), Ok(()));
+        let rebuilt = |other: Option<&str>| {
+            let mut copy = std::process::Command::new("/registered/codex");
+            copy.current_dir(&worktree);
+            let mut words = args.iter();
+            while let Some(word) = words.next() {
+                if word != "-c" {
+                    copy.arg(word);
+                    continue;
+                }
+                let setting = words.next().unwrap();
+                match (*setting == wanted, other) {
+                    (false, _) => {
+                        copy.arg("-c").arg(setting);
+                    }
+                    (true, Some(other)) => {
+                        copy.arg("-c").arg(other);
+                    }
+                    (true, None) => {}
+                }
+            }
+            copy
+        };
+        assert!(require_master_tool_policy(&rebuilt(None), None).is_err());
+        let trusted = wanted.replace("untrusted", "trusted");
+        assert!(require_master_tool_policy(&rebuilt(Some(&trusted)), None).is_err());
+    }
+
+    #[test]
     fn master_command_pins_model_and_read_only_stdio_without_spawning() {
         let command = master_command(
             Path::new("/registered/codex"),
