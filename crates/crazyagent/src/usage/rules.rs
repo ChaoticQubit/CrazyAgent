@@ -338,6 +338,9 @@ pub(super) struct CodexState {
     fast: bool,
     #[serde(default)]
     epoch: u64,
+    /// Whether the line read last was part of a fork's replay.
+    #[serde(default)]
+    pub(super) replayed: bool,
     #[serde(default)]
     usage_records: bool,
     #[serde(default)]
@@ -446,6 +449,7 @@ pub(super) fn codex_usage(
         .replay
         .as_mut()
         .is_some_and(|replay| replay.covers(at_ms));
+    state.replayed = replayed;
     let payload = &value["payload"];
     let kind = value["type"].as_str()?;
     if kind == "session_meta" {
