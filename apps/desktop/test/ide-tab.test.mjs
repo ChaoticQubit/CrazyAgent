@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -105,6 +105,23 @@ test("the IDE webview runs the input guard, locks navigation and opens other lin
   assert.match(source, /link_admitted\(&LINKS, Instant::now\(\)\)/, "links from window.open reach the browser at most once a second");
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json"));
   assert.deepEqual(allowed.webviews, ["main"], "the IDE webview gets no app command");
+});
+
+test("no capability covers the IDE webview or its window, before or after the move", () => {
+  const matches = (pattern, label) => new RegExp(`^${pattern.replaceAll("*", ".*")}$`).test(label);
+  const folder = new URL("../src-tauri/capabilities/", import.meta.url);
+  const names = readdirSync(folder).filter((name) => name.endsWith(".json"));
+  assert.ok(names.includes("main-window.json") && names.includes("terminal-wall.json"));
+  for (const name of names) {
+    const capability = JSON.parse(readFileSync(new URL(name, folder), "utf8"));
+    for (const pattern of capability.webviews ?? []) {
+      assert.ok(!matches(pattern, "ide-0a1b2c3d-1"), `${name} admits the IDE webview through ${pattern}`);
+    }
+    for (const pattern of capability.windows ?? []) {
+      assert.ok(!matches(pattern, "main"), `${name} admits every webview of the main window through ${pattern}`);
+      assert.ok(!matches(pattern, "ide-window-0a1b2c3d"), `${name} admits the IDE window through ${pattern}`);
+    }
+  }
 });
 
 test("the IDE tab follows its panel, hides with the tab, closes with the project and beats every minute", () => {
@@ -216,6 +233,82 @@ test("leaving the tab while a place is held sends no box after it, and still hid
   await evaluate("Fixture.answerPlace()");
   assert.equal((await evaluate("Fixture.placed()")).length, 1, "the waiting box ends with the tab");
   assert.equal(await evaluate(`Fixture.called("desktop_ide_hide")`), true, "leaving still hides the IDE");
+}));
+
+const OPEN_WINDOW = "Open in its own window";
+const FORWARD = "Bring it forward";
+const IN_ITS_WINDOW = "This IDE is in its own window";
+
+test("the window button moves the IDE out, and the tab says so and offers to bring it forward", () => withOpenTab("[]", async (evaluate) => {
+  const height = await evaluate("window.innerHeight");
+  await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)})`);
+  assert.deepEqual(await evaluate("Fixture.asks()"), [{ projectId: "project-one", viewport: height }], "the page's height goes along, to measure the title bar");
+  const shown = await evaluate("Fixture.tab()");
+  assert.ok(shown.text.includes(IN_ITS_WINDOW), shown.text);
+  assert.ok(shown.buttons.includes(FORWARD), JSON.stringify(shown.buttons));
+  assert.ok(!shown.buttons.includes(OPEN_WINDOW), "the button that moved it is gone");
+  assert.equal(shown.panelHidden, true, "the empty panel is hidden");
+  const placed = (await evaluate("Fixture.placed()")).length;
+  await evaluate("Fixture.frames()");
+  assert.equal((await evaluate("Fixture.placed()")).length, placed, "no box follows the IDE into its window");
+}));
+
+test("two presses of the window button move the IDE once", () => withOpenTab("[]", async (evaluate) => {
+  await evaluate(`Fixture.hold("desktop_ide_window_open")`);
+  await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)}, 2)`);
+  assert.equal(await evaluate(`Fixture.count("desktop_ide_window_open")`), 1, "the second press does nothing while the first runs");
+  await evaluate(`Fixture.release("desktop_ide_window_open")`);
+  assert.ok((await evaluate("Fixture.tab()")).text.includes(IN_ITS_WINDOW));
+}));
+
+test("two presses of Bring it forward ask once", () => withOpenTab("[]", async (evaluate) => {
+  await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)})`);
+  await evaluate(`Fixture.hold("desktop_ide_window_focus")`);
+  await evaluate(`Fixture.press(${JSON.stringify(FORWARD)}, 2)`);
+  assert.equal(await evaluate(`Fixture.count("desktop_ide_window_focus")`), 1);
+  await evaluate(`Fixture.release("desktop_ide_window_focus")`);
+  await evaluate(`Fixture.press(${JSON.stringify(FORWARD)})`);
+  assert.equal(await evaluate(`Fixture.count("desktop_ide_window_focus")`), 2, "a later press works");
+}));
+
+test("closing the IDE's own window puts it back in the tab", () => withOpenTab("[]", async (evaluate) => {
+  await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)})`);
+  const placed = (await evaluate("Fixture.placed()")).length;
+  await evaluate("Fixture.closeWindow()");
+  assert.equal(await evaluate(`Fixture.calledTimes("desktop_ide_open", 2)`), true, "the tab opens it again once the window has gone");
+  assert.equal(await evaluate(`Fixture.calledTimes("desktop_ide_place", ${placed + 1})`), true, "and places it over the panel");
+  const shown = await evaluate("Fixture.tab()");
+  assert.ok(!shown.text.includes(IN_ITS_WINDOW), shown.text);
+  assert.equal(shown.panelHidden, false);
+  assert.ok(shown.buttons.includes(OPEN_WINDOW), "and it can move out again");
+}));
+
+test("a tab opened while the IDE has its own window says so and places nothing", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
+  await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.mount([], [], false, true)");
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_open")`), true);
+    await evaluate("Fixture.frames()");
+    await evaluate("Fixture.frames()");
+    assert.ok((await evaluate("Fixture.tab()")).text.includes(IN_ITS_WINDOW));
+    assert.deepEqual(await evaluate("Fixture.placed()"), [], "the webview in the other window gets no box");
+  });
+});
+
+test("a refused move keeps the IDE in the tab and tells the owner", () => withOpenTab('["desktop_ide_window_open"]', async (evaluate) => {
+  await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)})`);
+  assert.match((await evaluate("Fixture.seen()")).alert, /own window/);
+  const shown = await evaluate("Fixture.tab()");
+  assert.equal(shown.panelHidden, false, "the IDE stays in its panel");
+  assert.ok(shown.buttons.includes(OPEN_WINDOW), "and the button comes back");
+}));
+
+test("a window that won't come forward tells the owner", () => withOpenTab('["desktop_ide_window_focus"]', async (evaluate) => {
+  await evaluate(`Fixture.press(${JSON.stringify(OPEN_WINDOW)})`);
+  await evaluate(`Fixture.press(${JSON.stringify(FORWARD)})`);
+  assert.match((await evaluate("Fixture.seen()")).alert, /forward/);
 }));
 
 test("an open dialog, drawer or menu hides the IDE webview until the last one closes", async () => {

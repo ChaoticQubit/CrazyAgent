@@ -187,9 +187,91 @@ function startPlan(plan) {
         if (kind === "go") location.hash = value;
         if (kind === "note") void note(value);
         if (kind === "shift") document.querySelector(".pj-tab-panel").style.marginTop = value;
+        if (kind === "press") [...document.querySelectorAll("button")].find((node) => node.textContent.trim() === value)?.click();
       }, at * 1000);
     }
   }, plan);
+}
+
+/** Every row the test build wrote about the IDE webviews and the app's windows. Output: the
+ * rows, oldest first, each webview's page answer parsed; the webview may JSON-encode it twice. */
+function windowRows() {
+  let text = "";
+  try {
+    text = readFileSync(join(evidence, "ide-own-window.jsonl"), "utf8");
+  } catch {
+    return [];
+  }
+  return text.trim().split("\n").filter(Boolean).map((line) => {
+    const row = JSON.parse(line);
+    if (row.look !== undefined) {
+      const once = JSON.parse(row.look);
+      row.look = typeof once === "string" ? JSON.parse(once) : once;
+    }
+    return row;
+  });
+}
+
+/** Waits for a row the test build wrote. Inputs: the test on a row, what is awaited and how
+ * long. Output: the first row that passes, among those newer than `after`. */
+async function rowWhere(test, label, timeout, after = 0) {
+  for (const deadline = Date.now() + timeout; ; await pause(POLL_MS / 2)) {
+    const found = windowRows().find((row) => row.at > after && test(row));
+    if (found) return found;
+    assert.ok(Date.now() < deadline, `${label}; last row: ${JSON.stringify(windowRows().at(-1))}`);
+  }
+}
+
+/** The test app's process number. Output: it as text; throws when the app is not running. */
+function appProcess() {
+  const found = spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim().split("\n")[0];
+  assert.ok(found, "the test app has a process");
+  return found;
+}
+
+/** Runs one System Events line against the test app's process. Input: the line. Output: what
+ * it answered; throws when it failed. */
+function onApp(line) {
+  const script = `tell application "System Events" to tell (first process whose unix id is ${appProcess()})\n${line}\nend tell`;
+  const done = spawnSync("/usr/bin/osascript", ["-e", script], { encoding: "utf8" });
+  assert.equal(done.status, 0, `${line}: ${done.stderr}`);
+  return done.stdout.trim();
+}
+
+/** The app menu's top items as the system shows them. Output: their names. */
+function menuNames() {
+  return onApp("get name of every menu bar item of menu bar 1").split(", ");
+}
+
+/** Sends one Command key combination to the front window of the test app. Input: the key. */
+function commandKey(key) {
+  onApp("set frontmost to true");
+  onApp(`keystroke "${key}" using command down`);
+}
+
+/** Raises the app's window with this title. Input: the title's words. */
+function raise(title) {
+  onApp("set frontmost to true");
+  onApp(`perform action "AXRaise" of (first window whose title contains "${title}")`);
+}
+
+/** Presses the close button of the app's window with this title. Input: the title's words. */
+function closeTitled(title) {
+  onApp(`click (first button of (first window whose title contains "${title}") whose subrole is "AXCloseButton")`);
+}
+
+const OWN_WINDOW = /^ide-window-[0-9a-f]+$/;
+const OPEN_WINDOW = "Open in its own window";
+const WORKBENCH_MS = 90;
+const OWN_WINDOW_MS = 30000;
+
+/** Opens a project's IDE tab, waits for the workbench and presses the window button, all on the
+ * page's timers because the webdriver session cannot see the main window meanwhile. Input: the
+ * project. Output: the row that first shows the webview in its own window. */
+async function moveOut(project) {
+  const started = Date.now();
+  await startPlan([[0, "go", `#/projects/${encodeURIComponent(project)}/ide`], [WORKBENCH_MS, "press", OPEN_WINDOW]]);
+  return rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? ""), "the IDE never reached its own window", WORKBENCH_MS * 1000 + OWN_WINDOW_MS, started);
 }
 
 describe("In the real window the IDE webview stays in its panel and leaves with its tab", () => {
@@ -202,6 +284,74 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     assert.equal(homed.outcome, "applied", `the projects home is set: ${JSON.stringify(homed)}`);
     await browser.execute(() => location.reload());
     await until(() => browser.execute(() => document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
+  });
+
+  it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
+    const first = await newProject("ide-own-one");
+    const second = await newProject("ide-own-two");
+    const third = await newProject("ide-own-three");
+    await buildReady();
+    await go(`#/projects/${encodeURIComponent(first)}/overview`);
+    await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
+
+    const moved = await moveOut(first);
+    const inMain = windowRows().filter((row) => row.at < moved.at && row.view?.window === "main" && row.look?.origin > 0).at(-1);
+    assert.ok(inMain, "the webview was seen in the main window before the move");
+    assert.equal(moved.view.maximized, true, "the window is maximized");
+    assert.equal(moved.view.fullscreen, false, "and not in native full screen");
+    assert.equal(moved.look.origin, inMain.look.origin, "the same page moved, with no reload");
+    assert.equal(moved.view.focused, true, "the new window has the focus");
+    writeFileSync(join(evidence, "own-window-rows.json"), JSON.stringify({ inMain, moved }, null, 2));
+
+    await until(() => browser.execute(() => document.querySelector(".ide-tab")?.textContent.includes("This IDE is in its own window")), OWN_WINDOW_MS, "the tab never said the IDE moved");
+    const buttons = await browser.execute(() => [...document.querySelectorAll("button")].map((node) => node.textContent.trim()));
+    assert.ok(buttons.includes("Bring it forward"), JSON.stringify(buttons));
+
+    const settled = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.ide.at[1] > 0, "the IDE never sat below the title bar", OWN_WINDOW_MS);
+    const { ide, inner, scale } = settled.view;
+    assert.equal(ide.at[0], 0, "the IDE starts at the window's left edge");
+    assert.equal(ide.size[0], inner[0], "and fills its width");
+    assert.equal(ide.at[1] + ide.size[1], inner[1], "and reaches its bottom");
+    assert.equal(Math.round(settled.look.height * scale), ide.size[1], "the page has the webview's whole height");
+
+    raise("IDE");
+    assert.ok(!menuNames().includes("File"), `the IDE window's menu owns none of the editor's keys: ${menuNames()}`);
+    const before = (await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused, "the IDE window never had the focus", OWN_WINDOW_MS)).look.editors;
+    commandKey("n");
+    const opened = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look.editors === before + 1, "Cmd+N opened no editor in the IDE window", OWN_WINDOW_MS);
+    commandKey("w");
+    await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look.editors === before, "Cmd+W closed no editor in the IDE window", OWN_WINDOW_MS, opened.at);
+    assert.ok(windowRows().at(-1).windows.some((label) => OWN_WINDOW.test(label)), "Cmd+W left the window itself open");
+
+    raise("CrazyAgent");
+    await pause(POLL_MS);
+    assert.ok(menuNames().includes("File"), `the main window gets its own menu back: ${menuNames()}`);
+    await browser.execute(() => [...document.querySelectorAll("button")].find((node) => node.textContent.trim() === "Bring it forward").click());
+    await pause(POLL_MS);
+    assert.ok(!menuNames().includes("File"), `Bring it forward gives the menu to the IDE window: ${menuNames()}`);
+
+    await startPlan([[20, "go", `#/`]]);
+    const closing = Date.now();
+    closeTitled("IDE");
+    const home = await rowWhere((row) => row.view?.window === "main", "closing the window did not return the IDE to the main window", OWN_WINDOW_MS, closing);
+    assert.equal(home.look.origin, inMain.look.origin, "the same page came back");
+    assert.ok(!home.windows.some((label) => OWN_WINDOW.test(label)), "and the window has gone");
+    await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
+
+    await go(`#/projects/${encodeURIComponent(second)}/overview`);
+    await moveOut(second);
+    const removing = Date.now();
+    const removal = await invoke("desktop_remove_project", { id: second, generation: ++generation, deleteName: null });
+    assert.equal(removal.outcome, "applied", JSON.stringify(removal));
+    await invoke("desktop_close_project_walls", { id: second });
+    await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "removing the project left its IDE window open", OWN_WINDOW_MS, removing);
+
+    await go(`#/projects/${encodeURIComponent(third)}/overview`);
+    await moveOut(third);
+    closeTitled("CrazyAgent");
+    for (const deadline = Date.now() + OWN_WINDOW_MS; spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim() !== ""; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, `closing the main window left a window open: ${JSON.stringify(windowRows().at(-1))}`);
+    }
   });
 
   it("opens, leaves, returns, follows its panel, and goes away with its project", async () => {

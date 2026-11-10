@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
+use tauri::async_runtime::JoinHandle;
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
@@ -87,6 +88,26 @@ impl Bounds {
         let content = window.inner_size().map_err(failed)?;
         let height = content.to_logical::<f64>(scale).height;
         Ok(InWindow(self.below_inset(height)))
+    }
+
+    /// Measures how far the title bar reaches into a window's content view, from the height of
+    /// the page in the main window. Inputs: the page's height and the content view's, both
+    /// logical. Output: the inset, or `ide_bounds_invalid` for a height no page can have.
+    fn title_bar(_viewport: f64, _content_height: f64) -> Result<f64, BridgeError> {
+        Ok(0.0)
+    }
+
+    /// The place of an IDE webview that has a window of its own: all of the content view below
+    /// the title bar. Inputs: the title bar's inset and the content view's size, logical.
+    /// Output: the bounds.
+    fn filling(_inset: f64, width: f64, height: f64) -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            viewport: height,
+        }
     }
 
     fn rect(self) -> Rect {
@@ -209,6 +230,24 @@ struct Held {
     opening: HashMap<String, u64>,
     asks: u64,
     engine: HashMap<String, Order>,
+    out: HashMap<String, Out>,
+}
+
+/// One project's IDE webview while it sits in a window of its own: the window's label, whether
+/// the project page closed meanwhile, and the task telling the engine the owner still uses it.
+struct Out {
+    window: String,
+    page_closed: bool,
+    beat: JoinHandle<()>,
+}
+
+/// What an open of a project finds of the project's own IDE window: none, one showing this
+/// launch of the server, or one showing a server that has gone.
+#[derive(Debug, PartialEq)]
+enum OwnWindow {
+    Absent,
+    Stays,
+    Stale,
 }
 
 /// One project's place in the queue of engine opens and stops: the turn each holds while the
@@ -239,6 +278,13 @@ impl Held {
     /// Gives up the project's open still waiting for the engine. Input: the project.
     fn cancel(&mut self, project: &ProjectId) {
         self.opening.remove(project.as_str());
+    }
+
+    /// Says what an open finds of the project's own window; an open that finds this launch's
+    /// window means the page is back, so a page close noted earlier no longer counts. Inputs:
+    /// the project and the URL the open loads. Output: what it found.
+    fn own_window(&mut self, _project: &ProjectId, _url: &Url) -> OwnWindow {
+        OwnWindow::Absent
     }
 }
 
@@ -284,6 +330,18 @@ impl IdeViews {
     /// Output: true while it is loaded.
     pub fn loaded(&self, project: &ProjectId) -> bool {
         self.lock().loaded.contains_key(project.as_str())
+    }
+
+    /// Whether this project's IDE sits in its own window. Input: the project. Output: true then.
+    pub fn in_own_window(&self, _project: &ProjectId) -> bool {
+        false
+    }
+
+    /// Keeps a project's IDE when its page closes while the IDE has its own window, noting the
+    /// close so that closing the window does the stop the page skipped. Input: the project.
+    /// Output: true when it was kept and the page's close must do nothing more.
+    pub fn keep_for_own_window(&self, _project: &ProjectId) -> bool {
+        false
     }
 
     /// Notes a project page's close, before any await, when an open asked the engine for
@@ -472,7 +530,10 @@ pub fn show(
         return Err(failed(error));
     }
     #[cfg(feature = "native-webdriver")]
-    crate::ide_probe::ask_once(webview.clone());
+    {
+        crate::ide_probe::ask_once(webview.clone());
+        crate::ide_probe::watch_windows(app.clone());
+    }
     webview.set_focus().map_err(failed)?;
     Ok(())
 }
@@ -874,6 +935,149 @@ mod tests {
         );
         assert!(views.closing(&alpha).is_none());
         service.shutdown().await.unwrap();
+    }
+
+    fn own_window(window: &str) -> Out {
+        Out {
+            window: window.to_owned(),
+            page_closed: false,
+            beat: tauri::async_runtime::spawn(async {}),
+        }
+    }
+
+    #[test]
+    fn an_ide_in_its_own_window_outlives_its_page_and_its_close_is_noted() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+        assert!(!views.in_own_window(&alpha), "no window yet");
+        assert!(
+            !views.keep_for_own_window(&alpha),
+            "a page close with no own window goes on as before"
+        );
+        views
+            .lock()
+            .out
+            .insert("alpha".to_owned(), own_window("ide-window-61"));
+        assert!(views.in_own_window(&alpha));
+        assert!(!views.in_own_window(&beta), "only that project's window");
+        assert!(views.keep_for_own_window(&alpha), "the page close is kept");
+        assert!(
+            views.lock().out["alpha"].page_closed,
+            "and noted, so closing the window stops the server"
+        );
+        assert!(!views.keep_for_own_window(&beta));
+    }
+
+    #[test]
+    fn an_open_finds_its_own_window_or_a_stale_one() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        let launch = Url::parse("http://127.0.0.1:41000/?tkn=ab").unwrap();
+        let later = Url::parse("http://127.0.0.1:41000/?tkn=cd").unwrap();
+        assert_eq!(
+            views.lock().own_window(&alpha, &launch),
+            OwnWindow::Absent,
+            "nothing is out"
+        );
+        {
+            let mut held = views.lock();
+            held.loaded.insert(
+                "alpha".to_owned(),
+                Loaded {
+                    label: "ide-616c706861-1".to_owned(),
+                    url: launch.clone(),
+                },
+            );
+            let mut out = own_window("ide-window-61");
+            out.page_closed = true;
+            held.out.insert("alpha".to_owned(), out);
+        }
+        assert_eq!(
+            views.lock().own_window(&alpha, &later),
+            OwnWindow::Stale,
+            "an access restart gives a new URL, so the window shows a server that has gone"
+        );
+        assert!(
+            views.lock().out["alpha"].page_closed,
+            "a stale window does not bring the page back"
+        );
+        assert_eq!(
+            views.lock().own_window(&alpha, &launch),
+            OwnWindow::Stays,
+            "the same launch stays in its window"
+        );
+        assert!(
+            !views.lock().out["alpha"].page_closed,
+            "the page is back, so closing the window must not stop the server"
+        );
+    }
+
+    #[test]
+    fn the_title_bar_is_measured_from_the_page_in_the_main_window() {
+        let inset = |viewport| Bounds::title_bar(viewport, 870.0).map_err(|error| error.code);
+        assert_eq!(
+            inset(838.0),
+            Ok(32.0),
+            "the page starts below the title bar"
+        );
+        assert_eq!(inset(870.0), Ok(0.0), "a page that fills the view has none");
+        assert_eq!(
+            inset(900.0),
+            Ok(0.0),
+            "a page taller than the view has none"
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, SPAN_MAX + 1.0] {
+            assert_eq!(inset(bad), Err("ide_bounds_invalid"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_ide_fills_its_own_window_below_the_title_bar() {
+        assert_eq!(
+            Bounds::filling(32.0, 1512.0, 945.0),
+            Bounds {
+                x: 0.0,
+                y: 32.0,
+                width: 1512.0,
+                height: 913.0,
+                viewport: 913.0,
+            }
+        );
+        assert_eq!(
+            Bounds::filling(32.0, 800.0, 10.0).height,
+            1.0,
+            "never empty"
+        );
+    }
+
+    #[test]
+    fn a_window_gone_home_stops_its_beat() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let ticks = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&ticks);
+        let beat = tauri::async_runtime::spawn(async move {
+            loop {
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        while ticks.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(Out {
+            window: "ide-window-61".to_owned(),
+            page_closed: false,
+            beat,
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let settled = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            settled,
+            "the beat has stopped"
+        );
     }
 
     #[test]
