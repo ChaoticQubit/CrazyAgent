@@ -26202,6 +26202,16 @@ const LEAVING_CLAUDE: &str = r#"#!/bin/sh
 exec /bin/sleep 300
 "#;
 
+/// A stand-in Claude Code that, run as a native lead, starts one process in a session of
+/// its own as [`LEAVING_CLAUDE`] does, then exits on its own once that process wrote its id.
+#[cfg(target_os = "macos")]
+const EXITING_CLAUDE: &str = r#"#!/bin/sh
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
+while [ ! -f "$PWD/left.pid" ]; do /bin/sleep 0.1; done
+/bin/sleep 2
+exit 0
+"#;
+
 /// A stand-in Claude Code that, run as a native lead, writes its own id to `left.pid` in the
 /// lead's folder and waits, starting nothing else.
 #[cfg(target_os = "macos")]
@@ -26211,12 +26221,16 @@ exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$
 
 /// Starts a native lead on its own server as the lead's worker does, with a stand-in Claude
 /// Code that writes a process id to `left.pid` in the lead's folder or its teammates' config
-/// home, then ends the lead through `end`. Inputs: the stand-in and the ending, given the session, the host and the
-/// lead. Output: the ending's outcome and whether that process still ran after it; the
-/// process is killed before this returns.
+/// home, then ends the lead through `end`. With `earlier`, the lead's own server already
+/// runs, started inside the lead's profile with no keeper, as one an earlier engine left.
+/// Inputs: the stand-in, whether a server runs earlier and the ending, given the session,
+/// the host and the lead. Output: the ending's outcome and whether that process still ran
+/// up to 2 s after it, since the warden kills only after it reports; the process is killed
+/// before this returns.
 #[cfg(target_os = "macos")]
 fn ended_native_lead<T>(
     script: &str,
+    earlier: bool,
     end: impl FnOnce(AgentSession, &Arc<dyn Host>, &AgentId) -> T,
 ) -> (T, bool) {
     use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
@@ -26271,6 +26285,38 @@ fn ended_native_lead<T>(
         tmux: fixture.tmux.clone(),
         scratch: mates_socket.parent().unwrap().to_path_buf(),
     };
+    if earlier {
+        use std::os::unix::fs::DirBuilderExt;
+        let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+        let folder = socket.parent().unwrap();
+        if !folder.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(folder)
+                .unwrap();
+        }
+        let started = crate::spawn_gate::status(
+            Command::new(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(crate::team::runtime::agent_profile(
+                    &fixture.base.join("team"),
+                    id,
+                ))
+                .arg(&fixture.tmux)
+                .args(["-u", "-f", "/dev/null", "-S"])
+                .arg(&socket)
+                .args(["new-session", "-d", "-s", "earlier", "/bin/sleep", "300"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(folder)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(started.success(), "the earlier server started");
+    }
     let home = agent_home(&runtime.state, id);
     let teammate_wrote = crate::launch_context::mates_home(&home).join("left.pid");
     let context = runtime
@@ -26302,19 +26348,40 @@ fn ended_native_lead<T>(
     };
     let process = rustix::process::Pid::from_raw(pid).unwrap();
     let ended = end(session, &host, &lead);
+    let gone = Instant::now() + Duration::from_secs(2);
+    while rustix::process::test_kill_process(process).is_ok() && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let running = rustix::process::test_kill_process(process).is_ok();
     let _ = rustix::process::kill_process(process, rustix::process::Signal::KILL);
     (ended, running)
 }
 
-/// Keeper r1 F1: a native lead's pane runs in its own server with no keeper and no warden,
-/// so a stop that leaves running a process the lead started in a session of its own is
-/// never reported as confirmed. It names what still runs in the lead's sandbox, which keeps
-/// the account held until a listing shows it ended.
+/// KEEPER (b): a native lead's own server runs under the keeper and its warden, so the
+/// lead's stop ends the whole server and every process in the lead's sandbox, one the lead
+/// started in a session of its own included, and is confirmed once the keeper is.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() {
-    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, |session, _, _| session.stop());
+fn a_native_lead_s_stop_ends_a_process_it_started_on_its_own_and_is_confirmed() {
+    let (stopped, running) =
+        ended_native_lead(LEAVING_CLAUDE, false, |session, _, _| session.stop());
+    assert!(
+        !running,
+        "the lead's own process ended with the stop: {stopped:?}"
+    );
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
+}
+
+/// Keeper r1 F1, after a restart (KEEPER (b) bail-out a): a native lead on an own server
+/// that runs with no keeper, as one an earlier engine started, has no warden, so a stop that
+/// leaves running a process the lead started in a session of its own is never reported as
+/// confirmed. It names what still runs in the lead's sandbox, which keeps the account held
+/// until a listing shows it ended.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_on_a_server_with_no_keeper_still_names_a_process_it_started_on_its_own() {
+    let (stopped, running) =
+        ended_native_lead(LEAVING_CLAUDE, true, |session, _, _| session.stop());
     assert!(
         running,
         "the lead's own process outlived the stop: {stopped:?}"
@@ -26323,6 +26390,35 @@ fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() 
         matches!(&stopped, Err(Unstopped::Left(left)) if left.code() == "harness_sandbox_left"),
         "{stopped:?}"
     );
+}
+
+/// KEEPER (b), rv-secreview F1: a native lead that exits on its own leaves its server and
+/// what it started running until its stop, which ends them through the server's keeper and
+/// is confirmed only then, so the account frees only on the keeper's confirmation.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_that_exits_on_its_own_has_its_stop_end_what_it_started() {
+    let (stopped, running) = ended_native_lead(EXITING_CLAUDE, false, |session, _, _| {
+        let AgentSession::Terminal(mut session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match session.next_event(Duration::from_millis(200)) {
+                Ok(Some(LaunchEvent::Exited { .. })) | Err(_) => break,
+                Ok(_) => assert!(
+                    Instant::now() < deadline,
+                    "the session never saw the lead exit"
+                ),
+            }
+        }
+        session.stop()
+    });
+    assert!(
+        !running,
+        "the lead's own process ended with the stop: {stopped:?}"
+    );
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
 }
 
 /// TEAM-8-R2-L1: a live harness whose pane closes while a process it started in a group of
@@ -26338,7 +26434,7 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
         "defined(POSIX::setpgid(0, 0)) or die; $SIG{HUP} = 'IGNORE';",
     );
     assert_ne!(script, LEAVING_CLAUDE);
-    let ((problem, left), running) = ended_native_lead(&script, |session, host, lead| {
+    let ((problem, left), running) = ended_native_lead(&script, true, |session, host, lead| {
         let AgentSession::Terminal(session) = session else {
             panic!("the native lead runs in a terminal");
         };
@@ -26379,12 +26475,13 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
     assert!(!left, "a close is never reported as only left running");
 }
 
-/// Keeper r1 F1: a native lead's pane an earlier engine left, ended with no session, is not
-/// confirmed gone while a process the lead started in a session of its own still runs.
+/// KEEPER (b): a native lead's pane ended with no session, as after its session left it,
+/// ends through its server's keeper every process the lead started, one in a session of its
+/// own included, and is confirmed gone.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_own_still_runs() {
-    let (ended, running) = ended_native_lead(LEAVING_CLAUDE, |session, host, lead| {
+fn a_left_native_lead_s_end_ends_a_process_it_started_on_its_own_and_is_confirmed() {
+    let (ended, running) = ended_native_lead(LEAVING_CLAUDE, false, |session, host, lead| {
         let AgentSession::Terminal(session) = session else {
             panic!("the native lead runs in a terminal");
         };
@@ -26392,20 +26489,19 @@ fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_o
         crate::harnesses::terminal_session::end_left_pane(host.as_ref(), lead, "test")
     });
     assert!(
-        running,
-        "the lead's own process outlived the end: {ended:?}"
+        !running,
+        "the lead's own process ended with the end: {ended:?}"
     );
-    assert_eq!(ended, Ok(false));
+    assert_eq!(ended, Ok(true));
 }
 
-/// SECAUDIT-SETSID-LEFTOVER: a native lead's pane that ends before its stop, as when it is
-/// killed, still has its stop name a process the lead started in a session of its own while
-/// the pane ran, whose parent the pane's end took with it, since the session followed the
-/// pane's processes while the pane lived.
+/// SECAUDIT-SETSID-LEFTOVER, KEEPER (b): a native lead whose server ends before its stop,
+/// as when it is killed, has that server's keeper end a process the lead started in a
+/// session of its own, whose parent the pane's end took with it, and its stop confirmed.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_native_lead_whose_pane_ended_first_still_names_a_process_it_started_on_its_own() {
-    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, |session, host, lead| {
+fn a_native_lead_whose_pane_ended_first_has_a_process_it_started_on_its_own_ended() {
+    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, false, |session, host, lead| {
         let AgentSession::Terminal(mut session) = session else {
             panic!("the native lead runs in a terminal");
         };
@@ -26427,13 +26523,10 @@ fn a_native_lead_whose_pane_ended_first_still_names_a_process_it_started_on_its_
         session.stop()
     });
     assert!(
-        running,
-        "the lead's own process outlived its pane: {stopped:?}"
+        !running,
+        "the lead's own process ended with its server: {stopped:?}"
     );
-    assert!(
-        matches!(&stopped, Err(Unstopped::Left(left)) if left.code() == "harness_sandbox_left"),
-        "{stopped:?}"
-    );
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
 }
 
 /// T23-R1-F2: the status column a project's delete waits on is written after the lead's stop
@@ -26447,7 +26540,7 @@ fn a_native_lead_s_stop_has_ended_its_running_teammate_when_it_returns() {
         "  echo $$ > \"$CLAUDE_CONFIG_DIR/left.pid\"\n  exec /bin/sleep 300\n  ;;",
     );
     assert_ne!(script, SPLITTING_CLAUDE, "the teammate records its own id");
-    let (stopped, running) = ended_native_lead(&script, |session, _, _| session.stop());
+    let (stopped, running) = ended_native_lead(&script, false, |session, _, _| session.stop());
     assert!(
         !running,
         "the teammate outlived its lead's stop: {stopped:?}"
@@ -26460,7 +26553,8 @@ fn a_native_lead_s_stop_has_ended_its_running_teammate_when_it_returns() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_s_stop_that_leaves_nothing_running_is_clean() {
-    let (stopped, running) = ended_native_lead(WAITING_CLAUDE, |session, _, _| session.stop());
+    let (stopped, running) =
+        ended_native_lead(WAITING_CLAUDE, false, |session, _, _| session.stop());
     assert!(!running, "the lead outlived its stop: {stopped:?}");
     assert!(matches!(stopped, Ok(None)), "{stopped:?}");
 }
