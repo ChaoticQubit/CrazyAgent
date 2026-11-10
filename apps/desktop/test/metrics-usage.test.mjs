@@ -254,6 +254,17 @@ test("runs tied to no project or account show as Unattributed and the master as 
   assert.match(words, /Onboarding 1\.5K/);
 });
 
+test("(your time) follows only a reset time the owner set that the card shows, never a failed read's line or a passed reset (PROTO-2 F1)", () => {
+  const failed = text(render({ report: { kind: "ok", value: report({ limits: [limits({
+    five_hour: null, five_hour_reset_override_ms: NOW - MINUTE, failure: "usage_unreachable",
+  })] }) } }));
+  assert.match(failed, /The last read failed, for the reason above\./);
+  assert.doesNotMatch(failed, /\(your time\)/, "a failed read's line names no time of the owner's");
+  const passed = text(render({ report: { kind: "ok", value: report({ limits: [limits({ five_hour_reset_override_ms: NOW - MINUTE })] }) } }));
+  assert.match(passed, /Next reset not known yet/);
+  assert.doesNotMatch(passed, /\(your time\)/, "a reset the owner set that has passed is not shown, so no suffix");
+});
+
 test("a manual reset, a failed check and a passed reset show on the account's card", () => {
   const words = text(render({ report: { kind: "ok", value: report({ limits: [limits({
     five_hour_reset_override_ms: NOW + 45 * MINUTE, weekly: { used_percent: 90, resets_at_ms: NOW - MINUTE }, failure: "usage_rate_limited",
