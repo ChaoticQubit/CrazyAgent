@@ -1989,7 +1989,10 @@ fn restarted_base(
 /// repository hold is taken, so a slow agent-sized fetch never stalls the owner's landing,
 /// and that branch must hold the set's base. The whole set, agent commits and staged
 /// files included,
-/// must stay within the bounds before anything is stored. The change set is stored
+/// must stay within the bounds before anything is stored. With no set open, a head already
+/// on the landing tip is not checked, since all its commits are on that branch: it opens no
+/// set, and files left uncommitted above it are still checked with the whole range by the
+/// commit that takes them in (LAND-8-L2). The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
 /// commits the same tree again. Its counts are measured against the tip it lands on,
 /// read before the hold as the clone fetch is (`owner::landing_tip`, DEC-107).
@@ -2078,7 +2081,9 @@ pub(super) fn record(
         }
         return Err(failure("changes_branch_not_above_base"));
     }
-    if above != head {
+    let fast_forwarded =
+        open.is_none() && above != head && already_on_tip(&shared, &head, tip.as_deref())?;
+    if above != head && !fast_forwarded {
         check_change(repo, &workspace.repository, above, &head, fresh, bounds)?;
     }
     super::merges::refuse_outside_merges(db, workspace, &shared, &head)?;
@@ -2102,9 +2107,7 @@ pub(super) fn record(
         None => None,
     };
     let mut record = match open {
-        None if committed.is_none()
-            && (head == base || already_on_tip(&shared, &head, tip.as_deref())?) =>
-        {
+        None if committed.is_none() && (head == base || fast_forwarded) => {
             return Ok(None);
         }
         None => Record {
