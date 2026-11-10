@@ -138,17 +138,18 @@ export function strategyOptions(inherited: string): { value: string; label: stri
 }
 
 /** One account order select: it keeps the owner's pick while its save and the read after it run,
- * and shows the saved value again after a refused save. Inputs: the select's parts, the help line
- * for a value and the change action. Output: the select. */
-function StrategySelect({ id, label, value, options, hint, save }: {
+ * and shows the saved value again after a refused save. Inputs: the select's parts, the schedule
+ * read the value came from, the help line for a value and the change action. Output: the select. */
+function StrategySelect({ id, label, value, read, options, hint, save }: {
   id: string;
   label: string;
   value: string;
+  read: AccountSchedule;
   options: SelectOption[];
   hint?: (value: string) => string | undefined;
   save: (value: string) => Promise<Result<void>>;
 }) {
-  const [shown, hold] = useHeld(value);
+  const [shown, hold] = useHeld(value, Object.is, read);
   return <Select id={id} label={label} value={shown} options={options} helper={hint?.(shown)} onValue={(next) => {
     const settled = hold(next);
     void save(next).then((result) => settled(result.kind === "ok" ? "" : result.kind));
@@ -167,7 +168,7 @@ export function ProjectAccountOrderView({ schedule, project, pool, onChange }: {
   if (schedule.kind !== "ok") return null;
   const inherited = (pool === null ? null : poolStrategy(schedule.value, pool)) ?? schedule.value.strategy;
   return <div className="stack-small">
-    <StrategySelect id="project-account-order" label="Account order for this project" value={projectStrategy(schedule.value, project) ?? ""}
+    <StrategySelect id="project-account-order" label="Account order for this project" value={projectStrategy(schedule.value, project) ?? ""} read={schedule.value}
       options={strategyOptions(strategyLabel(inherited))} save={async (value) => {
         const result = await onChange({ kind: "project_strategy", project, strategy: value === "" ? null : value as AccountStrategy });
         setError(result.kind === "ok" ? undefined : result.kind === "not_ready" ? "Account choice isn't ready in this build." : result.message);
