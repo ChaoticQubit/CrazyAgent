@@ -1972,13 +1972,13 @@ fn one_start_writes_one_overlap_note_to_each_agent() {
     let to_busy = bodies(&fixture, notes, busy);
     assert_eq!(to_busy.len(), 1, "{to_busy:?}");
     assert!(
-        to_busy[0].contains(", and 11 more that inspect_work() shows. This note takes no reply"),
+        to_busy[0].contains(", and 11 more between this work and yours. This note takes no reply"),
         "{}",
         to_busy[0]
     );
     let to_other = bodies(&fixture, notes, other);
     assert_eq!(to_other.len(), 1, "{to_other:?}");
-    assert!(!to_other[0].contains(" more that "), "{}", to_other[0]);
+    assert!(!to_other[0].contains(" more between "), "{}", to_other[0]);
 }
 
 /// One start tells at most ten agents of an overlap, however many it overlaps.
