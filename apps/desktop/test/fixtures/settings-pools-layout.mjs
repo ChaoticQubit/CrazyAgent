@@ -1,5 +1,6 @@
 import { act, createElement } from "react";
 import { Settings } from "../../src/screens/settings/index.tsx";
+import { startPoolWith } from "../../src/screens/settings/pool-draft.ts";
 import { mountTab, sceneRead, settle, wordsOf } from "./settings-tab.mjs";
 
 export * from "./settings-tab.mjs";
@@ -15,6 +16,11 @@ let saves = [];
 let gated = null;
 let gatedAnswers = [];
 let savedLineTimers = [];
+let livePools = [];
+let poolEditsSent = [];
+let readiedSent = [];
+let removedSent = [];
+let unmountPage = () => {};
 const say = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
 const member = (index, kind = "chatgpt") => ({ id: `acct-${index}`, kind, provider: "chatgpt", status: "signed_in", status_label: "Signed in" });
 const account = (index) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription", url: null, model: null, status: "signed_in", status_label: "Signed in" });
@@ -26,7 +32,23 @@ const WAITING = { ...MAIN, members: [member(0, "api_key"), { ...member(1), ...LA
 const KEYED_SPARE = { ...SPARE, members: [member(3, "api_key")] };
 const POOLS = { ok: [MAIN, SPARE], keyed: [MAIN, KEYED_SPARE], full: [FULL], waiting: [WAITING], long: [{ ...SPARE, name: "W".repeat(60) }], hollow: [{ ...SPARE, members: [] }], empty: [] };
 const SIGNED_IN = Array.from({ length: 18 }, (_, index) => account(index));
-const ACCOUNTS = { ok: SIGNED_IN, waiting: SIGNED_IN.map((item, index) => (index === 1 ? { ...item, ...LATE } : item)), empty: [] };
+const KEYED = { method: "api_key", method_label: "API key", status: "key_saved", status_label: "Key saved" };
+const CLAUDE = { provider: "claude", provider_name: "Claude" };
+const ACCOUNTS = {
+  ok: SIGNED_IN, waiting: SIGNED_IN.map((item, index) => (index === 1 ? { ...item, ...LATE } : item)), empty: [],
+  keyed: SIGNED_IN.map((item, index) => (index === 5 ? { ...item, ...KEYED } : item)),
+  mixed: SIGNED_IN.map((item, index) => (index >= 16 ? { ...item, ...CLAUDE } : item)),
+};
+const poolOf = (id, name, indexes, project_count) => ({ id, name, summary: "", members: indexes.map((index) => member(index)), project_count });
+const upTo = (count) => Array.from({ length: count }, (_, index) => index);
+const LIVE_POOLS = {
+  live: () => [MAIN, SPARE],
+  "live-full": () => [poolOf("pool-main", "Main pool", upTo(15), 2)],
+  "live-14": () => [poolOf("pool-main", "Main pool", upTo(14), 2)],
+  "live-one": () => [poolOf("pool-main", "Main pool", [3], 0)],
+  "live-new": () => [MAIN, { ...SPARE, name: "New pool" }, { ...SPARE, id: "pool-two", name: "New pool 2" }],
+  "live-empty": () => [],
+};
 const next = (why) => ({ kind: "next", weekly_resets_ms: null, weekly_left_percent: null, use_last: false, why });
 const ranked = (index, standing) => ({ connection: `acct-${index}`, standing });
 const order = (accounts) => ({ pool: "pool-main", strategy: "use_it_or_lose_it", accounts, own_order_projects: 0 });
@@ -77,18 +99,64 @@ function liveRanking() {
   return [{ ...order([...ready.map((index) => ranked(index, next({ kind: "tied_order" }))), ...held.map((index) => ranked(index, { kind: "never_use" }))]), strategy }, SPARE_ORDER];
 }
 
+/** Ranks every live pool in its member order, so a row added or removed shows at once. Output:
+ * the rankings. */
+function poolsRanking() {
+  return livePools.map((pool) => ({ pool: pool.id, strategy: "use_it_or_lose_it", own_order_projects: 0, accounts: pool.members.map((item) => ({ connection: item.id, standing: next({ kind: "tied_order" }) })) }));
+}
+
+/** Answers one pool edit as the engine does: a pool with no account is refused. Inputs: the scene
+ * and the edit's arguments. Output: the receipt. */
+function editPool(scene, args) {
+  const { edit } = args;
+  if (edit.kind === "remove_pool") {
+    removedSent.push(edit.id);
+    livePools = livePools.filter((pool) => pool.id !== edit.id);
+    return APPLIED;
+  }
+  poolEditsSent.push(edit);
+  if (scene.refuseEdit) return { pending: false, outcome: "rejected", rejection: scene.refuseEdit };
+  if (edit.pool.members.length === 0) return { pending: false, outcome: "rejected", rejection: "pool_needs_account" };
+  const members = edit.pool.members.map((id) => member(Number(id.slice("acct-".length))));
+  if (edit.kind === "create_pool") livePools = [...livePools, { id: edit.pool.id, name: edit.pool.name, summary: "", members, project_count: 0 }];
+  else livePools = livePools.map((pool) => (pool.id === edit.pool.id ? { ...pool, name: edit.pool.name, members } : pool));
+  return APPLIED;
+}
+
+/** Answers the commands of a pool edit and a set-up for agents. Inputs: the scene, the command
+ * and its arguments. Output: the answer, or undefined when the command is another one. */
+function liveEdit(scene, command, args) {
+  if (command === "desktop_model_access_page") return { ticket: "ticket" };
+  if (command === "desktop_edit_model_access") return editPool(scene, args);
+  if (command === "desktop_configure_account_profile") {
+    if (scene.ready === "refuse") throw { code: "engine_failed" };
+    readiedSent.push(args.ticket.slice("connection:".length));
+    return { pending: false, reply: { outcome: "configured" } };
+  }
+  if (command !== "desktop_inspect_model_access") return undefined;
+  if (args.collection === "connections") return { ticket: `connection:${args.id}`, record: { kind: "connection", connection: { id: args.id } } };
+  const pool = livePools.find((item) => item.id === args.id);
+  if (!pool) throw { code: "pool_not_found" };
+  return { ticket: "ticket", record: { kind: "pool", pool: { id: pool.id, name: pool.name, members: pool.members.map((item) => item.id) } } };
+}
+
 /** Answers one engine command for a scene. Inputs: the scene and the command. Output: the
  * answer, a failure thrown, or a read that never lands. */
 function answer(scene, command, args) {
   const failing = (state, list) => sceneRead(state, list, FAILURE, command);
   if (scene.hold === command) return new Promise(() => {});
+  if (LIVE_POOLS[scene.pools]) {
+    if (command === "desktop_pool_summaries") return livePools;
+    const edited = liveEdit(scene, command, args);
+    if (edited !== undefined) return edited;
+  }
   if (command === "desktop_pool_summaries") return failing(scene.pools ?? "ok", POOLS);
   if (command === "desktop_list_accounts") {
     const accounts = failing(scene.accounts ?? "ok", ACCOUNTS);
     return accounts instanceof Promise ? accounts : { accounts, next: null };
   }
   if (command === "desktop_account_schedule") return failing(scene.schedule ?? "ok", { ok: schedule });
-  if (command === "desktop_account_ranking") return scene.ranking === "live" ? liveRanking() : failing(scene.ranking ?? "ok", RANKINGS);
+  if (command === "desktop_account_ranking") return scene.ranking === "pools" ? poolsRanking() : scene.ranking === "live" ? liveRanking() : failing(scene.ranking ?? "ok", RANKINGS);
   if (command === "desktop_set_account_schedule") return saveChange(scene, args);
   if (command === "desktop_usage_report") {
     usageSince = args.sinceMs;
@@ -111,6 +179,11 @@ export async function mount(scene = {}, theme = "light") {
   gated = null;
   gatedAnswers = [];
   savedLineTimers = [];
+  livePools = LIVE_POOLS[scene.pools]?.() ?? [];
+  poolEditsSent = [];
+  readiedSent = [];
+  removedSent = [];
+  if (scene.drafted) startPoolWith(scene.drafted);
   schedule = { ...SCHEDULE, ...scene.start };
   const start = window.setInterval.bind(window);
   window.setInterval = (run, ms, ...rest) => { timers.push({ run, ms }); return start(run, ms, ...rest); };
@@ -120,7 +193,7 @@ export async function mount(scene = {}, theme = "light") {
     savedLineTimers.push(run);
     return 0;
   };
-  await mountTab(createElement(Settings, { tab: "pools" }), (command, args) => (command === gated ? new Promise((done) => gatedAnswers.push(() => done(answer(scene, command, args)))) : answer(scene, command, args)), theme);
+  unmountPage = await mountTab(createElement(Settings, { tab: "pools", action: scene.action }), (command, args) => (command === gated ? new Promise((done) => gatedAnswers.push(() => done(answer(scene, command, args)))) : answer(scene, command, args)), theme);
 }
 
 /** Lists every change the page asked the engine to save. Output: each change and its version. */
@@ -144,6 +217,41 @@ export async function openGate() {
 export async function passGate() {
   gatedAnswers.shift()?.();
   await settle(80);
+}
+
+/** Lists the pool edits the page sent, without pool removals. Output: each edit. */
+export function poolEdits() {
+  return poolEditsSent;
+}
+
+/** Lists the pools the page removed. Output: their ids. */
+export function removedPools() {
+  return removedSent;
+}
+
+/** Lists the accounts the page set up for agents. Output: their ids. */
+export function readied() {
+  return readiedSent;
+}
+
+/** Reads the names in the Add account panel. Output: the names in list order. */
+export function addRows() {
+  return [...document.querySelectorAll(".pool-add-row .ellipsis:first-child")].map(say);
+}
+
+/** Picks an option of a native select as the owner's choice does. Inputs: the select's selector
+ * and the option's value. Output: nothing. */
+export async function choose(selector, value) {
+  const node = document.querySelector(selector);
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(node, value);
+  await act(async () => { node.dispatchEvent(new Event("change", { bubbles: true })); });
+  await settle(40);
+}
+
+/** Takes the page away, as going to another page does. Output: nothing. */
+export async function unmount() {
+  await act(async () => { unmountPage(); });
+  await settle(40);
 }
 
 /** Reads the option a choice group shows. Input: the group's label. Output: its words. */
