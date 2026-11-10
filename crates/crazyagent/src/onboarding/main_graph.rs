@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const GRAPH_OUT: &CStr = c"graphify-out";
 const GRAPH_FILE: &CStr = c"graph.json";
@@ -26,8 +26,10 @@ const LOCK_TRIES: u32 = 100;
 const LOCK_WAIT: Duration = Duration::from_millis(50);
 /// How often the engine looks again at one project's main branch tip for a graph refresh.
 pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(30);
-/// How long a tip whose graph build failed waits before the engine tries it again.
+/// How long a project whose graph build failed waits before the engine tries it again,
+/// whatever its tip.
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
+const _: () = assert!(RETRY_AFTER.as_secs() > CHECK_EVERY.as_secs());
 
 /// One published build of a project's main graph (DEC-123): the main branch tip it was
 /// built at and when, in milliseconds since the epoch.
@@ -82,6 +84,15 @@ pub(crate) fn tip_valid(tip: &str) -> bool {
 pub(crate) fn due(published: Option<&Build>, tip: &str) -> bool {
     assert!(tip_valid(tip));
     published.is_none_or(|build| build.tip != tip)
+}
+
+/// Whether a project whose last main graph build failed still waits before the next try
+/// (DEC-123): for [`RETRY_AFTER`] after any failed or timed-out build, whatever tip the next
+/// build would be at, so a build that keeps failing runs at most once per wait however often
+/// main moves. Inputs: when the last build failed, None when it did not, and the time now.
+/// Output: the answer.
+pub(crate) fn retry_waits(failed: Option<Instant>, now: Instant) -> bool {
+    failed.is_some_and(|at| now.saturating_duration_since(at) < RETRY_AFTER)
 }
 
 /// Whether the engine builds and refreshes main graphs at all (DEC-123): only while the

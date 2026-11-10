@@ -211,6 +211,22 @@ fn a_graph_is_due_when_missing_or_the_tip_moved() {
     assert!(tip_valid(&"0f".repeat(32)));
 }
 
+/// A failed or timed-out build holds its project back for the retry time whatever tip main
+/// moves to, so a graph that keeps failing is built at most once per wait (DEC-123).
+#[test]
+fn a_failed_build_waits_the_retry_time_whatever_the_tip() {
+    let failed = Instant::now();
+    assert!(!retry_waits(None, failed));
+    assert!(retry_waits(Some(failed), failed));
+    let last = failed + RETRY_AFTER - Duration::from_secs(1);
+    assert!(retry_waits(Some(failed), last));
+    assert!(!retry_waits(Some(failed), failed + RETRY_AFTER));
+    assert!(
+        retry_waits(Some(failed + CHECK_EVERY), failed),
+        "a time read before the failure still waits"
+    );
+}
+
 /// Main graphs are built only while the code graph switch is on, and never on Linux
 /// (DEC-094), whatever the switch says.
 #[test]

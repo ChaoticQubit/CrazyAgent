@@ -595,14 +595,14 @@ fn graph_step(
 }
 
 /// What the idle loop remembers between main graph checks (DEC-123): when each onboarded
-/// project was last looked at, and the tip whose build last failed with when, so a project
-/// is checked at most every [`main_graph::CHECK_EVERY`] and a failed tip is built again only
-/// after [`main_graph::RETRY_AFTER`].
+/// project was last looked at, and when its last build failed, so a project is checked at
+/// most every [`main_graph::CHECK_EVERY`] and built again after a failure only once
+/// [`main_graph::retry_waits`] lets it, whatever its tip.
 #[cfg(unix)]
 #[derive(Default)]
 struct Refresh {
     checked: HashMap<String, Instant>,
-    failed: HashMap<String, (String, Instant)>,
+    failed: HashMap<String, Instant>,
 }
 
 /// Builds and publishes at most one project's main graph while no onboarding step waits
@@ -639,21 +639,21 @@ fn refresh_step(
         if crate::projects_home::state_folder(repo).as_path() == repo.as_path() {
             continue;
         }
+        if main_graph::retry_waits(refresh.failed.get(project).copied(), now) {
+            continue;
+        }
         let Some(tip) = main_tip(database, project, repo) else {
             continue;
         };
-        let waits = refresh.failed.get(project).is_some_and(|(failed, at)| {
-            *failed == tip && now.duration_since(*at) < main_graph::RETRY_AFTER
-        });
-        if waits || !main_graph::due(main_graph::latest(repo).as_ref(), &tip) {
+        if !main_graph::due(main_graph::latest(repo).as_ref(), &tip) {
             continue;
         }
-        match refresh_build(work, database, project, repo, tip.clone(), halted) {
+        match refresh_build(work, database, project, repo, tip, halted) {
             Refreshed::Published => {
                 refresh.failed.remove(project);
             }
             Refreshed::Failed => {
-                refresh.failed.insert(project.clone(), (tip, now));
+                refresh.failed.insert(project.clone(), Instant::now());
             }
             Refreshed::GaveWay => {}
         }
