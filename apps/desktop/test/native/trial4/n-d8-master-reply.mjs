@@ -1,3 +1,4 @@
+import { setTimeout as pause } from "node:timers/promises";
 import { click, shown } from "../settings-steps.mjs";
 import { pasteTerminal } from "../trial-kit.mjs";
 
@@ -20,6 +21,18 @@ export const BOX = ".pj-master-live textarea.tg-composer-input";
 const SEND = "//div[contains(@class, \"pj-master-live\")]//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
 const START = "//div[contains(@class, \"pj-master-live\")]//button[normalize-space(.)=\"Start all\"]";
 const RUNNING = ["starting", "idle", "working"];
+
+/** How long the terminal gets between two reads after a paste or an Enter, in ms. */
+export const READ_MS = 250;
+
+/** How many reads a paste gets to draw and stop growing: 10 seconds at READ_MS. */
+export const DRAW_READS_MAX = 40;
+
+/** How many reads one Enter gets to take the paste off the terminal: 5 seconds at READ_MS. */
+export const ENTER_READS_MAX = 20;
+
+/** How many times Enter is pressed before a send fails: the first may only clear a notice. */
+export const ENTER_PRESSES_MAX = 4;
 
 /** Counts the reply lines a harness drew on the master terminal: rows that start with its
  * reply mark followed by text. Inputs: the terminal rows and the harness id. Output: the
@@ -114,10 +127,84 @@ export async function terminalLive(kit, timeout) {
   return filled;
 }
 
+/** The characters of a message's start that name it in the input area, as leader/tell.sh reads it. */
+const MESSAGE_START_CHARS = 20;
+
+/** How Claude Code and Codex draw a long paste in their input area. */
+const PASTE_PLACEHOLDER = "[Pasted ";
+
+/** A row of nothing but rule characters, the edges of a ruled input box. */
+const RULE_ROW = /^\s*\u2500+\s*$/;
+
+/** A row that opens with a prompt mark, where a harness with no ruled box takes input. */
+const PROMPT_ROW = /^\s*[\u203a\u276f>]/;
+
+/** The first characters of a message, by which its paste is known. Input: the text. Output:
+ * the start of its first line; throws for a message with no text, which every row would match. */
+export function messageStart(text) {
+  const start = text.trim().split("\n")[0].trim().slice(0, MESSAGE_START_CHARS);
+  if (start === "") throw new Error("a message to send has text");
+  return start;
+}
+
+/** Picks a harness's input area off its screen by what the rows say: between the last two rule
+ * rows, as leader/tell.sh reads it, or with no ruled box from the last prompt row to the bottom.
+ * Input: the terminal rows. Output: those rows, none when no input area shows. */
+export function inputRows(rows) {
+  const rules = rows.flatMap((row, at) => (RULE_ROW.test(row) ? [at] : []));
+  if (rules.length >= 2) return rows.slice(rules.at(-2) + 1, rules.at(-1));
+  const prompt = rows.findLastIndex((row) => PROMPT_ROW.test(row));
+  return prompt < 0 ? [] : rows.slice(prompt);
+}
+
+/** Says whether a paste still sits in the input area: its start or the paste placeholder shows
+ * there, wherever the area has moved and whatever the transcript holds. Inputs: the message's
+ * start and the terminal rows. Output: a boolean. */
+export function pasteWaiting(start, rows) {
+  const area = inputRows(rows).join(" ");
+  return area.includes(start) || area.includes(PASTE_PLACEHOLDER);
+}
+
+/** Waits until a paste shows in the input area and that area reads the same on two reads in a
+ * row, so Enter never lands on a half-drawn paste. Inputs: the terminal and the message's
+ * start. Output: none; throws when it never showed, so no Enter is pressed on an unseen paste. */
+async function steadyPaste(terminal, start) {
+  let last = null;
+  for (let reads = 0; reads < DRAW_READS_MAX; reads += 1) {
+    await terminal.pause();
+    const rows = await terminal.rows();
+    const area = JSON.stringify(inputRows(rows));
+    if (area === last && pasteWaiting(start, rows)) return;
+    last = area;
+  }
+  throw new Error("the paste never drew in the master's input area: Enter was not pressed");
+}
+
+/** Pastes a message and presses Enter until its turn has started: a long paste followed at once
+ * by Enter can sit unsent, and a first Enter can only clear a notice. The turn has started when
+ * the caller's read says so or, with no such read, once the paste left the input area. Inputs:
+ * the terminal, { rows, paste, enter, pause }, the message and the read for a terminal that draws
+ * no echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
+export async function pasteAndSend(terminal, text, started) {
+  const start = messageStart(text);
+  await terminal.paste();
+  if (!started) await steadyPaste(terminal, start);
+  const begun = started ?? (async () => !pasteWaiting(start, await terminal.rows()));
+  for (let presses = 1; presses <= ENTER_PRESSES_MAX; presses += 1) {
+    await terminal.enter();
+    for (let reads = 0; reads < ENTER_READS_MAX; reads += 1) {
+      await terminal.pause();
+      if (await begun()) return presses;
+    }
+  }
+  throw new Error(`the paste stayed in the master's input area after ${ENTER_PRESSES_MAX} Enter presses: it was not sent`);
+}
+
 /** Sends one message to the live master as the owner does: through the message box when the
  * Terminal input setting shows it, else pasted into the terminal and sent with Enter, so a new
- * line in the text never presses Enter. Inputs: the kit and the text. Output: which input it used. */
-export async function sendToMaster(kit, text) {
+ * line in the text never presses Enter. Inputs: the kit, the text and, for a terminal that
+ * draws no echo, a read of whether the turn started. Output: which input it used. */
+export async function sendToMaster(kit, text, started) {
   if (await shown(BOX)) {
     await kit.paste(BOX, text);
     await kit.until(async () => {
@@ -129,8 +216,14 @@ export async function sendToMaster(kit, text) {
     return "message box";
   }
   await $(TERMINAL).click();
-  if (!(await browser.execute(pasteTerminal, text))) throw new Error("the master terminal lost the focus before the paste");
-  await browser.keys(KEYS.enter);
+  await pasteAndSend({
+    rows: masterRows,
+    paste: async () => {
+      if (!(await browser.execute(pasteTerminal, text))) throw new Error("the master terminal lost the focus before the paste");
+    },
+    enter: () => browser.keys(KEYS.enter),
+    pause: () => pause(READ_MS),
+  }, text, started);
   return "terminal";
 }
 
