@@ -390,12 +390,10 @@ fn listing(found: &[Conversation]) -> String {
 }
 
 /// Finds every past conversation of a project, newest first: each master session with
-/// engine turns, the team's messages and every harness record in the homes of the
-/// project's team agents, and in the home a native Claude Code lead's teammates run with
-/// beside its own (TPH-2 C). Records are found without following a link, only under a
-/// home's own record folders. A source that cannot be read is left out. Takes the engine
-/// database, the project and the folder of team agents' own folders. Returns at most
-/// `RECORDS_MAX` records with the stored conversations.
+/// engine turns, the team's messages and every harness record in its team agents' homes,
+/// their native teammates' included (TPH-2 C), each record folder within its fair share of
+/// the visit and record budgets (OP25-S5). Takes the engine database, the project and the
+/// agents folder. Returns at most `RECORDS_MAX` records with the stored conversations.
 fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Conversation> {
     let mut found = turn_sessions(connection, project).unwrap_or_default();
     if let Ok(Some(at_ms)) = team_last(connection, project) {
@@ -407,8 +405,51 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
         });
     }
     let kept = kept_records(connection, project).unwrap_or_default();
+    let trees = record_trees(connection, project, agents);
+    let (mut visits_left, mut records_left) = (VISITS_MAX, RECORDS_MAX);
     let mut records = Vec::new();
-    let mut visits = 0;
+    for (at, tree) in trees.iter().enumerate() {
+        let trees_left = trees.len() - at;
+        let (mine, visits) = tree_records(
+            agents,
+            tree,
+            &kept,
+            visits_left / trees_left,
+            records_left / trees_left,
+        );
+        visits_left = visits_left.saturating_sub(visits);
+        records_left -= mine.len();
+        records.extend(mine);
+    }
+    records.sort_by_key(|one| std::cmp::Reverse(one.at_ms));
+    let mut seen = std::collections::HashSet::new();
+    records.retain(|record| seen.insert(record.id.clone()));
+    assert!(records.len() <= RECORDS_MAX);
+    found.extend(records);
+    found.sort_by(|one, other| {
+        other
+            .at_ms
+            .cmp(&one.at_ms)
+            .then_with(|| one.id.cmp(&other.id))
+    });
+    found
+}
+
+/// One record folder of a team agent's home the search walks: the folder below the agents
+/// folder, the id prefix and label of its records and the harness that wrote them.
+struct Tree {
+    place: PathBuf,
+    prefix: String,
+    label: String,
+    harness: &'static str,
+}
+
+/// Lists the record folders of the project's team agents, newest agent first: each Claude
+/// Code or Codex home's own and, for a Claude Code agent, the home its native teammates run
+/// with, each only while the agent's folder and that home are plain folders. Takes the
+/// engine database, the project and the agents folder. Returns the folders.
+fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Tree> {
+    let mut trees = Vec::new();
     for (agent, harness, role) in team_agents(connection, project).unwrap_or_default() {
         let Some(harness) = crate::harnesses::spec(&harness).map(|spec| spec.id) else {
             continue;
@@ -424,87 +465,112 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
             continue;
         }
         let label = agent_label(connection, project, agent, &role, harness);
-        let mut places = vec![(home.join(folder), format!("agent-{agent}"), label.clone())];
         let mates = crate::launch_context::mates_home(&home);
+        trees.push(Tree {
+            place: home.join(folder),
+            prefix: format!("agent-{agent}"),
+            label: label.clone(),
+            harness,
+        });
         if harness == "claude-code" && plain_dir(&agents.join(&mates)) {
-            places.push((
-                mates.join(folder),
-                format!("agent-{agent}/mates"),
-                format!("native teammates of {label}"),
-            ));
-        }
-        for (place, prefix, label) in places {
-            let mut paths = Vec::new();
-            walk(agents, &place, &mut paths, &mut visits);
-            for (below, at_ms) in paths {
-                let Some(stem) = below
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(|stem| format!("{prefix}/{stem}"))
-                    .filter(|id| id_valid(id))
-                else {
-                    continue;
-                };
-                let label = match kept.get(&agents.join(&below)) {
-                    Some(session) => format!("{label}, master session {session}"),
-                    None => label.clone(),
-                };
-                records.push(Conversation {
-                    id: stem,
-                    label,
-                    at_ms,
-                    source: Source::Record {
-                        harness,
-                        agents: agents.to_path_buf(),
-                        below,
-                    },
-                });
-            }
+            trees.push(Tree {
+                place: mates.join(folder),
+                prefix: format!("agent-{agent}/mates"),
+                label: format!("native teammates of {label}"),
+                harness,
+            });
         }
     }
+    trees
+}
+
+/// Reads one record folder's records within its share of the budgets: at most `visits_max`
+/// entries walked and its newest `records_max` records with a plain id kept, each labeled
+/// with the master session that kept it, if one did. Takes the agents folder, the record
+/// folder, the records master sessions kept and both shares. Returns the records and the
+/// entries walked.
+fn tree_records(
+    agents: &Path,
+    tree: &Tree,
+    kept: &HashMap<PathBuf, String>,
+    visits_max: usize,
+    records_max: usize,
+) -> (Vec<Conversation>, usize) {
+    let mut paths = Vec::new();
+    let mut visits = 0;
+    walk(agents, &tree.place, &mut paths, &mut visits, visits_max);
+    let mut records: Vec<Conversation> = paths
+        .into_iter()
+        .filter_map(|(below, at_ms)| {
+            let id = below
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| format!("{}/{stem}", tree.prefix))
+                .filter(|id| id_valid(id))?;
+            let label = match kept.get(&agents.join(&below)) {
+                Some(session) => format!("{}, master session {session}", tree.label),
+                None => tree.label.clone(),
+            };
+            Some(Conversation {
+                id,
+                label,
+                at_ms,
+                source: Source::Record {
+                    harness: tree.harness,
+                    agents: agents.to_path_buf(),
+                    below,
+                },
+            })
+        })
+        .collect();
     records.sort_by_key(|one| std::cmp::Reverse(one.at_ms));
-    let mut seen = std::collections::HashSet::new();
-    records.retain(|record| seen.insert(record.id.clone()));
-    records.truncate(RECORDS_MAX);
-    found.extend(records);
-    found.sort_by(|one, other| {
-        other
-            .at_ms
-            .cmp(&one.at_ms)
-            .then_with(|| one.id.cmp(&other.id))
-    });
-    found
+    records.truncate(records_max);
+    (records, visits)
 }
 
 /// Collects the conversation records under one record folder of a home: `.jsonl` files at
-/// most `DEPTH_MAX` folders down, within `VISITS_MAX` entries in all. The record folder opens
-/// from the agents folder one part at a time with no link followed
+/// most `DEPTH_MAX` folders down, within `visits_max` entries. The record folder opens from
+/// the agents folder one part at a time with no link followed
 /// ([`crate::platform::open_beneath`]), so a folder an agent swapped for a link is skipped.
 /// Takes the agents folder, the record folder below it, the list to fill with each record's
-/// path below the agents folder and its change time, and the shared visit count.
+/// path below the agents folder and its change time, the visit count and its most.
 #[cfg(unix)]
-fn walk(agents: &Path, below: &Path, out: &mut Vec<(PathBuf, i64)>, visits: &mut usize) {
+fn walk(
+    agents: &Path,
+    below: &Path,
+    out: &mut Vec<(PathBuf, i64)>,
+    visits: &mut usize,
+    visits_max: usize,
+) {
     if let Ok(folder) = crate::platform::open_beneath(agents, below, RECORD_FOLDER) {
-        walk_folder(&folder, below, DEPTH_MAX, out, visits);
+        walk_folder(&folder, below, DEPTH_MAX, out, (visits, visits_max));
     }
 }
 
 /// Finds no records off Unix, where team agents do not run, so no agent home holds one.
-/// Takes the agents folder, the record folder, the list and the visit count, all unused.
+/// Takes the agents folder, the record folder, the list, the visit count and its most, all
+/// unused.
 #[cfg(not(unix))]
-fn walk(_agents: &Path, _below: &Path, _out: &mut Vec<(PathBuf, i64)>, _visits: &mut usize) {}
+fn walk(
+    _agents: &Path,
+    _below: &Path,
+    _out: &mut Vec<(PathBuf, i64)>,
+    _visits: &mut usize,
+    _visits_max: usize,
+) {
+}
 
 /// Lists one open record folder for [`walk`]: each plain `.jsonl` file in it and, while
 /// `depth` allows, each plain folder in it, opened from this one without following a link.
 /// Takes the folder, its path below the agents folder, the folder levels it may hold, the
-/// list and the visit count.
+/// list, and the visit count with its most.
 #[cfg(unix)]
 fn walk_folder(
     folder: &std::os::fd::OwnedFd,
     below: &Path,
     depth: usize,
     out: &mut Vec<(PathBuf, i64)>,
-    visits: &mut usize,
+    (visits, visits_max): (&mut usize, usize),
 ) {
     use rustix::fs::{AtFlags, FileType, Mode};
     let Ok(entries) = rustix::fs::Dir::read_from(folder) else {
@@ -516,7 +582,7 @@ fn walk_folder(
             continue;
         }
         *visits += 1;
-        if *visits > VISITS_MAX || out.len() >= RECORDS_MAX * 4 {
+        if *visits > visits_max || out.len() >= RECORDS_MAX * 4 {
             return;
         }
         let (Ok(text), Ok(stat)) = (
@@ -529,7 +595,7 @@ fn walk_folder(
         match FileType::from_raw_mode(stat.st_mode) {
             FileType::Directory if depth > 1 => {
                 if let Ok(inner) = rustix::fs::openat(folder, name, RECORD_FOLDER, Mode::empty()) {
-                    walk_folder(&inner, &path, depth - 1, out, visits);
+                    walk_folder(&inner, &path, depth - 1, out, (visits, visits_max));
                 }
             }
             FileType::RegularFile
