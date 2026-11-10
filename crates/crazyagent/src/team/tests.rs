@@ -5274,6 +5274,10 @@ fn a_budget_can_rise_after_the_recount_is_used_and_says_it_was_reached() {
         project.as_str(),
         now_ms(),
     );
+    assert!(
+        budget_stop(&connection, &project, now_ms()).unwrap(),
+        "the team's next step stops it"
+    );
     let after = budget(&connection, &project).unwrap().unwrap();
     assert!(after.used > before.used);
     assert!(after.reached);

@@ -1715,6 +1715,7 @@ fn a_tool_filed_before_a_rewind_is_not_collected_again() {
     let filed = std::fs::metadata(&record).unwrap().len();
     append(&record, &line("Read"));
     let mut progress = Progress {
+        identity: file_identity(&std::fs::metadata(&record).unwrap()),
         filed_to: filed,
         ..Progress::default()
     };
