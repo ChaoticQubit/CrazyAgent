@@ -2299,7 +2299,7 @@ pub(super) fn release_agent_claims(db: &Connection, record: &Record) {
     );
 }
 
-/// Holds a sub-agent's claims on its ended work for the change set its turn end leaves
+/// Holds an agent's claims on its ended work for the change set its turn end leaves
 /// open, or releases them when the turn leaves nothing to land, after releasing those of
 /// any set that closed while its release failed (OS-8, DEC-117 Q7). A failure is logged by
 /// its plain code, never fails the turn end, and is tried again at the next one. Inputs:
@@ -2310,16 +2310,17 @@ pub(super) fn hold_agent_claims(
     open: Option<&ChangeSetId>,
     now: u64,
 ) {
-    if workspace.agent.kind != AgentKind::Sub {
-        return;
-    }
-    let Ok(agent) = workspace.agent.id.parse::<crate::coord::AgentId>() else {
-        return;
-    };
     logged_claims(
         i64::try_from(now)
             .map_err(|_| failure("changes_unavailable"))
             .and_then(|now| {
+                let agent = match workspace.agent.kind {
+                    AgentKind::Sub => workspace.agent.id.parse().ok(),
+                    AgentKind::Master => crate::coord::master_of(db, &workspace.project)?,
+                };
+                let Some(agent) = agent else {
+                    return Ok(0);
+                };
                 for set in crate::coord::held_sets(db, agent)? {
                     let closed = ChangeSetId::new(&set)
                         .ok()
@@ -2339,7 +2340,8 @@ pub(super) fn hold_agent_claims(
 }
 
 /// Settles a project's claims no turn end will, as [`super::sweep_claims`] says. Reads
-/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones.
+/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones. A chat
+/// master's set records its session id, so a master takes the newest open master set.
 /// Inputs: the store, the project and the time now. Output: Ok or the first failure.
 pub(super) fn sweep_claims(
     db: &Connection,
@@ -2362,9 +2364,11 @@ pub(super) fn sweep_claims(
     }
     for agent in crate::coord::stopped_with_unheld(db, project)? {
         let id = agent.to_string();
-        let set = open
-            .iter()
-            .find(|record| record.agent.kind == AgentKind::Sub && record.agent.id == id);
+        let master = crate::coord::is_master(db, agent)?;
+        let set = open.iter().rev().find(|record| match record.agent.kind {
+            AgentKind::Master => master,
+            AgentKind::Sub => record.agent.id == id,
+        });
         match set {
             Some(record) => crate::coord::hold_for_set(db, agent, record.id.as_str())?,
             None => crate::coord::release_unheld(db, agent, now)?,

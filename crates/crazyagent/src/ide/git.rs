@@ -98,6 +98,76 @@ pub fn ceiling(root: &Path, older_agents: bool) -> Result<OsString, EngineError>
     Ok(value)
 }
 
+/// The file in a project's IDE folder that every git of its IDE server reads as its user-level
+/// config, written by the engine at each launch.
+pub const GLOBAL_CONFIG: &str = "gitconfig";
+
+#[cfg(unix)]
+const GLOBAL_TEMPORARY: &str = "gitconfig.tmp";
+
+/// The variables that keep a git of the IDE server off every config its sandbox denies: the
+/// user-level config named by `config`, and no system config. Git dies on a denied config and
+/// only skips a missing one. A later Full access server, which keeps the owner's own config,
+/// leaves these out here. Input: the config's absolute path. Output: the variables.
+pub fn global_env(config: &Path) -> [(OsString, OsString); 2] {
+    assert!(config.is_absolute());
+    let (name, value) = crate::sandbox::AGENT_GIT_ENV[0];
+    assert_eq!((name, value), ("GIT_CONFIG_NOSYSTEM", "1"));
+    [
+        (
+            OsString::from("GIT_CONFIG_GLOBAL"),
+            config.as_os_str().to_owned(),
+        ),
+        (OsString::from(name), OsString::from(value)),
+    ]
+}
+
+/// The text of the user-level git config an IDE git reads: the per-user ignore and attributes
+/// files set to nothing, so git never warns on the denied defaults in the owner's home, then
+/// the owner's name and email when git has them. Input: the name and email, each free of
+/// control characters. Output: the text.
+#[cfg(unix)]
+fn global_text(identity: Option<&(String, String)>) -> String {
+    let mut text =
+        String::from("[core]\n\texcludesFile = /dev/null\n\tattributesFile = /dev/null\n");
+    if let Some((name, email)) = identity {
+        let (name, email) = (quoted(name), quoted(email));
+        text.push_str(&format!("[user]\n\tname = {name}\n\temail = {email}\n"));
+    }
+    assert!(text.ends_with('\n'));
+    assert!(text.starts_with("[core]\n"));
+    text
+}
+
+/// A value as git config reads it back whole: in quotes, with its backslashes and quotes
+/// escaped. Input: a value free of control characters. Output: the quoted value.
+#[cfg(unix)]
+fn quoted(value: &str) -> String {
+    assert!(!value.chars().any(char::is_control));
+    let text = format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
+    assert!(text.len() >= value.len() + 2);
+    text
+}
+
+/// Writes a project's [`GLOBAL_CONFIG`] whole, replacing what is there and never following a
+/// link, with the owner's name and email as git reads them for the repository, so an IDE
+/// commit carries them; git keeps its own default when it has none. Inputs: the project's IDE
+/// folder, its repository and the owner's home, if known. Output: Ok, or
+/// `ide_settings_unwritable`.
+#[cfg(unix)]
+pub fn write_global(
+    folder: &Path,
+    repository: &Path,
+    owner_home: Option<&Path>,
+) -> Result<(), EngineError> {
+    let identity =
+        owner_home.and_then(|home| crate::landing::owner_git_identity(repository, home).ok());
+    let text = global_text(identity.as_ref());
+    let target = folder.join(GLOBAL_CONFIG);
+    assert!(target.is_absolute());
+    super::settings::replace(folder, GLOBAL_TEMPORARY, &target, text.as_bytes(), 0o600)
+}
+
 /// The workspace keys that keep the IDE's git to the repository at each section's root: no
 /// submodule detection, and no scan for repositories below a section or around an open
 /// file. Output: the keys and their values, for the generated workspace file.

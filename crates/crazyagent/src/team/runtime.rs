@@ -5023,11 +5023,17 @@ impl TeamRuntime {
             let layout = self
                 .agent_layout(&stored.project_id, agent)
                 .map_err(error)?;
+            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
+            let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
+                super::master::WAKE_DELIVERED
+            } else {
+                prompt.as_str()
+            };
             let mut prompt = sub_agent_prompt(
                 &stored.name,
                 &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
                 &earlier,
-                &prompt,
+                task_text,
                 layout,
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
@@ -5040,7 +5046,6 @@ impl TeamRuntime {
                 prompt.push_str(text);
             }
             let background = super::background_at_end(&self.connection, &stored.project_id)?;
-            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
             prompt.push_str(&waiting);
             let home = agent_home(&self.state, agent);
             let edit = self.next_message_edit(project, agent, &home);

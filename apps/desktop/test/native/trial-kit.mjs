@@ -21,8 +21,8 @@ const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0, "the team deadline is positive");
 
 /** The state the steps of one trial run share: desktop step count, the project id, the leads,
- * the owner's Master input, the failed step slugs, the team deadline and the step being run. */
-export const run = { desktop: 0, project: null, leads: [], input: null, failed: [], teamBy: null, current: null };
+ * the owner's Terminal input, the failed step slugs, the team deadline and the step being run. */
+export const run = { desktop: 0, project: null, leads: [], failed: [], teamBy: null, current: null };
 
 /** Quotes text as an XPath string literal. Input: text without a double quote. Output: it quoted. */
 export function lit(value) {
@@ -385,6 +385,19 @@ export function sendTerminal(event, scope = globalThis) {
   for (const type of ["keydown", "keyup"]) {
     target.dispatchEvent(new scope.KeyboardEvent(type, { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
   }
+  return true;
+}
+
+/** Sends one clipboard paste to the focused xterm in the page, as the owner's paste key does:
+ * the app's own paste listener takes the text and brackets it, so a new line in it never
+ * presses Enter. Runs in the page. Inputs: the text and the page's global scope. Output: false
+ * when the focus is not a terminal, so nothing was sent. */
+export function pasteTerminal(text, scope = globalThis) {
+  const target = scope.document.activeElement;
+  if (!target || !target.classList || !target.classList.contains("xterm-helper-textarea")) return false;
+  const event = new scope.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
+  target.dispatchEvent(event);
   return true;
 }
 

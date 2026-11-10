@@ -598,7 +598,7 @@ fn spec(name: &str) -> Value {
             }, "required": ["work", "version", "action"], "additionalProperties": false}),
         ),
         FINISH_WORK_TOOL => (
-            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and release its claims. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
+            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and keep its claims until the change set carrying the work lands, or its turn ends with nothing to land. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
             json!({"type": "object", "properties": {
                 "work": work,
                 "version": version,
