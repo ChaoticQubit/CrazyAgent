@@ -36,6 +36,7 @@ let saveAnswer = null;
 let saveDelay = SAVE_MS;
 let render = null;
 let poolAssigned = "pool-a";
+let policyRefusal = null;
 const poolRecord = (id) => ({ kind: "pool", pool: { id, projects: poolAssigned === id ? ["alpha"] : [] } });
 
 /** Answers the app's engine calls as a quick engine does: the reads these screens make, the
@@ -57,7 +58,10 @@ function engine(status) {
     transformCallback: () => 0,
     async invoke(command, args) {
       sent.push({ command, args });
-      if (command === "desktop_project_agent_policy") return policy;
+      if (command === "desktop_project_agent_policy") {
+        if (policyRefusal !== null) throw { code: policyRefusal };
+        return policy;
+      }
       if (command === "desktop_set_project_agent_policy") {
         policy = { ...policy, access: args.policy.access, version: policy.version + 1 };
         return RECEIPT;
@@ -100,6 +104,10 @@ export function answerSaves(receipt, delay = SAVE_MS) {
 
 /** Puts the focus on a segmented row's checked option, as Tab does. Input: the row's label.
  * Output: whether it took the focus. */
+export function refusePolicy(code) {
+  policyRefusal = code;
+}
+
 export function focusChecked(row) {
   const radio = document.querySelector(`[data-setting="${row}"] [role="radio"][aria-checked="true"]`);
   radio?.focus();

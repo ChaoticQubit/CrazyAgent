@@ -121,6 +121,19 @@ test("a coordination save keeps a change the TUI or another window made after th
     [["warn", "ten_minutes", "on"], ["block", "ten_minutes", "off"]], "the reminder save keeps the Block set elsewhere");
 });
 
+test("Agent access on a project made before setup says so, not that the project is gone", { timeout: 120_000 }, async () => {
+  const said = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.refusePolicy("project_setup_missing")`);
+    assert.equal(await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`), true);
+    await page.evaluate("Fixture.settle(150)");
+    return page.evaluate(`document.querySelector('[data-setting="Agent access"]').textContent`);
+  });
+  assert.match(said, /This project was created before project setup existed\./);
+  assert.doesNotMatch(said, /no longer exists/);
+});
+
 test("Agent access in place moves its choice on arrow keys and clicks, says first when saving stops agents, and saves only on Save, Full access after its warning", { timeout: 120_000 }, async () => {
   const sentAccess = `Fixture.sentTo("desktop_set_project_agent_policy").args.map((call) => call.policy.access)`;
   const rowText = `document.querySelector('[data-setting="Agent access"]').textContent`;
