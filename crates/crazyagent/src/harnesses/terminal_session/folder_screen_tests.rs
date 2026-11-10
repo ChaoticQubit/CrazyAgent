@@ -2,11 +2,14 @@ use super::TerminalSession;
 use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
 use crate::harnesses::launch::{AccountBinding, LaunchError, LaunchLimits, LaunchRequest};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use crate::terminal::{
+    AgentId, FOLDER, Host, HostError, InteractiveCommand, PaneRef, TerminalStream,
+};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MENU_QUIT: &str = "Folder access\r\n/some/folder\r\n\r\n\u{203a} 1. Open restricted\r\n  2. Quit\r\n\r\nenter continue \u{b7} esc quit\r\n";
@@ -208,6 +211,102 @@ fn an_adopted_pane_at_its_input_box_is_ready_at_once_and_gets_no_key() {
     let pane = start("adopt-box", INPUT_BOX, None, false);
     pane.shows(Screen::InputBox);
     let mut pane = pane.adopted();
+    assert!(pane.session.poll_ready().unwrap());
+    std::thread::sleep(WATCH);
+    assert_eq!(pane.keys(), Vec::<String>::new());
+    pane.close();
+}
+
+/// A real pane's host whose first look at a screen fails, as one failed tmux capture does.
+/// Holds the real host and whether that look has happened. Every other call goes through.
+struct FirstLookFails {
+    real: Arc<dyn Host>,
+    looked: AtomicBool,
+}
+
+impl Host for FirstLookFails {
+    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        self.real.spawn(agent, command)
+    }
+
+    fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.real.attach(agent)
+    }
+
+    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
+        if self.looked.swap(true, Ordering::SeqCst) {
+            return self.real.screen(agent);
+        }
+        Err(HostError("terminal_capture_failed".into()))
+    }
+
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.real.snapshot(agent)
+    }
+
+    fn kept(&self, agent: &AgentId) -> bool {
+        self.real.kept(agent)
+    }
+
+    fn keep_last(&self, agent: &AgentId) {
+        self.real.keep_last(agent);
+    }
+
+    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        self.real.input(agent, bytes)
+    }
+
+    fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
+        self.real.resize(agent, cols, rows)
+    }
+
+    fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
+        self.real.kill(agent)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.real.unkept(agent)
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        self.real.alive()
+    }
+}
+
+/// A failed look at an adopted pane's screen reads as not on the folder screen, the way
+/// `poll_ready` keeps its wait on one, so one failed tmux capture at a restart cannot end
+/// a healthy Codex worker.
+#[test]
+fn an_adopted_pane_whose_first_screen_look_fails_stays_up_and_is_ready() {
+    let pane = start("adopt-blind", INPUT_BOX, None, false);
+    pane.shows(Screen::InputBox);
+    let Pane {
+        session,
+        keys,
+        _server,
+        _root,
+    } = pane;
+    let record = session.record().cloned().unwrap();
+    let (real, agent) = (session.host.clone(), session.agent.clone());
+    session.leave();
+    let failing = FirstLookFails {
+        real: real.clone(),
+        looked: AtomicBool::new(false),
+    };
+    let session = TerminalSession::adopt(
+        Arc::new(failing),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .expect("one failed look at the screen must not end the adoption");
+    assert!(real.alive().unwrap().contains(&agent));
+    let mut pane = Pane {
+        session,
+        keys,
+        _server,
+        _root,
+    };
     assert!(pane.session.poll_ready().unwrap());
     std::thread::sleep(WATCH);
     assert_eq!(pane.keys(), Vec::<String>::new());
