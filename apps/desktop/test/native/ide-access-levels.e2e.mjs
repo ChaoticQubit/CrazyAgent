@@ -92,7 +92,10 @@ async function openTab(page, { site, project, opened, evidence }) {
     assert.ok(Date.now() < deadline, "the project page never showed its tabs");
   }
   await pause(SETTLE_MS);
-  if ((await me.seen()).includes("The IDE isn't downloaded yet.")) await me.click("Download", ".pj-ide-unavailable button");
+  if ((await me.seen()).includes("The IDE isn't downloaded yet.")) {
+    await me.click("Download", ".pj-ide-unavailable button");
+    await me.waitFor("the download under way", (text) => !text.includes("The IDE isn't downloaded yet."));
+  }
   for (const deadline = Date.now() + BUILD_MS; !(await tabs()).includes("tab-ide"); await pause(POLL_MS * 10)) {
     const text = await me.seen();
     assert.ok(!IDE_FAILED.test(text), `the IDE download reports a failure: ${text.slice(0, 600)}`);
