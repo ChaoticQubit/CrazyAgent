@@ -108,8 +108,9 @@ def scan(t, agent_id):
 
 
 def late_wake(row, lead_end):
-    """Tells an engine wake that began after the lead ended, which the lead could not have
-    waited on. Inputs: the task row and the lead's end in ms. Output: the answer."""
+    """Tells an engine wake that began after the lead ended or never began. Its prompt and
+    start alone cannot tell an acknowledgement from work, so the check prints how many it
+    leaves out. Inputs: the task row and the lead's end in ms. Output: the answer."""
     return (row[5] or "").startswith(WAKE_PROMPTS) and (row[2] is None or row[2] > lead_end)
 
 
@@ -129,8 +130,9 @@ def worker_end(worker, tasks, scans, lead_end):
 
 def lead_findings(t, tasks, scans):
     """Compares each lead's last done task with its workers' work. Inputs: the trial, tasks
-    by agent and scans. Output: leads compared, early ends and results that name no work."""
-    compared, early, unnamed = 0, [], []
+    by agent and scans. Output: leads compared, early ends, results that name no work and
+    the ids of the late wakes left out."""
+    compared, early, unnamed, late = 0, [], [], []
     for lead in t.leads:
         done = [row for row in tasks.get(lead["id"], []) if row[4] == "done" and row[3] is not None]
         workers = t.children[lead["id"]]
@@ -141,6 +143,7 @@ def lead_findings(t, tasks, scans):
         if all(end is None for _, end in ends):
             continue
         compared += 1
+        late += [row[0] for worker in workers for row in tasks.get(worker["id"], []) if late_wake(row, last[3])]
         name = f"task {last[0]} of {t.label(lead)}"
         for worker, end in ends:
             if end == "open":
@@ -155,7 +158,7 @@ def lead_findings(t, tasks, scans):
         text = last[6] or ""
         if work and not any(word in text for word in work):
             unnamed.append(f"{name} names none of its workers' work ({listed(sorted(work))})")
-    return compared, early, unnamed
+    return compared, early, unnamed, late
 
 
 def background_findings(t, tasks, scans):
@@ -197,8 +200,9 @@ def check(t):
     ):
         tasks.setdefault(row[1], []).append(row)
     scans = {agent_id: scan(t, agent_id) for agent_id in t.agents}
-    compared, early, unnamed = lead_findings(t, tasks, scans)
+    compared, early, unnamed, late = lead_findings(t, tasks, scans)
     detail = f"leads compared={compared}"
+    detail += f"; late wakes left out={len(late)} (tasks {listed(sorted(late))})" if late else ""
     failed = early + unnamed
     exercised = True
     if mode == "wait":

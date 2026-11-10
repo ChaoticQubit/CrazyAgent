@@ -8410,8 +8410,9 @@ fn sub_agent_prompt(
         }
     };
     format!(
-        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}Your task: {task}\n{lands}\nWhen you finish, reply with a short summary of what you did.",
-        worktree.display()
+        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}{lead}{task}\n{lands}\nWhen you finish, reply with a short summary of what you did.",
+        worktree.display(),
+        lead = delivery::TASK_LEAD,
     )
 }
 
