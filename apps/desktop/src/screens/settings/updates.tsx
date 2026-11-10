@@ -145,7 +145,7 @@ export function UpdatesView({ settings, engine, phase, channelBusy, channelProbl
   onLinkCli: () => void;
   onRetry: () => void;
 }) {
-  const [held, holdChannel] = useHeld<UpdateChannel | null>(settings.kind === "ok" ? settings.value.channel : null);
+  const [held, holdChannel] = useHeld<UpdateChannel | null>(settings.kind === "ok" ? settings.value.channel : null, Object.is, settings);
   if (settings.kind === "loading") return <>{UPDATES_TOP}<Skeleton shape="line" count={3} /></>;
   if (settings.kind === "not_ready") return <>{UPDATES_TOP}<NotReady what="Updates" /></>;
   if (settings.kind === "error") return <>{UPDATES_TOP}<LoadError message={settings.code === "unknown" ? settings.message : updateMessage(settings.code)} onRetry={onRetry} /></>;

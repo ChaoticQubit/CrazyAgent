@@ -181,7 +181,7 @@ export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | 
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState("");
   const status = data.team.result?.kind === "ok" ? data.team.result.value : null;
-  const [shown, hold] = useHeld<SwitchApply | null>(status === null ? null : applyMode(status));
+  const [shown, hold] = useHeld<SwitchApply | null>(status === null ? null : applyMode(status), Object.is, status);
   if (status === null) return null;
   const choose = async (mode: SwitchApply) => {
     const settled = hold(mode);

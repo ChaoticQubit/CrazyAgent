@@ -205,7 +205,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   onApprove?: (memory: SavedMemory) => void;
   onWrites?: (writes: AgentMemoryWrites) => Promise<string>;
 }) {
-  const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null);
+  const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null, Object.is, saved);
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const where = scope ? `${names.get(scope) ?? "this project"} only` : "app-wide";
   const filters = <span className="row">
