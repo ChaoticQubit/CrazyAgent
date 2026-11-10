@@ -256,7 +256,7 @@ test("the keyboard goes from the name box to the folder list and scrolls it with
   assert.ok(seen.scrolled.top > 0, `the keys scrolled the list: ${JSON.stringify(seen)}`);
 });
 
-test("a project name up to the 255-byte bound is cut to one line with an ellipsis in the dialog title and the Type to confirm label, and its whole text stays in the hover and the page (UI2-R2 markup)", async () => {
+test("a project name up to the 255-byte bound is cut to one line with an ellipsis in the dialog title, and the Type to confirm label shows the whole name to type, wrapping within a bounded height (UI2-R2 markup, r1 L1)", async () => {
   const { readFileSync } = await import("node:fs");
   assert.equal(typeof dialog.removeTitle, "function", "the remove dialog draws its own title");
   for (const name of ["n".repeat(NAME_BYTES_MAX), "word ".repeat(51).trim()]) {
@@ -264,10 +264,12 @@ test("a project name up to the 255-byte bound is cut to one line with an ellipsi
     const title = renderToStaticMarkup(createElement("h2", null, dialog.removeTitle(name)));
     assert.match(title, clip, "the title cuts the name and keeps it whole in the hover");
     assert.match(title, /from CrazyAgent\?<\/h2>$/u, "the end of the question stays in view");
-    assert.match(view({ preview: preview({ name }), choice: "everything" }), new RegExp(`Type ${clip.source} to confirm`, "u"), "the label cuts the name too");
+    const label = view({ preview: preview({ name }), choice: "everything" }).match(/<span class="pj-label pj-remove-name">.*? to confirm<\/span>/u)?.[0] ?? "";
+    assert.equal(label, `<span class="pj-label pj-remove-name">Type <span class="pj-mono">${name}</span> to confirm</span>`, "the label shows the whole name the owner must type");
   }
   const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
   assert.match(css, /\.pj-remove-clip \{[^}]*display: inline-block;[^}]*max-width: [^;]+;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/u);
+  assert.match(css, /\.pj-remove-name \{[^}]*overflow-wrap: anywhere;[^}]*max-height: \d+px;[^}]*overflow-y: auto;/u, "the whole name wraps and its height stays bounded, so Delete stays in the frame");
   const shell = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
   assert.match(shell, /\.dialog-head h2 \{[^}]*min-width: 0;/u, "a long title cannot push the close button out");
   const settings = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
