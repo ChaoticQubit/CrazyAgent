@@ -1891,11 +1891,6 @@ impl Tmux {
 }
 
 impl Tmux {
-    /// Starts an agent's terminal as [`Host::spawn`] does, the pane of a lead's own server
-    /// also starting with `pane_env` set over what the server hands it, such as the
-    /// variables that point a native lead's app at its teammates' server. Takes the agent,
-    /// the command and those variables, none off a lead's server. Returns where it runs, or
-    /// the plain code.
     /// Has a server that runs in the foreground, as a lead's own server under its keeper
     /// does, end once its last session ends, as a server a client started does (FBTMUX-P1),
     /// since `tmux -D` turns exit-empty off. Its control, connecting, makes the holder
@@ -1904,6 +1899,11 @@ impl Tmux {
         self.control()?.run("set-option -s exit-empty on").map(drop)
     }
 
+    /// Starts an agent's terminal as [`Host::spawn`] does, the pane of a lead's own server
+    /// also starting with `pane_env` set over what the server hands it, such as the
+    /// variables that point a native lead's app at its teammates' server. Takes the agent,
+    /// the command and those variables, none off a lead's server. Returns where it runs, or
+    /// the plain code.
     pub(super) fn spawn_with(
         &self,
         agent: &AgentId,
