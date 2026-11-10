@@ -129,6 +129,9 @@ export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare, 
   </SettingSection>;
 }
 
+/** The one screen, not built yet. Input: the old list's parts. Output: the old list. */
+export const PoolsScreenView = PoolsView;
+
 /** The body of All accounts for each state of the read: loading, not ready, failed, no accounts
  * at all, nothing shown, or the windowed lines. Inputs: the read, the accounts shown, whether
  * Selected only has nothing to show and the line for one account. Output: the list. */

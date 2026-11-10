@@ -9,36 +9,172 @@ const EDIT_MAIN = 'button[aria-label="Edit pool Main pool"]';
 
 const read = (page) => page.evaluate("Fixture.sections()");
 const say = (page) => page.evaluate("Fixture.text()");
+const items = (page) => page.evaluate("Fixture.poolItems()");
+const rows = (page) => page.evaluate("Fixture.orderRows()");
+const commandCount = async (page, name) => (await page.evaluate("Fixture.commands()")).filter((command) => command === name).length;
+const ITEM = (at) => `.pool-items .pool-item:nth-child(${at})`;
+const RANKING = "desktop_account_ranking";
+const USAGE = "desktop_usage_report";
+const POOLS_READ = "desktop_pool_summaries";
 
-test("the list shows the title, its purpose and New pool, then Your pools with one line per pool", async () => {
-  const seen = await onPools({}, async (page) => ({ top: await page.evaluate("Fixture.top()"), sections: await read(page) }));
+test("the screen shows the title and purpose, Your pools with New pool on the left, and the first pool selected on the right", async () => {
+  const seen = await onPools({}, async (page) => ({ top: await page.evaluate("Fixture.top()"), sections: await read(page), items: await items(page), cap: await page.evaluate("Fixture.wordsOf('.pool-cap')") }));
   assert.deepEqual(seen.top?.heading, "Pools", JSON.stringify(seen.top));
   assert.match(seen.top.purpose, /A pool is a group of accounts for a project\. When one account runs out, agents move to the next one in the pool\./);
-  assert.deepEqual(seen.top.actions, ["New pool"]);
-  assert.deepEqual(seen.sections.map((section) => [section.heading, section.about]), [["Your pools", "2 pools"]]);
-  const [main, spare] = seen.sections[0].rows;
-  assert.equal(main.label, "Main pool");
-  for (const part of ["3 ChatGPT", "3 of 15", "3 ready", "Used by 2 projects"]) assert.ok(main.help.includes(part), `${part} in ${main.help}`);
-  assert.ok(main.controlLeft > main.labelRight, JSON.stringify(main));
-  assert.deepEqual(main.visible, ["Get ready for agents", "Edit pool", "Delete pool"]);
-  assert.deepEqual(main.buttons, ["Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool"]);
-  assert.deepEqual(spare.visible, ["Edit pool", "Delete pool"], "only a pool with keyed members can be set up for agents");
+  assert.deepEqual(seen.top.actions, []);
+  assert.deepEqual(seen.sections.map((section) => [section.heading, section.actions]), [["Your pools", ["New pool"]], ["Main pool", ["Get ready for agents", "Edit pool", "Delete pool"]]]);
+  assert.equal(seen.sections[1].about, "Used by 2 projects. 3 ready. Shown on each project's pool picker.");
+  assert.deepEqual(seen.items.map((item) => [item.name, item.count, item.about, item.current]), [["Main pool", "3 of 15", "3 ready. Used by 2 projects.", "true"], ["Spare", "1 of 15", "1 ready. Not used.", null]]);
+  assert.equal(seen.cap, "3 of 15");
 });
 
-test("a 60-letter pool name wraps inside its label and leaves the actions alone", async () => {
-  const [section] = await onPools({ pools: "long" }, read);
-  const [row] = section.rows;
-  assert.equal(row.label.length, 60);
-  assert.equal(row.labelSpills, false, JSON.stringify(row));
-  assert.ok(row.controlLeft >= row.labelRight, JSON.stringify(row));
-  assert.deepEqual(row.visible, ["Edit pool", "Delete pool"]);
+test("pressing a pool selects it and shows its own accounts, actions and order, and the focus stays on it", async () => {
+  const seen = await onPools({}, async (page) => {
+    await press(page, ITEM(2));
+    return { items: await items(page), sections: await read(page), rows: await rows(page), order: await page.evaluate("Fixture.wordsOf('.pool-order')"), focused: await page.evaluate("Fixture.focused()") };
+  });
+  assert.deepEqual(seen.items.map((item) => item.current), [null, "true"]);
+  assert.equal(seen.sections[1].heading, "Spare");
+  assert.deepEqual(seen.sections[1].actions, ["Edit pool", "Delete pool"], "only a pool with keyed members can be set up for agents");
+  assert.deepEqual(seen.rows.map((row) => row.name), ["Account 3"]);
+  assert.match(seen.order, /^Account order Order comes from Balanced, this pool: /);
+  assert.match(seen.order, /1 project using this pool sets its own order\.$/);
+  assert.match(seen.focused.name, /^Spare/);
 });
 
-test("real Tab keys walk New pool, then each pool's actions in row order", async () => {
+test("a 60-letter pool name wraps in the list and in the pane and nothing moves sideways", async () => {
+  const seen = await onPools({ pools: "long" }, async (page) => ({ items: await items(page), sections: await read(page), panes: await page.evaluate("Fixture.panes()") }), 1440);
+  assert.equal(seen.items[0].name.length, 60);
+  assert.equal(seen.items[0].spills, false, JSON.stringify(seen.items[0]));
+  assert.deepEqual(seen.sections[1].actions, ["Edit pool", "Delete pool"]);
+  assert.equal(seen.panes.sideways, false, JSON.stringify(seen.panes));
+});
+
+test("real Tab keys walk New pool, each pool in the list, then the selected pool's actions", async () => {
   const walked = await onPools({}, (page) => tabWalk(page, 6));
   const from = walked.indexOf("New pool");
   assert.notEqual(from, -1, JSON.stringify(walked));
-  assert.deepEqual(walked.slice(from, from + 6), ["New pool", "Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool", "Edit pool Spare", "Delete pool Spare"]);
+  const names = walked.slice(from, from + 6);
+  assert.match(names[1], /^Main pool/);
+  assert.match(names[2], /^Spare/);
+  assert.deepEqual(names.slice(3), ["Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool"]);
+});
+
+test("the rows stand exactly as the ranking gives them, each with its place, name, state, plan, why and usage", async () => {
+  const seen = await onPools({}, rows);
+  assert.deepEqual(seen.map((row) => [row.number, row.spoken, row.name, row.held]), [["1", "Position 1", "Account 2", false], ["2", "Position 2", "Account 0", false], ["3", "Position 3", "Account 1", false]]);
+  assert.deepEqual(seen.map((row) => row.badges), [["Signed in"], ["Signed in"], ["Signed in"]]);
+  assert.deepEqual(seen.map((row) => row.plan), ["ChatGPT \u00b7 No rank, used to 100%", "ChatGPT \u00b7 No rank, used to 100%", "ChatGPT \u00b7 Rank 2, keeps 10% of its week, used last"]);
+  assert.deepEqual(seen.map((row) => row.why), ["You ranked it 1.", "Least weekly use of the accounts ready now.", "More weekly use than the one above."]);
+  assert.deepEqual(seen[0].limits, [["Weekly62% used", "ok"], ["5-hour18% used", "ok"]]);
+  assert.deepEqual(seen[1].limits, [["Weekly30% used", "ok"]]);
+  assert.deepEqual([seen[2].limits, seen[2].none], [[], "No usage read yet"]);
+});
+
+test("held accounts come after the held line with no number, in the ranking's order", async () => {
+  const seen = await onPools({ ranking: "held" }, async (page) => ({ rows: await rows(page), head: await page.evaluate("Fixture.heldHead()") }));
+  assert.deepEqual(seen.rows.map((row) => [row.number, row.spoken, row.name, row.held]), [["1", "Position 1", "Account 2", false], ["-", "Held", "Account 1", true], ["-", "Held", "Account 0", true]]);
+  assert.deepEqual(seen.head, { words: "Held now, in pool order. Each one rejoins the order when its reason ends.", between: true });
+  assert.equal(seen.rows[2].why, "Never use. You pinned it.");
+});
+
+test("a not signed in row reads why and links to its own sign-in, and no other row has the link", async () => {
+  const seen = await onPools({ ranking: "held" }, rows);
+  assert.equal(seen[1].why, "Not signed in. Agents skip it until you sign in again. Sign in");
+  assert.deepEqual(seen[1].link, { href: "#/settings/accounts?action=sign_in&account=acct-1", label: "Sign in Account 1" });
+  assert.deepEqual([seen[0].link, seen[2].link], [null, null]);
+});
+
+test("with no ready account the pane says so and still lists the held ones", async () => {
+  const seen = await onPools({ ranking: "none" }, async (page) => ({ says: await say(page), rows: await rows(page) }));
+  assert.ok(seen.says.includes("No account can take work now."), seen.says);
+  assert.deepEqual(seen.rows.map((row) => row.spoken), ["Held", "Held", "Held"]);
+});
+
+test("Near its limit shows at 80 and not at 79, and a used-up window reads full and not near", async () => {
+  const seen = await onPools({ limits: "near" }, rows);
+  assert.deepEqual(seen.map((row) => [row.name, row.badges.includes("Near its limit"), row.limits[0][1]]), [["Account 2", true, "near"], ["Account 0", false, "ok"], ["Account 1", false, "full"]]);
+});
+
+for (const [scene, words, absent] of [
+  [{ ranking: "missing" }, ["Account order isn't ready yet"], "No account can take work now."],
+  [{ ranking: "error" }, ["Couldn't load the account order.", "Try again"], "No account can take work now."],
+  [{ ranking: "bare" }, ["No accounts to rank yet."], "No account can take work now."],
+  [{ limits: "error" }, ["Couldn't read usage limits."], "No usage read yet"],
+  [{ limits: "pending" }, ["Account 2"], "No usage read yet"],
+  [{ limits: "missing" }, ["Account 2"], "No usage read yet"],
+]) {
+  test(`the pane keeps its state for ${JSON.stringify(scene)}`, async () => {
+    const seen = await onPools(scene, async (page) => ({ says: await say(page), items: await items(page) }));
+    for (const part of words) assert.ok(seen.says.includes(part), `${part} in ${seen.says}`);
+    assert.ok(!seen.says.includes(absent), seen.says);
+    assert.equal(seen.items.length, 2, "the list stays when one read of the pane fails");
+  });
+}
+
+test("a ranking still loading draws skeletons in the pane and leaves the list in place", async () => {
+  const seen = await onPools({ ranking: "pending" }, async (page) => ({ skeletons: await page.evaluate("Fixture.count('.pool-detail .skeleton')"), items: await items(page) }));
+  assert.ok(seen.skeletons >= 4, String(seen.skeletons));
+  assert.equal(seen.items.length, 2);
+});
+
+test("Try again on the order reads the ranking a second time", async () => {
+  const reads = await onPools({ ranking: "error" }, async (page) => {
+    await press(page, ".pool-detail button", "Try again");
+    return commandCount(page, RANKING);
+  });
+  assert.ok(reads >= 2, String(reads));
+});
+
+test("with the schedule not read, a row keeps its harness and drops only the plan", async () => {
+  const seen = await onPools({ schedule: "error" }, async (page) => ({ rows: await rows(page), order: await page.evaluate("Fixture.wordsOf('.pool-order')") }));
+  assert.equal(seen.rows[0].plan, "ChatGPT");
+  assert.equal(seen.order, "");
+});
+
+test("a pool with no accounts says how to add one", async () => {
+  const says = await onPools({ pools: "hollow", ranking: "bare" }, say);
+  assert.ok(says.includes("No accounts yet. Use Edit pool to put one in this pool."), says);
+  assert.ok(!says.includes("No accounts to rank yet."), says);
+});
+
+test("the two panes stand side by side above 1180 px and stack at 1180 px, and rows keep room for their words", async () => {
+  const wide = await onPools({}, async (page) => ({ panes: await page.evaluate("Fixture.panes()"), rows: await rows(page) }), 1440);
+  assert.ok(wide.panes.list.right <= wide.panes.pool.left, JSON.stringify(wide.panes));
+  assert.equal(wide.panes.list.top, wide.panes.pool.top);
+  assert.equal(wide.panes.list.right - wide.panes.list.left, 232);
+  assert.ok(wide.rows[0].whoWidth >= 200, String(wide.rows[0].whoWidth));
+  const justAbove = await onPools({}, async (page) => ({ panes: await page.evaluate("Fixture.panes()"), rows: await rows(page) }), 1200);
+  assert.ok(justAbove.panes.list.right <= justAbove.panes.pool.left, JSON.stringify(justAbove.panes));
+  assert.ok(justAbove.rows[0].whoWidth >= 200, `a pane this narrow still leaves the name room: ${justAbove.rows[0].whoWidth}`);
+  assert.equal(justAbove.panes.sideways, false);
+  for (const width of [1180, 900, 700]) {
+    const panes = await onPools({}, (page) => page.evaluate("Fixture.panes()"), width);
+    assert.ok(panes.pool.top > panes.list.top, `${width}: ${JSON.stringify(panes)}`);
+    assert.equal(panes.pool.left, panes.list.left, String(width));
+    assert.equal(panes.sideways, false, String(width));
+  }
+});
+
+test("the page reads the ranking and the limits again once a minute and leaves the pools read alone", async () => {
+  const seen = await onPools({}, async (page) => {
+    const delays = await page.evaluate("Fixture.timerDelays()");
+    const before = [await commandCount(page, RANKING), await commandCount(page, USAGE), await commandCount(page, POOLS_READ)];
+    await page.evaluate("Fixture.fireTimer(60000)");
+    return { delays, before, after: [await commandCount(page, RANKING), await commandCount(page, USAGE), await commandCount(page, POOLS_READ)] };
+  });
+  assert.equal(seen.delays.filter((delay) => delay === 60000).length, 1, JSON.stringify(seen.delays));
+  assert.deepEqual(seen.after, [seen.before[0] + 1, seen.before[1] + 1, seen.before[2]]);
+});
+
+test("a change saved in Account choice reads the order on the right again", async () => {
+  const seen = await onPools({}, async (page) => {
+    const before = await commandCount(page, RANKING);
+    await press(page, 'form.row button[type="submit"]');
+    return { before, after: await commandCount(page, RANKING), saved: await commandCount(page, "desktop_set_account_schedule") };
+  });
+  assert.equal(seen.saved, 1);
+  assert.equal(seen.after, seen.before + 1);
 });
 
 for (const [state, expected, absent] of [
@@ -99,7 +235,7 @@ test("Pool name is marked changed against the saved name, and In this pool again
 
 test("the editor keeps its name error, its full-pool notice and its save failure", async () => {
   const named = await onPools({}, async (page) => {
-    await press(page, ".settings-top button", "New pool");
+    await press(page, ".set-head button", "New pool");
     await press(page, 'button[type="submit"]');
     const empty = { says: await say(page), invalid: await page.evaluate("Fixture.invalid('#pool-name')") };
     await page.evaluate("document.getElementById('pool-name').focus()");
@@ -122,14 +258,14 @@ for (const [scene, expected] of [
   [{ accounts: "missing" }, ["Accounts isn't ready yet"]],
 ]) {
   test(`the account list keeps its ${scene.accounts} state`, async () => {
-    const says = await onPools(scene, async (page) => { await press(page, ".settings-top button", "New pool"); return say(page); });
+    const says = await onPools(scene, async (page) => { await press(page, ".set-head button", "New pool"); return say(page); });
     for (const part of expected) assert.ok(says.includes(part), `${part} in ${says}`);
   });
 }
 
 test("the account list keeps Provider, Selected only, search and their empty lines", async () => {
   const seen = await onPools({}, async (page) => {
-    await press(page, ".settings-top button", "New pool");
+    await press(page, ".set-head button", "New pool");
     const fresh = await say(page);
     const provider = await page.evaluate("Fixture.count('#pool-provider')");
     await press(page, "label.checkbox", "Selected only");
@@ -149,7 +285,7 @@ test("the account list keeps Provider, Selected only, search and their empty lin
 
 test("an account line shows name, provider and status with its checkbox on the right, and a tick adds a member", async () => {
   const seen = await onPools({}, async (page) => {
-    await press(page, ".settings-top button", "New pool");
+    await press(page, ".set-head button", "New pool");
     const pick = await page.evaluate("Fixture.pick()");
     await press(page, ".pick");
     return { pick, says: await say(page), members: await page.evaluate("Fixture.count('.member')"), sections: await read(page) };
@@ -174,14 +310,17 @@ test("a full pool refuses another account on its own row and in the notice", asy
   assert.ok(seen.says.includes("15 of 15"), seen.says);
 });
 
-test("a member who is not signed in keeps its note in the editor and its count on the list", async () => {
+test("a member who is not signed in keeps its note in the editor and in the pane and its count on the list", async () => {
   const seen = await onPools({ pools: "waiting", accounts: "waiting" }, async (page) => {
-    const list = await read(page);
+    const listed = await items(page);
+    const pane = await say(page);
     await press(page, EDIT_MAIN);
-    return { help: list[0].rows[0].help, says: await say(page) };
+    return { about: listed[0].about, pane, says: await say(page) };
   });
-  assert.ok(seen.help.includes("2 ready, 1 not signed in"), seen.help);
-  assert.ok(seen.says.includes("1 account isn't signed in. Agents skip it until you sign in again."), seen.says);
+  const note = "1 account isn't signed in. Agents skip it until you sign in again.";
+  assert.ok(seen.about.includes("2 ready, 1 not signed in"), seen.about);
+  assert.ok(seen.pane.includes(note), seen.pane);
+  assert.ok(seen.says.includes(note), seen.says);
 });
 
 test("Loading draws its skeletons under the title and in the account list", async () => {
@@ -189,7 +328,7 @@ test("Loading draws its skeletons under the title and in the account list", asyn
   assert.equal(seen.top?.heading, "Pools");
   assert.ok(seen.skeletons >= 4, String(seen.skeletons));
   const accounts = await onPools({ accounts: "pending" }, async (page) => {
-    await press(page, ".settings-top button", "New pool");
+    await press(page, ".set-head button", "New pool");
     return page.evaluate("Fixture.count('.skeleton')");
   });
   assert.ok(accounts >= 6, String(accounts));
@@ -212,6 +351,7 @@ test("Account choice stays below a list of pools and only there", async () => {
 
 test("Delete pool asks first, and a refused delete shows under the title", async () => {
   const seen = await onPools({}, async (page) => {
+    await press(page, ITEM(2));
     await press(page, 'button[aria-label="Delete pool Spare"]');
     const asking = await page.evaluate("document.querySelector('dialog[open]')?.innerText ?? ''");
     const before = await page.evaluate("Fixture.commands()");
@@ -248,6 +388,7 @@ test("a double press on Get ready for agents runs once and shows it is working",
 test("while one pool gets ready, another pool's Get ready waits and keeps its word", async () => {
   const other = await onPools({ hold: INSPECT, pools: "keyed" }, async (page) => {
     await press(page, `button[aria-label="${READY}: Main pool"]`);
+    await press(page, ITEM(2));
     return readyState(page, "Spare");
   });
   assert.deepEqual(other, { words: READY, disabled: true });
@@ -271,9 +412,20 @@ test("Get ready for agents reaches the engine and says which account is not read
 });
 
 for (const theme of ["light", "dark"]) {
+  test(`the pool list and every row part read at 4.5 to 1 in ${theme}`, async () => {
+    const seen = await onPools({ ranking: "held", limits: "near" }, async (page) => {
+      const read = {};
+      for (const selector of [".pool-item-count", ".pool-item.on .pool-item-label", ".pool-item-about", ".pool-pos", ".pool-row.held .pool-pos", ".pool-plan", ".pool-why", ".pool-row.held .pool-why", ".pool-why a", ".pool-limit.near", ".pool-limit.full", ".pool-limit-none", ".pool-held-head", ".pool-order p"]) {
+        read[selector] = await page.evaluate(`Fixture.contrast(${JSON.stringify(selector)})`);
+      }
+      return read;
+    }, 1440, theme);
+    for (const [name, ratio] of Object.entries(seen)) assert.ok(ratio >= CONTRAST_MIN, `${name}: ${ratio}`);
+  });
+
   test(`help and the changed mark read at 4.5 to 1 in ${theme}`, async () => {
     const seen = await onPools({}, async (page) => {
-      const help = await page.evaluate('Fixture.contrast(".set-help")');
+      const help = await page.evaluate('Fixture.contrast(".set-head p")');
       await press(page, EDIT_MAIN);
       await page.evaluate("document.getElementById('pool-name').focus()");
       await page.send("Input.insertText", { text: "x" });
