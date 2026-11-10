@@ -738,6 +738,115 @@ fn agent_logged_rows_keep_their_own_share_and_never_push_out_other_events() {
     assert_eq!(listed.first().map(String::as_str), Some("One more phase"));
 }
 
+/// Work verbs keep their own newest 2,000 rows beside the other shares (T11-R2-F2): an
+/// agent looping start_work and finish_work never pushes out the owner's Accept or the
+/// project's Created, and past its share only the oldest work rows go.
+#[test]
+fn work_rows_keep_their_own_share_and_never_push_out_other_events() {
+    let (_folder, db) = db();
+    note_created(&db, &project(), "Harbor Notes", 0);
+    let accepted = NewActivity {
+        kind: ActivityKind::Accepted,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: "Accepted the changes of Ada (@api): Add the login form",
+        change_set: None,
+    };
+    record(&db, &project(), &accepted, 1).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000)
+         INSERT INTO project_activity(project,at_ms,kind,actor,goal,text)
+         SELECT ?1, 1 + i, CASE i % 2 WHEN 0 THEN 'work_started' ELSE 'work_complete' END,
+                'Ada (@api)', 'Loop', 'Work ' || i FROM n",
+        [PROJECT],
+    )
+    .unwrap();
+    let start = NewActivity {
+        kind: ActivityKind::WorkStarted,
+        actor: "Ada (@api)",
+        agent: None,
+        goal: Some("Loop"),
+        text: "Started the work",
+        change_set: None,
+    };
+    record(&db, &project(), &start, 20_000).unwrap();
+    let count = |filter: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT COUNT(*) FROM project_activity WHERE project=?1 AND {filter}"),
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let work = "kind IN ('work_started','work_review_ready','work_complete','work_closed')";
+    assert_eq!(
+        count("kind='accepted'"),
+        1,
+        "an agent's work verbs never push out the owner's Accept"
+    );
+    assert_eq!(count("kind='created'"), 1);
+    assert_eq!(count(work), 2_000, "work rows keep their newest 2,000");
+    assert_eq!(count(&format!("{work} AND at_ms <= 8002")), 0);
+    assert_eq!(count(&format!("{work} AND at_ms = 8003")), 1);
+}
+
+/// A team that logs fast cannot crowd the engine's and the owner's events out of a listing
+/// (T11-R2-L1): agents' phases, test runs and work verbs take at most a quarter of it, so
+/// the owner's Accept under 1,000 newer agent rows still lists, at every limit, and the
+/// read says older rows were left out.
+#[test]
+fn agent_rows_take_at_most_a_quarter_of_a_listing() {
+    let (_folder, db) = db();
+    note_created(&db, &project(), "Harbor Notes", 0);
+    let accepted = NewActivity {
+        kind: ActivityKind::Accepted,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: "Accepted the changes of Ada (@api): Add the login form",
+        change_set: None,
+    };
+    record(&db, &project(), &accepted, 1).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+         INSERT INTO project_activity(project,at_ms,kind,actor,text)
+         SELECT ?1, 1 + i, CASE i % 3 WHEN 0 THEN 'phase' WHEN 1 THEN 'test' ELSE 'work_started' END,
+                'Ada (@api)', 'Row ' || i FROM n",
+        [PROJECT],
+    )
+    .unwrap();
+    for limit in [LIST_MAX, 200, 4] {
+        let read = listed(&db, &project(), limit).unwrap();
+        let kinds: Vec<ActivityKind> = read.items.iter().map(|item| item.kind).collect();
+        let agent_rows = kinds
+            .iter()
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    ActivityKind::Phase
+                        | ActivityKind::Test
+                        | ActivityKind::WorkStarted
+                        | ActivityKind::WorkReviewReady
+                        | ActivityKind::WorkComplete
+                        | ActivityKind::WorkClosed
+                )
+            })
+            .count();
+        assert!(
+            agent_rows <= limit.div_ceil(4),
+            "limit {limit}: {agent_rows}"
+        );
+        assert!(
+            agent_rows > 0,
+            "limit {limit}: the newest agent rows still list"
+        );
+        assert!(kinds.contains(&ActivityKind::Accepted), "limit {limit}");
+        assert!(kinds.contains(&ActivityKind::Created), "limit {limit}");
+        assert!(read.more, "limit {limit}: older agent rows were left out");
+    }
+}
+
 /// AL2: an Accept brought in from before the engine recorded events reads as the owner's,
 /// the set named by its number when it has one and by its agent and prompt while not.
 #[test]
