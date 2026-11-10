@@ -285,7 +285,8 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
 
 /// T8 R4: Delete everything records the project's tool cache folder as an engine file and
 /// removes it, unlinking the engine's `.git` links to `/dev/null` in its buckets and leaving
-/// `/dev/null` itself as it was.
+/// `/dev/null` itself as it was; a file an agent pinned in the cache does not keep it
+/// (T8 r1 L3).
 #[cfg(target_os = "macos")]
 #[test]
 fn delete_everything_removes_the_projects_tool_cache_and_leaves_dev_null_alone() {
@@ -301,6 +302,12 @@ fn delete_everything_removes_the_projects_tool_cache_and_leaves_dev_null_alone()
         .join("sdists-v10");
     std::fs::create_dir_all(&bucket).unwrap();
     std::os::unix::fs::symlink("/dev/null", bucket.join(".git")).unwrap();
+    std::fs::write(bucket.join("pinned"), "kept").unwrap();
+    nix::unistd::chflags(
+        bucket.join("pinned").as_path(),
+        nix::sys::stat::FileFlag::UF_IMMUTABLE,
+    )
+    .unwrap();
     std::fs::write(cache.join("sandboxed-worktree.primed"), "record").unwrap();
     let plan = crate::projects_home::DeletePlan {
         database: base.join("engine.db"),

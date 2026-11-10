@@ -176,7 +176,8 @@ pub fn grant(
 /// project, at every level, with their priming records (T8), when Clean up removes the
 /// agent's worktree, since a removed agent never runs again. A shared cache stays, since
 /// other agents of its level use it. No link is followed: a link in a cache's place is
-/// unlinked, and `remove_dir_all` unlinks the `/dev/null` markers. Inputs: the engine
+/// unlinked, the `/dev/null` markers are unlinked, and a folder the agent closed or a file
+/// it pinned in its cache is opened and unpinned first (T8 r1 L3). Inputs: the engine
 /// runtime, the project as [`project_folder`] names it and the agent's id. Output: Ok once
 /// none is left.
 pub fn remove_agent(runtime: &Path, project: &str, agent: &str) -> std::io::Result<()> {
@@ -192,7 +193,10 @@ pub fn remove_agent(runtime: &Path, project: &str, agent: &str) -> std::io::Resu
                 match std::fs::symlink_metadata(&path) {
                     Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
                     Err(problem) => return Err(problem),
-                    Ok(found) if found.is_dir() => std::fs::remove_dir_all(&path)?,
+                    Ok(found) if found.is_dir() => {
+                        crate::team::cleanup::remove_agent_tree(&path)
+                            .map_err(|problem| std::io::Error::other(problem.0))?
+                    }
                     Ok(_) => std::fs::remove_file(&path)?,
                 }
                 assert!(std::fs::symlink_metadata(&path).is_err());

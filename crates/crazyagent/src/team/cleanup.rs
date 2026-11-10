@@ -948,7 +948,20 @@ fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
 /// once nothing has its name.
 pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
-        writable(folder);
+        writable(folder, false);
+        gone(std::fs::remove_dir_all(folder))?;
+    }
+    Ok(())
+}
+
+/// Deletes a folder an agent wrote as [`remove_tree`] does and, when a plain delete stops,
+/// also clears the immutable and append-only flags of this user's entries on the way, so an
+/// agent's `chflags uchg` or `chmod 0500` in its own tool cache keeps neither Clean up nor a
+/// project's delete from removing it (T8 r1 L3). Input: the folder. Output: Ok once nothing
+/// has its name.
+pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
+    if std::fs::remove_dir_all(folder).is_err() {
+        writable(folder, true);
         gone(std::fs::remove_dir_all(folder))?;
     }
     Ok(())
@@ -957,20 +970,33 @@ pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
 /// Lets the owner delete inside every real folder under `folder`, visiting at most
 /// `DISK_ENTRIES_MAX` folders. Every folder is opened relative to its parent's open
 /// handle without following a link, and changed and listed through its own handle, so a
-/// link swapped in meanwhile is never followed. Input: the folder.
+/// link swapped in meanwhile is never followed. With `pinned`, the flags [`unpin`] clears
+/// go first from the folder, each folder below it and each entry in them. Inputs: the
+/// folder and whether to clear those flags.
 #[cfg(unix)]
-fn writable(folder: &Path) {
+fn writable(folder: &Path, pinned: bool) {
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
-    use std::ffi::CString;
+    use std::ffi::{CString, OsStr};
+    use std::os::unix::ffi::OsStrExt;
     use std::rc::Rc;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    if pinned {
+        unpin(rustix::fs::CWD, folder, folder);
+        let _ = rustix::fs::chmodat(
+            rustix::fs::CWD,
+            folder,
+            Mode::RWXU,
+            AtFlags::SYMLINK_NOFOLLOW,
+        );
+    }
     let Ok(top) = rustix::fs::open(folder, flags, Mode::empty()) else {
         return;
     };
-    let mut pending: Vec<(Rc<std::os::fd::OwnedFd>, Option<CString>)> = vec![(Rc::new(top), None)];
+    let mut pending: Vec<(Rc<std::os::fd::OwnedFd>, Option<CString>, PathBuf)> =
+        vec![(Rc::new(top), None, folder.to_path_buf())];
     let mut budget = DISK_ENTRIES_MAX;
-    while let Some((parent, name)) = pending.pop() {
+    while let Some((parent, name, path)) = pending.pop() {
         if budget == 0 {
             return;
         }
@@ -979,6 +1005,9 @@ fn writable(folder: &Path) {
             None => Ok(Rc::clone(&parent)),
             Some(name) => rustix::fs::openat(&*parent, name.as_c_str(), flags, Mode::empty())
                 .or_else(|_| {
+                    if pinned {
+                        unpin(&*parent, name.as_c_str(), &path);
+                    }
                     rustix::fs::chmodat(
                         &*parent,
                         name.as_c_str(),
@@ -992,6 +1021,9 @@ fn writable(folder: &Path) {
         let Ok(handle) = opened else {
             continue;
         };
+        if pinned {
+            unpin(&*handle, c".", &path);
+        }
         let _ = rustix::fs::fchmod(&*handle, Mode::RWXU);
         let Ok(entries) = Dir::read_from(&*handle) else {
             continue;
@@ -1001,18 +1033,56 @@ fn writable(folder: &Path) {
                 break;
             }
             let child = entry.file_name();
-            if matches!(child.to_bytes(), b"." | b"..")
-                || !matches!(entry.file_type(), FileType::Directory | FileType::Unknown)
-            {
+            if matches!(child.to_bytes(), b"." | b"..") {
                 continue;
             }
-            pending.push((Rc::clone(&handle), Some(child.to_owned())));
+            let below = path.join(OsStr::from_bytes(child.to_bytes()));
+            if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
+                if pinned {
+                    unpin(&*handle, child, &below);
+                }
+                continue;
+            }
+            pending.push((Rc::clone(&handle), Some(child.to_owned()), below));
         }
     }
 }
 
 #[cfg(not(unix))]
-fn writable(_: &Path) {}
+fn writable(_: &Path, _: bool) {}
+
+/// Clears the immutable and append-only flags, which an agent may set on what it owns, from
+/// one entry of this user that is not a link, keeping every other flag (T8 r1 L3). The
+/// flags are set by path, as the engine has no call that sets them through a handle, and
+/// only while the path still names the entry its parent's handle found. Inputs: the entry's
+/// open parent, its name there and its path.
+#[cfg(target_os = "macos")]
+fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P, path: &Path) {
+    use nix::sys::stat::FileFlag;
+    use rustix::fs::{AtFlags, FileType};
+    let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
+    let Ok(found) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return;
+    };
+    let flags = FileFlag::from_bits_retain(found.st_flags);
+    if !flags.intersects(pinning)
+        || found.st_uid != rustix::process::geteuid().as_raw()
+        || FileType::from_raw_mode(found.st_mode) == FileType::Symlink
+    {
+        return;
+    }
+    let Ok(named) = rustix::fs::lstat(path) else {
+        return;
+    };
+    if (named.st_dev, named.st_ino) == (found.st_dev, found.st_ino) {
+        let _ = nix::unistd::chflags(path, flags.difference(pinning));
+    }
+}
+
+/// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:
+/// unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unpin<P: rustix::path::Arg>(_: impl std::os::fd::AsFd, _: P, _: &Path) {}
 
 /// Counts what a folder holds on disk, never following a link, visiting at most `budget`
 /// entries. Inputs: the folder and the entries left. Output: the bytes and whether every

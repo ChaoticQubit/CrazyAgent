@@ -333,6 +333,33 @@ fn a_link_file_or_closed_folder_an_agent_left_in_its_cache_is_repaired_at_the_ne
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
+/// T8 r1 L3: a file an agent pinned (`chflags uchg`), a folder it made append only and a
+/// folder it closed (`chmod 0500`) in its own cache keep none of it from Clean up: the
+/// agent's cache goes all the same.
+#[test]
+fn clean_up_takes_an_agents_cache_it_pinned_and_closed_inside() {
+    use nix::sys::stat::FileFlag;
+    let runtime = Runtime::new("");
+    let own = key(
+        ToolCacheScope::PerAgent,
+        AgentAccess::Sandboxed,
+        CacheShape::Worktree,
+        "7",
+    )
+    .unwrap();
+    let prepared = prepare(&runtime.runtime, "project-1", &own, None).unwrap();
+    let closed = prepared.root.join(UV).join("closed");
+    std::fs::create_dir(&closed).unwrap();
+    std::fs::write(closed.join("pinned"), "kept").unwrap();
+    nix::unistd::chflags(closed.join("pinned").as_path(), FileFlag::UF_IMMUTABLE).unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let appending = prepared.root.join(PNPM);
+    nix::unistd::chflags(appending.as_path(), FileFlag::UF_APPEND).unwrap();
+    remove_agent(&runtime.runtime, "project-1", "7").unwrap();
+    assert!(std::fs::symlink_metadata(&prepared.root).is_err());
+    assert!(project_folder(&runtime.runtime, "project-1").is_dir());
+}
+
 /// T8 C3: a folder of the engine's own that others may enter fails closed.
 #[test]
 fn an_engine_cache_folder_others_may_enter_fails_closed() {
