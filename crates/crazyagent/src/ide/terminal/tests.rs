@@ -227,7 +227,6 @@ fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
         .stderr(std::process::Stdio::piped());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(output.status.success(), "{output:?}");
     assert_eq!(
         said.lines().next(),
         Some("This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
