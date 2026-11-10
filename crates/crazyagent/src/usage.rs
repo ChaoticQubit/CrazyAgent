@@ -325,6 +325,14 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
                 max = turns::HOUR_TURNS_MAX
             ),
         ),
+        (
+            "usage_activity",
+            "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns)
+             SELECT hour_ms,?2,agent,model,activity,turns,edit_turns,first_try_turns FROM usage_activity WHERE project=?1
+             ON CONFLICT(hour_ms,project,agent,model,activity) DO UPDATE SET
+             turns=turns+excluded.turns,edit_turns=edit_turns+excluded.edit_turns,first_try_turns=first_try_turns+excluded.first_try_turns"
+                .to_owned(),
+        ),
     ];
     for (table, add) in moves {
         if has(table)? {
@@ -379,6 +387,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(money::SCHEMA).map_err(storage)?;
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
     db.execute_batch(recount::SCHEMA).map_err(storage)?;
+    db.execute_batch(activity::SCHEMA).map_err(storage)?;
     capture::count_rows(db)
 }
 

@@ -1720,6 +1720,13 @@ fn a_tool_filed_before_a_rewind_is_not_collected_again() {
         ..Progress::default()
     };
     let mut tools = Vec::new();
-    read_record_with(&record, Format::Claude, &mut progress, NOW, &mut tools);
+    read_record_with(
+        &record,
+        Format::Claude,
+        &mut progress,
+        NOW,
+        Some(&mut tools),
+        None,
+    );
     assert_eq!(tools, ["Read".to_owned()]);
 }

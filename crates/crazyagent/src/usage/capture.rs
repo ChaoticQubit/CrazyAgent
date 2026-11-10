@@ -6,7 +6,7 @@ use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -236,6 +236,8 @@ struct Progress {
     /// How far the live scan had filed turns and tools when Use new set this record back.
     #[serde(default)]
     filed_to: u64,
+    #[serde(default)]
+    turn: super::activity::OpenTurn,
 }
 
 /// The records of one read, one entry per message. Inputs arrive line by line.
@@ -243,6 +245,7 @@ struct Progress {
 struct Reading {
     usages: Vec<Usage>,
     by_key: std::collections::HashMap<String, usize>,
+    turns: Vec<super::activity::Closed>,
 }
 
 impl Reading {
@@ -268,10 +271,95 @@ impl Reading {
         self.usages.len() >= USAGES_PER_READ_MAX
     }
 
-    /// Ends the read. Output: the records to count.
-    fn finished(self) -> Vec<Usage> {
-        self.usages.into_iter().map(Usage::settled).collect()
+    /// Ends the read. Output: the records to count and the finished turns.
+    fn finished(self) -> (Vec<Usage>, Vec<super::activity::Closed>) {
+        (
+            self.usages.into_iter().map(Usage::settled).collect(),
+            self.turns,
+        )
     }
+}
+
+const TURNS_PER_READ_MAX: usize = 4096;
+const KEYS_ASKED_MAX: usize = 64 * 1024;
+
+/// What one scan can tell about a turn's first counted record: whether its key is stored or
+/// this scan already asked about it, so that an original and its copy read together count once.
+pub(super) struct Seen<'a> {
+    db: &'a Connection,
+    table: &'static str,
+    asked: HashSet<String>,
+}
+
+impl<'a> Seen<'a> {
+    pub(super) fn new(db: &'a Connection, table: &'static str) -> Self {
+        Self {
+            db,
+            table,
+            asked: HashSet::new(),
+        }
+    }
+
+    /// Whether a key was seen before. Input: the key. Output: the answer; past
+    /// `KEYS_ASKED_MAX` only stored keys are known, and a store that cannot say answers no.
+    fn known(&mut self, key: &str) -> bool {
+        let stored = self
+            .db
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id=?1)", self.table),
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        let repeated = self.asked.contains(key);
+        if self.asked.len() < KEYS_ASKED_MAX {
+            self.asked.insert(key.to_owned());
+        }
+        repeated || stored
+    }
+}
+
+/// Follows the turn one line belongs to and keeps the turn once it ends, unless it is a copy.
+/// Inputs: the line, its format, the progress, the key of the line's own record, what the scan
+/// saw and the read. Output: whether the line belongs to a copied turn.
+fn follow_turn(
+    value: &Value,
+    format: Format,
+    progress: &mut Progress,
+    key: Option<&str>,
+    seen: Option<&mut Seen<'_>>,
+    reading: &mut Reading,
+) -> bool {
+    let replayed = format == Format::Codex && progress.codex.replayed;
+    if replayed {
+        progress.turn.judge(|| true);
+    } else if let Some(key) = key {
+        progress
+            .turn
+            .judge(|| seen.is_some_and(|seen| seen.known(key)));
+    }
+    let closed = match format {
+        Format::Claude => super::activity::claude_line(value, &mut progress.turn),
+        Format::Codex => {
+            super::activity::codex_line(value, &mut progress.turn).map(|mut closed| {
+                if closed.model.is_empty() {
+                    closed.model.clone_from(&progress.codex.model);
+                }
+                closed
+            })
+        }
+    };
+    let copied = replayed
+        || closed
+            .as_ref()
+            .map_or(progress.turn.repeat(), |closed| closed.repeat);
+    if let Some(closed) = closed
+        && !closed.repeat
+        && reading.turns.len() < TURNS_PER_READ_MAX
+    {
+        reading.turns.push(closed);
+    }
+    copied
 }
 
 /// One limit window a rollout line reports. The agent writes its own rollout, so a window
@@ -685,6 +773,7 @@ pub(super) fn session_name(path: &Path) -> String {
 /// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
 /// its place. A line longer than the read is skipped.
 /// Inputs: the record, its progress and the time. Output: the records and the last limits.
+#[cfg(test)]
 fn read_record(
     path: &Path,
     format: Format,
@@ -697,29 +786,36 @@ fn read_record(
     read_opened(opened, format, progress, now_ms, &session_name(path))
 }
 
-/// Reads one record as `read_record` does and also collects the tool calls its new lines
-/// record. Inputs: the record, its progress, the time and the collected tools.
-/// Output: the records and the last limits.
+/// Reads what one record gained since its stored progress and follows the turns of its new
+/// lines. Inputs: the record, its progress, the time, where to collect the tool calls, if
+/// anywhere, and what the scan saw. Output: the records, the finished turns and the last limits.
 fn read_record_with(
     path: &Path,
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-    tools: &mut Vec<String>,
-) -> (Vec<Usage>, Option<Observation>) {
+    tools: Option<&mut Vec<String>>,
+    seen: Option<&mut Seen<'_>>,
+) -> (
+    Vec<Usage>,
+    Vec<super::activity::Closed>,
+    Option<Observation>,
+) {
     let Some(opened) = open_record(path) else {
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new(), None);
     };
     read_opened_with(
         opened,
         format,
         progress,
         now_ms,
-        Some(tools),
+        tools,
         &session_name(path),
+        seen,
     )
 }
 
+#[cfg(test)]
 fn read_opened(
     opened: (File, (u64, u64), u64),
     format: Format,
@@ -727,7 +823,16 @@ fn read_opened(
     now_ms: i64,
     fallback_thread: &str,
 ) -> (Vec<Usage>, Option<Observation>) {
-    read_opened_with(opened, format, progress, now_ms, None, fallback_thread)
+    let (usages, _, limits) = read_opened_with(
+        opened,
+        format,
+        progress,
+        now_ms,
+        None,
+        fallback_thread,
+        None,
+    );
+    (usages, limits)
 }
 
 /// Reads what an open record gained since its stored progress, up to the length it had
@@ -736,8 +841,8 @@ fn read_opened(
 /// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
 /// device, so a reboot never counts a whole record again. Inputs: the open record with its
 /// identity and length, its progress, the time and where to collect the tool calls read,
-/// at most `TOOLS_PER_READ_MAX`, if anywhere, and the thread to use when no line named one.
-/// Output: the records and the last limits.
+/// at most `TOOLS_PER_READ_MAX`, if anywhere, the thread to use when no line named one and
+/// what the scan saw. Output: the records, the finished turns and the last limits.
 fn read_opened_with(
     (mut file, identity, length): (File, (u64, u64), u64),
     format: Format,
@@ -745,7 +850,12 @@ fn read_opened_with(
     now_ms: i64,
     mut tools: Option<&mut Vec<String>>,
     fallback_thread: &str,
-) -> (Vec<Usage>, Option<Observation>) {
+    mut seen: Option<&mut Seen<'_>>,
+) -> (
+    Vec<Usage>,
+    Vec<super::activity::Closed>,
+    Option<Observation>,
+) {
     if crate::file_identity::same_files(&[progress.identity], &[identity])
         && length >= progress.offset
     {
@@ -757,7 +867,7 @@ fn read_opened_with(
         };
     }
     if length == progress.offset || file.seek(SeekFrom::Start(progress.offset)).is_err() {
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new(), None);
     }
     let mut bytes = Vec::new();
     if file
@@ -765,14 +875,14 @@ fn read_opened_with(
         .read_to_end(&mut bytes)
         .is_err()
     {
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new(), None);
     }
     let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
         if bytes.len() == READ_BYTES_MAX {
             progress.offset += bytes.len() as u64;
             progress.skipping = true;
         }
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new(), None);
     };
     let mut reading = Reading::default();
     let mut limits = None;
@@ -788,9 +898,11 @@ fn read_opened_with(
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
+        let mut key: Option<String> = None;
         match format {
             Format::Claude => {
                 if let Some(usage) = claude_usage(&value) {
+                    key.clone_from(&usage.key);
                     reading.add(usage);
                 }
                 for usage in advisor_usages(&value) {
@@ -800,13 +912,22 @@ fn read_opened_with(
             Format::Codex => {
                 let (usage, observed) = codex_line(&value, progress, now_ms, fallback_thread);
                 if let Some(usage) = usage {
+                    key.clone_from(&usage.key);
                     reading.add(usage);
                 }
                 limits = observed.or(limits);
             }
         }
+        let copied = follow_turn(
+            &value,
+            format,
+            progress,
+            key.as_deref(),
+            seen.as_deref_mut(),
+            &mut reading,
+        );
         let already_filed = progress.offset + consumed <= progress.filed_to;
-        if let Some(tools) = tools.as_deref_mut().filter(|_| !already_filed) {
+        if let Some(tools) = tools.as_deref_mut().filter(|_| !copied && !already_filed) {
             let called = match format {
                 Format::Claude => claude_tools(&value),
                 Format::Codex => codex_tools(&value),
@@ -821,7 +942,9 @@ fn read_opened_with(
     progress.offset += consumed;
     assert!(progress.offset <= length);
     assert!(tools.is_none_or(|tools| tools.len() <= TOOLS_PER_READ_MAX));
-    (reading.finished(), limits)
+    assert!(reading.turns.len() <= TURNS_PER_READ_MAX);
+    let (usages, turns) = reading.finished();
+    (usages, turns, limits)
 }
 
 fn stored_progress(db: &Connection, key: &str) -> Result<Progress, EngineError> {
@@ -891,6 +1014,7 @@ fn scan(
     mark_cut(db, home, attribution, &left, stopped, now_ms)?;
     let mut changed = Vec::new();
     let mut budget = USAGES_PER_SCAN_MAX;
+    let mut seen = Seen::new(db, Messages::Live { file: None }.table());
     for path in paths {
         if budget == 0 {
             break;
@@ -899,10 +1023,14 @@ fn scan(
         let before = stored_progress(db, &key)?;
         let mut progress = before.clone();
         let mut tools = Vec::new();
-        let (usages, observed) = match counting {
-            Some(_) => read_record_with(&path, format, &mut progress, now_ms, &mut tools),
-            None => read_record(&path, format, &mut progress, now_ms),
-        };
+        let (usages, turns, observed) = read_record_with(
+            &path,
+            format,
+            &mut progress,
+            now_ms,
+            counting.is_some().then_some(&mut tools),
+            Some(&mut seen),
+        );
         budget = budget.saturating_sub(usages.len());
         if progress != before {
             changed.push((
@@ -911,6 +1039,7 @@ fn scan(
                 before,
                 progress,
                 usages,
+                turns,
                 observed,
                 tools,
             ));
@@ -923,7 +1052,7 @@ fn scan(
     let tracking = super::recount::keeps_live_keys(&tx)?;
     let mut added = Tokens::default();
     let mut limits = None;
-    for (key, session, before, progress, usages, observed, tools) in changed {
+    for (key, session, before, progress, usages, turns, observed, tools) in changed {
         if stored_progress(&tx, &key)? != before {
             continue;
         }
@@ -938,6 +1067,13 @@ fn scan(
             params![key, serde_json::to_string(&progress).map_err(storage)?],
         )
         .map_err(storage)?;
+        super::activity::add_turns(
+            &tx,
+            now_ms - now_ms.rem_euclid(HOUR_MS),
+            attribution.project.as_ref().map_or("", ProjectId::as_str),
+            &attribution.agent,
+            &turns,
+        )?;
         for (model, growth) in count_usages(
             &tx,
             Messages::Live {
@@ -1013,13 +1149,14 @@ pub(super) fn recount_read(
     if !crate::file_identity::same_files(&[listed], &[identity]) || length < before {
         return stopped;
     }
-    let (usages, _) = read_opened_with(
+    let (usages, _, _) = read_opened_with(
         opened,
         format,
         &mut progress,
         now_ms,
         None,
         &session_name(path),
+        None,
     );
     let whole = progress.offset >= length;
     let done = whole || progress.offset == before;
@@ -1203,11 +1340,12 @@ fn forget_old_messages(db: &Connection, now_ms: i64) -> Result<(), EngineError> 
 }
 
 /// The most models one session keeps rows for in one hour; later models file under `''`.
-const MODELS_PER_HOUR_MAX: i64 = 16;
+pub(super) const MODELS_PER_HOUR_MAX: i64 = 16;
 /// The tables whose rows transcript lines create.
 const COUNTED_TABLES: &[&str] = &[
     "usage_messages",
     "usage_tokens",
+    "usage_activity",
     "usage_recount_messages",
     "usage_recount_rows",
     "usage_recount_live",
