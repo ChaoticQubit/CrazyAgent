@@ -7,6 +7,7 @@ export * from "./settings-tab.mjs";
 const FAILURE = { code: "engine_failed" };
 const APPLIED = { pending: false, outcome: "applied", rejection: null };
 let timers = [];
+let usageSince;
 const say = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
 const member = (index, kind = "chatgpt") => ({ id: `acct-${index}`, kind, provider: "chatgpt", status: "signed_in", status_label: "Signed in" });
 const account = (index) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription", url: null, model: null, status: "signed_in", status_label: "Signed in" });
@@ -34,7 +35,7 @@ const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limi
 
 /** Answers one engine command for a scene. Inputs: the scene and the command. Output: the
  * answer, a failure thrown, or a read that never lands. */
-function answer(scene, command) {
+function answer(scene, command, args) {
   const failing = (state, list) => sceneRead(state, list, FAILURE, command);
   if (scene.hold === command) return new Promise(() => {});
   if (command === "desktop_pool_summaries") return failing(scene.pools ?? "ok", POOLS);
@@ -46,6 +47,7 @@ function answer(scene, command) {
   if (command === "desktop_account_ranking") return failing(scene.ranking ?? "ok", RANKINGS);
   if (command === "desktop_set_account_schedule") return APPLIED;
   if (command === "desktop_usage_report") {
+    usageSince = args.sinceMs;
     const limits = failing(scene.limits ?? "ok", LIMITS);
     return limits instanceof Promise ? limits : { limits };
   }
@@ -62,7 +64,7 @@ export async function mount(scene = {}, theme = "light") {
   timers = [];
   const start = window.setInterval.bind(window);
   window.setInterval = (run, ms, ...rest) => { timers.push({ run, ms }); return start(run, ms, ...rest); };
-  await mountTab(createElement(Settings, { tab: "pools" }), (command) => answer(scene, command), theme);
+  await mountTab(createElement(Settings, { tab: "pools" }), (command, args) => answer(scene, command, args), theme);
 }
 
 /** Reads the first account line. Output: its words and the edges of its name and checkbox. */
@@ -124,4 +126,9 @@ export async function fireTimer(ms) {
   if (found.length !== 1) throw new Error(`${found.length} timers repeat every ${ms} ms`);
   await act(async () => { found[0].run(); });
   await settle(60);
+}
+
+/** Reads the range start of the last usage read. Output: it in ms, or null for all of time. */
+export function lastUsageSince() {
+  return usageSince;
 }

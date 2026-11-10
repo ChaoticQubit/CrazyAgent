@@ -180,6 +180,13 @@ test("a deleted pool reads the pools and the order again", async () => {
   assert.deepEqual(seen.after, [seen.before[0] + 1, seen.before[1] + 1]);
 });
 
+test("the page asks usage for a short range, since it reads only the limits", async () => {
+  const since = await onPools({}, (page) => page.evaluate("Fixture.lastUsageSince()"));
+  assert.equal(typeof since, "number", String(since));
+  assert.ok(since <= Date.now(), "a range start past the engine's clock is refused");
+  assert.ok(since >= Date.now() - 2 * 60 * 60 * 1000, new Date(since).toISOString());
+});
+
 test("a change saved in Account choice reads the order on the right again", async () => {
   const seen = await onPools({}, async (page) => {
     const before = await commandCount(page, RANKING);
