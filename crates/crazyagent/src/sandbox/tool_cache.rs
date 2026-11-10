@@ -172,6 +172,36 @@ pub fn grant(
     }
 }
 
+/// Removes the tool caches One per agent gave an agent and its native teammates in one
+/// project, at every level, with their priming records (T8), when Clean up removes the
+/// agent's worktree, since a removed agent never runs again. A shared cache stays, since
+/// other agents of its level use it. No link is followed: a link in a cache's place is
+/// unlinked, and `remove_dir_all` unlinks the `/dev/null` markers. Inputs: the engine
+/// runtime, the project as [`project_folder`] names it and the agent's id. Output: Ok once
+/// none is left.
+pub fn remove_agent(runtime: &Path, project: &str, agent: &str) -> std::io::Result<()> {
+    let folder = project_folder(runtime, project);
+    for own in [agent.to_owned(), format!("{agent}-teammates")] {
+        for access in AgentAccess::ALL {
+            let Some(key) = key(ToolCacheScope::PerAgent, access, CacheShape::Worktree, &own)
+            else {
+                continue;
+            };
+            for name in [format!("{key}.primed"), key] {
+                let path = folder.join(name);
+                match std::fs::symlink_metadata(&path) {
+                    Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(problem) => return Err(problem),
+                    Ok(found) if found.is_dir() => std::fs::remove_dir_all(&path)?,
+                    Ok(_) => std::fs::remove_file(&path)?,
+                }
+                assert!(std::fs::symlink_metadata(&path).is_err());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Makes, or finds, the tool cache `<project folder>/<key>` for one launch, with `uv` and
 /// `pnpm-store` folders inside, and, when a uv binary is given, a `.git` link to exactly
 /// `/dev/null` in each cache bucket uv makes a `.git` file in, so uv runs under the SM1-R

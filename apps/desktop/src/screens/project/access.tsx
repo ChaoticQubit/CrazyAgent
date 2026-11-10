@@ -62,7 +62,7 @@ export const TOOL_CACHE_CHOICES: { scope: ToolCacheScope; label: string; help: s
 ];
 
 /** What an agent's uv cache clean does, and when CrazyAgent removes the caches. */
-export const TOOL_CACHE_CLEAN = "uv cache clean fails inside an agent's sandbox. CrazyAgent removes a project's caches, an agent's own one included, when you delete the project.";
+export const TOOL_CACHE_CLEAN = "uv cache clean fails inside an agent's sandbox. CrazyAgent removes a project's caches when you delete the project, and an agent's own cache when Clean up removes its worktree.";
 
 /** Why the tool cache choice has no effect under Full access. */
 export const TOOL_CACHE_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so their tools use their own caches.";

@@ -696,8 +696,9 @@ fn sweep_one(
 /// checked again, then each is removed with git, never forcing, and only then its record.
 /// A stop hands back the record of every claimed agent whose worktree is still there. The
 /// agent's folder with its conversations, its sandbox profile, its rows, messages and logs
-/// stay as history. Inputs: the store, the project, the agents and the time now. Output:
-/// the agents removed and the plain code of the first one kept.
+/// stay as history; on macOS the tool caches One per agent gave it go with the worktree
+/// (T8). Inputs: the store, the engine root, the project, the agents and the time now.
+/// Output: the agents removed and the plain code of the first one kept.
 pub fn remove(
     db: &Connection,
     runtime: &Path,
@@ -751,7 +752,7 @@ pub fn remove(
 /// one kept.
 fn retire_claimed(
     db: &Connection,
-    _runtime: &Path,
+    runtime: &Path,
     project: &ProjectId,
     claimed: &[Target],
     now: u64,
@@ -806,6 +807,17 @@ fn retire_claimed(
                 }
                 Err(code) => return Ok(Some(code)),
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(project_root) = place.repository.to_str()
+            && crate::sandbox::tool_cache::remove_agent(
+                runtime,
+                project_root,
+                &target.id.to_string(),
+            )
+            .is_err()
+        {
+            return Ok(Some("cleanup_folder_failed"));
         }
         db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
