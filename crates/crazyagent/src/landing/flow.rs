@@ -2451,14 +2451,16 @@ fn logged_claims(result: Result<(), EngineError>) {
 }
 
 /// Discards one open change set holding no intent, as [`discard`] does once it checked the
-/// owner's reviewed head. The caller holds [`hold`] on its repository. Inputs: the store,
-/// the change set and the time now. Output: the time it stays restorable until.
+/// owner's reviewed head. When the store refuses the closed state, the change set is left
+/// open as the store still holds it. The caller holds [`hold`] on its repository. Inputs:
+/// the store, the change set and the time now. Output: the time it stays restorable until.
 pub(super) fn discard_held(
     db: &Connection,
     record: &mut Record,
     now: u64,
 ) -> Result<u64, EngineError> {
     assert!(record.is_open() && record.intent.is_none());
+    let open = record.clone();
     let id = record.id.clone();
     let shared = shared(&record.repository)?;
     let target = shared
@@ -2478,7 +2480,10 @@ pub(super) fn discard_held(
     record.pruned = false;
     record.conflicts.clear();
     record.updated_ms = now;
-    store::save(db, record)?;
+    if let Err(error) = store::save(db, record) {
+        *record = open;
+        return Err(error);
+    }
     release_agent_claims(db, record);
     set_engine_ref(&shared, &record.repository, &pending_ref(&id), None)?;
     let head = record.head.clone();
