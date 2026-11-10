@@ -1390,7 +1390,7 @@ fn provider_rejected(connection: &Connection, id: &str) {
 /// Every account's standing in the only pool's ranking, in ranking order. Inputs: the store
 /// and the access. Output: the standings.
 fn held_as(connection: &Connection, access: &ModelAccess) -> Vec<Standing> {
-    ranking(connection, access, NOW_MS).unwrap()[0]
+    ranked(connection, access)[0]
         .accounts
         .iter()
         .map(|account| account.standing)
@@ -1642,9 +1642,7 @@ fn a_ranking_counts_only_this_pools_projects_that_set_their_own_order() {
     for id in ["project-a", "project-b"] {
         known_project(&connection, id);
     }
-    let count = |connection: &Connection| {
-        ranking(connection, &access, NOW_MS).unwrap()[0].own_order_projects
-    };
+    let count = |connection: &Connection| ranked(connection, &access)[0].own_order_projects;
     assert_eq!(count(&connection), 0);
     change(
         &mut connection,
