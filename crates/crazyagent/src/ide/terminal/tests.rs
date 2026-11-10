@@ -398,8 +398,9 @@ fn plant_then_prune(worktrees: bool, script: &str) -> (String, usize) {
 }
 
 /// A Sandboxed terminal cannot make `.git/worktrees`, or an entry in it, a link, in any
-/// letter case, while it still makes a real admin folder there as `git worktree add` does.
-/// Git's `worktree prune` empties the folder such a link names, outside the project
+/// letter case, by renaming or clone-copying one in either, while it still makes a real
+/// admin folder there as `git worktree add` does and links in the project itself. Git's
+/// `worktree prune` empties the folder such a link names, outside the project
 /// (SECAUDIT-WORKTREE-ADMIN-PLANT).
 #[cfg(target_os = "macos")]
 #[test]
@@ -411,9 +412,15 @@ fn the_sandboxed_terminal_cannot_link_git_worktrees_to_a_folder_the_owners_prune
         true,
         "ln -s @OWNER@ .git/worktrees/planted; echo admin=$?; \
          ln -s @OWNER@ .git/WORKTREES/cased; echo cased=$?; \
-         mkdir .git/worktrees/real; echo real=$?",
+         mkdir .git/worktrees/real; echo real=$?; \
+         ln -s @OWNER@ t && ln -s @OWNER@ u; echo linked=$?; \
+         mv t .git/worktrees/moved; echo moved=$?; \
+         cp -c -P u .git/worktrees/cloned; echo cloned=$?; \
+         cp -c -P u copied; echo copied=$?",
     );
-    for code in ["admin=1", "cased=1", "real=0"] {
+    for code in [
+        "admin=1", "cased=1", "real=0", "linked=0", "moved=1", "cloned=1", "copied=0",
+    ] {
         assert!(said.contains(code), "{code}: {said}");
     }
     assert_eq!(kept, 2, "{said}");
