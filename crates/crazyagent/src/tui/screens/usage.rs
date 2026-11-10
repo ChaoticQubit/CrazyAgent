@@ -330,7 +330,7 @@ fn shown<'a>(names: &'a HashMap<String, String>, key: &'a str) -> &'a str {
 fn window_line(
     label: &str,
     window: Option<LimitWindow>,
-    own: bool,
+    own: Option<i64>,
     failed: bool,
     left_out: Option<&str>,
     now_ms: i64,
@@ -345,7 +345,11 @@ fn window_line(
             "{label:<8}{:>3}% used  {}{}",
             window.used_percent.round() as u32,
             reset_text(window.resets_at_ms, now_ms),
-            if own { " (your time)" } else { "" }
+            if own.is_some() && window.resets_at_ms == own {
+                " (your time)"
+            } else {
+                ""
+            }
         ),
     }
 }
@@ -390,7 +394,7 @@ fn limits_lines(
         window_line(
             "5-hour",
             limits.five_hour_at(now_ms),
-            limits.five_hour_reset_override_ms.is_some(),
+            limits.five_hour_reset_override_ms,
             failed,
             limits.five_hour_left_out_label.as_deref(),
             now_ms
@@ -401,7 +405,7 @@ fn limits_lines(
         window_line(
             "Weekly",
             limits.weekly_at(now_ms),
-            limits.weekly_reset_override_ms.is_some(),
+            limits.weekly_reset_override_ms,
             failed,
             limits.weekly_left_out_label.as_deref(),
             now_ms
