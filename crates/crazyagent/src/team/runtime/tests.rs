@@ -17603,6 +17603,74 @@ fn a_linked_teammate_s_conflicting_file_names_reach_the_lead_quoted_one_per_line
     );
 }
 
+/// TEAM-3-R2-LOWS (rv-code L2): a resting teammate whose own worker still holds an open
+/// change set is not landed on its idle lead's task branch. The lead is told once why, not
+/// at every pass, and the work lands at the first pass after that worker's set closed,
+/// though neither the teammate's head nor the lead's tip moved.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_teammate_with_an_open_worker_set_waits_and_its_lead_is_told_once() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    std::fs::write(linked.teammate("check").join("check.txt"), "Checked.\n").unwrap();
+    let (greet, check) = (linked.id(&fixture, "greet"), linked.id(&fixture, "check"));
+    linked.mark(&fixture, greet, "idle");
+    linked.mark(&fixture, check, "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worker = crate::landing::open_change_set(&db, &linked.teammate("check"))
+        .unwrap()
+        .expect("check's turn waits as its change set");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1, status='working' WHERE id=?2",
+            params![greet, check],
+        )
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    let held = || -> Vec<String> {
+        linked
+            .notes(&fixture)
+            .into_iter()
+            .filter(|note| {
+                note.contains("greet") && note.contains(crate::landing::WORKER_OPEN_TEXT)
+            })
+            .collect()
+    };
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "greet's work waits for its worker"
+    );
+    assert_eq!(held().len(), 1, "the lead is told once: {:?}", held());
+    crate::landing::discard(
+        &db,
+        &worker.id,
+        &worker.head,
+        u64::try_from(now_ms()).unwrap(),
+    )
+    .unwrap();
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let landed = linked.tip(&linked.branch);
+    assert_ne!(
+        landed, start,
+        "greet's work lands once its worker's set closed"
+    );
+    assert_eq!(linked.files(&start, &landed), "hello.txt");
+    assert_eq!(held().len(), 1, "{:?}", held());
+}
+
 /// A Claude Code lead in native mode in a linked worktree of the project repository, as
 /// the Sandboxed default gives it, on the task branch the engine named for it, with the
 /// start the engine records for a new worktree and its private home, temp and profiles
@@ -20309,7 +20377,63 @@ fn wiring_a_kept_native_lead_s_ready_pane_names_its_calls_and_registers_its_team
         (true, Some((lead, "Lead".to_owned())), vec![Some(member)]),
         "(pane row kept, the lead's call named, teammates in the status)"
     );
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[lead]),
+        "LP-R1: the pane the Ready report kept outlives the engine"
+    );
+    assert_eq!(
+        fixture.agent_status(lead),
+        (AgentStatus::Stopped, Some(LEFT_RUNNING_NOTE.into()))
+    );
+    assert!(
+        fixture.recorded(lead),
+        "its pane row stays for the next engine"
+    );
     host.kill(&agent).unwrap();
+}
+
+/// Wiring test of engine mechanics (LP-R1): a kept native lead the owner is stopping is not
+/// left running at engine stop, so the pane row its Ready report wrote is dropped and the
+/// engine names no pane it left. The pane is a real tmux pane; the report stands in for a
+/// start, as in the row above.
+#[test]
+fn wiring_a_kept_native_lead_being_stopped_is_not_left_running_at_engine_stop() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    let record = fixture.pane(&host, lead);
+    let worker = between_turns(&project, AgentRole::Sub, true, true);
+    assert!(worker.managed && worker.kept_session && !worker.live);
+    team.workers.insert(lead, worker);
+    team.apply(
+        lead,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+    assert!(
+        fixture.recorded(lead),
+        "the Ready report keeps the lead's pane row"
+    );
+    team.workers.get_mut(&lead).unwrap().stopping = true;
+
+    assert!(
+        team.shutdown().unwrap().is_empty(),
+        "a stopping lead is not left running"
+    );
+    assert!(!fixture.recorded(lead), "its pane row is gone");
+    assert_eq!(fixture.agent_status(lead), (AgentStatus::Stopped, None));
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
 /// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
