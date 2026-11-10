@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The first argument of the one `ide.git` call that is no network command: the engine's
 /// shim sends it to carry the staged changes of one git command into the project's index.
@@ -394,6 +394,9 @@ fn applied(git_folder: &Path, lines: &Path) -> Result<Refused, &'static str> {
     let started = Instant::now();
     let index = git_folder.join("index");
     let lock = git_folder.join("index.lock");
+    let stamp = fs::symlink_metadata(&index)
+        .and_then(|found| found.modified())
+        .ok();
     loop {
         let input = fs::File::open(lines).map_err(|_| "index_copy_failed")?;
         let mut command = confined(
@@ -405,19 +408,39 @@ fn applied(git_folder: &Path, lines: &Path) -> Result<Refused, &'static str> {
             &["update-index", "-z", "--index-info"],
         );
         command.stdin(Stdio::from(input));
-        let done =
-            ran(command, REFUSALS_BYTES_MAX, APPLY_TIME).map_err(|_| "index_git_unavailable")?;
+        let done = ran_stopped(command, REFUSALS_BYTES_MAX, APPLY_TIME, TERM_GRACE)
+            .map_err(|_| "index_git_unavailable")?;
         let locked = done
             .stderr
             .windows(b"index.lock".len())
             .any(|part| part == b"index.lock");
         match done.status {
-            Some(0) => return Ok(refusals(&done.stderr, done.cut)),
+            Some(0) => {
+                keep_racy(&index, stamp);
+                return Ok(refusals(&done.stderr, done.cut));
+            }
             None => return Err("index_timed_out"),
             Some(_) if !locked => return Err("index_refused"),
             Some(_) if started.elapsed() >= LOCK_RETRY => return Err("index_locked"),
             Some(_) => std::thread::sleep(LOCK_POLL),
         }
+    }
+}
+
+/// Puts the index's modification time back after an apply. The apply runs in the git
+/// folder, where git cannot compare a racily clean entry with its file, and a new time would
+/// end that entry's racy status and hide a same-size change from the owner. A failure logs
+/// one line and leaves the stage, which has landed. Inputs: the index and its time before
+/// the apply, none for an index that did not exist. Output: none.
+fn keep_racy(index: &Path, stamp: Option<SystemTime>) {
+    let Some(stamp) = stamp else { return };
+    let kept = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(index)
+        .and_then(|file| file.set_modified(stamp));
+    if kept.is_err() {
+        eprintln!("ide_git_index_stamp_failed");
     }
 }
 

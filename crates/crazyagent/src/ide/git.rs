@@ -229,6 +229,9 @@ const SHIM_EXEC: &str = "exec git \"$@\"\n";
 /// real index. A command wrongly left off takes the private path; one wrongly listed fails
 /// on the denied lock. `rebase` is on neither path.
 const READ_ONLY: &str = "status|diff|log|show|rev-parse|ls-files|cat-file|for-each-ref|rev-list|blame|check-ignore|check-attr|merge-base|symbolic-ref|config|remote|ls-tree|show-ref|describe|var|version|--version|--help|help|hash-object|branch|tag|reflog|shortlog|grep|fsck|count-objects|name-rev";
+/// The git commands that write the index of a new checkout and never the project's: on the
+/// private index that checkout would lose its own, so they run as they are.
+const OWN_INDEX: &str = "worktree|clone";
 const REBASE_REFUSED: &str = "fatal: CrazyAgent does not run git rebase from the IDE in the project folder, because its sandbox denies git's rebase state. Use your own terminal.";
 const NO_FORWARDER: &str = "fatal: CrazyAgent carries git index changes through the IDE's Source Control, which this process cannot reach. Use Source Control or your own terminal.";
 const NOT_COPIED: &str =
@@ -245,8 +248,8 @@ fn shell_folder(folder: &Path) -> Result<&str, EngineError> {
 }
 
 /// The end of the shim where the IDE sandbox denies the project's real index
-/// (SECAUDIT-IDE-SERVER-INDEX). A [`READ_ONLY`] command, and any command outside the project
-/// folder, runs git directly. In the folder, `rebase` stops with a plain line; a process with
+/// (SECAUDIT-IDE-SERVER-INDEX). A [`READ_ONLY`] or [`OWN_INDEX`] command, and any command
+/// outside the project folder, runs git directly. In the folder, `rebase` stops with a plain line; a process with
 /// no forwarder fails before git runs. Anything else runs on a throwaway copy of the index,
 /// and when its bytes changed the engine carries the difference across through git's own
 /// path check. Inputs: the project folder, the private folder and the word that runs git.
@@ -255,7 +258,7 @@ fn private_flow(project: &Path, private: &Path, runner: &str) -> Result<String, 
     let (project, private) = (shell_folder(project)?, shell_folder(private)?);
     let verb = crate::ide::bridge::INDEX_VERB;
     let text = format!(
-        "case \"$1\" in\n{READ_ONLY})\n  exec {runner} \"$@\"\n  ;;\nesac\n\
+        "case \"$1\" in\n{READ_ONLY}|{OWN_INDEX})\n  exec {runner} \"$@\"\n  ;;\nesac\n\
 if [ \"$(pwd -P)\" != '{project}' ]; then\n  exec {runner} \"$@\"\nfi\n\
 if [ \"$1\" = rebase ]; then\n  echo \"{REBASE_REFUSED}\" >&2\n  exit 128\nfi\n\
 if [ -z \"$CRAZYAGENT_IDE_GIT_NODE\" ] || [ -z \"$CRAZYAGENT_IDE_GIT_FORWARD\" ] || [ -z \"$secret\" ]; then\n  echo \"{NO_FORWARDER}\" >&2\n  exit 128\nfi\n\

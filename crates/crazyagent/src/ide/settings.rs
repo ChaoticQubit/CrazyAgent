@@ -338,7 +338,6 @@ pub(super) fn replace(
     std::fs::rename(&temporary, target).map_err(unwritable)
 }
 
-#[cfg(unix)]
 /// Empties the server's private index folder at launch, so what a killed command left is
 /// never read again. A link there is removed, never followed. Input: the folder. Output: Ok,
 /// or a plain refusal.
@@ -353,6 +352,7 @@ fn reset_private_index(folder: &Path) -> Result<(), EngineError> {
     super::bridge::private_folder(folder)
 }
 
+#[cfg(unix)]
 fn unwritable<E>(_: E) -> EngineError {
     failure("ide_settings_unwritable")
 }
