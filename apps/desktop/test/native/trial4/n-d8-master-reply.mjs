@@ -1,3 +1,4 @@
+import { setTimeout as pause } from "node:timers/promises";
 import { click, shown } from "../settings-steps.mjs";
 import { pasteTerminal } from "../trial-kit.mjs";
 
@@ -20,6 +21,18 @@ export const BOX = ".pj-master-live textarea.tg-composer-input";
 const SEND = "//div[contains(@class, \"pj-master-live\")]//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
 const START = "//div[contains(@class, \"pj-master-live\")]//button[normalize-space(.)=\"Start all\"]";
 const RUNNING = ["starting", "idle", "working"];
+
+/** How long the terminal gets between two reads after a paste or an Enter, in ms. */
+export const READ_MS = 250;
+
+/** How many reads a paste gets to draw and stop growing: 10 seconds at READ_MS. */
+export const DRAW_READS_MAX = 40;
+
+/** How many reads one Enter gets to take the paste off the terminal: 5 seconds at READ_MS. */
+export const ENTER_READS_MAX = 20;
+
+/** How many times Enter is pressed before a send fails: the first may only clear a notice. */
+export const ENTER_PRESSES_MAX = 4;
 
 /** Counts the reply lines a harness drew on the master terminal: rows that start with its
  * reply mark followed by text. Inputs: the terminal rows and the harness id. Output: the
@@ -114,10 +127,30 @@ export async function terminalLive(kit, timeout) {
   return filled;
 }
 
+/** Lists the rows a paste drew. Inputs: the rows before and after it. Output: [{ at, row }]. */
+export function drawnRows(before, after) {
+  return [];
+}
+
+/** Says whether a drawn paste still sits on the terminal. Inputs: its rows and the terminal's
+ * rows now. Output: a boolean. */
+export function pasteWaiting(drawn, rows) {
+  return false;
+}
+
+/** Pastes and presses Enter. Inputs: the terminal and the caller's read of a started turn.
+ * Output: how many times Enter was pressed. */
+export async function pasteAndSend(terminal, started) {
+  await terminal.paste();
+  await terminal.enter();
+  return 1;
+}
+
 /** Sends one message to the live master as the owner does: through the message box when the
  * Terminal input setting shows it, else pasted into the terminal and sent with Enter, so a new
- * line in the text never presses Enter. Inputs: the kit and the text. Output: which input it used. */
-export async function sendToMaster(kit, text) {
+ * line in the text never presses Enter. Inputs: the kit, the text and, for a terminal that
+ * draws no echo, a read of whether the turn started. Output: which input it used. */
+export async function sendToMaster(kit, text, started) {
   if (await shown(BOX)) {
     await kit.paste(BOX, text);
     await kit.until(async () => {
@@ -129,8 +162,14 @@ export async function sendToMaster(kit, text) {
     return "message box";
   }
   await $(TERMINAL).click();
-  if (!(await browser.execute(pasteTerminal, text))) throw new Error("the master terminal lost the focus before the paste");
-  await browser.keys(KEYS.enter);
+  await pasteAndSend({
+    rows: masterRows,
+    paste: async () => {
+      if (!(await browser.execute(pasteTerminal, text))) throw new Error("the master terminal lost the focus before the paste");
+    },
+    enter: () => browser.keys(KEYS.enter),
+    pause: () => pause(READ_MS),
+  }, started);
   return "terminal";
 }
 

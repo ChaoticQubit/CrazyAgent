@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { TRIAL3_STEPS } from "./trial3-steps.mjs";
+import { pasteTerminal } from "./trial-kit.mjs";
 import * as reply from "./trial4/n-d8-master-reply.mjs";
 import * as enter from "./trial4/n-d10-terminal-enter.mjs";
 import * as sessions from "./trial4/n-d11-sessions-bar.mjs";
@@ -12,6 +13,48 @@ import * as questions from "./trial4/n-d29-question-tags.mjs";
 
 const MODULES = [reply, enter, sessions, instructions, swap, any, questions];
 const DOT = "\u23fa";
+const IDLE = ["> ", ""];
+const PASTED = "> [Pasted text #1 +17 lines]";
+const SENT = ["> ", "Working on it"];
+const RULE = "\u2500".repeat(20);
+
+/** A terminal a send runs against, with no window. Input: the screen, a function of what the
+ * terminal has seen so far. Output: the terminal, with what it saw under `seen`. */
+function fakeTerminal(screen) {
+  const seen = { pasted: false, presses: 0, reads: 0, readsAtPaste: 0, readsAtEnter: [] };
+  return {
+    seen,
+    rows: async () => { seen.reads += 1; return screen(seen); },
+    paste: async () => { seen.pasted = true; seen.readsAtPaste = seen.reads; },
+    enter: async () => { seen.presses += 1; seen.readsAtEnter.push(seen.reads); },
+    pause: async () => {},
+  };
+}
+
+/** Runs a body with a window that has no message box under the master and whose terminal
+ * rows come from a function. Inputs: the rows function, given what was seen, whether the
+ * terminal keeps the focus, and the body. Output: the body's result; the globals are removed. */
+async function withBoxlessWindow(rows, focused, body) {
+  const seen = { pasted: false, enters: 0, reads: 0, readsAtPaste: 0, readsAtEnter: 0, clicks: 0 };
+  globalThis.$$ = async () => [];
+  globalThis.$ = () => ({ click: async () => { seen.clicks += 1; } });
+  globalThis.browser = {
+    execute: async (fn) => {
+      if (fn === pasteTerminal) { seen.pasted = focused; seen.readsAtPaste = seen.reads; return focused; }
+      if (!fn.toString().includes("xterm-rows")) return undefined;
+      seen.reads += 1;
+      return rows(seen);
+    },
+    keys: async () => { seen.enters += 1; seen.readsAtEnter = seen.reads; },
+  };
+  try {
+    return await body(seen);
+  } finally {
+    delete globalThis.$$;
+    delete globalThis.$;
+    delete globalThis.browser;
+  }
+}
 
 test("every master check module names one check of the plan, runs after a trial 3 step or at the end, and quotes the owner", () => {
   const slugs = new Set([...TRIAL3_STEPS.map((step) => step.slug), "end"]);
@@ -32,6 +75,94 @@ test("a reply line is the harness's mark followed by text; the owner's prompt an
   assert.equal(reply.replyLines(["\u2022 Ran the plan"], "codex"), 1);
   assert.equal(reply.replyLines(rows, "codex"), 0);
   assert.throws(() => reply.replyLines(rows, "rcli"), /no reply mark is known for the harness rcli/);
+});
+
+test("a paste's rows are the ones with text it changed, and it waits while any of them is unchanged", () => {
+  const before = ["> ", RULE, ""];
+  const after = ["> the prompt", "", RULE];
+  const drawn = reply.drawnRows(before, after);
+  assert.deepEqual(drawn, [{ at: 0, row: "> the prompt" }]);
+  assert.equal(reply.pasteWaiting(drawn, after), true);
+  assert.equal(reply.pasteWaiting(drawn, before), false);
+  assert.equal(reply.pasteWaiting([], after), false);
+});
+
+test("a pasted message gets one Enter, and only after it has drawn and stopped changing", async () => {
+  const terminal = fakeTerminal((seen) => {
+    if (seen.presses > 0) return SENT;
+    const since = seen.pasted ? seen.reads - seen.readsAtPaste : 0;
+    if (since < 3) return IDLE;
+    return since < 5 ? ["> first", ""] : [PASTED, "more"];
+  });
+  assert.equal(await reply.pasteAndSend(terminal), 1);
+  assert.equal(terminal.seen.presses, 1);
+  assert.equal(terminal.seen.readsAtEnter[0], terminal.seen.readsAtPaste + 7);
+});
+
+test("a first Enter that only clears a notice is followed by a second that sends", async () => {
+  const terminal = fakeTerminal((seen) => (seen.presses >= 2 ? SENT : seen.pasted ? [PASTED, ""] : IDLE));
+  assert.equal(await reply.pasteAndSend(terminal), 2);
+});
+
+test("a paste that never leaves the terminal fails after the last Enter instead of reading as sent", async () => {
+  const terminal = fakeTerminal((seen) => (seen.pasted ? [PASTED, ""] : IDLE));
+  await assert.rejects(reply.pasteAndSend(terminal), /stayed on the master terminal after 4 Enter presses: it was not sent/);
+  assert.equal(terminal.seen.presses, reply.ENTER_PRESSES_MAX);
+  assert.equal(terminal.seen.reads, 1 + 3 + reply.ENTER_PRESSES_MAX * reply.ENTER_READS_MAX);
+});
+
+test("a paste that never draws fails with no Enter pressed", async () => {
+  const terminal = fakeTerminal(() => IDLE);
+  await assert.rejects(reply.pasteAndSend(terminal), /the paste never drew on the master terminal/);
+  assert.equal(terminal.seen.presses, 0);
+  assert.equal(terminal.seen.reads, 1 + reply.DRAW_READS_MAX);
+});
+
+test("an animated row neither counts as the paste nor as the send", async () => {
+  const spinner = (seen) => `Thinking ${seen.reads}`;
+  const silent = fakeTerminal((seen) => ["> ", spinner(seen)]);
+  await assert.rejects(reply.pasteAndSend(silent), /the paste never drew/);
+  assert.equal(silent.seen.presses, 0);
+  const typed = fakeTerminal((seen) => [seen.presses >= 2 ? "> " : seen.pasted ? PASTED : "> ", spinner(seen)]);
+  assert.equal(await reply.pasteAndSend(typed), 2);
+});
+
+test("a box edge left on the paste's row does not read as the paste still waiting", async () => {
+  const terminal = fakeTerminal((seen) => {
+    if (seen.presses > 0) return ["> ", "", RULE];
+    return seen.pasted ? [PASTED, "", RULE] : ["> ", RULE, ""];
+  });
+  assert.equal(await reply.pasteAndSend(terminal), 1);
+});
+
+test("a terminal that draws no echo is sent on the caller's read of a started turn, with no draw to wait for", async () => {
+  const terminal = fakeTerminal(() => IDLE);
+  assert.equal(await reply.pasteAndSend(terminal, async () => terminal.seen.presses >= 2), 2);
+  assert.equal(terminal.seen.readsAtEnter[0], 1);
+  const stuck = fakeTerminal(() => IDLE);
+  await assert.rejects(reply.pasteAndSend(stuck, async () => false), /it was not sent/);
+  assert.equal(stuck.seen.presses, reply.ENTER_PRESSES_MAX);
+});
+
+test("sendToMaster with no box proves the paste on the real rows before Enter", async () => {
+  const rows = (seen) => (seen.enters > 0 ? SENT : seen.pasted ? [PASTED, ""] : IDLE);
+  await withBoxlessWindow(rows, true, async (seen) => {
+    assert.equal(await reply.sendToMaster(null, "The whole prompt"), "terminal");
+    assert.equal(seen.clicks, 1);
+    assert.equal(seen.enters, 1);
+    assert.equal(seen.readsAtEnter, seen.readsAtPaste + 3);
+  });
+});
+
+test("sendToMaster stops with no Enter when the terminal lost the focus, and hands a caller's read to the send", async () => {
+  await withBoxlessWindow(() => IDLE, false, async (seen) => {
+    await assert.rejects(reply.sendToMaster(null, "The whole prompt"), /lost the focus before the paste/);
+    assert.equal(seen.enters, 0);
+  });
+  await withBoxlessWindow(() => IDLE, true, async (seen) => {
+    assert.equal(await reply.sendToMaster(null, "A line", async () => seen.enters > 0), "terminal");
+    assert.equal(seen.enters, 1);
+  });
 });
 
 test("the master has ended when it has no agent row or a stopped status; running agents are counted", () => {
