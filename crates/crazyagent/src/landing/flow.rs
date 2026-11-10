@@ -1230,10 +1230,13 @@ fn changes_listing(repo: &Repo, from: &str, to: &str) -> Result<Vec<u8>, EngineE
     Ok(output.stdout)
 }
 
-/// The entries of a `changes_listing`: each changed path's new mode, new object, status
-/// letter and path. Input: the listing. Output: the entries, or `changes_git_failed` for a
-/// field git would not write.
-fn changed_entries(listing: &[u8]) -> Result<Vec<(&str, &str, &str, &[u8])>, EngineError> {
+/// One entry of a `changes_listing`: the changed path's new mode, new object, status
+/// letter and path.
+type Changed<'a> = (&'a str, &'a str, &'a str, &'a [u8]);
+
+/// The entries of a `changes_listing`. Input: the listing. Output: the entries, or
+/// `changes_git_failed` for a field git would not write.
+fn changed_entries(listing: &[u8]) -> Result<Vec<Changed<'_>>, EngineError> {
     let mut fields = listing.split(|byte| *byte == 0);
     let mut entries = Vec::new();
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
