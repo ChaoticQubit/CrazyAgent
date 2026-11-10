@@ -70,6 +70,33 @@ fn quoted(path: &Path) -> String {
     format!("'{text}'")
 }
 
+/// land-19 r1 M1: no confined process writes a commit-graph file into the project's object
+/// store, in any letter case, since git answers ancestry from it without reading commits.
+#[test]
+fn sandboxed_child_cannot_write_a_commit_graph_in_any_letter_case() {
+    let case = case();
+    let info = case.project.join(".git").join("objects").join("info");
+    fs::create_dir_all(info.join("commit-graphs")).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("graph.sb");
+    for target in [
+        info.join("commit-graph"),
+        case.project.join(".git/OBJECTS/Info/Commit-Graph"),
+        info.join("commit-graphs").join("graph-0.graph"),
+        case.project
+            .join(".git/objects/INFO/COMMIT-GRAPHS/commit-graph-chain"),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("echo forged > {}", quoted(&target)),
+        );
+        assert!(!output.status.success(), "{}", target.display());
+    }
+    assert!(!info.join("commit-graph").exists());
+    assert_eq!(fs::read_dir(info.join("commit-graphs")).unwrap().count(), 0);
+}
+
 #[test]
 fn sandboxed_child_writes_only_inside_the_project_and_its_own_dirs() {
     let case = case();

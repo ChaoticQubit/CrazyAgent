@@ -701,6 +701,310 @@ fn the_bounds_still_count_owner_files_taken_in_from_main() {
     );
 }
 
+/// Writes the repository's commit-graph with generation numbers version 1 for every commit
+/// `head` and the branches reach, then rewrites it so `child` names `parent` as its only
+/// parent, as a process able to write that file forges ancestry (land-19 r1 M1). Inputs:
+/// the case, the commit the graph must reach, the child and the claimed parent.
+fn forge_commit_graph(case: &Case, head: &str, child: &str, parent: &str) {
+    case.owner(&["update-ref", "refs/heads/forged", head]);
+    case.owner(&[
+        "-c",
+        "commitGraph.generationVersion=1",
+        "commit-graph",
+        "write",
+        "--reachable",
+    ]);
+    case.owner(&["update-ref", "-d", "refs/heads/forged"]);
+    let path = case.repo.join(".git/objects/info/commit-graph");
+    let mut data = std::fs::read(&path).unwrap();
+    assert!(data.starts_with(b"CGPH") && data[5] == 1);
+    let mut chunks = BTreeMap::new();
+    for at in (0..=usize::from(data[6])).map(|index| 8 + 12 * index) {
+        let offset = u64::from_be_bytes(data[at + 4..at + 12].try_into().unwrap());
+        chunks.insert(data[at..at + 4].to_vec(), usize::try_from(offset).unwrap());
+    }
+    assert!(!chunks.contains_key(b"GDA2".as_slice()));
+    let fanout = chunks[b"OIDF".as_slice()];
+    let count = u32::from_be_bytes(data[fanout + 1020..fanout + 1024].try_into().unwrap());
+    let ids = chunks[b"OIDL".as_slice()];
+    let position = |hex: &str| {
+        (0..usize::try_from(count).unwrap())
+            .find(|at| {
+                data[ids + 20 * at..ids + 20 * at + 20]
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+                    == hex
+            })
+            .unwrap()
+    };
+    let (child, parent) = (position(child), position(parent));
+    let rows = chunks[b"CDAT".as_slice()];
+    let (row, parent_row) = (rows + 36 * child, rows + 36 * parent);
+    let word =
+        |data: &[u8], row: usize| u64::from_be_bytes(data[row + 28..row + 36].try_into().unwrap());
+    let generation = (word(&data, parent_row) >> 34) + 1;
+    let date = word(&data, row) & ((1 << 34) - 1);
+    data[row + 20..row + 24].copy_from_slice(&u32::try_from(parent).unwrap().to_be_bytes());
+    data[row + 24..row + 28].copy_from_slice(&0x7000_0000u32.to_be_bytes());
+    data[row + 28..row + 36].copy_from_slice(&((generation << 34) | date).to_be_bytes());
+    let forged = path.with_extension("forged");
+    std::fs::write(&forged, data).unwrap();
+    std::fs::rename(&forged, &path).unwrap();
+}
+
+/// Commits a gitlink named `mine` to `commit` in an agent's worktree as the agent, with the
+/// empty folder an unfilled submodule leaves, so `add -A` keeps it. Inputs: the case, the
+/// agent's worktree and the commit. Output: the new commit.
+fn commit_own_gitlink(case: &Case, worktree: &Path, commit: &str) -> String {
+    std::fs::create_dir(worktree.join("mine")).unwrap();
+    git_in(
+        &case.home,
+        worktree,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{commit},mine"),
+        ],
+    );
+    git_in(
+        &case.home,
+        worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Own submodule",
+        ],
+    );
+    git_in(&case.home, worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// Commits a gitlink named `vendor` to `commit` on the owner's branch, with the empty folder
+/// an unfilled submodule leaves, so the owner's checkout stays clean. Inputs: the case and
+/// the commit. Output: the new tip.
+fn owner_commits_gitlink(case: &Case, commit: &str) -> String {
+    std::fs::create_dir_all(case.repo.join("vendor")).unwrap();
+    case.owner(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{commit},vendor"),
+    ]);
+    case.owner(&["commit", "-q", "-m", "Owner adds a submodule"]);
+    case.tip()
+}
+
+/// land-19 r1 M1 (a): a commit-graph claiming the agent's gitlink commit is on the landing
+/// tip changes nothing for the engine, whose git reads no commit-graph, so the gitlink is
+/// still the agent's own and refused at its turn end. The owner's own git does take the
+/// forged answer, which shows the graph was in place.
+#[test]
+fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_the_turn_end() {
+    let case = Case::new();
+    case.start();
+    let agent = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    let gitlinked = commit_own_gitlink(&case, &agent.worktree, &case.tip());
+    write(&agent.worktree.join("own.txt"), "own\n");
+    git_in(&case.home, &agent.worktree, &["add", "own.txt"]);
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["commit", "-q", "-m", "Own work"],
+    );
+    let head = git_in(&case.home, &agent.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
+    forge_commit_graph(&case, &head, &tip, &gitlinked);
+    case.owner(&["merge-base", "--is-ancestor", &gitlinked, &tip]);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &agent, &merge_turn())),
+        "changes_embedded_repository"
+    );
+}
+
+/// land-19 r1 M1 (a) and (b): Accept reads no commit-graph either, and refuses a gitlink in
+/// what it would land, here an agent gitlink a forged graph claims is on the tip, in a set
+/// whose head moved past its turn-end checks.
+#[test]
+fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_accept() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let start = case.tip();
+    let gitlinked = commit_own_gitlink(&case, &case.workspace.worktree, &start);
+    case.edit("OWN", "own\n");
+    case.agent_commit("Own work");
+    let head = case.agent(&["rev-parse", "HEAD"]).trim().to_owned();
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET head=?1 WHERE id=?2",
+            [head.as_str(), id.as_str()],
+        )
+        .unwrap();
+    let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
+    forge_commit_graph(&case, &head, &tip, &gitlinked);
+    case.owner(&["merge-base", "--is-ancestor", &gitlinked, &tip]);
+    assert_eq!(refused(case.accept(&id)), "changes_embedded_repository");
+    assert_eq!(case.tip(), tip);
+}
+
+/// land-19 r1 L1, closed by M1 (b): an owner gitlink an agent took in is the tip's at the
+/// turn end, but once the owner resets main below it, Accept would land it back, so Accept
+/// refuses it.
+#[test]
+fn accept_refuses_an_owner_gitlink_the_owner_dropped_from_main_after_the_turn_end() {
+    let case = Case::new();
+    case.start();
+    let agent = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    let start = case.tip();
+    owner_commits_gitlink(&case, &start);
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    write(&agent.worktree.join("own.txt"), "own\n");
+    let id = record_turn_end(&case.db, &agent, &merge_turn())
+        .unwrap()
+        .unwrap();
+    case.owner(&["reset", "-q", "--hard", &start]);
+    assert_eq!(refused(case.accept(&id)), "changes_embedded_repository");
+    assert_eq!(case.tip(), start);
+}
+
+/// land-19 r1 M1 (b): after an earlier set landed as a squash while the agent kept working,
+/// an owner gitlink the agent then took in from main is the tip's, at the turn end and at
+/// Accept, so the later set opens and lands.
+#[test]
+fn a_set_above_an_owner_gitlink_taken_in_after_a_squash_landing_opens_and_lands() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.edit("LATER", "later\n");
+    case.agent_commit("Agent keeps working");
+    let AcceptOutcome::Landed { .. } = case.accept(&first).unwrap() else {
+        panic!("the first accept conflicted");
+    };
+    owner_commits_gitlink(&case, &case.tip());
+    case.agent(&[
+        "-c",
+        "user.name=Agent",
+        "-c",
+        "user.email=agent@example.invalid",
+        "merge",
+        "-q",
+        "--no-edit",
+        "main",
+    ]);
+    case.edit("OWN", "own\n");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&second).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+}
+
+/// land-19 r1 L2: with no landing tip, as for a worker whose lead's worktree is gone, the
+/// own checks read from the set's start, so the agent's own gitlink is refused.
+#[test]
+fn with_no_landing_tip_an_agent_gitlink_is_refused() {
+    let mut case = Case::new();
+    let lead_tip = worker_of_lead(&mut case, 1);
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    case.owner(&["worktree", "remove", "--force", lead.to_str().unwrap()]);
+    commit_own_gitlink(&case, &case.workspace.worktree, &lead_tip);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &merge_turn())),
+        "changes_embedded_repository"
+    );
+}
+
+/// land-19 r1 L2: the own checks fall back to the set's start for a tip with no history in
+/// common, and read from where the tip meets the head once the owner reset main below the
+/// start, so in both the agent's own gitlink is refused.
+#[test]
+fn an_agent_gitlink_is_refused_with_an_unrelated_tip_or_a_tip_reset_below_the_start() {
+    for owner_move in ["unrelated history", "reset below the start"] {
+        let case = Case::new();
+        case.start();
+        let below = case.tip();
+        case.owner_commit("LATER", "later\n", "Owner adds a file");
+        let agent = numbered_agent(&case, 3);
+        record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir)
+            .unwrap();
+        if owner_move == "unrelated history" {
+            case.owner(&["checkout", "-q", "--orphan", "fresh"]);
+            case.owner(&["commit", "-q", "-m", "Owner starts over"]);
+            case.owner(&["branch", "-M", "fresh", "main"]);
+        } else {
+            case.owner(&["reset", "-q", "--hard", &below]);
+        }
+        commit_own_gitlink(&case, &agent.worktree, &below);
+        assert_eq!(
+            refused(record_turn_end(&case.db, &agent, &merge_turn())),
+            "changes_embedded_repository",
+            "{owner_move}"
+        );
+    }
+}
+
+/// land-19 r1 L2: a worker under Lands Lead takes in its lead's gitlink with its lead's
+/// branch, which is its landing tip, so its own edit opens a set measured as the edit
+/// alone, and its own gitlink is still refused.
+#[test]
+fn a_lead_worker_takes_in_its_lead_s_gitlink_and_its_own_is_still_refused() {
+    let mut case = Case::new();
+    let lead_tip = worker_of_lead(&mut case, 1);
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    std::fs::create_dir(lead.join("vendor")).unwrap();
+    git_in(
+        &case.home,
+        &lead,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{lead_tip},vendor"),
+        ],
+    );
+    git_in(
+        &case.home,
+        &lead,
+        &[
+            "-c",
+            "user.name=Lead",
+            "-c",
+            "user.email=lead@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Lead adds a submodule",
+        ],
+    );
+    case.agent(&["merge", "-q", "--ff-only", "crazyagent/agent-35"]);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).files, 1);
+    commit_own_gitlink(&case, &case.workspace.worktree, &lead_tip);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &merge_turn())),
+        "changes_embedded_repository"
+    );
+}
+
 /// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
 fn plant_links(folder: &Path, links: &[(&str, &str)]) {
     for (link, target) in links {
