@@ -28,7 +28,7 @@ export interface Printer {
  * rebase of the branch's upstream runs here, in the IDE sandbox, where the sandbox's write
  * denies apply. A pull with no upstream to take is refused before anything is fetched.
  * The script hands this a copy of its environment and removes the relay's secret from its
- * own, so no git it starts, and no hook of that git, holds the secret; only the shim
+ * own, so no git it starts, and no hook of that git, inherits the secret; only the shim
  * named in `GIT_SHIM_ENV` gets it for a pull's local step, and takes it off its own
  * environment before git starts.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
