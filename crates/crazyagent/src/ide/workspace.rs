@@ -141,23 +141,14 @@ pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> 
     crate::sandbox::canonical(&folder).map_err(|_| failure("ide_project_folder_invalid"))
 }
 
-/// Whether git in the project's IDE runs the project's own hooks in its Project section, as
-/// the owner saved it in the project's agent policy; Off when none is saved. Inputs: the
-/// engine root and the project. Output: the switch, or `ide_workspace_unavailable` for a
-/// policy that cannot be read, so a tampered one never turns hooks on.
-pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineError> {
-    let db = open(root)?;
-    crate::sandbox::policy::load(&db, project.as_str())
-        .map(|policy| policy.ide_git_hooks)
-        .map_err(unavailable)
-}
-
 /// What a project's IDE server starts from, as the owner saved it in the project's agent
-/// policy: the access level and the network choice an Own branch IDE follows.
+/// policy: the access level, the network choice an Own branch IDE follows and whether git
+/// in the IDE runs the project's own hooks in its Project section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdePolicy {
     pub access: AgentAccess,
     pub network: AgentNetwork,
+    pub hooks: bool,
 }
 
 impl IdePolicy {
@@ -170,16 +161,17 @@ impl IdePolicy {
     }
 }
 
-/// A project's [`IdePolicy`]; the default, Sandboxed with the Open network no Sandboxed IDE
-/// reads, when none is saved. Inputs: the engine root and the project. Output: the policy, or
-/// `ide_workspace_unavailable` for one that cannot be read, so a tampered one never widens
-/// the IDE.
+/// A project's [`IdePolicy`]; the default, Sandboxed with hooks off and the Open network no
+/// Sandboxed IDE reads, when none is saved. Inputs: the engine root and the project. Output:
+/// the policy, or `ide_workspace_unavailable` for one that cannot be read, so a tampered one
+/// never widens the IDE or turns its hooks on.
 pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
     let db = open(root)?;
     crate::sandbox::policy::load(&db, project.as_str())
         .map(|policy| IdePolicy {
             access: policy.access,
             network: policy.network,
+            hooks: policy.ide_git_hooks,
         })
         .map_err(unavailable)
 }

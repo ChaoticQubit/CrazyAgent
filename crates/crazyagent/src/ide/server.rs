@@ -250,16 +250,13 @@ impl Servers {
     /// qualified it never starts. The idle watch starts with the launch, so a launch whose
     /// open is cut while it starts is still stopped once it exits, idles or misses its start
     /// limit, and is never handed back to a later open. Inputs: the project, its canonical
-    /// folder, the canonical root of a verified build and whether the owner lets the IDE run
-    /// the project's git hooks in that folder ([`super::git::shim_text`]). Output: where the
-    /// IDE is reached, or a plain refusal, `ide_project_deleting` while a
-    /// [`Servers::hold_for_delete`] lives.
+    /// folder and the canonical root of a verified build. Output: where the IDE is reached,
+    /// or a plain refusal, `ide_project_deleting` while a [`Servers::hold_for_delete`] lives.
     pub async fn open(
         &self,
         project: &ProjectId,
         root: &Path,
         build: &Path,
-        project_hooks: bool,
     ) -> Result<ServerInfo, EngineError> {
         if !sandbox::qualified() {
             return Err(failure("ide_platform_unqualified"));
@@ -326,8 +323,7 @@ impl Servers {
                 socket: &self.socket,
                 policy,
             };
-            let mut command =
-                command_off_thread(launch, &info, output, project_hooks, &mut start).await?;
+            let mut command = command_off_thread(launch, &info, output, false, &mut start).await?;
             self.prepare_extensions(&build, &folder).await?;
             self.spawn(project, &slot, &info, &mut command)
         }
@@ -409,6 +405,12 @@ impl Servers {
             finish(running).await;
         }
         stopped
+    }
+
+    /// Stops a project's server when the owner's saved policy no longer fits the one it
+    /// started under. Input: the project. Output: whether a server was stopped.
+    pub async fn follow_level(&self, _project: &ProjectId) -> bool {
+        false
     }
 
     /// Whether a Delete everything holds this project's IDE refused. Asked before an open does

@@ -10,6 +10,10 @@ pub(in crate::tui) const FULL_ACCESS_WARNING: &str = "Agents run with your user'
 /// started above it, but not what a Full access agent started outside its terminal.
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
+/// What saving a new level, hooks or network choice does to the project's open IDE, the same
+/// in the desktop app.
+pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "";
+
 /// What turning a toolchain off does to work already running: the engine stops each agent,
 /// research job and master turn whose sandbox granted it.
 pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
