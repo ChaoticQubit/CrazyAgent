@@ -1103,3 +1103,23 @@ fn the_recount_keys_work_only_while_it_is_offered() {
         assert_eq!(use_new, expected);
     }
 }
+
+#[test]
+fn a_second_recount_choice_says_it_was_already_decided() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    let refused = Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Settings(
+        Box::new(SettingsEvent::RecountDecided(Err(
+            "usage_recount_not_ready".into(),
+        ))),
+    )));
+    page.arrive(&refused, &mut ctx);
+    let said = ctx.message().expect("the refusal is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Could not apply that choice.",
+            "This recount was already decided. Press r to read again."
+        )
+    );
+}

@@ -362,8 +362,8 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total, money
 }
 
 /** The once-only offer: old and new side by side and the two choices. Inputs: the comparison,
- * the money view and what to do once chosen. Output: the panel. */
-function RecountPanel({ status, money, onDone }: { status: RecountStatus; money: MoneyView; onDone: () => void }) {
+ * the money view, what to do once chosen and how a choice reaches the engine. Output: the panel. */
+export function RecountPanel({ status, money, onDone, decide = decideRecount }: { status: RecountStatus; money: MoneyView; onDone: () => void; decide?: (useNew: boolean) => Promise<Result<void>> }) {
   const priced = money.settings.prices !== "off";
   const row = (name: string, tokens: Tokens, cost: string) => <tr>
     <th scope="row">{name}</th>
@@ -372,7 +372,7 @@ function RecountPanel({ status, money, onDone }: { status: RecountStatus; money:
     {priced && <td className="num">{cost}</td>}
   </tr>;
   const [refused, setRefused] = useState("");
-  const choose = (useNew: boolean) => void decideRecount(useNew).then((result) => {
+  const choose = (useNew: boolean) => void decide(useNew).then((result) => {
     setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
     if (result.kind === "ok") onDone();
   });
