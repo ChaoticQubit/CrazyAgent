@@ -987,30 +987,29 @@ pub struct PoolRanking {
 /// (DEC-096 item 8): an account the pick's own sign-in check refuses, or a paused one, is held,
 /// the rest go through `Choice::order`, each with why it stands where it does. Live load and the
 /// account work already runs on only break ties, so they are left out.
-/// Takes the engine connection, model access and clock. Returns one ranking per pool.
+/// Takes the owner read's transaction, model access and clock. Returns one ranking per pool.
 pub fn ranking(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     access: &ModelAccess,
     now_ms: i64,
 ) -> Result<Vec<PoolRanking>, EngineError> {
-    let pauses = table_exists(connection, "team_paused_accounts")?;
-    let sign_ins = table_exists(connection, "native_auth_operations")?;
-    let run = active_run(connection)?;
+    let pauses = table_exists(tx, "team_paused_accounts")?;
+    let sign_ins = table_exists(tx, "native_auth_operations")?;
+    let run = active_run(tx)?;
     let mut pools = Vec::with_capacity(access.pools.len());
     for pool in &access.pools {
-        let choice = Choice::read(connection, access, None, &[&pool.id], now_ms)?;
+        let choice = Choice::read(tx, access, None, &[&pool.id], now_ms)?;
         let mut held = Vec::new();
         let mut candidates = Vec::new();
         let mut places = Vec::new();
         for (index, member) in pool.members.iter().enumerate() {
             let held_now = if choice.schedule.plan(member).pin == Some(Pin::NeverUse) {
                 None
-            } else if let Some(standing) =
-                sign_in_hold(connection, sign_ins, run.as_ref(), access, member)?
+            } else if let Some(standing) = sign_in_hold(tx, sign_ins, run.as_ref(), access, member)?
             {
                 Some(standing)
             } else {
-                paused_until(connection, pauses, member, now_ms)?
+                paused_until(tx, pauses, member, now_ms)?
                     .map(|until_ms| Standing::Paused { until_ms })
             };
             match held_now {
@@ -1094,10 +1093,10 @@ fn active_run(
 /// account is not signed in when its latest sign-in did not end authenticated or a provider
 /// rejected it. One whose sign-in stands but fails `native_sign_in`, as a doubted sign-in, a
 /// profile a check still holds or a sign-in proved under an earlier run does, needs a check.
-/// Takes the store, whether it has sign-ins at all, the active run, the model access and the
-/// member. Returns the held standing, or none when the pick can take it.
+/// Takes the read's transaction, whether it has sign-ins at all, the active run, the model
+/// access and the member. Returns the held standing, or none when the pick can take it.
 fn sign_in_hold(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     sign_ins: bool,
     run: Option<&crate::engine::owner::HostStamp>,
     access: &ModelAccess,
@@ -1112,13 +1111,13 @@ fn sign_in_hold(
     if !matches!(model.auth, ModelAuthentication::NativeManaged { .. }) {
         return Ok(None);
     }
-    if !crate::storage::latest_sign_in_authenticated(connection, model)?
-        || crate::model_gateway::sign_in_rejected(connection, model)?
+    if !crate::storage::latest_sign_in_authenticated(tx, model)?
+        || crate::model_gateway::sign_in_rejected(tx, model)?
     {
         return Ok(Some(Standing::NotSignedIn));
     }
     let proved =
-        run.is_some_and(|run| crate::storage::native_sign_in(connection, run, model, None).is_ok());
+        run.is_some_and(|run| crate::storage::native_sign_in(tx, run, model, None).is_ok());
     Ok((!proved).then_some(Standing::SignInUnconfirmed))
 }
 

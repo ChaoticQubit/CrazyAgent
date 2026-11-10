@@ -2117,8 +2117,8 @@ fn owner_stop(db: &mut Connection, host: &HostStamp) -> Result<(), EngineError> 
     tx.commit().map_err(error)
 }
 
-fn owner_revision(db: &Connection) -> Result<u64, EngineError> {
-    let n: i64 = db
+fn owner_revision(tx: &Transaction<'_>) -> Result<u64, EngineError> {
+    let n: i64 = tx
         .query_row("SELECT revision FROM state WHERE id=1", [], |r| r.get(0))
         .map_err(error)?;
     u64::try_from(n).map_err(error)

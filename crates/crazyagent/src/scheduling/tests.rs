@@ -597,7 +597,7 @@ fn a_transcript_reading_orders_an_account_after_the_others_but_never_leaves_it_o
         )]
     );
     assert_eq!(ordered(&choice, &list), ["c", "a", "b"]);
-    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    let pools = ranked(&connection, &access);
     assert_eq!(
         standings(&pools[0]),
         [
@@ -894,6 +894,13 @@ fn next(resets_ms: Option<i64>, left: Option<u8>, use_last: bool, why: OrderWhy)
     }
 }
 
+/// Ranks the pools inside a transaction, as the owner read does. Takes the store and the model
+/// access. Returns the rankings.
+fn ranked(connection: &Connection, access: &ModelAccess) -> Vec<PoolRanking> {
+    let tx = connection.unchecked_transaction().unwrap();
+    ranking(&tx, access, NOW_MS).unwrap()
+}
+
 fn standings(pool: &PoolRanking) -> Vec<(&str, Standing)> {
     pool.accounts
         .iter()
@@ -944,7 +951,7 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
             params![NOW_MS + HOUR_MS, NOW_MS - 1],
         )
         .unwrap();
-    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    let pools = ranked(&connection, &access);
     assert_eq!(pools.len(), 1);
     assert_eq!(pools[0].pool, reference("pool-a"));
     assert_eq!(pools[0].strategy, Strategy::UseItOrLoseIt);
@@ -1001,7 +1008,7 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
             strategy: Some(Strategy::Balanced),
         },
     );
-    let balanced = ranking(&connection, &access, NOW_MS).unwrap();
+    let balanced = ranked(&connection, &access);
     assert_eq!(balanced[0].strategy, Strategy::Balanced);
     assert_eq!(
         standings(&balanced[0])[..2],
@@ -1032,7 +1039,7 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
 fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
     let (_directory, connection) = database();
     let access = access(&["a", "b"]);
-    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    let pools = ranked(&connection, &access);
     assert_eq!(
         standings(&pools[0]),
         [
@@ -1040,11 +1047,7 @@ fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
             ("b", next(None, None, false, OrderWhy::NoReading))
         ]
     );
-    assert!(
-        ranking(&connection, &ModelAccess::default(), NOW_MS)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(ranked(&connection, &ModelAccess::default()).is_empty());
 }
 
 const RESET_MS: i64 = NOW_MS + 24 * HOUR_MS;
@@ -1094,7 +1097,7 @@ fn why_under(
             },
         );
     }
-    reasons(&ranking(&connection, &access, NOW_MS).unwrap())
+    reasons(&ranked(&connection, &access))
 }
 
 /// Two reasons with the accounts named, for comparing with `why_under`. Inputs: the first
@@ -1400,7 +1403,7 @@ fn an_account_with_no_sign_in_is_held_as_not_signed_in_and_a_signed_in_one_is_ne
     let access = access(&["a", "b"]);
     signed_in(&connection, "b");
     assert_eq!(
-        standings(&ranking(&connection, &access, NOW_MS).unwrap()[0]),
+        standings(&ranked(&connection, &access)[0]),
         [
             ("b", next(None, None, false, OrderWhy::NoReading)),
             ("a", Standing::NotSignedIn),
