@@ -2232,9 +2232,10 @@ fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
 /// IDE-SANDBOX-AGENT-FOLDERS (a) under the installed `server.sb`: the IDE writes nothing
 /// under the project's `.git/worktrees`, in any letter case, nor below an agent folder's
 /// `.git`, whatever makes the write: a shell, real git by path, or git through the shim,
-/// an alias included. Agents' admin files keep their bytes and nothing is planted there.
-/// Status, `worktree list`, a commit at the project folder and a gc, with agent reflogs
-/// and without, still work.
+/// an alias included, and no hard link of an admin file into the project carries a write
+/// to it. Agents' admin files keep their bytes and nothing is planted there. Status,
+/// `worktree list`, a commit at the project folder and a gc, with agent reflogs and
+/// without, still work.
 #[test]
 fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
     let s = server();
@@ -2337,6 +2338,14 @@ fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
     assert!(!admins.join("planted").exists());
     let lock = admins.join("agent-4").join("locked");
     assert!(!sh(&s.profile, ": > \"$1\"", &lock));
+    let linked =
+        r#"/bin/ln "$1" "${1%/.git/*}/h" && printf 'ref: refs/heads/x\n' > "${1%/.git/*}/h""#;
+    assert!(!sh(
+        &s.profile,
+        linked,
+        &admins.join("agent-4").join("HEAD")
+    ));
+    assert!(!s.root.join("h").exists());
     let commit = setup(&s.root, &["rev-parse", "agent-4"]);
     let (moved, said) = ide_git(
         &s.profile,
@@ -2374,4 +2383,85 @@ fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
     assert_eq!(read(&heads), before);
     assert!(s.no_private_files());
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// IDE-SANDBOX-AGENT-FOLDERS (a) r1 M1 under the installed `server.sb`: in a project with
+/// no `.git/worktrees` yet, the IDE plants no admin root under a spelling APFS folds to it
+/// with the Kelvin sign for `k` or the long s for `s`, nor through the project folder
+/// spelled with a long s, so a later `git worktree add` by the engine never puts agents'
+/// admin folders under a name the deny misses.
+#[test]
+fn the_ide_plants_no_admin_root_under_a_kelvin_or_long_s_spelling() {
+    let s = server();
+    let git = s.root.join(".git");
+    assert!(!git.join("worktrees").exists());
+    let variant = PathBuf::from(
+        s.root
+            .to_str()
+            .unwrap()
+            .replacen("ca-ides-", "ca-ide\u{17f}-", 1),
+    );
+    assert_ne!(variant, s.root);
+    for planted in [
+        git.join("wor\u{212a}trees"),
+        git.join("worktree\u{17f}"),
+        git.join("wor\u{212a}tree\u{17f}"),
+        variant.join(".git").join("worktrees"),
+    ] {
+        assert!(
+            !sh(&s.profile, "/bin/mkdir \"$1\"", &planted),
+            "{}",
+            planted.display()
+        );
+        assert!(!git.join("worktrees").exists(), "{}", planted.display());
+    }
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// r1 M1 for a locked folder: the Remote settings lock holds against a path spelled with
+/// the long s, the only other letter APFS folds to `s`, in the folders above the lock:
+/// the engine's settings keep their bytes.
+#[test]
+fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    let machine = home.join("data").join("Machine");
+    for path in [&machine, &build, &root] {
+        folder(path);
+    }
+    let settings = machine.join("settings.json");
+    let engine = "{\"chat.disableAIFeatures\": true}\n";
+    fs::write(&settings, engine).unwrap();
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[machine.as_path()],
+    };
+    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let overwrite = r#"printf '{"chat.disableAIFeatures": false}' > "$1""#;
+    for variant in [
+        mine.join("\u{17f}erver/data/Machine/settings.json"),
+        mine.join("\u{17f}erver/data/Machine/\u{17f}ettings.json"),
+        mine.join("server/data/Machine/\u{17f}ettings.json"),
+    ] {
+        assert!(!sh(&profile, overwrite, &variant), "{}", variant.display());
+    }
+    assert_eq!(fs::read_to_string(&settings).unwrap(), engine);
+    assert_eq!(fs::read_dir(&machine).unwrap().count(), 1);
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
