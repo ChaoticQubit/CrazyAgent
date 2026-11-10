@@ -58,6 +58,7 @@ pub(super) fn recount_all(db: &Connection, home: &Path) {
             format: Format::Claude,
             attribution: who(),
             removed: false,
+            team_agent: None,
         }],
         NOW,
     )
@@ -71,6 +72,7 @@ fn home_of(path: PathBuf) -> Home {
         format: Format::Claude,
         attribution: who(),
         removed: false,
+        team_agent: None,
     }
 }
 
@@ -137,6 +139,7 @@ fn a_step_stays_within_its_bytes_and_a_restart_goes_on() {
             format: Format::Claude,
             attribution: who(),
             removed: false,
+            team_agent: None,
         }],
         NOW,
     )
@@ -855,4 +858,248 @@ fn only_the_whole_store_view_carries_the_comparison_and_prices_off_strips_its_do
     )
     .unwrap();
     assert_eq!(report(None).recount.unwrap().new_cost_nanos, 0);
+}
+
+const AT_TWO: &str = "2026-11-09T02:10:00.000Z";
+const AT_THREE: &str = "2026-11-09T03:10:00.000Z";
+const LATER: i64 = 1_794_200_000_000;
+
+fn ms(text: &str) -> i64 {
+    super::super::rules::timestamp_ms(text).unwrap()
+}
+
+fn editing_turn(path: &Path, at: &str, text: &str, id: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({"type": "user", "timestamp": at, "message": {"content": text}})
+    )
+    .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "type": "assistant", "timestamp": at,
+            "message": {
+                "id": id, "model": "claude-opus-4-5", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": "/repo/a.rs"}}]
+            }
+        })
+    )
+    .unwrap();
+}
+
+fn activity_rows(db: &Connection) -> Vec<(i64, String, i64)> {
+    db.prepare("SELECT hour_ms,activity,turns FROM usage_activity ORDER BY hour_ms,activity")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn recount_at(db: &Connection, home: &Path, team_agent: Option<i64>, at: i64) {
+    begin(
+        db,
+        &[Home {
+            path: home.to_path_buf(),
+            format: Format::Claude,
+            attribution: who(),
+            removed: false,
+            team_agent,
+        }],
+        at,
+    )
+    .unwrap();
+    while step(db, BYTES_PER_STEP, at).unwrap() {}
+}
+
+#[test]
+fn history_fills_the_activity_chart_in_the_hour_each_turn_began() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    editing_turn(&file, AT_TWO, "add a page", "m1");
+    editing_turn(&file, AT_THREE, "fix the crash", "m2");
+    recount_at(&db, &home, None, LATER);
+    assert_eq!(
+        activity_rows(&db),
+        vec![
+            (ms("2026-11-09T02:00:00.000Z"), "feature".to_owned(), 1),
+            (ms("2026-11-09T03:00:00.000Z"), "debugging".to_owned(), 1),
+        ]
+    );
+}
+
+#[test]
+fn each_turn_belongs_to_the_recount_or_the_live_scan_and_never_both() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    editing_turn(&file, AT_TWO, "add a page", "m1");
+    recount_at(&db, &home, None, ms("2026-11-09T03:00:00.000Z"));
+    assert_eq!(activity_rows(&db).len(), 1);
+    editing_turn(&file, AT_THREE, "fix the crash", "m2");
+    capture::scan_home(&db, &home, Format::Claude, &who(), LATER).unwrap();
+    assert_eq!(
+        activity_rows(&db),
+        vec![
+            (ms("2026-11-09T02:00:00.000Z"), "feature".to_owned(), 1),
+            (LATER - LATER.rem_euclid(HOUR_MS), "debugging".to_owned(), 1),
+        ]
+    );
+}
+
+#[test]
+fn until_a_recount_has_started_the_live_scan_leaves_turns_to_it() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    editing_turn(
+        &home.join("projects/-repo/s1.jsonl"),
+        AT_TWO,
+        "add a page",
+        "m1",
+    );
+    capture::scan_home(&db, &home, Format::Claude, &who(), LATER).unwrap();
+    assert_eq!(activity_rows(&db), vec![]);
+    recount_at(&db, &home, None, LATER);
+    assert_eq!(
+        activity_rows(&db),
+        vec![(ms("2026-11-09T02:00:00.000Z"), "feature".to_owned(), 1)]
+    );
+}
+
+#[test]
+fn history_fills_tool_hours_for_a_team_agent_and_only_before_the_start() {
+    let (root, db) = store();
+    crate::coord::ensure(&db).unwrap();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    editing_turn(&file, AT_TWO, "add a page", "m1");
+    editing_turn(&file, AT_THREE, "fix the crash", "m2");
+    recount_at(&db, &home, Some(7), ms("2026-11-09T03:00:00.000Z"));
+    let rows: Vec<(i64, i64, i64)> = db
+        .prepare("SELECT hour_ms,agent,SUM(count) FROM coord_tool_hours GROUP BY hour_ms,agent")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows, vec![(ms("2026-11-09T02:00:00.000Z"), 7, 1)]);
+}
+
+#[test]
+fn a_resumed_copy_fills_history_once_in_either_order() {
+    for swapped in [false, true] {
+        let (root, db) = store();
+        crate::coord::ensure(&db).unwrap();
+        let one = root.path().join("one");
+        let two = root.path().join("two");
+        editing_turn(
+            &one.join("projects/-repo/s1.jsonl"),
+            AT_TWO,
+            "add a page",
+            "m1",
+        );
+        editing_turn(
+            &two.join("projects/-repo/s2.jsonl"),
+            AT_TWO,
+            "add a page",
+            "m1",
+        );
+        editing_turn(
+            &two.join("projects/-repo/s2.jsonl"),
+            AT_TWO,
+            "fix the crash",
+            "m2",
+        );
+        let paths = if swapped { [two, one] } else { [one, two] };
+        let homes = paths.map(|path| Home {
+            path,
+            format: Format::Claude,
+            attribution: who(),
+            removed: false,
+            team_agent: Some(7),
+        });
+        begin(&db, &homes, LATER).unwrap();
+        while step(&db, BYTES_PER_STEP, LATER).unwrap() {}
+        let turns: i64 = db
+            .query_row(
+                "SELECT COALESCE(SUM(turns),0) FROM usage_activity",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tools: i64 = db
+            .query_row(
+                "SELECT COALESCE(SUM(count),0) FROM coord_tool_hours",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((turns, tools), (2, 2), "swapped {swapped}");
+    }
+}
+
+#[test]
+fn a_turn_filed_live_is_not_filed_again_after_use_new() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    editing_turn(&file, AT_TWO, "add a page", "m1");
+    old_row(&db, "s1", 400, 0);
+    recount_at(&db, &home, None, ms("2026-11-09T03:00:00.000Z"));
+    editing_turn(&file, AT_THREE, "fix the crash", "m2");
+    capture::scan_home(&db, &home, Format::Claude, &who(), LATER).unwrap();
+    assert_eq!(activity_rows(&db).len(), 2);
+    decide(&db, true, LATER).unwrap();
+    capture::scan_home(&db, &home, Format::Claude, &who(), LATER + 1).unwrap();
+    let turns: i64 = db
+        .query_row("SELECT SUM(turns) FROM usage_activity", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(turns, 2);
+}
+
+#[test]
+fn a_turn_the_read_saw_is_filed_once_by_the_scan_before_the_seed() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    editing_turn(&file, AT_TWO, "add a page", "m1");
+    editing_turn(&file, AT_THREE, "fix the crash", "m2");
+    let started = ms("2026-11-09T03:00:00.000Z");
+    begin(
+        &db,
+        &[Home {
+            path: home.clone(),
+            format: Format::Claude,
+            attribution: who(),
+            removed: false,
+            team_agent: None,
+        }],
+        started,
+    )
+    .unwrap();
+    assert!(
+        step(&db, BYTES_PER_STEP, started).unwrap(),
+        "the step that read the last chunk does not seed"
+    );
+    capture::scan_home(&db, &home, Format::Claude, &who(), LATER).unwrap();
+    while step(&db, BYTES_PER_STEP, LATER).unwrap() {}
+    assert_eq!(
+        activity_rows(&db),
+        vec![
+            (ms("2026-11-09T02:00:00.000Z"), "feature".to_owned(), 1),
+            (LATER - LATER.rem_euclid(HOUR_MS), "debugging".to_owned(), 1),
+        ]
+    );
 }

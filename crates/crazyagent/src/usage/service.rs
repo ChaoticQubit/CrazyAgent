@@ -318,6 +318,7 @@ impl Usage {
                         access,
                     ),
                     removed: false,
+                    team_agent: Some(id),
                 });
             }
         }
@@ -351,6 +352,7 @@ impl Usage {
                     format,
                     attribution,
                     removed,
+                    team_agent: None,
                 });
             }
         }

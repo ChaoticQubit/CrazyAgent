@@ -109,12 +109,14 @@ const CLEAR_STAGING: &str = "DELETE FROM usage_recount_rows; DELETE FROM usage_r
     DELETE FROM usage_recount_sessions; DELETE FROM usage_recount_live;";
 
 /// One agent home the recount reads, and who its tokens count against. `removed` marks a run
-/// of a removed project, whose name no project id can hold.
+/// of a removed project, whose name no project id can hold. `team_agent` is the team agent
+/// the home belongs to, whose tool calls fill its tool hours; a research run has none.
 pub(super) struct Home {
     pub path: PathBuf,
     pub format: Format,
     pub attribution: Attribution,
     pub removed: bool,
+    pub team_agent: Option<i64>,
 }
 
 /// What the owner sees once: the totals as they stand and as they would be, and how many
@@ -703,6 +705,7 @@ pub(crate) mod tests_support {
                 format: Format::Claude,
                 attribution,
                 removed: false,
+                team_agent: None,
             }],
             now_ms,
         )

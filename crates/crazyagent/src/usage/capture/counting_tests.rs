@@ -1355,6 +1355,7 @@ fn names(db: &Connection, sql: &str) -> Vec<String> {
 #[test]
 fn an_edit_verified_and_edited_again_is_not_first_try() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     append(&file, &user("add a page"));
     append(&file, &calls("m1", None, edit("/repo/a.rs")));
@@ -1375,6 +1376,7 @@ fn an_edit_verified_and_edited_again_is_not_first_try() {
 #[test]
 fn a_lookup_between_two_edits_is_still_first_try() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     append(&file, &user("add a page"));
     append(&file, &calls("m1", None, edit("/repo/a.rs")));
@@ -1387,6 +1389,7 @@ fn a_lookup_between_two_edits_is_still_first_try() {
 #[test]
 fn a_tool_result_or_a_meta_line_does_not_start_a_turn() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     append(&file, &user("add a page"));
     append(&file, &calls("m1", None, edit("/repo/a.rs")));
@@ -1401,6 +1404,7 @@ fn a_tool_result_or_a_meta_line_does_not_start_a_turn() {
 #[test]
 fn a_turn_split_across_two_scans_counts_once() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     append(&file, &user("add a page"));
     append(&file, &calls("m1", None, edit("/repo/a.rs")));
@@ -1444,6 +1448,7 @@ fn tools_read(db: &Connection, file: &Path, format: Format) -> usize {
 #[test]
 fn a_resumed_copy_files_its_turns_and_tools_once() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let first = transcript(root.path(), "s1");
     append(&first, &user("add a page"));
     append(&first, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
@@ -1476,6 +1481,7 @@ fn a_resumed_copy_files_its_turns_and_tools_once() {
 #[test]
 fn an_original_and_its_copy_in_one_scan_file_one_turn() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     for name in ["s1", "s2"] {
         let file = transcript(root.path(), name);
         append(&file, &user("add a page"));
@@ -1509,6 +1515,7 @@ fn codex_done(at: &str) -> String {
 #[test]
 fn a_forks_replayed_turn_files_nothing() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = rollout(root.path(), "fork");
     append(
         &file,
@@ -1531,6 +1538,7 @@ fn a_forks_replayed_turn_files_nothing() {
 #[test]
 fn a_codex_turn_files_under_its_model() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = rollout(root.path(), "one");
     append(&file, &meta(T0, "one", serde_json::json!({})));
     append(&file, &codex_user(T0_1, "add a page"));
@@ -1547,6 +1555,7 @@ fn a_codex_turn_files_under_its_model() {
 #[test]
 fn past_its_caps_a_turn_is_left_out_of_the_chart_only() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     append(&file, &user("add a page"));
     append(&file, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
@@ -1562,6 +1571,7 @@ fn past_its_caps_a_turn_is_left_out_of_the_chart_only() {
 #[test]
 fn past_sixteen_models_in_an_hour_a_turn_files_under_no_model() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     for index in 0..17 {
         append(&file, &user("add a page"));
@@ -1577,6 +1587,7 @@ fn past_sixteen_models_in_an_hour_a_turn_files_under_no_model() {
 #[test]
 fn a_forgotten_projects_turns_stay_in_the_chart_under_removed_projects() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = transcript(root.path(), "s1");
     for id in ["m1", "m2"] {
         append(&file, &user("add a page"));
@@ -1615,6 +1626,7 @@ fn codex_patch(at: &str, head: &str, file: &str) -> String {
 
 fn edits_around(between: &str) -> Vec<(String, i64, i64, i64)> {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = rollout(root.path(), "one");
     append(&file, &meta(T0, "one", serde_json::json!({})));
     append(&file, &codex_user(T0_1, "add a page"));
@@ -1633,6 +1645,7 @@ fn retried() -> Vec<(String, i64, i64, i64)> {
 #[test]
 fn a_codex_turn_takes_a_turn_context_written_before_its_message() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = rollout(root.path(), "one");
     append(&file, &meta(T0, "one", serde_json::json!({})));
     append(&file, &context(T0_1));
@@ -1706,6 +1719,7 @@ fn a_lookup_wrapped_in_a_codex_shell_is_still_first_try() {
 #[test]
 fn a_codex_patch_files_by_its_first_path_and_stores_only_a_hash() {
     let (root, db) = store();
+    super::super::recount::begin(&db, &[], 0).unwrap();
     let file = rollout(root.path(), "one");
     let test = serde_json::json!({"cmd": "cargo test"});
     append(&file, &meta(T0, "one", serde_json::json!({})));
