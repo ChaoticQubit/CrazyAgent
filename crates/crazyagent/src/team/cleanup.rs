@@ -338,6 +338,29 @@ fn place(
     .map_err(unavailable)
 }
 
+/// Says whether a worktree record names a place cleanup may delete (DEC-123 rv-secreview
+/// L1): its repository is this project's own folder as the runtime records it, canonical,
+/// and the worktree is a named folder directly inside that folder's `.crazyagent/worktrees`,
+/// or `worktrees` on the old layout. Inputs: the store, the project and the place. Output:
+/// the answer, false for a project with no stored setup or a folder that no longer resolves.
+fn placed(db: &Connection, project: &ProjectId, place: &Place) -> Result<bool, EngineError> {
+    let Some(stored) = crate::project_setup::load_setup(db, project).map_err(unavailable)? else {
+        return Ok(false);
+    };
+    let Ok(folder) = stored.project_folder().canonicalize() else {
+        return Ok(false);
+    };
+    assert!(folder.is_absolute());
+    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let parent = place.worktree.parent();
+    let inside = place.worktree.file_name().is_some()
+        && [state.join("worktrees"), folder.join("worktrees")]
+            .iter()
+            .any(|worktrees| parent == Some(worktrees.as_path()));
+    assert!(!inside || place.worktree.starts_with(&folder));
+    Ok(inside && place.repository == folder)
+}
+
 /// Says why a team agent's own row keeps it: not this project's, still running, the master
 /// the runtime starts again in this worktree (picked by `runtime::last_master`, so aliases
 /// of its harness count), or with an unfinished task pinned to it. Inputs: the store, the
@@ -412,6 +435,9 @@ fn check(
             None => return Ok(Err("cleanup_agent_not_found")),
         },
     };
+    if !placed(db, project, &target.place)? {
+        return Ok(Err("cleanup_worktree_invalid"));
+    }
     if target.worktree_removed() {
         return Ok(Ok(target));
     }
@@ -712,6 +738,11 @@ fn retire_claimed(
     now: u64,
     removed: &mut Vec<i64>,
 ) -> Result<Option<&'static str>, EngineError> {
+    for target in claimed {
+        if !placed(db, project, &target.place)? {
+            return Ok(Some("cleanup_worktree_invalid"));
+        }
+    }
     for target in claimed.iter().filter(|target| !target.worktree_removed()) {
         let place = &target.place;
         if let Some(code) = crate::landing::retire_blocker(
@@ -786,6 +817,9 @@ fn claim(
             return Ok(Err(code));
         }
         if let Some(place) = place(&tx, Record::Retiring, project, *id)? {
+            if !placed(&tx, project, &place)? {
+                return Ok(Err("cleanup_worktree_invalid"));
+            }
             claimed.push(Target {
                 id: *id,
                 place,
@@ -797,6 +831,9 @@ fn claim(
         let Some(place) = place(&tx, Record::Live, project, *id)? else {
             return Ok(Err("cleanup_agent_not_found"));
         };
+        if !placed(&tx, project, &place)? {
+            return Ok(Err("cleanup_worktree_invalid"));
+        }
         tx.execute(
             "INSERT INTO team_retiring(agent,project,repository,worktree,git_dir,since_ms)
              SELECT agent,project,repository,worktree,git_dir,?3 FROM team_worktrees

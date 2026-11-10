@@ -2970,10 +2970,10 @@ pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineE
 }
 
 /// Loads the stored setup of one project.
-/// Takes a transaction and the project.
+/// Takes a connection or a transaction and the project.
 /// Returns the setup, or none for a project created without one.
 pub fn load_setup(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     project: &ProjectId,
 ) -> Result<Option<StoredSetup>, EngineError> {
     let body: Option<String> = tx
