@@ -1049,8 +1049,10 @@ fn count_message(
 }
 
 /// Counts one read's records, each priced when it is counted, because the long-context tier
-/// and the one-hour write are per call. Inputs: the open write, the key table, the records
-/// and the time. Output: what each model added.
+/// and the one-hour write are per call. A repeat pays the one-hour rate only past what its
+/// earlier copies wrote, the least its one-hour part can have grown, so it never reads over.
+/// Inputs: the open write, the key table, the records and the time. Output: what each model
+/// added.
 pub(super) fn count_usages(
     tx: &Connection,
     table: Messages,
@@ -1067,7 +1069,9 @@ pub(super) fn count_usages(
                 .input
                 .saturating_add(usage.tokens.cache_read)
                 .saturating_add(usage.tokens.cache_write),
-            one_hour: usage.one_hour,
+            one_hour: usage
+                .one_hour
+                .saturating_sub(usage.tokens.cache_write.saturating_sub(growth.cache_write)),
             web_searches: web,
             fast: usage.fast,
         };
