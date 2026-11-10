@@ -20309,7 +20309,63 @@ fn wiring_a_kept_native_lead_s_ready_pane_names_its_calls_and_registers_its_team
         (true, Some((lead, "Lead".to_owned())), vec![Some(member)]),
         "(pane row kept, the lead's call named, teammates in the status)"
     );
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[lead]),
+        "LP-R1: the pane the Ready report kept outlives the engine"
+    );
+    assert_eq!(
+        fixture.agent_status(lead),
+        (AgentStatus::Stopped, Some(LEFT_RUNNING_NOTE.into()))
+    );
+    assert!(
+        fixture.recorded(lead),
+        "its pane row stays for the next engine"
+    );
     host.kill(&agent).unwrap();
+}
+
+/// Wiring test of engine mechanics (LP-R1): a kept native lead the owner is stopping is not
+/// left running at engine stop, so the pane row its Ready report wrote is dropped and the
+/// engine names no pane it left. The pane is a real tmux pane; the report stands in for a
+/// start, as in the row above.
+#[test]
+fn wiring_a_kept_native_lead_being_stopped_is_not_left_running_at_engine_stop() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    let record = fixture.pane(&host, lead);
+    let worker = between_turns(&project, AgentRole::Sub, true, true);
+    assert!(worker.managed && worker.kept_session && !worker.live);
+    team.workers.insert(lead, worker);
+    team.apply(
+        lead,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+    assert!(
+        fixture.recorded(lead),
+        "the Ready report keeps the lead's pane row"
+    );
+    team.workers.get_mut(&lead).unwrap().stopping = true;
+
+    assert!(
+        team.shutdown().unwrap().is_empty(),
+        "a stopping lead is not left running"
+    );
+    assert!(!fixture.recorded(lead), "its pane row is gone");
+    assert_eq!(fixture.agent_status(lead), (AgentStatus::Stopped, None));
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
 /// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
