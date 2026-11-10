@@ -394,7 +394,7 @@ test("Terminal input offers its three choices and starts on Terminal only", asyn
 test("choosing Both saves it under the Terminal input key alone and it reads back when Profile opens again", async () => {
   const group = '[role=radiogroup][aria-label="Terminal input"]';
   const seen = await onProfile({}, async (page) => {
-    await page.evaluate(`Object.defineProperty(window, "localStorage", { configurable: true, value: (() => { const kept = new Map(); window.keptInput = kept; return { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) }; })() })`);
+    await page.evaluate(`Object.defineProperty(window, "localStorage", { configurable: true, value: (() => { const kept = new Map(); window.keptInput = kept; return { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) }; })() }); true`);
     await press(page, `${group} button`, "Both");
     const saved = await page.evaluate("[...window.keptInput.entries()]");
     await page.evaluate(`Fixture.mount(${JSON.stringify({ tab: "profile" })}, "light")`);
