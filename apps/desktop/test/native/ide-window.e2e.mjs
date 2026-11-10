@@ -284,6 +284,14 @@ const OPEN_WINDOW = "Open in its own window";
 const WORKBENCH_MS = 90;
 const OWN_WINDOW_MS = 30000;
 const FRONT_MS = 5000;
+const SAME_PAGE_MS = 1000;
+
+/** Fails the row unless two rows show one page. WebKit's time origin wobbles by a millisecond or
+ * so, while a reload would move it by the many seconds since the page first loaded. Inputs: the
+ * two rows and the message. Output: none. */
+function samePage(row, other, message) {
+  assert.ok(row.look && Math.abs(row.look.origin - other.look.origin) < SAME_PAGE_MS, `${message}: ${row.look?.origin} and ${other.look.origin}`);
+}
 
 /** Opens a project's IDE tab, waits for the workbench and presses the window button, all on the
  * page's timers because the webdriver session cannot see the main window meanwhile. Input: the
@@ -317,7 +325,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const moved = await moveOut(first);
     const inMain = windowRows().filter((row) => row.at < moved.at && row.view?.window === "main" && row.look?.origin > 0).at(-1);
     assert.ok(inMain, "the webview was seen in the main window before the move");
-    assert.equal(moved.look?.origin, inMain.look.origin, "the same page moved, with no reload");
+    samePage(moved, inMain, "the same page moved, with no reload");
     const shaped = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.maximized && row.view.focused, "the window was never maximized with the focus", OWN_WINDOW_MS);
     assert.equal(shaped.view.fullscreen, false, "and it is not in native full screen");
     writeFileSync(join(evidence, "own-window-rows.json"), JSON.stringify({ inMain, moved }, null, 2));
@@ -327,15 +335,21 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     assert.ok(buttons.includes("Bring it forward"), JSON.stringify(buttons));
 
     const settled = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.ide.at[1] > 0 && row.look !== null, "the IDE never sat below the title bar", OWN_WINDOW_MS);
-    const { ide, inner, scale } = settled.view;
+    const { ide, outer, scale } = settled.view;
     assert.equal(ide.at[0], 0, "the IDE starts at the window's left edge");
-    assert.equal(ide.size[0], inner[0], "and fills its width");
-    assert.equal(ide.at[1] + ide.size[1], inner[1], "and reaches its bottom");
+    assert.equal(ide.size[0], outer[0], "and fills its width");
+    assert.equal(ide.at[1] + ide.size[1], outer[1], "and reaches its bottom");
     assert.equal(Math.round(settled.look.height * scale), ide.size[1], "the page has the webview's whole height");
 
     raise("IDE");
     await pause(POLL_MS);
     shot("own-window");
+    await testAppInFront();
+    onApp(`set size of (first window whose title contains "IDE") to {${SHOWN_WIDTH}, ${SHOWN_HEIGHT}}`);
+    const resized = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.outer[0] === SHOWN_WIDTH * scale && row.view.ide.size[0] === row.view.outer[0], "the IDE did not follow its window's new size", OWN_WINDOW_MS);
+    assert.equal(resized.view.ide.at[1] + resized.view.ide.size[1], resized.view.outer[1], "after a resize it still reaches the bottom");
+    assert.equal(resized.view.ide.at[1], ide.at[1], "and still sits below the title bar");
+    shot("own-window-resized");
     await browser.saveScreenshot(join(evidence, "tab-while-out.png"));
     assert.ok(!menuNames().includes("File"), `the IDE window's menu owns none of the editor's keys: ${menuNames()}`);
     const before = (await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused && row.look !== null, "the IDE window never had the focus", OWN_WINDOW_MS)).look.editors;
@@ -356,7 +370,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const closing = Date.now();
     await closeTitled("IDE");
     const home = await rowWhere((row) => row.view?.window === "main", "closing the window did not return the IDE to the main window", OWN_WINDOW_MS, closing);
-    assert.equal(home.look?.origin, inMain.look.origin, "the same page came back");
+    samePage(home, inMain, "the same page came back");
     assert.ok(!home.windows.some((label) => OWN_WINDOW.test(label)), "and the window has gone");
     await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
 

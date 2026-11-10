@@ -595,11 +595,14 @@ fn hex_of(project: &ProjectId) -> String {
         .collect()
 }
 
+/// Where an IDE webview goes in its own window, from the window's frame. Inner size will not do:
+/// in a window with no child webview Tauri reports it as the frame of the webview being placed.
+/// Inputs: the window and the title bar's inset. Output: the place, or the failed read.
 fn whole_window<R: Runtime>(window: &Window<R>, inset: f64) -> Result<Rect, BridgeError> {
     let scale = window.scale_factor().map_err(failed)?;
-    let content = window.inner_size().map_err(failed)?;
-    let content = content.to_logical::<f64>(scale);
-    Ok(Bounds::filling(inset, content.width, content.height).rect())
+    let frame = window.outer_size().map_err(failed)?;
+    let frame = frame.to_logical::<f64>(scale);
+    Ok(Bounds::filling(inset, frame.width, frame.height).rect())
 }
 
 /// Moves a project's loaded IDE webview into a maximized window of its own, the same webview, so

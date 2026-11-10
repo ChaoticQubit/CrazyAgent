@@ -94,6 +94,7 @@ fn write_windows(app: &AppHandle, file: &Path) {
 fn window_row(webview: &Webview) -> Option<Value> {
     let window = webview.window();
     let inner = window.inner_size().ok()?;
+    let outer = window.outer_size().ok()?;
     Some(json!({
         "webview": webview.label(),
         "window": window.label(),
@@ -102,6 +103,7 @@ fn window_row(webview: &Webview) -> Option<Value> {
         "focused": window.is_focused().ok()?,
         "scale": window.scale_factor().ok()?,
         "inner": [inner.width, inner.height],
+        "outer": [outer.width, outer.height],
         "ide": frame(webview)?,
     }))
 }
