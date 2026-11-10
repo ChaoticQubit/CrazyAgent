@@ -1365,6 +1365,15 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    until_place(
+        &mut shell,
+        &mut connection,
+        &Place::Master {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+    )
+    .await;
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Add a dark theme").await;
