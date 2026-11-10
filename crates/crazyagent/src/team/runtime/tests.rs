@@ -15426,6 +15426,53 @@ fn a_close_with_a_command_left_fails_the_agent_and_reports_both() {
     }
 }
 
+/// Only the harness's own stop, saying it left commands running, keeps an agent whose work
+/// ended well from failing; a close whose cause merely reads like that code still fails it,
+/// since the agent's status is never decided from the text (TEAM-8-L1).
+#[test]
+fn a_close_whose_cause_reads_like_a_leftover_code_still_fails_the_agent() {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT};
+    for (at, code) in [LEFT, SANDBOX_LEFT].into_iter().enumerate() {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        team.apply(
+            agent,
+            Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Success,
+                cause: None,
+            },
+        )
+        .unwrap();
+        let closed = with_code(PROCESS_CLOSED, Some(code));
+        team.apply(
+            agent,
+            Report::Ended {
+                problem: Some(closed.clone()),
+            },
+        )
+        .unwrap();
+        let shown: Option<String> = fixture
+            .connection
+            .query_row(
+                "SELECT error FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.agent_status(agent).0,
+            AgentStatus::Failed,
+            "row {at}"
+        );
+        assert_eq!(shown, Some(closed), "row {at}");
+    }
+}
+
 /// A wake task whose message was read before the task ran, as when a restart runs it a
 /// second time, says the message was already delivered rather than pointing at one that
 /// is not there (HB-S5-C).
