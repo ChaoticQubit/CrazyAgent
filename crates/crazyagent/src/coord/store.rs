@@ -186,7 +186,7 @@ pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), Engine
         )
         .map_err(state)?;
     }
-    for table in ["coord_activity", "coord_tool_use"] {
+    for table in ["coord_activity", "coord_tool_use", "coord_tool_hours"] {
         db.execute(
             &format!(
                 "DELETE FROM {table} WHERE agent IN (SELECT id FROM team_agents
