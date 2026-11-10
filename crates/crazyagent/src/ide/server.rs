@@ -256,7 +256,7 @@ impl Servers {
     /// once the server listens on 127.0.0.1 and no other process holds its port. The server
     /// runs at the project's saved access level ([`super::workspace::ide_policy`]), under its
     /// Seatbelt profile from [`sandbox::profile`] below Full access; one left running under a
-    /// level or network the owner has since changed is stopped first. A start reads the
+    /// level, network or hooks switch the owner has since changed is stopped first. A start reads the
     /// owner's local model ports for that profile to keep ([`super::workspace::kept_ports`]),
     /// and settings that do not read stop it. Where no sandbox is qualified it never starts. The idle watch starts with the launch, so a launch whose
     /// open is cut while it starts is still stopped once it exits, idles or misses its start
@@ -422,6 +422,11 @@ impl Servers {
             finish(running).await;
         }
         stopped
+    }
+
+    /// The projects the register holds a slot for, at most `PROJECTS_MAX`. Output: their ids.
+    pub fn projects(&self) -> Vec<ProjectId> {
+        locked(&self.slots).keys().cloned().collect()
     }
 
     /// Stops a project's server when the owner's saved policy no longer fits the one it

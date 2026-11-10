@@ -67,10 +67,12 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
 /// applied setup run starts installing in the background, and every removal, applied or
-/// not, sweeps the folders and secrets it moved aside or left, and an applied agent policy
-/// reaches the project's open IDE. Inputs: the engine, its authority, the request, its
-/// reply and the exchange deadline. Output: the reply, with the dependencies filled in for
-/// a setup status read.
+/// not, sweeps the folders and secrets it moved aside or left, an applied agent policy
+/// reaches the project's open IDE, and a Reconcile answered Committed with an applied result
+/// reaches every open IDE, since a Save's lost reply leaves that the only call after its
+/// commit and its answer names no project. Inputs: the engine, its authority, the request,
+/// its reply and the exchange deadline. Output: the reply, with the dependencies filled in
+/// for a setup status read.
 pub(super) async fn after_owner(
     engine: &Engine,
     authority: &Arc<Authority>,
@@ -117,6 +119,11 @@ pub(super) async fn after_owner(
         ) if matches!(operation.result, OwnerResult::Applied) => {
             follow_saved_level(authority, project_id.clone());
         }
+        (OwnerOperation::Reconcile { .. }, OwnerResponse::Committed { operation })
+            if matches!(operation.result, OwnerResult::Applied) =>
+        {
+            follow_saved_levels(authority);
+        }
         _ => {}
     }
     Ok(reply)
@@ -136,6 +143,18 @@ fn follow_saved_level(authority: &Arc<Authority>, project: crate::protocol::Proj
 
 #[cfg(not(unix))]
 fn follow_saved_level(_authority: &Arc<Authority>, _project: crate::protocol::ProjectId) {}
+
+/// Compares every project's open IDE with its saved policy, each in the background so a
+/// launch holding one project's start lock never delays another's stop. Input: the authority.
+#[cfg(unix)]
+fn follow_saved_levels(authority: &Arc<Authority>) {
+    for project in authority.ide_servers.projects() {
+        follow_saved_level(authority, project);
+    }
+}
+
+#[cfg(not(unix))]
+fn follow_saved_levels(_authority: &Arc<Authority>) {}
 
 fn start_check(root: &Path) {
     let begin = progress::with(root, |state| {
