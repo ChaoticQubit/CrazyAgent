@@ -680,6 +680,26 @@ fn a_sandbox_refuses_to_plant_a_checkout_the_owner_git_would_enter() {
     assert!(evil.join("config").is_file());
 }
 
+/// SECAUDIT-WORKTREE-ADMIN-PLANT: a project-writable sandbox may make a folder in
+/// `.git/worktrees` but not the `gitdir` or `commondir` file that registers it, in any
+/// letter case, since the owner's `git worktree repair` would point a real checkout at it.
+#[test]
+fn a_sandbox_refuses_to_register_a_planted_worktree_admin_folder() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let admin = case.project.join(".git").join("worktrees").join("planted");
+    let made = run(&sandbox, &profile, &format!("mkdir {}", quoted(&admin)));
+    assert!(made.status.success(), "{made:?}");
+    for name in ["gitdir", "commondir", "GITDIR", "CommonDir"] {
+        let target = admin.join(name);
+        write_refused(
+            &sandbox,
+            &profile,
+            &format!(": > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
 #[test]
 fn a_sandbox_refuses_writes_to_the_submodule_store() {
     let (case, sandbox, profile, _worktree) = git_case();
