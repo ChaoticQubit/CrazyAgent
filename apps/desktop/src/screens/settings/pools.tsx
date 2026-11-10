@@ -520,8 +520,9 @@ function usePoolEdits(apply: ApplyChange, accounts: Loaded<AccountView[]>, refus
 }
 
 /** Settings, Pools: the one screen, adding, removing, renaming, a new pool and Delete pool; the
- * pools, the accounts, the order and the limits are read again once a minute. Input: whether the
- * page was opened to start a new pool. */
+ * pools, the accounts and the limits are read again once a minute, and the order too unless a
+ * change waits, since the queue reads it when it drains. Input: whether the page was opened to
+ * start a new pool. */
 export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
   const [pools, reload] = useLoad(poolSummaries, [], "pool-summaries");
@@ -537,7 +538,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const [removing, setRemoving] = useState(false);
   const [preparing, setPreparing] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string>();
-  const { saved, apply } = usePoolChanges((poolsMoved) => {
+  const { saved, apply, changing } = usePoolChanges((poolsMoved) => {
     rereadSchedule();
     rerank();
     if (poolsMoved) { reload(); rereadAccounts(); }
@@ -545,14 +546,11 @@ export function Pools({ creating }: { creating: boolean }) {
   const edits = usePoolEdits(apply, accounts, setRefusal, setSelected);
   const read = pools.kind === "ok" ? pools.value : [];
   const draft = edits.draft?.id && read.some((item) => item.id === edits.draft?.id) ? null : edits.draft;
-  const opened = useRef(false);
   useEffect(() => {
     if (edits.draft !== null && draft === null) edits.drop();
   }, [draft, edits.draft]);
   useEffect(() => {
-    if (!creating) { opened.current = false; return; }
-    if (opened.current || pools.kind !== "ok" || accounts.kind === "loading") return;
-    opened.current = true;
+    if (!creating || pools.kind !== "ok" || accounts.kind === "loading") return;
     const taken = takePoolDraft();
     navigate({ name: "settings", tab: "pools" }, true);
     const names = pools.value.map((item) => item.name);
@@ -561,7 +559,13 @@ export function Pools({ creating }: { creating: boolean }) {
     setAdding(true);
   }, [creating, pools.kind, accounts.kind]);
   useEffect(() => {
-    const timer = setInterval(() => { setNowMs(Date.now()); reload(); rereadAccounts(); rerank(); rereadUsage(); }, REREAD_MS);
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+      reload();
+      rereadAccounts();
+      if (!changing()) rerank();
+      rereadUsage();
+    }, REREAD_MS);
     return () => clearInterval(timer);
   }, []);
   const limits: Loaded<AccountLimits[]> = usage.kind === "ok" ? { kind: "ok", value: usage.value.limits } : usage;

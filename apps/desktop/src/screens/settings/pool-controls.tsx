@@ -31,8 +31,8 @@ export type ApplyChange = (made: MadeChange) => Promise<Result<string | null>>;
  * change reads the schedule first, because a save answers with no version and the engine refuses
  * a change naming an old one. The reads after run once, when no change is left waiting, so a burst
  * never shows a half-done state. Inputs: the re-read of the page, told whether a pool's own record
- * moved, and where a refusal is said. Output: the saved line and `apply`. */
-export function usePoolChanges(reread: (poolsMoved: boolean) => void, refused: (sentence: string | undefined) => void): { saved: string | undefined; apply: ApplyChange } {
+ * moved, and where a refusal is said. Output: the saved line, `apply` and whether a change waits. */
+export function usePoolChanges(reread: (poolsMoved: boolean) => void, refused: (sentence: string | undefined) => void): { saved: string | undefined; apply: ApplyChange; changing: () => boolean } {
   const session = useAppSession();
   const [saved, setSaved] = useState<{ text: string } | null>(null);
   const tail = useRef<Promise<unknown>>(Promise.resolve());
@@ -80,7 +80,7 @@ export function usePoolChanges(reread: (poolsMoved: boolean) => void, refused: (
     return answer;
   };
 
-  return { saved: saved?.text, apply };
+  return { saved: saved?.text, apply, changing: () => waiting.current > 0 };
 }
 
 /** Holds a pick on its control and queues its change, letting go of the pick when the engine
