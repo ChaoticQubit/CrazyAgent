@@ -93,6 +93,8 @@ test("the input area is between the last two rules, or with no box from the last
   assert.deepEqual(reply.inputRows([`  ${RULE}  `, "> a", `${RULE} note`, RULE]), ["> a", `${RULE} note`]);
   assert.deepEqual(reply.inputRows(["\u203a old message", `${DOT} reply`, "\u203a typed", "  more", "footer"]), ["\u203a typed", "  more", "footer"]);
   assert.deepEqual(reply.inputRows(["nothing to type into"]), []);
+  assert.deepEqual(reply.inputRows(["> an older message", "Do you want to proceed?", " \u276f 1. Yes", "   2. No"]), []);
+  assert.deepEqual(reply.inputRows([RULE, "> 1. Yes", "  2. No", RULE]), []);
 });
 
 test("a paste waits while the input area holds its start or the placeholder, wherever that area has moved", () => {
@@ -149,9 +151,18 @@ test("a sent message echoed on the row it was typed on, with the box moved below
 test("a dialog drawn in place of the input box is not read as sent", async () => {
   const DIALOG = ["Do you trust the files in this folder?", "  1. Yes, continue", "  2. No, exit", "Enter to confirm"];
   const terminal = fakeTerminal((seen) => (seen.presses > 0 ? DIALOG : seen.pasted ? PASTED : IDLE));
-  await assert.rejects(reply.pasteAndSend(terminal, MESSAGE), /after 4 Enter presses: it was not sent/);
-  assert.equal(terminal.seen.presses, reply.ENTER_PRESSES_MAX);
+  await assert.rejects(reply.pasteAndSend(terminal, MESSAGE), /no input area showed after 1 Enter presses: it was not sent/);
+  assert.equal(terminal.seen.presses, 1);
 });
+
+for (const mark of ["\u276f", ">", "\u203a"]) {
+  test(`a picker with a ${mark} cursor drawn in place of the input box is not read as sent and gets no second Enter`, async () => {
+    const PICKER = ["Do you want to proceed?", ` ${mark} 1. Yes`, "   2. No"];
+    const terminal = fakeTerminal((seen) => (seen.presses > 0 ? PICKER : seen.pasted ? PASTED : IDLE));
+    await assert.rejects(reply.pasteAndSend(terminal, MESSAGE), /no input area showed after 1 Enter presses: it was not sent/);
+    assert.equal(terminal.seen.presses, 1);
+  });
+}
 
 test("an input box hidden for a moment after Enter and drawn empty again reads as sent on one press", async () => {
   const terminal = fakeTerminal((seen) => {

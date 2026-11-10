@@ -9226,6 +9226,20 @@ fn a_task_whose_background_command_ends_during_its_turn_ends_with_that_turn() {
     );
 }
 
+/// The stand-in of [`long_background`] with a 2 s command that writes `background.txt` in
+/// the agent's folder and then runs `then`, so the file lands while the turn waits held.
+/// Takes the lines to run after the write. Returns the script.
+#[cfg(target_os = "macos")]
+fn held_background_writes(then: &str) -> String {
+    let done = "    printf done > \"$CLAUDE_CONFIG_DIR/background-done\"\n";
+    let script = long_background(2);
+    assert_eq!(script.matches(done).count(), 1);
+    script.replace(
+        done,
+        &format!("    printf mine > background.txt\n{then}{done}"),
+    )
+}
+
 /// S3 (DEC-119): a task whose turn waited on its background command, which wrote a file,
 /// posts its change set when it ends, holding that file, with no stop of the agent.
 #[cfg(target_os = "macos")]
@@ -9234,9 +9248,19 @@ fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_st
     let fixture = Fixture::new(1);
     choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
     let host = fixture.host();
-    let mut team = check_runtime(&fixture, &host, &mid_turn_background(), None, None);
+    let mut team = check_runtime(&fixture, &host, &held_background_writes(""), None, None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let agent = subs(&fixture)[0];
+    assert!(
+        stand_in_file(&fixture, agent, "held").exists(),
+        "the turn waited held on its command"
+    );
+    let (_, result, _) = check_end(&fixture).unwrap();
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.") && result.contains("Check passed."),
+        "{result}"
+    );
     let landing = crate::landing::open(&fixture.base).unwrap();
     let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
     assert_eq!(sets.len(), 1, "{sets:#?}");
@@ -9287,18 +9311,24 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
     let git = format!(
         "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
     );
-    let write = "    printf mine > background.txt\n";
-    let script = mid_turn_background().replace(
-        write,
-        &format!(
-            "{write}    {git} add background.txt > /dev/null 2>&1\n    {git} commit -q -m work > /dev/null 2>&1\n    printf $? > \"$CLAUDE_CONFIG_DIR/commit-code\"\n"
-        ),
-    );
+    let script = held_background_writes(&format!(
+        "    {git} add background.txt > /dev/null 2>&1\n    {git} commit -q -m work > /dev/null 2>&1\n    printf $? > \"$CLAUDE_CONFIG_DIR/commit-code\"\n"
+    ));
     assert!(script.contains("commit-code"));
     let host = fixture.host();
     let mut team = check_runtime(&fixture, &host, &script, None, None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let agent = subs(&fixture)[0];
+    assert!(
+        stand_in_file(&fixture, agent, "held").exists(),
+        "the turn waited held on its command"
+    );
+    let (_, result, _) = check_end(&fixture).unwrap();
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.") && result.contains("Check passed."),
+        "{result}"
+    );
     assert_eq!(
         std::fs::read_to_string(stand_in_file(&fixture, agent, "commit-code")).unwrap(),
         "0",

@@ -745,7 +745,7 @@ impl TerminalSession {
             }
             let event = match fact {
                 TranscriptEvent::Interrupted | TranscriptEvent::TurnError { .. }
-                    if self.over_hold && !self.background.is_empty() =>
+                    if self.over_hold =>
                 {
                     continue;
                 }
@@ -760,13 +760,16 @@ impl TerminalSession {
                         self.held = true;
                         continue;
                     }
+                    let success = success || self.over_hold;
                     self.held = false;
                     self.over_hold = false;
                     self.turn = false;
                     LaunchEvent::TurnFinished { success }
                 }
                 TranscriptEvent::TurnStarted => {
-                    self.over_hold |= self.held;
+                    if self.held {
+                        self.over_hold = !self.background.is_empty();
+                    }
                     self.held = false;
                     continue;
                 }

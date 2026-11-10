@@ -373,10 +373,10 @@ fn the_sandboxed_terminal_cannot_commit() {
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
-/// Runs a confined IDE terminal's pane as the host would and answers what it says first, which
-/// is printed inside the pane because the pane host repaints the terminal as it attaches and
-/// wipes anything written from outside. Inputs: the project's level and the terminal's.
-/// Output: the pane's first line.
+/// Runs a confined IDE terminal's pane as the host would, pins that its shell then starts,
+/// and answers what it says first, which is printed inside the pane because the pane host
+/// repaints the terminal as it attaches and wipes anything written from outside. Inputs: the
+/// project's level and the terminal's. Output: the pane's first line.
 #[cfg(target_os = "macos")]
 fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
     let case = Case::new();
@@ -398,17 +398,20 @@ fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
         project_access,
     )
     .unwrap();
+    let typed = case.root.join("typed");
+    std::fs::write(&typed, "echo started\n").unwrap();
     let mut command = std::process::Command::new(&pane.argv[0]);
     command
         .args(&pane.argv[1..])
         .current_dir(&pane.cwd)
         .env_clear()
         .envs(pane.env.iter().map(|(name, value)| (name, value)))
-        .stdin(std::process::Stdio::null())
+        .stdin(std::fs::File::open(&typed).unwrap())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(said.lines().nth(1), Some("started"), "{output:?}");
     said.lines().next().unwrap_or_default().to_owned()
 }
 

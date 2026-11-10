@@ -139,6 +139,9 @@ const RULE_ROW = /^\s*\u2500+\s*$/;
 /** A row that opens with a prompt mark, where a harness with no ruled box takes input. */
 const PROMPT_ROW = /^\s*[\u203a\u276f>]/;
 
+/** A picker's row under its cursor: the same mark, then an option number. */
+const PICKER_ROW = /^\s*[\u203a\u276f>]\s*\d+\./;
+
 /** The first characters of a message, by which its paste is known. Input: the text. Output:
  * the start of its first line; throws for a message with no text, which every row would match. */
 export function messageStart(text) {
@@ -149,12 +152,13 @@ export function messageStart(text) {
 
 /** Picks a harness's input area off its screen by what the rows say: between the last two rule
  * rows, as leader/tell.sh reads it, or with no ruled box from the last prompt row to the bottom.
- * Input: the terminal rows. Output: those rows, none when no input area shows. */
+ * A picker's cursor row means a dialog holds the screen. Input: the terminal rows. Output: those
+ * rows, none when no input area shows. */
 export function inputRows(rows) {
   const rules = rows.flatMap((row, at) => (RULE_ROW.test(row) ? [at] : []));
-  if (rules.length >= 2) return rows.slice(rules.at(-2) + 1, rules.at(-1));
   const prompt = rows.findLastIndex((row) => PROMPT_ROW.test(row));
-  return prompt < 0 ? [] : rows.slice(prompt);
+  const area = rules.length >= 2 ? rows.slice(rules.at(-2) + 1, rules.at(-1)) : rows.slice(prompt < 0 ? rows.length : prompt);
+  return area.some((row) => PICKER_ROW.test(row)) ? [] : area;
 }
 
 /** Says whether a paste still sits in the input area: its start or the paste placeholder shows
@@ -183,25 +187,34 @@ async function steadyPaste(terminal, start) {
 /** Pastes a message and presses Enter until its turn has started: a long paste followed at once
  * by Enter can sit unsent, and a first Enter can only clear a notice. The turn has started when
  * the caller's read says so or, with no such read, once an input area shows without the
- * paste; a dialog drawn in the box's place is no input area. Inputs:
+ * paste; a dialog drawn in the box's place is no input area and gets no further Enter, which
+ * would accept its choice. Inputs:
  * the terminal, { rows, paste, enter, pause }, the message and the read for a terminal that draws
  * no echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
 export async function pasteAndSend(terminal, text, started) {
   const start = messageStart(text);
   await terminal.paste();
   if (!started) await steadyPaste(terminal, start);
+  let area = true;
   const begun = started ?? (async () => {
     const rows = await terminal.rows();
-    return inputRows(rows).length > 0 && !pasteWaiting(start, rows);
+    area = inputRows(rows).length > 0;
+    return area && !pasteWaiting(start, rows);
   });
-  for (let presses = 1; presses <= ENTER_PRESSES_MAX; presses += 1) {
-    await terminal.enter();
+  let presses = 0;
+  for (let rounds = 0; rounds < ENTER_PRESSES_MAX; rounds += 1) {
+    if (area) {
+      await terminal.enter();
+      presses += 1;
+    }
     for (let reads = 0; reads < ENTER_READS_MAX; reads += 1) {
       await terminal.pause();
       if (await begun()) return presses;
     }
   }
-  throw new Error(`the paste stayed in the master's input area after ${ENTER_PRESSES_MAX} Enter presses: it was not sent`);
+  throw new Error(area
+    ? `the paste stayed in the master's input area after ${presses} Enter presses: it was not sent`
+    : `no input area showed after ${presses} Enter presses: it was not sent`);
 }
 
 /** Sends one message to the live master as the owner does: through the message box when the
