@@ -145,7 +145,8 @@ test("By agent draws once an agent the usage read lists with no tokens and the e
     usage: { kind: "ok", value: { ...usage(), total: tokens({}), agents: [row("team-9", { tokens: tokens({}) })] } },
     metrics: { kind: "ok", value: metrics({ agents: [ash] }) },
   });
-  assert.equal([...markup.matchAll(/class="mx-row"/gu)].length, 1, tableText(markup));
+  const body = markup.slice(markup.indexOf("<tbody"), markup.indexOf("</tbody>"));
+  assert.equal([...body.matchAll(/<tr>/gu)].length, 1, tableText(markup));
 });
 
 test("By run titles each run by its task and shows its agent, end and result", () => {
