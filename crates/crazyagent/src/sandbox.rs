@@ -776,6 +776,7 @@ pub struct ProjectSandbox {
     teammates: bool,
     answers: Option<PathBuf>,
     setup: Option<TeammatesSetup>,
+    lead_branch: Option<String>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -850,6 +851,7 @@ impl ProjectSandbox {
             teammates: false,
             answers: None,
             setup: None,
+            lead_branch: None,
         })
     }
 
@@ -1114,17 +1116,43 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Names the branch a clone lead works on, as the engine records it, so its native
+    /// teammates write only the refs of its `<branch>--<name>` teammate branches in the
+    /// clone, never the lead's own (AGENT-REF-ALLOW-NARROW). Input: an agent branch, as
+    /// [`crate::agent_git::is_agent_branch`] says. Output: the sandbox, or `Invalid` before
+    /// [`Self::confine_to_clone`], a second time or for any other branch.
+    pub fn lead_branch(mut self, branch: &str) -> Result<Self, SandboxError> {
+        if self.clone.is_none() || self.lead_branch.is_some() {
+            return Err(invalid(
+                "only a clone lead's sandbox names its branch, once",
+            ));
+        }
+        if !crate::agent_git::is_agent_branch(branch) {
+            return Err(invalid("the lead's branch must be an agent branch"));
+        }
+        self.lead_branch = Some(branch.to_owned());
+        Ok(self)
+    }
+
     /// Confines the engine's own git, run with a linked lead's rights, to adding the lead's
     /// native teammates' linked worktrees (OP-9b): it writes only the teammates' folder of
     /// the lead's worktree, the project repository's `.git/worktrees` records and the refs
-    /// and reflogs of `crazyagent/<task>--<name>` teammate branches with their `crazyagent`
-    /// folders, beside the lead's home and temp dir; the project stays readable. Makes the teammates' folder as a plain
-    /// folder. Input: the lead's canonical linked worktree in `worktrees/`, whose `.git`
-    /// link names a record in `.git/worktrees`. Output: the confined sandbox, `Invalid` or
-    /// the disk error.
-    pub fn confine_to_teammates_setup(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+    /// and reflogs of the lead's own `<branch>--<name>` teammate branches with their
+    /// `crazyagent` folders (AGENT-REF-ALLOW-NARROW), beside the lead's home and temp dir;
+    /// the project stays readable. Makes the teammates' folder as a plain folder. Inputs:
+    /// the lead's canonical linked worktree in `worktrees/`, whose `.git` link names a
+    /// record in `.git/worktrees`, and its agent branch as the engine records it. Output:
+    /// the confined sandbox, `Invalid` or the disk error.
+    pub fn confine_to_teammates_setup(
+        mut self,
+        worktree: &Path,
+        branch: &str,
+    ) -> Result<Self, SandboxError> {
         if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
+        }
+        if !crate::agent_git::is_agent_branch(branch) {
+            return Err(invalid("the lead's branch must be an agent branch"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
@@ -1164,6 +1192,7 @@ impl ProjectSandbox {
         );
         self.read_roots.push(self.project_root.clone());
         self.setup = Some(TeammatesSetup { folder, records });
+        self.lead_branch = Some(branch.to_owned());
         Ok(self)
     }
 
@@ -1495,7 +1524,7 @@ impl ProjectSandbox {
             return String::new();
         }
         match (&self.clone, &self.checkout) {
-            (Some(clone), _) => teammates_clone_denies(clone),
+            (Some(clone), _) => teammates_clone_denies(clone, self.lead_branch.as_deref()),
             (None, Some(checkout)) => {
                 let worktree = checkout.worktree.display();
                 let root = seatbelt_pattern(&checkout.worktree);
@@ -1758,11 +1787,13 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
         }
         text.push_str(")\n");
-        if self.setup.is_some() {
+        assert!(self.setup.is_none() || self.lead_branch.is_some());
+        if let (Some(_), Some(branch)) = (&self.setup, &self.lead_branch) {
             text.push_str(&format!(
-                "(allow file-write*\n  (regex #\"^{}/\\.git/(logs/)?refs/heads/{}(/[a-z0-9-]+--[a-z0-9-]+(\\.lock)?)?$\"))\n",
+                "(allow file-write*\n  (regex #\"^{}/\\.git/(logs/)?refs/heads/({}|{}--[a-z0-9-]+(\\.lock)?)$\"))\n",
                 seatbelt_pattern(&self.project_root),
-                regex_escape(crate::agent_git::LINKED_PREFIX.trim_end_matches('/'))
+                regex_escape(crate::agent_git::LINKED_PREFIX.trim_end_matches('/')),
+                regex_escape(branch)
             ));
         }
         text.push_str("(deny file-read* file-write*");
@@ -2614,27 +2645,38 @@ fn clone_store_denies(clone: &Path) -> String {
 
 /// The writes a clone lead's teammates may not make in the lead's clone (OP-9): anything but
 /// the teammates' folder, the clone's object store, the inside of each worktree record git
-/// keeps in `.git/worktrees`, and the refs and reflogs of `crazyagent/<task>--<name>`
-/// teammate branches; nor the links that tie a teammate worktree to the clone, which the
-/// engine writes with the lead's rights, each name in any letter case; nor the teammates'
-/// folder entry, nor make, move or remove anything directly in it, such as a teammate's
-/// folder, where the engine's lead-rights `git worktree add` writes (OP9B-C1). It must
-/// follow every write allow, since the last match wins.
-/// Input: the clone. Output: the rule text.
-fn teammates_clone_denies(clone: &Path) -> String {
+/// keeps in `.git/worktrees`, and the refs and reflogs of the lead's own `<branch>--<name>`
+/// teammate branches, none when the lead's branch is unknown, never the lead's branch
+/// (AGENT-REF-ALLOW-NARROW); nor the links that tie a teammate worktree to the clone, which
+/// the engine writes with the lead's rights, each name in any letter case; nor the
+/// teammates' folder entry, nor make, move or remove anything directly in it, such as a
+/// teammate's folder, where the engine's lead-rights `git worktree add` writes (OP9B-C1).
+/// It must follow every write allow, since the last match wins.
+/// Inputs: the clone and the lead's branch. Output: the rule text.
+fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
     let path = clone.display();
     let root = seatbelt_pattern(clone);
     let folder = crate::agent_git::TEAMMATES_FOLDER;
     let teammates = any_case(folder);
     let git = any_case(".git");
-    let branches = regex_escape(crate::agent_git::LINKED_PREFIX);
+    let branches = lead
+        .map(|lead| {
+            format!(
+                "\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{}--[a-z0-9-]+(\\.lock)?$\"))",
+                regex_escape(lead)
+            )
+        })
+        .unwrap_or_default();
     let text = format!(
-        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\"))\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{branches}[a-z0-9-]+--[a-z0-9-]+(\\.lock)?$\"))))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
+        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\")){branches}))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
         any_case("worktrees"),
         any_case("commondir"),
         any_case("gitdir")
     );
-    assert_eq!(text.matches("(regex #\"^/").count(), 6);
+    assert_eq!(
+        text.matches("(regex #\"^/").count(),
+        5 + usize::from(lead.is_some())
+    );
     assert_eq!(text.matches("(subpath \"/").count(), 3);
     text
 }
