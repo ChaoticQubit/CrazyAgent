@@ -24244,13 +24244,19 @@ fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() 
     );
 }
 
-/// TEAM-8-R2-L1: a live harness whose pane closes while a process it started in a session of
-/// its own still runs reports both through `live_serve`, with the close last, so the agent
-/// reads as failed and the owner still sees what runs.
+/// TEAM-8-R2-L1: a live harness whose pane closes while a process it started in a group of
+/// its own, still in the pane's session where the stop's listing finds it, runs on reports
+/// both through `live_serve`, with the close last, so the agent reads as failed and the owner
+/// still sees what runs.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_last() {
-    let (problem, running) = ended_native_lead(LEAVING_CLAUDE, |session, host, lead| {
+    let script = LEAVING_CLAUDE.replace(
+        "POSIX::setsid() > 0 or die;",
+        "defined(POSIX::setpgid(0, 0)) or die; $SIG{HUP} = 'IGNORE';",
+    );
+    assert_ne!(script, LEAVING_CLAUDE);
+    let (problem, running) = ended_native_lead(&script, |session, host, lead| {
         let AgentSession::Terminal(session) = session else {
             panic!("the native lead runs in a terminal");
         };
