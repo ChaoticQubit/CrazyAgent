@@ -10,7 +10,6 @@ import { entry } from "../new-project/wizard";
 import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
-import { readMasterInput } from "../../state";
 import { ConversationTab, MasterSettingsButton } from "./conversation";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
@@ -342,7 +341,7 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 /** The live master area in one state: one console whose head names the master, its state
  * and account, then New session and Sessions, which restart the live terminal on a fresh or
  * resumed conversation and start the live master when it is stopped, above the master's
- * terminal filling the rest, typed into as the owner's Master input setting says, under the
+ * terminal filling the rest, typed into as the owner's Terminal input setting says, under the
  * engine's line while that terminal waits to start, or a line while it starts, can't or is
  * stopped; a stopped team (Stop all) says so and offers
  * Start all. An engine that says the master has no terminal app
@@ -351,7 +350,6 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * area's sessions when its owner already holds them and why the owner's Open opened no
  * session, if it did not. Output: the area. */
 export function LiveMasterView({ data, harness, live, onStart, onSession, sessions: held, openNote = null }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; onSession?: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null }) {
-  const [input] = useState(readMasterInput);
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
   const own = useMasterSessions(data.id, held === undefined);
@@ -405,6 +403,6 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
     {live.kind === "running" && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
-    {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded input={input} follow />}
+    {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded follow />}
   </div>;
 }

@@ -81,6 +81,7 @@ test("a panel opened from Waiting on you before the graph reads keeps its termin
   const seen = await withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
+    await evaluate('Fixture.saveInput("both")');
     await evaluate("Fixture.mount(0, 'late')");
     assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, "the inbox read");
     assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, "Open terminal on Ada");
@@ -102,6 +103,7 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
   const steps = await withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
+    await evaluate('Fixture.saveInput("both")');
     await evaluate("Fixture.mount(0, 'ok', [Fixture.runningTask(7)])");
     assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
     assert.equal(await evaluate("Fixture.click('Ada')"), true, "card Ada");

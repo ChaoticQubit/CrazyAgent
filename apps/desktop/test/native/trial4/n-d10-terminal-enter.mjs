@@ -29,7 +29,7 @@ export function oneMessage(rows, [first, second], harness) {
 export const checks = [{
   id: "N-D10", op: ["OP-12"], title: "The master terminal is the harness's own screen; Shift+Enter adds a line and Enter sends",
   why: "owner: \"The master conversation is a chat form, not a terminal. Input is broken, and Enter and Shift-Enter do not behave as in a terminal\"",
-  after: "master-input",
+  after: "hidden-folders",
   run: async (kit) => {
     await kit.tab("conversation");
     const started = await startIfPaused(kit, kit.project());

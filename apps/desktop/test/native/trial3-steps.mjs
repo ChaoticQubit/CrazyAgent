@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { mask } from "./trial3-mask.mjs";
 import { click, says, shown, text, texts, type, unfold } from "./settings-steps.mjs";
 import { MODE, NAME, PROJECT, TEAM_MS, UI_MS, choose, go, graph, hash, inView, lit, paste, pick, project, reopen, run, screen, segment, tab, team, until, waitFor } from "./trial-kit.mjs";
+import { sendToMaster, terminalLive } from "./trial4/n-d8-master-reply.mjs";
 
 const ANSWER = process.env.TRIAL_ANSWER ?? "Hello";
 const POOL = process.env.TRIAL_POOL ?? "";
@@ -13,8 +13,10 @@ const MASTER_MS = Math.min(TEAM_MS, 600000);
 const STOP_MS = Math.min(TEAM_MS, 300000);
 const FIXTURE_INSTRUCTIONS = "# Mandatory workflow\n\nFixture instruction set for the trial 3 offline proof.\n";
 const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" ? Buffer.byteLength(FIXTURE_INSTRUCTIONS) : 12848 };
-export const SETTINGS = { landOn: process.env.TRIAL_LAND_ON ?? "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
+export const SETTINGS = { landOn: process.env.TRIAL_LAND_ON ?? "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https" };
 const RUNNING = ["starting", "idle", "working"];
+/** The kit calls that the trial 4 checks' shared master helpers make. */
+const MASTER_KIT = { paste, until, waitFor };
 const WORKER_BOX = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//label[.//input[@type=\"checkbox\"]]";
 const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is fixing conflicts with main", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
 assert(Number.isFinite(SETUP_MS) && SETUP_MS > 0, "the setup deadline is positive");
@@ -296,26 +298,6 @@ export const TRIAL3_STEPS = [
     },
   },
   {
-    slug: "master-input",
-    it: "shows the message box under the master terminal",
-    title: "Set Master input to Both",
-    why: "The trial prompt is sent from the message box under the live master terminal",
-    action: async () => {
-      await go("#/settings/profile");
-      const options = ["Terminal only", "Message box only", "Both"];
-      await until(async () => {
-        for (const option of options) if (await shown(segment("Master input", option)) && await $(segment("Master input", option)).getAttribute("aria-checked") === "true") run.input = option;
-        return run.input !== null;
-      }, UI_MS, "Master input was never shown with a choice");
-      if (run.input !== SETTINGS.input) await click(segment("Master input", SETTINGS.input));
-      await go("#/settings/process");
-      await go("#/settings/profile");
-      await until(async () => await shown(segment("Master input", SETTINGS.input)) && await $(segment("Master input", SETTINGS.input)).getAttribute("aria-checked") === "true", UI_MS, "Master input did not read back");
-      await inView(segment("Master input", SETTINGS.input));
-      return `Master input reads Both after reopening Settings, Profile (it was ${run.input})`;
-    },
-  },
-  {
     slug: "send-prompt",
     it: "sends the master the trial prompt",
     title: "Send the master the trial prompt",
@@ -325,18 +307,9 @@ export const TRIAL3_STEPS = [
       await tab("conversation");
       const started = await shown("button=Start all");
       if (started) await click("button=Start all");
-      const box = "textarea.tg-composer-input";
-      const send = "//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
-      await until(() => shown(box), UI_MS, "the master's message box was never shown");
-      await paste(box, message);
-      await waitFor(async () => {
-        if ((await $(box).getValue()) !== message) await paste(box, message);
-        const live = await $(send).isEnabled();
-        return { done: live, seen: live ? "the master terminal is live" : mask((await screen()).slice(0, 400)) };
-      }, MASTER_MS, "Send never became enabled with the prompt in the box: the master terminal never went live");
-      await click(send);
-      await until(async () => (await $(box).getValue()) === "", UI_MS, "the message box kept the prompt: it was not sent");
-      return `${started ? "Start all, then " : ""}sent ${Buffer.byteLength(message)} bytes (sha256 ${createHash("sha256").update(message).digest("hex").slice(0, 12)})`;
+      await terminalLive(MASTER_KIT, MASTER_MS);
+      const way = await sendToMaster(MASTER_KIT, message);
+      return `${started ? "Start all, then " : ""}sent ${Buffer.byteLength(message)} bytes by ${way} (sha256 ${createHash("sha256").update(message).digest("hex").slice(0, 12)})`;
     },
   },
   {
@@ -422,19 +395,6 @@ export const TRIAL3_STEPS = [
         const running = nodes.filter((node) => !ended(node));
         return { done: nodes.length > 1 && running.length === 0, seen: `${nodes.length} nodes; still running: ${running.map((node) => `${node.label} ${node.status ?? "open"}`).join(", ") || "none"}` };
       }, STOP_MS, "agents were still running after Stop all");
-    },
-  },
-  {
-    slug: "restore-master-input",
-    it: "puts Master input back",
-    title: "Put Master input back",
-    why: "The owner's own Master input choice comes back after the trial",
-    action: async () => {
-      assert(run.input, "needs the Master input read by the master-input step");
-      await go("#/settings/profile");
-      if (await $(segment("Master input", run.input)).getAttribute("aria-checked") !== "true") await click(segment("Master input", run.input));
-      await until(async () => await $(segment("Master input", run.input)).getAttribute("aria-checked") === "true", UI_MS, "Master input did not go back");
-      return `Master input reads ${run.input} again`;
     },
   },
 ];
