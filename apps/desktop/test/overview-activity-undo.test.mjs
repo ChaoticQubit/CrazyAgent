@@ -79,6 +79,24 @@ test("a merge row with no branch from the engine: Undo reads only the old stored
   assert.match(await confirmFor(unnamed), /Undo this merge on its branch\?/, "the numbered sentence is never read for a branch");
 });
 
+test("Undo shows a branch name's hidden characters as visible escapes, in the confirm and in its note, as the row's words do", { timeout: 60_000 }, async () => {
+  const hidden = "rel‮ease";
+  const shown = "rel\\u202eease";
+  const seen = await steps(`
+    const asked = await Fixture.click(".pj-activity-row button", "Undo merge");
+    if (asked.missed) return { first, asked };
+    const clicked = await Fixture.click("dialog[open] button", "Undo merge");
+    if (clicked.missed) return { first, asked, clicked };
+    const done = await Fixture.answerUndo({ kind: "ok", value: { kind: "landed", commit: "${"f".repeat(40)}", branch: ${JSON.stringify(hidden)} } });
+    return { first, asked, clicked, done };
+  `, [{ ...item(1, "merged_into_main", "The master merged its changes", LOGIN), branch: hidden }]);
+  assert.equal(seen.asked.missed, null, "the merge row has an Undo merge button");
+  assert.ok(seen.asked.dialog.includes(`Undo this merge on ${shown}?`), seen.asked.dialog);
+  assert.ok(seen.asked.dialog.includes(`one new commit on ${shown} that reverts this merge.`), seen.asked.dialog);
+  assert.ok(!seen.asked.dialog.includes("‮"), "the confirm never draws the direction change");
+  assert.equal(seen.done.note, `Undid the merge with one new commit on ${shown}. Later commits stay.`);
+});
+
 test("Undo reverts the merge through the engine, says so and reads the activity again", { timeout: 60_000 }, async () => {
   const undone = [item(5, "undone", "Undid the changes of Master on main: Fix the login", LOGIN), ...ITEMS.slice(0, 3), { ...ITEMS[3], undone: true }];
   const seen = await steps(`
