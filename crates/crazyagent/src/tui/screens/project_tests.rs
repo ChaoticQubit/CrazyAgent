@@ -1417,6 +1417,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -3070,6 +3071,7 @@ fn console_screen() -> ProjectScreen {
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     }));
     screen.context = Some(ProjectContext {
         project_id: project,

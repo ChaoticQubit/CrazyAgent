@@ -138,6 +138,7 @@ fn graph() -> Box<TeamGraph> {
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     })
 }
 
