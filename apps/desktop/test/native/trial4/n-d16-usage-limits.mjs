@@ -1,5 +1,6 @@
 import { UI_MS, lit } from "../trial-kit.mjs";
 import { limitsVerdict, orderVerdict, sameOrder } from "../trial4-usage.mjs";
+import { selectPool } from "../settings-steps.mjs";
 
 const PAGES_MAX = 5;
 
@@ -26,7 +27,7 @@ async function accountNames() {
   throw new Error(`there are more than ${PAGES_MAX * 200} accounts to name`);
 }
 
-/** The limit cards Settings, Usage shows, in screen order. Output: [{ notice, windows }]. */
+/** The limit cards Metrics shows, in screen order. Output: [{ notice, windows }]. */
 function limitCards() {
   return browser.execute(() => [...document.querySelectorAll("section.usage-limits")].map((card) => ({
     notice: card.querySelector(".notice")?.innerText.trim() ?? "",
@@ -51,13 +52,13 @@ function shownNext(label) {
 export const checks = [{
   id: "N-D16",
   op: ["OP-17"],
-  title: "Settings, Usage shows each account's 5-hour and weekly use and reset, and Use it or lose it tries the soonest weekly reset first",
+  title: "Metrics shows each account's 5-hour and weekly use and reset, and Use it or lose it tries the soonest weekly reset first",
   why: "owner: where are the usage limits ... there is no usage pane in the settings",
   after: "end",
   run: async (kit) => {
-    await kit.go("#/settings/usage");
+    await kit.go("#/metrics");
     await kit.until(() => browser.execute(() => document.querySelector("section.usage-limits") !== null || document.body.innerText.includes("No limits read yet")),
-      UI_MS, "Settings, Usage never showed the account limits");
+      UI_MS, "Metrics never showed the account limits");
     const limits = limitsVerdict(await limitCards());
     await kit.inView("section.usage-limits");
     await kit.screen();
@@ -80,11 +81,12 @@ export const checks = [{
     await kit.inView(`//section[@aria-label=${lit(`${name} next accounts`)}]`);
     await kit.screen();
     await kit.go("#/settings/pools");
-    await kit.until(() => browser.execute((id) => document.getElementById(id)?.selectedOptions[0]?.textContent != null, `schedule-${pool.pool}`),
-      UI_MS, "Settings, Pools never showed the pool's account order");
-    const chosen = await browser.execute((id) => document.getElementById(id).selectedOptions[0].textContent, `schedule-${pool.pool}`);
+    await selectPool(name);
+    const picked = () => browser.execute(() => document.querySelector('[role="radiogroup"][aria-label="Account order"] [aria-checked="true"]')?.textContent ?? null);
+    await kit.until(async () => (await picked()) !== null, UI_MS, "Settings, Pools never showed the pool's account order");
+    const chosen = await picked();
     if (!chosen.includes("Use it or lose it")) throw new Error(`the pool's account order reads ${JSON.stringify(chosen)}, not Use it or lose it`);
-    await kit.inView(`//*[@id=${lit(`schedule-${pool.pool}`)}]`);
+    await kit.inView(`//*[@role="radiogroup" and @aria-label=${lit("Account order")}]`);
     await kit.screen();
     return `${limits}; ${order.detail}; its Next accounts list shows that order and its account order reads ${chosen}`;
   },

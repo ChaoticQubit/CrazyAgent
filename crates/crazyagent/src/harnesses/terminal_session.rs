@@ -1,3 +1,4 @@
+use super::codex_folder::{self, Screen};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id,
@@ -54,8 +55,10 @@ pub struct TerminalSession {
     events: usize,
     ready: bool,
     first: Option<FirstScreen>,
+    folder: Option<FolderStep>,
     turn: bool,
     held: bool,
+    over_hold: bool,
     own_held: bool,
     live: bool,
     own: bool,
@@ -75,6 +78,15 @@ pub struct TerminalSession {
 
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
 const KEY_FILE_BYTES_MAX: u64 = crate::model_gateway::relay::KEY_BYTES_MAX as u64;
+
+/// How far a launch Codex opens behind its folder access screen has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderStep {
+    /// The screen has not been seen yet.
+    Waiting,
+    /// The engine pressed Enter once and waits for the input box.
+    Answered,
+}
 
 /// What the engine saw of an app's first screen while it waits for the app to read keys:
 /// the attached stream once an attach worked, when the wait began, whether anything was
@@ -249,6 +261,7 @@ impl TerminalSession {
                 resume: resume.is_some(),
             },
         )?;
+        let folder = codex_folder::behind_a_screen(&command.argv).then_some(FolderStep::Waiting);
         if let Some(team) = installed.as_ref().and_then(Installed::native) {
             interactive::write_teammate_command(&home, &command, &request, team)?;
         }
@@ -305,8 +318,10 @@ impl TerminalSession {
             events: 0,
             ready: false,
             first: None,
+            folder,
             turn: false,
             held: false,
+            over_hold: false,
             own_held: false,
             live: false,
             own: false,
@@ -406,6 +421,7 @@ impl TerminalSession {
         if !self.turn {
             return Err(failure("launch_not_running"));
         }
+        self.over_hold = false;
         if self.held {
             self.held = false;
             self.turn = false;
@@ -563,9 +579,11 @@ impl TerminalSession {
     /// Looks once, without waiting, whether the app reads keys yet by the rule its first
     /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
     /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
-    /// since the first look. A failed look keeps the wait, so the next look tries again
-    /// within the same bound. Output: the answer, the failed look's problem, or
-    /// `launch_closed` once the pane ended.
+    /// since the first look. A Codex launch behind its folder access screen is ready only
+    /// once that screen took its one Enter and the input box is up, and fails instead of
+    /// typing when that does not happen in time. A failed look keeps the wait, so the next
+    /// look tries again within the same bound. Output: the answer, the failed look's
+    /// problem, a folder access failure, or `launch_closed` once the pane ended.
     pub fn poll_ready(&mut self) -> Result<bool, LaunchError> {
         if self.ready {
             return Ok(true);
@@ -576,7 +594,14 @@ impl TerminalSession {
             drawn: false,
             quiet: Instant::now(),
         });
-        if first.started.elapsed() >= READY_WAIT {
+        if let Some(step) = self.folder {
+            if first.started.elapsed() >= codex_folder::SCREEN_WAIT {
+                return Err(failure(match step {
+                    FolderStep::Waiting => codex_folder::SCREEN_MISSING,
+                    FolderStep::Answered => codex_folder::BOX_MISSING,
+                }));
+            }
+        } else if first.started.elapsed() >= READY_WAIT {
             self.ready = true;
             self.first = None;
             return Ok(true);
@@ -608,12 +633,35 @@ impl TerminalSession {
         }
         let ready = first.drawn
             && first.quiet.elapsed() >= READY_QUIET
-            && self.host.input_live(&self.agent).map_err(host_failure)?;
+            && self.host.input_live(&self.agent).map_err(host_failure)?
+            && self.past_folder_screen()?;
         if ready {
             self.ready = true;
             self.first = None;
         }
         Ok(ready)
+    }
+
+    /// Takes a launch one step past Codex's folder access screen: Enter once, only on
+    /// exactly that screen, then the input box. A launch not behind the screen is past it
+    /// already. Output: whether the app can take a prompt, or the failed look's problem.
+    fn past_folder_screen(&mut self) -> Result<bool, LaunchError> {
+        let Some(step) = self.folder else {
+            return Ok(true);
+        };
+        let screen = self.host.screen(&self.agent).map_err(host_failure)?;
+        match (step, codex_folder::read_screen(&screen)) {
+            (FolderStep::Waiting, Screen::Menu) => {
+                self.type_bytes(ENTER)?;
+                self.folder = Some(FolderStep::Answered);
+                Ok(false)
+            }
+            (FolderStep::Answered, Screen::InputBox) => {
+                self.folder = None;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn wait_ready(&mut self, cancel: &AtomicBool) -> Result<(), LaunchError> {
@@ -696,6 +744,11 @@ impl TerminalSession {
                 continue;
             }
             let event = match fact {
+                TranscriptEvent::Interrupted | TranscriptEvent::TurnError { .. }
+                    if self.over_hold =>
+                {
+                    continue;
+                }
                 TranscriptEvent::Text { text } => LaunchEvent::Text { text },
                 TranscriptEvent::ToolUse { name } => LaunchEvent::ToolUse { name },
                 TranscriptEvent::Interrupted => LaunchEvent::Interrupted,
@@ -703,15 +756,20 @@ impl TerminalSession {
                     LaunchEvent::TurnError { rate_limited }
                 }
                 TranscriptEvent::TurnFinished { success } => {
-                    if success && !self.background.is_empty() {
+                    if !self.background.is_empty() && (success || self.over_hold) {
                         self.held = true;
                         continue;
                     }
+                    let success = success || self.over_hold;
                     self.held = false;
+                    self.over_hold = false;
                     self.turn = false;
                     LaunchEvent::TurnFinished { success }
                 }
                 TranscriptEvent::TurnStarted => {
+                    if self.held {
+                        self.over_hold = !self.background.is_empty();
+                    }
                     self.held = false;
                     continue;
                 }
@@ -1058,3 +1116,6 @@ impl AgentSession {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod folder_screen_tests;

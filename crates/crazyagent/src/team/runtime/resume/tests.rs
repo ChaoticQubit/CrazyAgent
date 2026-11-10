@@ -335,6 +335,18 @@ fn resume_note_lists_unknown_outcomes() {
     );
 }
 
+/// The note of an interrupted wake task carries no messages, so it does not quote a task
+/// that says one is at its end (HB-S5-C). Any other task is quoted as it was.
+#[test]
+fn the_note_of_an_interrupted_wake_task_does_not_point_at_a_missing_message() {
+    use crate::team::master::{WAKE_DELIVERED, WAKE_TASK};
+    let work = std::path::PathBuf::from("/nowhere");
+    let task = run("codex", None, &work, None);
+    let written = note(&task, Some(WAKE_TASK));
+    assert!(!written.contains(WAKE_TASK), "{written}");
+    assert!(written.ends_with(WAKE_DELIVERED), "{written}");
+}
+
 #[cfg(target_os = "macos")]
 mod failed {
     use super::super::{RETRY_LATER, RETRY_ONCE};
@@ -1075,6 +1087,13 @@ done
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
         let (task, sub) = fixture.hung(&mut team);
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_reuse_idle(project,mode) VALUES (?1,'on')",
+                [PROJECT],
+            )
+            .unwrap();
         fixture
             .connection
             .execute(

@@ -769,6 +769,7 @@ pub struct ProjectSandbox {
     fixed: Vec<PathBuf>,
     shared: Vec<PathBuf>,
     teammates: bool,
+    answers: Option<PathBuf>,
     setup: Option<TeammatesSetup>,
 }
 
@@ -842,6 +843,7 @@ impl ProjectSandbox {
             fixed: Vec::new(),
             shared: Vec::new(),
             teammates: false,
+            answers: None,
             setup: None,
         })
     }
@@ -1381,7 +1383,9 @@ impl ProjectSandbox {
     /// neither swaps its own listener in there (rv-secreview RH2R2-1). The lead's part of the
     /// relay mailbox is hidden from the teammates but for its `relay.json`, which they only
     /// read, and they never move or re-permission the mailbox or the temp folder holding it
-    /// (relay mailbox forgery C1). Inputs: the three sockets, the canonical tmux program and
+    /// (relay mailbox forgery C1). Neither the lead nor a teammate moves the tool mailbox, so
+    /// no answer is written outside the rule that keeps answers the engine's. Inputs: the
+    /// three sockets, the canonical tmux program and
     /// the teammates' home beside the lead's, its team folders already made, with the
     /// mailbox in the agent temp folder. Output: the lead's and the teammates' sandboxes,
     /// `Invalid`, or `Unavailable` off macOS.
@@ -1437,6 +1441,8 @@ impl ProjectSandbox {
                 .iter()
                 .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
         );
+        let answers = mailbox.clone();
+        teammates.answers = Some(answers.clone());
         teammates.fixed = vec![home.clone(), self.agent_tmp.clone(), mailbox];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
@@ -1444,12 +1450,31 @@ impl ProjectSandbox {
         if teammates.writes(&home) {
             return Err(invalid("a teammates' writable root holds the lead's home"));
         }
-        let lead = self
+        let mut lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
             .reach_unix_socket(mates)?
             .shut_unix_socket(&binding)?;
+        lead.fixed.push(answers.clone());
+        lead.answers = Some(answers);
         Ok((lead, teammates))
+    }
+
+    /// The writes no agent of a native team may make to the engine's answers in the tool
+    /// mailbox the team shares, a reply or the part file it is written under, in any spelling
+    /// the volume folds together. An agent may still remove a reply, as its tool server does
+    /// once it has read one. Output: the rule text, empty for any other profile.
+    fn answers_denies(&self) -> String {
+        let Some(mailbox) = &self.answers else {
+            return String::new();
+        };
+        let rule = format!(
+            "(regex #\"^{}/[^/]+({}|{})$\")",
+            seatbelt_pattern(mailbox),
+            any_case(crate::team::tool::REPLY_SUFFIX),
+            any_case(crate::team::tool::ANSWER_PART_SUFFIX),
+        );
+        format!("(deny file-write* {rule})\n(allow file-write-unlink {rule})\n")
     }
 
     /// The writes a native lead's teammates may not make in the lead's worktree (OP-9,
@@ -1664,7 +1689,11 @@ impl ProjectSandbox {
         self.writable_roots().any(|root| path.starts_with(root))
     }
 
-    /// The Seatbelt profile text for this agent.
+    /// The Seatbelt profile text for this agent. Reading another process's arguments through
+    /// sysctl is refused only with both the named sysctl deny and the explicit `process-info*`
+    /// deny. What stays open: every read of a process of the same sandbox, the list of process
+    /// ids, which carries only ids, and for `nohup`, by its own path, the one read of a process
+    /// outside that it needs to detach from the console. Output: the text.
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
@@ -1673,8 +1702,12 @@ impl ProjectSandbox {
             self.execs.iter().filter(|program| !self.writes(program)),
         ));
         text.push_str("(allow signal (target same-sandbox))\n");
-        text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
+        text.push_str("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))\n");
+        text.push_str("(deny process-info*)\n");
+        text.push_str("(allow process-info* (target same-sandbox))\n");
+        text.push_str("(allow process-info-listpids)\n");
+        text.push_str("(allow process-info-pidinfo (process-path \"/usr/bin/nohup\"))\n");
         text.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
         text.push_str("(allow ipc-posix-sem)\n");
         text.push_str(
@@ -1766,7 +1799,7 @@ impl ProjectSandbox {
         }
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
@@ -1839,6 +1872,8 @@ impl ProjectSandbox {
         }
         let teammates = self.teammates_denies();
         text.push_str(&teammates);
+        let answers = self.answers_denies();
+        text.push_str(&answers);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1858,6 +1893,9 @@ impl ProjectSandbox {
         last.extend(self.shared.iter().map(|folder| shared_denies(folder)));
         if !teammates.is_empty() {
             last.push(teammates);
+        }
+        if !answers.is_empty() {
+            last.push(answers);
         }
         assert!(
             denies_follow_write_allows(&text, &last),

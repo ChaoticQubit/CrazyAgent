@@ -4,11 +4,11 @@ import { graphifyVerdict, tidy } from "../trial4-accounts.mjs";
 /** Reads every Tools row and pack entry of Settings, Pack. Output: rows { section, title,
  * words, on, id }, on and id being the switch's state and id, or null with no switch. */
 function packRows() {
-  return browser.execute(() => [...document.querySelectorAll("main section[aria-label] li.in-row")].filter((node) => node.getClientRects().length).map((row) => {
+  return browser.execute(() => [...document.querySelectorAll("main .set-group .set-row")].filter((node) => node.getClientRects().length).map((row) => {
     const toggle = row.querySelector("button[role=\"switch\"]");
     return {
-      section: row.closest("section").getAttribute("aria-label"),
-      title: row.querySelector("strong")?.textContent.trim() ?? "",
+      section: row.closest(".set-group").querySelector("h3").firstChild.textContent.trim(),
+      title: row.dataset.setting ?? "",
       words: [...row.querySelectorAll(".badge")].map((badge) => badge.textContent.trim()),
       on: toggle ? toggle.getAttribute("aria-checked") === "true" : null,
       id: toggle?.id ?? null,
@@ -26,23 +26,25 @@ async function flip(kit, selector, on) {
 export const checks = [{
   id: "N-D4",
   op: ["OP-49"],
-  title: "Graphify shows once, reads installed when present, and its pack switch turns off and on",
+  title: "Graphify shows once, reads installed when present, and, on a fixture, its pack switch turns off and on",
   why: "owner: \"since it's default, I couldn't even uncheck the box\"",
   after: "end",
   run: async (kit) => {
     await kit.go("#/settings/pack");
-    await kit.until(async () => await shown("section[aria-label=\"Tools\"]") && (await packRows()).some((row) => row.section !== "Tools"), kit.UI_MS, "Settings, Pack never showed its tools and pack entries");
+    await kit.until(async () => await shown("//section[contains(@class, \"set-group\")][.//h3[normalize-space(.)=\"Tools\"]]") && (await packRows()).some((row) => row.section !== "Tools"), kit.UI_MS, "Settings, Pack never showed its tools and pack entries");
     const { tool, entry } = graphifyVerdict(await packRows());
     if (!/^pack-[a-z0-9_-]+$/u.test(entry.id ?? "")) throw new Error(`the Graphify pack switch has an unexpected id ${entry.id}`);
     const selector = `#${entry.id}`;
     await kit.inView(selector);
     await kit.screen();
+    const seen = `${tool.title} reads ${tool.words.join(", ")} once among the tools; ${entry.title} shows once in ${entry.section}`;
+    if (kit.MODE !== "fixture") return `${seen} and its switch reads ${entry.on ? "on" : "off"}; a live run leaves the owner's switch alone`;
     return tidy(async () => {
       await flip(kit, selector, !entry.on);
       await kit.screen();
       await flip(kit, selector, entry.on);
       await kit.screen();
-      return `${tool.title} reads ${tool.words.join(", ")} once among the tools; ${entry.title} shows once in ${entry.section} and its switch went ${entry.on ? "off and back on" : "on and back off"}`;
+      return `${seen} and its switch went ${entry.on ? "off and back on" : "on and back off"}`;
     }, async () => {
       if (await $(selector).getAttribute("aria-checked") !== String(entry.on)) await flip(kit, selector, entry.on);
     });

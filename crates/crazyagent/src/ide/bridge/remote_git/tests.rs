@@ -937,3 +937,75 @@ fn a_git_command_past_its_limit_is_killed_and_its_outcome_unknown() {
     );
     drop(silent);
 }
+
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: every later git the engine runs
+/// names the project's git folder as its common folder, so a `commondir` planted after the
+/// check redirects none of them.
+#[test]
+fn a_commondir_planted_after_the_check_redirects_no_later_git() {
+    let project = Project::new();
+    let store = project.root.join("store");
+    for name in ["objects", "refs"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    std::fs::write(
+        store.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n[probe]\n\tvalue = planted\n",
+    )
+    .unwrap();
+    ok(&project.folder, &["config", "probe.value", "project"]);
+    std::fs::write(
+        project.folder.join(".git").join("commondir"),
+        format!("{}\n", store.display()),
+    )
+    .unwrap();
+    let done = ran(
+        git(
+            &project.folder,
+            &project.env(),
+            &["config", "--get", "probe.value"],
+        ),
+        4096,
+        LIMIT,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&done.stdout).trim(), "project");
+}
+
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: a `commondir` planted in the
+/// project's `.git`, in any spelling the volume folds together, cannot send the engine's git
+/// to another folder's config and run a command from it.
+#[test]
+fn a_planted_commondir_runs_no_command_from_another_folder_s_config() {
+    let project = Project::new();
+    std::fs::write(project.root.join("CaseProbe"), "").unwrap();
+    let names: &[&str] = if project.root.join("caseprobe").exists() {
+        &["commondir", "COMMONDIR"]
+    } else {
+        &["commondir"]
+    };
+    let store = project.root.join("store");
+    for name in ["objects", "refs"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    let marker = project.root.join("ssh-ran");
+    std::fs::write(
+        store.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tsshCommand = touch {}\n[remote \"origin\"]\n\turl = ssh://dummy.invalid/x.git\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for name in names {
+        let planted = project.folder.join(".git").join(name);
+        std::fs::write(&planted, format!("{}\n", store.display())).unwrap();
+        assert_eq!(
+            refused(project.git(&["ls-remote", "origin"])),
+            "ide_git_config_refused",
+            "{name}"
+        );
+        assert!(!marker.exists(), "{name}");
+        std::fs::remove_file(&planted).unwrap();
+    }
+}

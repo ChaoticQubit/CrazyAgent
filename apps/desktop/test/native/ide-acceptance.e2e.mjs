@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -11,40 +11,28 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, closedPort, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
+import { BUILD_MS, FOLDER, GIT, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, SETUP_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
-const GIT = "/usr/bin/git";
 const REPO = "seed-shop";
 const AGENT = "agent-builder";
 const AGENT_LABEL = "Ada (@builder) · Codex";
 const AGENT_NAME = "Ada (@builder)";
-const FOLDER = "Project";
-const OWNER_NAME = "IDE Owner";
-const OWNER_EMAIL = "owner@example.invalid";
 const OWNER_LINE = "Owner line typed in the IDE.";
 const AGENT_LINE = "Now with tomatoes.";
 const TYPED = "Owner edit from the IDE";
 const ARROWED = "Owner edit from the real IDE";
-const SETUP_MS = 120000;
-const BUILD_MS = 15 * 60 * 1000;
-const WORKBENCH_MS = 120000;
-const SETTLE_MS = 1500;
+const UNSAVED = "UnsavedOwnerLineBeforeRestart";
+const BACKUP_MS = 3000;
+const STOP_MS = 20000;
+const RESTORE_MS = 20000;
 const PRIMARY = process.platform === "darwin" ? 4 : 2;
 const CTRL = 2;
+const CHAT_KEYS = process.platform === "darwin" ? CTRL | PRIMARY : CTRL | 1;
 const SHIFT = 8;
-const KEYS = { F1: ["F1", 112], Enter: ["Enter", 13], Escape: ["Escape", 27], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39] };
-const LEFTOVER_COMMANDS = ["Chat:", "Inline Chat", "Snooze Inline Suggestions", "Sync Account Policy", "Manage Accounts", "Accounts:", "Show Remote Menu", "Install Remote Development Extensions", "Settings Sync"];
+const LEFTOVER_COMMANDS = ["Terminal: Select Default Profile", "Chat:", "Inline Chat", "Snooze Inline Suggestions", "Sync Account Policy", "Manage Accounts", "Accounts:", "Show Remote Menu", "Install Remote Development Extensions", "Settings Sync"];
 const LOOPBACK = /^(127\.0\.0\.1|localhost|[0-9a-v]{52}\.localhost)$/;
-const IDE_FAILED = /didn't match its published checksum|couldn't be downloaded|couldn't start|stopped while it started|unavailable on/;
-
-/** Runs git with no system or user config, so only the repository's own config counts.
- * Inputs: the folder and git's arguments. Output: git's trimmed stdout. */
-function git(folder, ...args) {
-  const result = spawnSync(GIT, ["-c", "commit.gpgsign=false", ...args], { cwd: folder, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: folder, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
-  assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
-  return result.stdout.trim();
-}
 
 /** Whether something accepts connections on a loopback port. Input: the port. Output: the answer. */
 function listening(port) {
@@ -87,6 +75,8 @@ function ownerRepo(folder, remote, url) {
   git(remote, "init", "-q", "--bare", "-b", "main");
   git(folder, "remote", "add", "origin", url);
   git(folder, "push", "-q", "-u", "origin", "main");
+  git(folder, "config", "--unset", "user.name");
+  git(folder, "config", "--unset", "user.email");
   return git(folder, "rev-parse", "HEAD");
 }
 
@@ -105,184 +95,6 @@ function teamAgent(runtime, project, repo, worktree) {
   } finally {
     store.close();
   }
-}
-
-/** Starts the engine on its root and the end-to-end bridge on its socket. Inputs: the
- * binaries, the engine root, the environment and the evidence folder. Output: both children
- * and the bridge's port and token. */
-async function stack(engineBinary, bridgeBinary, runtime, env, evidence) {
-  const { child: engine } = await launch(engineBinary,
-    ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
-    { ...env }, evidence, "engine", /^ready$/m);
-  const started = await launch(bridgeBinary, [join(runtime, "engine.sock")], { ...env }, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
-  return { engine, bridgeProcess: started.child, bridge: { port: Number(started.match[1]), token: started.match[2] } };
-}
-
-/** Makes the project an owner on the real engine: the owner profile, the projects home,
- * then the folder onboarded with the pool until setup settles. Inputs: the bridge, the
- * projects home, the repository, the pool and the generation counter. Output: the project. */
-async function onboard(bridge, projects, repo, pool, next) {
-  assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects to the test engine");
-  assert.equal((await value(bridge, "desktop_save_owner_profile", { profile: { name: OWNER_NAME }, generation: next() })).outcome, "applied");
-  assert.equal((await value(bridge, "desktop_set_projects_home", { path: projects, generation: next() })).outcome, "applied");
-  const receipt = await value(bridge, "desktop_start_onboarding", { path: repo, pool, generation: next() });
-  assert.equal(receipt.outcome, "applied", `the folder becomes a project: ${JSON.stringify(receipt)}`);
-  for (const deadline = Date.now() + SETUP_MS; ; await pause(POLL_MS * 4)) {
-    const view = await value(bridge, "desktop_onboarding", { id: receipt.project_id });
-    if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
-    assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
-  }
-  return receipt.project_id;
-}
-
-/** The answers for the IDE tab's native-only commands while the frontend runs in a browser:
- * an open asks the real engine through the bridge's `e2e_ide_open` and keeps the server it
- * opened; placing, hiding, closing and focus have no native webview to move here.
- * Inputs: the bridge and the list the opened servers go in. Output: the local answers. */
-function ideAnswers(bridge, opened) {
-  const none = async () => ({ value: null });
-  return {
-    desktop_ide_open: async ({ projectId }) => {
-      const answer = await bridgeCall(bridge, "e2e_ide_open", { projectId });
-      if (!("value" in answer)) return answer;
-      opened.push(answer.value);
-      return { value: null };
-    },
-    desktop_ide_place: none,
-    desktop_ide_hide: none,
-    desktop_ide_close: none,
-    desktop_ide_focus: none,
-  };
-}
-
-/** Builds the workbench address the IDE tab loads: the server's loopback origin with the
- * project's workspace file and the session token read from its 0600 file, as the desktop
- * reads it. Input: the opened server. Output: the URL text. */
-function workbenchUrl(server) {
-  assert.equal(statSync(server.token_path).mode & 0o777, 0o600, "the token file is private to the owner");
-  const token = readFileSync(server.token_path, "utf8").trim();
-  assert.match(token, /^[0-9a-f]{64}$/, "the token file holds one 256-bit token");
-  assert.ok(isAbsolute(server.workspace) && existsSync(server.workspace), "the engine wrote the project's workspace file");
-  const address = new URL(server.url);
-  assert.equal(address.hostname, "127.0.0.1", "the IDE is reached on loopback only");
-  address.pathname = "/";
-  address.search = new URLSearchParams({ workspace: server.workspace, tkn: token }).toString();
-  return address.toString();
-}
-
-/** Real keyboard and mouse input for a DevTools page: keys as the OS sends them, typed text,
- * clicks and hovers at a point. Input: the page. Output: the helpers. */
-function input({ send }) {
-  const key = async (name, modifiers = 0) => {
-    const [code, keyCode] = KEYS[name] ?? [`Key${name}`, name.charCodeAt(0)];
-    const pressed = KEYS[name] ? name : name.toLowerCase();
-    for (const type of ["rawKeyDown", "keyUp"]) {
-      await send("Input.dispatchKeyEvent", { type, key: pressed, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers });
-    }
-  };
-  const text = (value) => send("Input.insertText", { text: value });
-  const hover = ({ x, y }) => send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
-  const click = async ({ x, y }) => {
-    for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
-      await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: type === "mouseMoved" ? 0 : 1 });
-    }
-  };
-  return { key, text, hover, click };
-}
-
-/** The workbench as the owner works it: waiting for what it shows, the F1 palette and its
- * rows, quick input rows, and the Source Control view's commit box and change groups.
- * Inputs: the page, its input helpers and the owner helpers. Output: the helpers. */
-function workbench(page, keys, me) {
-  const until = async (what, expression, ms = STEP_MS) => {
-    const deadline = Date.now() + ms;
-    for (;;) {
-      const seen = await page.evaluate(expression);
-      if (seen) return seen;
-      if (Date.now() > deadline) {
-        await me.capture(`timeout-${what.replace(/[^a-z0-9]+/gi, "-").slice(0, 40)}`);
-        assert.fail(`the owner never saw ${what}`);
-      }
-      await pause(POLL_MS);
-    }
-  };
-  const rows = `(() => {
-    const widget = document.querySelector(".quick-input-widget");
-    if (!widget || !widget.getClientRects().length || widget.style.display === "none") return null;
-    return [...widget.querySelectorAll(".quick-input-list .monaco-list-row")].map((row) => (row.getAttribute("aria-label") ?? row.innerText).replace(/\\s+/g, " ").trim());
-  })()`;
-  const settled = async () => {
-    let last = null;
-    for (const deadline = Date.now() + STEP_MS; Date.now() < deadline; await pause(SETTLE_MS / 3)) {
-      const now = await page.evaluate(rows);
-      if (now !== null && last !== null && JSON.stringify(now) === JSON.stringify(last)) return now;
-      last = now;
-    }
-    return last ?? [];
-  };
-  const palette = async (query) => {
-    await keys.key("F1");
-    await until("the F1 command palette", rows);
-    await keys.text(query);
-    await pause(SETTLE_MS);
-    return settled();
-  };
-  const rowAt = (starts, has = "") => page.evaluate(`(() => {
-    const row = [...document.querySelectorAll(".quick-input-widget .quick-input-list .monaco-list-row")].find((item) => {
-      const label = (item.getAttribute("aria-label") ?? item.innerText).replace(/\\s+/g, " ").trim();
-      return label.startsWith(${JSON.stringify(starts)}) && label.includes(${JSON.stringify(has)});
-    });
-    if (!row) return null;
-    const rect = row.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  })()`);
-  const pick = async (starts, has = "") => {
-    const box = await rowAt(starts, has);
-    if (!box) {
-      await me.capture(`no-row-${starts.replace(/[^a-z0-9]+/gi, "-").slice(0, 30)}`);
-      assert.fail(`no "${starts}" row; the list shows: ${JSON.stringify(await page.evaluate(rows))}`);
-    }
-    await keys.click(box);
-  };
-  const run = async (command) => {
-    await palette(command);
-    await pick(command);
-  };
-  const sidebar = (name) => `(() => {
-    const title = document.querySelector(".part.sidebar .composite.title");
-    return Boolean(title && title.getClientRects().length && ${name}.test(title.textContent));
-  })()`;
-  const commitBox = `(() => {
-    const rows = [...document.querySelectorAll(".scm-view .monaco-list-row")];
-    const named = rows.some((row) => row.querySelector(".scm-provider"));
-    let current = null;
-    for (const row of rows) {
-      const name = row.querySelector(".scm-provider .monaco-icon-name-container")?.textContent?.trim();
-      if (name) current = name;
-      const editor = row.querySelector(".scm-editor");
-      if (editor && editor.getClientRects().length && (!named || current === ${JSON.stringify(FOLDER)})) {
-        const rect = editor.getBoundingClientRect();
-        const text = [...editor.querySelectorAll(".view-line")].map((line) => line.textContent.replace(/\\u00a0/g, " ")).join("\\n");
-        return { x: rect.left + 24, y: rect.top + rect.height / 2, text };
-      }
-    }
-    return null;
-  })()`;
-  const group = (label) => `(() => {
-    const row = [...document.querySelectorAll(".scm-view .monaco-list-row")].find((item) => item.querySelector(".resource-group") && item.innerText.includes(${JSON.stringify(label)}));
-    if (!row) return null;
-    const rect = row.getBoundingClientRect();
-    const action = row.querySelector('.action-label[aria-label="Accept"], .action-label[title="Accept"]');
-    const at = action?.getBoundingClientRect();
-    return { row: { x: rect.left + rect.width / 3, y: rect.top + rect.height / 2 }, action: at && at.width > 0 ? { x: at.left + at.width / 2, y: at.top + at.height / 2 } : null };
-  })()`;
-  const dialogButton = (label) => `(() => {
-    const button = [...document.querySelectorAll(".monaco-dialog-box .monaco-button")].find((item) => item.getClientRects().length && item.textContent.trim() === ${JSON.stringify(label)});
-    if (!button) return null;
-    const rect = button.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  })()`;
-  return { until, rows, palette, pick, run, sidebar, commitBox, group, dialogButton };
 }
 
 /** Lists the processes an engine root started that run the IDE's agent host, which must
@@ -320,6 +132,7 @@ connections = [
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
+  writeFileSync(join(home, ".gitconfig"), `[user]\n\tname = ${OWNER_NAME}\n\temail = ${OWNER_EMAIL}\n`);
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   let generation = 0;
@@ -432,6 +245,37 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.deepEqual(shown.settingsEditors, [], "no settings.json editor opens on a cold start");
       });
 
+      await t.test("the chat shortcut, Open View and the secondary side bar bring back no chat", async () => {
+        assert.ok(server, "blocked: the IDE tab step opened no IDE");
+        const chatShown = `document.querySelectorAll(".interactive-session, .chat-widget, .inline-chat, .interactive-input-part").length`;
+        await page.evaluate(`window.chatKeysSeen = 0; addEventListener("keydown", (event) => { if (event.code === "KeyI" && event.ctrlKey) window.chatKeysSeen += 1; }, true); 1`);
+        await keys.key("I", CHAT_KEYS);
+        await pause(SETTLE_MS);
+        assert.equal(await page.evaluate("window.chatKeysSeen"), 1, "the chat shortcut reached the workbench once");
+        assert.equal(await page.evaluate(chatShown), 0, "the chat shortcut opens no chat");
+        await ide.run("View: Open View");
+        await ide.until("the Open View list", ide.rows);
+        await pause(SETTLE_MS);
+        const views = await page.evaluate(ide.rows);
+        await keys.key("Escape");
+        assert.deepEqual(views.filter((label) => /chat/i.test(label)), [], "Open View lists no chat view");
+        await ide.run("View: Toggle Secondary Side Bar Visibility");
+        await ide.until("the secondary side bar open", `(() => {
+          const bar = document.querySelector(".part.auxiliarybar");
+          return Boolean(bar && bar.getClientRects().length && bar.getBoundingClientRect().width > 0);
+        })()`);
+        await pause(SETTLE_MS);
+        await me.capture("secondary-side-bar");
+        const bar = await page.evaluate(`[...document.querySelectorAll(".part.auxiliarybar [aria-label]")].map((item) => item.getAttribute("aria-label")).filter((name) => /chat/i.test(name) && name !== "Chat actions")`);
+        assert.deepEqual(bar, [], "the opened secondary side bar names no chat but its empty toolbar");
+        assert.equal(await page.evaluate(chatShown), 0, "the opened secondary side bar holds no chat");
+        await ide.run("View: Toggle Secondary Side Bar Visibility");
+        await ide.until("the secondary side bar closed", `(() => {
+          const bar = document.querySelector(".part.auxiliarybar");
+          return !bar || !bar.getClientRects().length || bar.getBoundingClientRect().width === 0;
+        })()`);
+      });
+
       await t.test("the owner opens a project file, types and saves, and the edit is in the project folder", async () => {
         await keys.key("P", PRIMARY);
         await ide.until("quick open", ide.rows);
@@ -463,6 +307,25 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await keys.key("G", CTRL | SHIFT);
         await ide.until("the Source Control view from Ctrl+Shift+G", ide.sidebar(/source control/i));
         await me.capture("source-control");
+      });
+
+      await t.test("Source Control stages and unstages through the engine into the project's real index", async () => {
+        const staged = () => git(repo, "diff", "--cached", "--name-only");
+        const through = async (command, reached, what) => {
+          await ide.run(command);
+          for (const deadline = Date.now() + STEP_MS; !reached(staged()); await pause(POLL_MS)) {
+            const picker = await page.evaluate(ide.rows);
+            if (picker && picker.some((label) => label.includes(REPO))) await ide.pick(REPO);
+            assert.ok(Date.now() < deadline, `${what}: the real index shows ${JSON.stringify(staged())}`);
+          }
+        };
+        const holdsNotes = (list) => list.split("\n").includes("notes.md");
+        assert.equal(staged(), "", "nothing is staged before the IDE stages");
+        await through("Git: Stage All Changes", holdsNotes, "the IDE's stage");
+        await ide.until("the staged group in Source Control", `(document.querySelector(".scm-view")?.textContent ?? "").includes("Staged Changes")`);
+        await me.capture("staged");
+        await through("Git: Unstage All Changes", (list) => list === "", "the IDE's unstage");
+        await through("Git: Stage All Changes", holdsNotes, "the IDE's second stage");
       });
 
       await t.test("the commit box takes typed input and arrow keys, and the IDE commits the owner's edit", async () => {
@@ -555,6 +418,32 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the terminal shows no AI hint");
       });
 
+      const ran = terminalRunner({ ide, keys, me, repo });
+      const answers = async (file) => {
+        const said = await ran(file, `command -v git; git --version; git config user.name; git config user.email; echo "HOME=$HOME"`);
+        const lines = said.split("\n");
+        assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
+        assert.ok(lines.some((line) => line.startsWith("HOME=") && line.includes("/ide-shell/")), `${file}: ${said}`);
+        assert.ok(!lines.includes(OWNER_NAME), `${file}: ${said}`);
+        assert.ok(!lines.includes(OWNER_EMAIL), `${file}: ${said}`);
+        assert.doesNotMatch(said, /fatal|unable to access/, `${file}: ${said}`);
+      };
+
+      await t.test("the project's terminal reads git but cannot stage or commit", async () => {
+        await keys.key("Escape");
+        await ide.run("Terminal: Create New Terminal");
+        await pause(SETTLE_MS);
+        await ide.pick(FOLDER);
+        await ide.until("the project's terminal in the panel", `document.querySelectorAll(".part.panel .xterm").length > 0`);
+        await me.capture("sandboxed-terminal");
+        assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the open terminal shows no AI hint");
+        await answers("sandboxed-terminal-git.txt");
+        const refused = await ran("sandboxed-terminal-refused-git.txt", `echo staged > terminal-refused.txt; git add terminal-refused.txt; echo "add=$?"; git -c user.name=o -c user.email=o@example.invalid commit -q -m no; echo "commit=$?"; git status --porcelain`);
+        assert.match(refused, /^add=[1-9]/m, refused);
+        assert.match(refused, /^commit=[1-9]/m, refused);
+        assert.match(refused, /^\?\? terminal-refused\.txt$/m, refused);
+      });
+
       await t.test("nothing the workbench asked for left the machine, and the agent host never started", async () => {
         const outside = [...requests].filter(([, url]) => {
           const address = new URL(url);
@@ -565,6 +454,40 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           assert.equal(failed.get(id), "csp", `the policy blocked ${url} before it was sent`);
         }
         assert.deepEqual(agentHosts(runtime), [], "no IDE agent host process runs");
+      });
+
+      await t.test("a saved access level restarts the IDE, and the Save's words match what happens to an unsaved edit", async () => {
+        await ide.run("File: New Untitled Text File");
+        await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
+        await keys.text(UNSAVED);
+        await ide.until("the edit marked unsaved", `document.querySelector(".tabs-container .tab.active.dirty") !== null`);
+        await pause(BACKUP_MS);
+        await me.capture("unsaved-before-restart");
+        const view = await value(bridge, "desktop_project_agent_policy", { id: project });
+        const access = view.access === "sandboxed" ? "own_branch" : "sandboxed";
+        const saved = await value(bridge, "desktop_set_project_agent_policy", { id: project, version: view.version, policy: { access, network: view.network, toolchains: [], ide_git_hooks: false }, generation: next() });
+        assert.equal(saved.outcome, "applied", `the level is saved: ${JSON.stringify(saved)}`);
+        for (const deadline = Date.now() + STOP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
+          assert.ok(Date.now() < deadline, "the IDE server kept running after its level was saved");
+        }
+        let asked = false;
+        page.on("Page.javascriptDialogOpening", () => {
+          asked = true;
+          void page.send("Page.handleJavaScriptDialog", { accept: true });
+        });
+        const reopened = await bridgeCall(bridge, "e2e_ide_open", { projectId: project });
+        assert.ok("value" in reopened, `the IDE opens again: ${JSON.stringify(reopened)}`);
+        const origin = await page.evaluate("performance.timeOrigin");
+        await page.send("Page.navigate", { url: workbenchUrl(reopened.value) });
+        await ide.until("the workbench again", `performance.timeOrigin > ${origin} && document.querySelector(".monaco-workbench .part.activitybar") !== null`, WORKBENCH_MS);
+        let back = false;
+        for (const deadline = Date.now() + RESTORE_MS; !back && Date.now() < deadline; await pause(POLL_MS)) {
+          back = await page.evaluate(`[...document.querySelectorAll(".view-line")].some((line) => line.textContent.includes(${JSON.stringify(UNSAVED)}))`);
+        }
+        await me.capture("unsaved-after-restart");
+        writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"} prompt ${asked}\n`);
+        const said = readFileSync(join(appRoot, "src/screens/project/access.tsx"), "utf8").includes("Unsaved edits are lost.");
+        assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
       });
     });
   } finally {

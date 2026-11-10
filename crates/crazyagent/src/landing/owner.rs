@@ -1,7 +1,7 @@
 use super::clone;
 use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
-use super::git::{Repo, failure};
+use super::git::{Repo, Writes, failure};
 use super::store::{self, Intent, Record};
 use super::{
     AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
@@ -266,10 +266,27 @@ fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), Eng
 /// Where an Accept writes: the owner's checked-out branch through the owner's checkout, a
 /// branch checked out nowhere as its ref alone, or an agent's own branch through that
 /// agent's linked worktree.
-enum Target {
+pub(super) enum Target {
     Checkout,
     Ref,
-    Agent(flow::Agent),
+    Agent(Box<flow::Agent>),
+}
+
+/// The checkout an Accept fills and the code it refuses with: the owner's, or an agent's
+/// linked worktree confined to itself, since its agent may still be changing it. Inputs:
+/// the target and the owner's repository. Output: the checkout and its code, none for a ref
+/// alone, or what confining the worktree reported.
+pub(super) fn filled_checkout(
+    target: &Target,
+    owner: &Repo,
+) -> Result<Option<(Repo, &'static str)>, EngineError> {
+    Ok(match target {
+        Target::Checkout => Some((owner.clone(), "changes_owner_dirty")),
+        Target::Ref => None,
+        Target::Agent(agent) => {
+            Some((agent.repo.confined(Writes::WorkTree)?, "changes_agent_busy"))
+        }
+    })
 }
 
 /// Finds the worktree, other than the owner's checkout, that has a branch checked out.
@@ -344,7 +361,7 @@ fn landing_target(
     if agent.branch() != Some(name) {
         return Err(failure("changes_target_checked_out"));
     }
-    Ok((reference, tip, Target::Agent(agent)))
+    Ok((reference, tip, Target::Agent(Box::new(agent))))
 }
 
 /// The branch the master works on and merges harnesses into (DEC-100), with its tip: the
@@ -869,7 +886,8 @@ fn finish(
         };
         super::note_accepted(db, record, by, &closed);
     }
-    if let Err(error) = super::subagent::close_with_lead(db, record) {
+    let owner_pressed = by == By::Named(OWNER_ACTOR);
+    if let Err(error) = super::subagent::close_with_lead(db, record, owner_pressed) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
@@ -1083,7 +1101,7 @@ fn close_covered(db: &Connection, master: &Record, landed: &str) -> Vec<String> 
     let found = sets.len();
     let mut closed = Vec::new();
     for mut record in sets {
-        match super::merges::holds_clean_changes(&owner, landed, &record.head) {
+        match super::merges::holds_set_work(&owner, landed, &record.base, &record.head) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
@@ -1153,9 +1171,11 @@ pub(super) fn accept(
 /// Lands a change set as one squash commit on a target branch, the project's Land on
 /// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
 /// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
-/// for that agent's own branch. Inputs: as [`accept`], plus the target branch and who
-/// accepts, as the project's activity names them. Output: the landed commit and branch, or
-/// the conflicts.
+/// for that agent's own branch. Anyone but the owner is refused with
+/// [`super::WORKER_OPEN`] while a worker below the set's agent holds an open set, since only
+/// the owner's Accept may close that set with it (DEC-107). Inputs: as [`accept`], plus the
+/// target branch and who accepts, as the project's activity names them. Output: the landed
+/// commit and branch, or the conflicts.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn accept_to(
     db: &Connection,
@@ -1195,6 +1215,9 @@ fn accept_held(
         || record.intent.is_some()
     {
         return Err(failure("changes_stale"));
+    }
+    if by != By::Named(OWNER_ACTOR) && super::subagent::has_open_worker(db, &record)? {
+        return Err(failure(super::WORKER_OPEN));
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
@@ -1260,12 +1283,8 @@ fn accept_held(
     if stopped(Step::Recorded) {
         return Err(failure("changes_git_failed"));
     }
-    let written = match &target {
-        Target::Checkout => Some((&owner, "changes_owner_dirty")),
-        Target::Ref => None,
-        Target::Agent(agent) => Some((&agent.repo, "changes_agent_busy")),
-    };
-    if let Some((checkout, refused)) = written
+    let written = filled_checkout(&target, &owner)?;
+    if let Some((checkout, refused)) = &written
         && checkout
             .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
             .code
@@ -1300,12 +1319,7 @@ fn accept_held(
             .is_ok(),
     };
     if !moved {
-        let checkout = match &target {
-            Target::Checkout => Some(&owner),
-            Target::Ref => None,
-            Target::Agent(agent) => Some(&agent.repo),
-        };
-        if let Some(checkout) = checkout
+        if let Some((checkout, _)) = &written
             && checkout.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
         {
             let _ = checkout.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
@@ -1440,18 +1454,38 @@ pub(super) fn undo(
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 
-/// Records a finished undo: every set the undone merge closed (a master's merge closes the
-/// sets its head holds) is marked undone with it, then the set keeps the reverting commit
-/// and drops its intent, its merge rows show Undone and one Undone row names the closed
-/// sets whose work it reverted too. Inputs: the store, the undone set, the reverting commit
-/// and who undid it. Output: Ok once saved.
+/// Records a finished undo: sets accepted with no commit of their own whose work the revert
+/// removed, as [`reverted_work`] says, are marked undone with it, the set keeps the commit
+/// and drops its intent, its merge rows show Undone and one Undone row names those sets. The
+/// reads every set shares run first, so a failed one stops the step for a retry. Inputs: the
+/// store, the undone set, the reverting commit and who undid it. Output: Ok once saved.
 fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Result<(), EngineError> {
     let landed = record
         .landed
         .clone()
         .ok_or_else(|| failure("changes_undo_unavailable"))?;
+    let owner = shared(&record.repository)?;
+    let above = commits_from(&owner, &landed, commit)?;
+    let changed = diff::changed_paths(&owner, &format!("{landed}^1"), &landed)?;
+    let before = owner
+        .commit_of(&format!("{commit}^1"))?
+        .ok_or_else(|| failure("changes_git_failed"))?;
     let mut closed = Vec::new();
-    for mut other in store::closed_in(db, &record.project, &landed, &record.id)? {
+    for mut other in store::closed_without_commit(db, &record.project, &record.id)? {
+        let Some(at) = other.landed.clone().filter(|at| above.contains(at)) else {
+            continue;
+        };
+        let reverted =
+            reverted_work(&owner, [&before, commit], &changed, &other).unwrap_or_else(|error| {
+                eprintln!(
+                    "landing_undo_closed_set_unread cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+                at == landed
+            });
+        if !reverted {
+            continue;
+        }
         other.undone = Some(commit.to_owned());
         store::save(db, &other)?;
         closed.push(other.agent.label);
@@ -1463,6 +1497,38 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
     crate::activity::mark_undone(db, &record.project, record.id.as_str());
     super::note_undo(db, record, &closed, by);
     Ok(())
+}
+
+/// Lists the commits from a landed one up to the commit reverting it on that line, the
+/// landed one included, with one git run. Inputs: the owner repository and both commits.
+/// Output: the commits.
+fn commits_from(owner: &Repo, landed: &str, commit: &str) -> Result<BTreeSet<String>, EngineError> {
+    let range = format!("{landed}..{commit}");
+    let listed = owner.run(&["rev-list", "--ancestry-path", &range])?;
+    let text = std::str::from_utf8(&listed).map_err(|_| failure("changes_git_failed"))?;
+    let mut commits: BTreeSet<String> = text.lines().map(str::to_owned).collect();
+    commits.insert(landed.to_owned());
+    Ok(commits)
+}
+
+/// Tells whether a revert removed a set's work: the reverted commit changed one of the set's
+/// files, the branch held the set's work just before the revert and does not at the
+/// reverting commit. Inputs: the owner repository, the commits before and after the revert,
+/// the paths it changed and the set. Output: the answer, or a read failure of this set.
+fn reverted_work(
+    owner: &Repo,
+    [before, after]: [&str; 2],
+    changed: &[String],
+    set: &Record,
+) -> Result<bool, EngineError> {
+    let own = diff::changed_paths(owner, &set.base, &set.head)?;
+    if !own.iter().any(|path| changed.contains(path)) {
+        return Ok(false);
+    }
+    Ok(
+        super::merges::holds_set_work(owner, before, &set.base, &set.head)?
+            && !super::merges::holds_set_work(owner, after, &set.base, &set.head)?,
+    )
 }
 
 /// Moves an owner ref an Accept or an undo left in flight: by compare and swap when the
@@ -1588,6 +1654,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     record.intent = Some(Intent::Reset {
         from: Some(before.head.clone()),
         target: merged.clone(),
+        earlier: Some(store::Earlier::of(&before)),
     });
     store::save(db, &record)?;
     if !flow::reset_agent(&agent, &before.head, &merged)? {
@@ -1769,9 +1836,11 @@ pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, Engin
 /// an undo is finished or dropped the same way, and an agent worktree reset counts as done
 /// when HEAD already holds its target, is run again only while HEAD still holds the
 /// commit it started from and the worktree holds nothing else, and is dropped otherwise,
-/// so a commit the agent made after it stopped is never moved. The caller holds [`hold`]
-/// on its repository. Inputs: the store and the loaded record. Output: Ok once the stored
-/// record holds no intent.
+/// so a commit the agent made after it stopped is never moved. A closed set's next set
+/// opens above the target once the agent's branch holds it and not the set's head, and a
+/// restore that reached its target does what the live restore does last. The caller holds
+/// [`hold`] on its repository. Inputs: the store and the loaded record. Output: Ok once the
+/// stored record holds no intent.
 fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     match record.intent.clone() {
         Some(Intent::Land {
@@ -1808,7 +1877,11 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 store::save(db, record)?;
             }
         }
-        Some(Intent::Reset { from, target }) => {
+        Some(Intent::Reset {
+            from,
+            target,
+            earlier,
+        }) => {
             let agent = match flow::agent(db, record) {
                 Err(refused) if refused.0 == "changes_workspace_invalid" => None,
                 opened => Some(opened?),
@@ -1819,15 +1892,17 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             {
                 if current == target {
                     reset = true;
-                } else if from.as_deref() == Some(current.as_str())
-                    && (flow::holds_only(&agent.repo, &target)?
-                        || flow::holds_only(&agent.repo, &current)?)
-                {
-                    reset = flow::reset_agent(agent, &current, &target)?;
+                } else if may_finish_reset(agent, record, &current, from.as_deref(), &target)? {
+                    reset = flow::reset_settling(agent, &current, &target)?;
                 }
             }
             if !record.is_open() {
-                let start = if reset { &target } else { &record.head };
+                let reached = reset
+                    || match &agent {
+                        Some(agent) => agent.built_on(&target)? && !agent.built_on(&record.head)?,
+                        None => false,
+                    };
+                let start = if reached { &target } else { &record.head };
                 flow::set_base(
                     db,
                     &record.repository,
@@ -1835,6 +1910,18 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     &record.git_dir,
                     start,
                 )?;
+            } else if let Some(earlier) = earlier {
+                let restoring = earlier.was_discarded();
+                let reached = reset
+                    || match &agent {
+                        Some(agent) => agent.built_on(&target)?,
+                        None => false,
+                    };
+                if !reached {
+                    put_back(record, earlier)?;
+                } else if restoring {
+                    flow::finish_restore(db, record)?;
+                }
             }
             record.intent = None;
             store::save(db, record)?;
@@ -1843,6 +1930,45 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     }
     assert!(record.intent.is_none());
     Ok(())
+}
+
+/// Tells whether a stored reset may still move the agent's HEAD: only from the commit it
+/// recorded, with the worktree holding one of the two; or, for a step stored before resets
+/// recorded that, when the files already hold `target` and HEAD holds the set's head or a
+/// commit behind `target`, so no commit of the agent's leaves its branch. Inputs: the
+/// agent, the set, HEAD, the recorded start and the target. Output: the answer.
+fn may_finish_reset(
+    agent: &flow::Agent,
+    record: &Record,
+    current: &str,
+    from: Option<&str>,
+    target: &str,
+) -> Result<bool, EngineError> {
+    if let Some(from) = from {
+        return Ok(from == current
+            && (flow::holds_only(&agent.repo, target)?
+                || flow::holds_only(&agent.repo, current)?));
+    }
+    Ok(agent.repo.commit_of(target)?.is_some()
+        && flow::holds_only(&agent.repo, target)?
+        && (current == record.head
+            || agent
+                .repo
+                .test(&["merge-base", "--is-ancestor", current, target])?))
+}
+
+/// Puts an open change set back as it was before a reset that did not happen, with its
+/// pending ref, as the step's own refusal does. The caller saves the record. Inputs: the
+/// set and what it held. Output: Ok once the ref is back.
+fn put_back(record: &mut Record, earlier: store::Earlier) -> Result<(), EngineError> {
+    earlier.put_back(record);
+    let pending = record.is_open().then(|| record.head.clone());
+    flow::set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &pending_ref(&record.id),
+        pending.as_deref(),
+    )
 }
 
 /// What the owner's branch tip leaves of one open change set's work (DEC-107): the two
@@ -2161,11 +2287,12 @@ fn show(
 /// [`hold`] on its repository. A gone agent copy closes it as removed outside; against the
 /// tip it lands on (DEC-107), its lead's branch for a lead's worker while Lands is Lead,
 /// else the owner's branch tip, when one is readable, a pending or conflicting set the tip
-/// holds closes as landed outside like an Accept onto that tip, and otherwise its counts
-/// become what is not yet on the tip. Inputs: the store, the change set, the owner
-/// repository with its tip, None while the owner's HEAD is detached, busy or unreadable,
-/// what the set is judged against and the heads its batch check found. Output: the two
-/// trees its diff shows against that tip, None to show its stored change.
+/// holds closes as landed outside like an Accept onto that tip, unless a worker below it
+/// still holds an open set, which no close the owner did not press may discard, and
+/// otherwise its counts become what is not yet on the tip. Inputs: the store, the change
+/// set, the owner repository with its tip, None while the owner's HEAD is detached, busy
+/// or unreadable, what the set is judged against and the heads its batch check found.
+/// Output: the two trees its diff shows against that tip, None to show its stored change.
 fn observe_one(
     db: &Connection,
     id: &ChangeSetId,
@@ -2205,6 +2332,13 @@ fn observe_one(
         }
         Judged::Taken(_) => {
             close_taken(db, &mut record)?;
+            Ok(None)
+        }
+        Judged::Landed if super::subagent::has_open_worker(db, &record)? => Ok(None),
+        Judged::Landed
+            if matches!(against, Against::Lead(_))
+                && !super::merges::holds_changes_since(owner, tip, &record.base, &record.head)? =>
+        {
             Ok(None)
         }
         Judged::Landed => {
@@ -2286,7 +2420,7 @@ fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
 /// Notices what the owner did outside the app to every open change set of one project, or
 /// of every project, one repository at a time under its hold, reading each owner tip once,
 /// each lead's tip once before the hold, and checking every open head with one git run,
-/// after closing lead workers' sets their lead's closed set left open (DEC-107).
+/// after landing lead workers' sets their lead's landed set holds (DEC-107).
 /// A change set that cannot be judged now is logged by its plain code and left as it was.
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.

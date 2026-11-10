@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import * as kit from "./trial-kit.mjs";
-import { CHECKS, TUI_CHECKS, loadChecks, plan } from "./trial4-checks.mjs";
+import { CHECKS, OWNER_MS, TUI_CHECKS, loadChecks, plan, runsIn } from "./trial4-checks.mjs";
 import { TRIAL3_STEPS } from "./trial3-steps.mjs";
 import { startTui } from "../../../../scripts/trial/tui-kit.mjs";
 
@@ -79,7 +79,8 @@ describe(`CrazyAgent trial 4: trial 3 plus ${desktopChecks.length} desktop and $
       continue;
     }
     const title = `${check.id} (${check.op.join(", ")}) ${check.title}`;
-    if (check.surface === "tui") it(title, () => verifyTui(slug, title, check));
+    if (!runsIn(check, kit.MODE, OWNER_MS)) it.skip(`${title} (not taken on this ${kit.MODE} run)`);
+    else if (check.surface === "tui") it(title, () => verifyTui(slug, title, check));
     else it(title, () => kit.step(slug, title, check.why, () => verify(check, checkKit)));
   }
 });

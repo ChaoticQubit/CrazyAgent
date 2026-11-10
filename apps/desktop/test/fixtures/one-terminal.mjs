@@ -6,10 +6,15 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { AgentsTab } from "../../src/screens/project/agents.tsx";
+import { LiveMasterView } from "../../src/screens/project/live-master.tsx";
+import { TeamActivity } from "../../src/screens/project/team-activity.tsx";
+import { WallGrid } from "../../src/screens/terminals/index.tsx";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
-const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", questions: [], release: () => {} };
+let shownData = null;
+const kept = new Map();
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], prompts: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", questions: [], release: () => {} };
 
 /** One open question Brook put to the owner, most urgent first as the engine lists them.
  * Inputs: its id, its urgency and its text. Output: the question. */
@@ -113,6 +118,10 @@ function bridge() {
         return null;
       }
       if (command === "desktop_terminal_resize") return null;
+      if (command === "desktop_terminal_prompt") {
+        engine.prompts.push(args.text);
+        return null;
+      }
       if (command === "desktop_team_cancel") {
         engine.cancels.push(args.task);
         return { generation: args.generation, outcome: "applied", pending: false, rejection: null };
@@ -135,7 +144,7 @@ function bridge() {
  * Inputs: the delay in ms, the graph mode, the tasks, the changes and the view. */
 export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = {}) {
   root?.unmount();
-  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs, graph, questions: view.questions ?? [] });
+  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], prompts: [], callbacks: new Map(), next: new Map(), delayMs, graph, questions: view.questions ?? [] });
   bridge();
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
@@ -150,6 +159,7 @@ export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = 
     assigned: { pool: { id: "pool-a", name: view.pool ?? "Pool A", members: [] } }, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
     team: { result: { kind: "ok", value: teamStatus({ tasks, ...patch }) }, at: 1 }, reloadTeam: () => {},
   };
+  shownData = data;
   flushSync(() => root.render(createElement(AgentsTab, { data, section: view.section })));
 }
 
@@ -367,5 +377,66 @@ export function drawer() {
   return {
     title: open.querySelector("h2")?.textContent ?? "",
     sections: [...open.querySelectorAll("section")].map((item) => item.getAttribute("aria-label") ?? item.querySelector("h3")?.textContent ?? ""),
+  };
+}
+
+/** Gives the page the app's local storage, which this blank test page lacks, holding a
+ * saved input choice under a key, or nothing for an app that never saved one. Inputs: the
+ * choice, or null, and the key, by default the Terminal input setting's own. */
+export function saveInput(choice, key = "crazyagent.terminal-input") {
+  kept.clear();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) },
+  });
+  if (choice !== null) kept.set(key, choice);
+}
+
+/** The prompts the owner sent from a message box, as the engine got them. Output: their texts. */
+export function sentPrompts() {
+  return engine.prompts;
+}
+
+/** Opens one agent's terminal through one real door of the app: "agents" clicks its graph
+ * card, "wall" draws the wall window's tiles, "activity" clicks its Team activity row and
+ * "master" draws the running Master tab. Inputs: the door and the agent's name. */
+export async function openDoor(door, name) {
+  mount(0);
+  if (door === "agents") {
+    await until(() => document.querySelectorAll(".tg-card-open").length === 4);
+    click(name);
+  } else if (door === "wall") {
+    flushSync(() => root.render(createElement(WallGrid, { projectId: "alpha", tiles: TEAM.nodes, nodes: TEAM.nodes, perWindow: 4, onStop: () => {} })));
+  } else if (door === "activity") {
+    flushSync(() => root.render(createElement(TeamActivity, { data: shownData, children: null })));
+    await until(() => document.querySelector(".ta-row") !== null);
+    [...document.querySelectorAll(".ta-row")].find((row) => row.textContent.includes(name))?.click();
+  } else {
+    flushSync(() => root.render(createElement(LiveMasterView, { data: shownData, harness: "codex", live: { kind: "running", node: TEAM.nodes[0] }, onStart: async () => {} })));
+  }
+}
+
+/** The Team activity rows as the owner reads them, once they are drawn. Output: their labels. */
+export async function activityNames() {
+  await until(() => document.querySelector(".ta-row") !== null);
+  return [...document.querySelectorAll(".ta-row")].map((row) => row.getAttribute("aria-label"));
+}
+
+/** What one agent's terminal offers once it is live: how many message boxes and Send buttons
+ * it has, the Message buttons in its head, or null with no head, its status line and how many
+ * text areas the whole page shows besides the terminals' own.
+ * Input: the agent's name. Output: those, or null when no such terminal is on the page. */
+export async function doorShown(name) {
+  const panel = () => [...document.querySelectorAll("section.tg-terminal")].find((item) => item.getAttribute("aria-label") === `${name} terminal`);
+  await until(() => Boolean(panel()?.querySelector(".tg-terminal-note [role=status]")));
+  const found = panel();
+  if (!found) return null;
+  const head = found.querySelector(".tg-terminal-head");
+  return {
+    boxes: found.querySelectorAll("textarea.tg-composer-input").length,
+    sends: found.querySelectorAll("button[type=submit]").length,
+    messages: head ? [...head.querySelectorAll("button")].filter((item) => item.textContent.trim() === "Message" || item.getAttribute("aria-label") === `Message ${name}`).length : null,
+    onPage: [...document.querySelectorAll("textarea:not(.xterm-helper-textarea)")].filter((item) => item.getClientRects().length > 0).length,
+    note: found.querySelector(".tg-terminal-note [role=status]")?.textContent ?? null,
   };
 }

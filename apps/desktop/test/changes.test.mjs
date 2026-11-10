@@ -13,7 +13,7 @@ const NOW = Date.UTC(2026, 9, 26, 18, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 3, added: 12, removed: 4, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, conflicts: [], message: "Add a file", waiting: false, ...extra,
+  restorable_until_ms: null, conflicts: [], regenerated: [], message: "Add a file", waiting: false, ...extra,
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
 
@@ -224,6 +224,14 @@ test("a set merged but not yet handed to its agent says so and can be asked agai
   assert.deepEqual(model.actions(set({ state: "updating" }), NOW), { accept: false, discard: false, update: false, restore: false });
   assert.deepEqual(model.stateBadge(set({ state: "pending", waiting: true })), { word: "Ready to review", tone: "info" });
   assert.equal(client.changesRefusal({ code: "team_agent_not_found" }), "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.");
+});
+
+test("a lockfile the project's tools rebuilt is named as their work while its set waits for review", () => {
+  const rebuilt = set({ regenerated: ["Cargo.lock", "web/package-lock.json"] });
+  assert.equal(model.regeneratedNote?.(rebuilt), "Rebuilt with this project's own tools to fit your branch: Cargo.lock, web/package-lock.json. They ran on the agent's work, so review the result like the agent's own edits.");
+  assert.equal(model.regeneratedNote?.(set()), null);
+  assert.equal(model.regeneratedNote?.({ ...rebuilt, state: "accepted" }), null);
+  assert.match(readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8"), /regeneratedNote\(set\)/);
 });
 
 test("a change set that moved on while open goes back to review: Accept and Discard wait for its last page and send the head reviewed", () => {

@@ -40,6 +40,8 @@ pub const NEW_FOLDER_REFUSED: &str = "changes_new_folder_too_large";
 
 /// The most change sets one list reply carries, newest first.
 pub const LIST_MAX: usize = 32;
+/// The most bytes of conflicting file names one open set's line carries.
+const OPEN_SET_FILES_MAX: usize = 400;
 /// The most bytes an owner-edited Accept message may hold.
 pub const MESSAGE_BYTES_MAX: usize = 4096;
 
@@ -271,6 +273,8 @@ pub struct ChangeSetView {
     pub outside: bool,
     #[serde(default)]
     pub number: Option<u64>,
+    #[serde(default)]
+    pub regenerated: Vec<String>,
 }
 
 /// How a file changed between a change set's base and head.
@@ -371,13 +375,15 @@ pub struct TargetBranches {
 }
 
 /// What merging a sub-agent's branch into its lead's task branch did (DEC-104 K5b):
-/// merged as the commit named, already in the task branch, or conflicting on the listed
-/// files, with the merge undone and the branch left in the lead's clone to merge by hand.
+/// merged as the commit named, already in the task branch, in its history with the work
+/// absent and the open set left waiting for the owner, or conflicting on the listed files,
+/// with the merge undone and the branch left in the lead's clone to merge by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MergeOutcome {
     Merged { commit: String, branch: String },
     AlreadyMerged { branch: String },
+    WorkAbsent { branch: String },
     Conflict { branch: String, files: Vec<String> },
 }
 
@@ -999,7 +1005,7 @@ pub fn commit_deletions(
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
 /// waiting in the worktree settle on the change set the turn end leaves open; when they
 /// cannot, they keep waiting for the next turn end and the recorded set is still returned.
-/// A sub-agent's claims on its ended work then hold for that set, or are released when
+/// An agent's claims on its ended work then hold for that set, or are released when
 /// nothing is pending. Whether the set then goes back to its agent is the turn-end caller's,
 /// through [`conflicts_with_main`] (OS-8). Inputs: the store, the workspace and the turn end.
 /// Output: the change set the work now belongs to, None when nothing is pending.
@@ -1088,8 +1094,9 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 
 /// Lists one project's change sets as the owner's Changes and the master's brief show
 /// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
-/// is Lead, since that lead merges them (F3). Inputs: the store and the project. Output:
-/// the change sets.
+/// is Lead, since that lead merges them (F3), but with a worker's open set whose lead's
+/// copy was removed outside the app or whose lead's set closed and left it open, since no
+/// lead will. Inputs: the store and the project. Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);
@@ -1097,7 +1104,13 @@ pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetV
     if subagent::leads_merge(db, project)? {
         let mut kept = Vec::with_capacity(sets.len());
         for set in sets {
-            if !subagent::is_lead_worker(db, project, &set.agent)? {
+            let open = matches!(
+                set.state,
+                ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+            );
+            if !subagent::is_lead_worker(db, project, &set.agent)?
+                || (open && subagent::lead_left(db, project, &set)?)
+            {
                 kept.push(set);
             }
         }
@@ -1319,6 +1332,13 @@ pub fn accept_into(
     )
 }
 
+/// The refusal of a land the owner did not press while a worker below the set's agent
+/// holds an open change set (HB-S4-LANDED).
+pub const WORKER_OPEN: &str = "changes_worker_open";
+
+/// What the agent refused with [`WORKER_OPEN`] reads, after "Not merged" or "Not accepted".
+pub const WORKER_OPEN_TEXT: &str = "a worker's work under that agent is still open. The owner or, while Lands is Lead, that worker's lead has to land or discard it first. Then merge again.";
+
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
 /// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
@@ -1453,8 +1473,14 @@ pub fn discard_as(
     by: &str,
 ) -> Result<u64, EngineError> {
     #[cfg(unix)]
-    return flow::discard(db, id, expected_head, now_ms)
-        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
+    return flow::discard(
+        db,
+        id,
+        expected_head,
+        now_ms,
+        by == crate::activity::OWNER_ACTOR,
+    )
+    .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms, by);
@@ -1567,6 +1593,37 @@ pub fn change_set_name(set: &ChangeSetView) -> String {
         ),
         None => agent,
     }
+}
+
+/// One open change set as the owner's Changes view reads it: its name, its size, the
+/// view's state words and the files it conflicts on, so a master and the owner mean the
+/// same set (HB-S5-J). Names and paths come from agents, so the whole line stays one line
+/// with its control and hidden characters replaced. Input: the open change set. Output: the
+/// line.
+pub fn open_set_line(set: &ChangeSetView) -> String {
+    let state = match set.state {
+        ChangeState::Pending => "Ready to review",
+        ChangeState::Conflict => "Conflicts with the owner's branch",
+        ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => "Agent is fixing conflicts with main",
+        ChangeState::Updating => "Agent is updating",
+        ChangeState::Accepted | ChangeState::Discarded => {
+            unreachable!("only an open change set has a line")
+        }
+    };
+    let files = if set.conflicts.is_empty() {
+        String::new()
+    } else {
+        let joined = set.conflicts.join(", ");
+        format!(": {}", crate::team::bound_text(&joined, OPEN_SET_FILES_MAX))
+    };
+    let line = format!(
+        "{}, +{} -{}, {state}{files}",
+        change_set_name(set),
+        set.added,
+        set.removed
+    );
+    crate::memory::visible_text(&line.replace(char::is_control, "\u{fffd}"))
 }
 
 /// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7

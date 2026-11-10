@@ -252,14 +252,14 @@ impl ProjectChanges {
             read_ms: 0,
             edit: None,
             reveal: None,
-            painting: Cell::new(true),
+            painting: Cell::new(false),
         }
     }
 
     /// Says whether the next drawings of this tab are painted on screen. Only a painted
     /// drawing records that a moved diff's last line was seen, so a taller drawing that is
-    /// never shown cannot unlock Accept (RVA-1). Input: false while drawing a view that is
-    /// not painted. Output: none.
+    /// never shown cannot unlock Accept (RVA-1), and a drawing counts only when its caller says
+    /// so. Input: true around the drawing that reaches the screen, false after it. Output: none.
     pub(in crate::tui) fn painting(&self, painted: bool) {
         self.painting.set(painted);
     }
@@ -1258,6 +1258,9 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
             look.fg,
         )),
         ChangeState::Discarded => notes.push((restore_note(set, now_ms), look.fg)),
+        ChangeState::Pending if !set.regenerated.is_empty() => {
+            notes.push((rebuilt_line(&set.regenerated), look.fg))
+        }
         _ => {}
     }
     let mut rows = vec![Row::of(crate::landing::change_set_name(set), look.heading)];
@@ -1438,21 +1441,34 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
 }
 
 fn conflict_line(files: &[String]) -> String {
+    format!(
+        "These files also changed on your branch: {}. Ask the agent to update, or discard.",
+        shown_files(files)
+    )
+}
+
+/// Says which lockfiles the project's own tools rebuilt on the agent's work. Input: the
+/// lockfiles. Output: the note.
+fn rebuilt_line(files: &[String]) -> String {
+    format!(
+        "Rebuilt with this project's own tools to fit your branch: {}. They ran on the agent's work, so review the result like the agent's own edits.",
+        shown_files(files)
+    )
+}
+
+/// The first `CONFLICTS_SHOWN` files, then how many more. Input: the files. Output: the
+/// words.
+fn shown_files(files: &[String]) -> String {
     let shown = files
         .iter()
         .take(CONFLICTS_SHOWN)
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
-    let more = files.len().saturating_sub(CONFLICTS_SHOWN);
-    let more = if more > 0 {
-        format!(" and {more} more")
-    } else {
-        String::new()
-    };
-    format!(
-        "These files also changed on your branch: {shown}{more}. Ask the agent to update, or discard."
-    )
+    match files.len().saturating_sub(CONFLICTS_SHOWN) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
 }
 
 /// The diff header lines of the changed files that carry the instruction file mark, as the

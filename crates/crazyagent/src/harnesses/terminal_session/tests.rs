@@ -327,6 +327,198 @@ mod own_turns {
         );
         assert_eq!(pane.session.stop().unwrap(), None);
     }
+
+    const RATE_LIMITED: &str = r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"API Error"}]}}"#;
+
+    /// Types a prompt into the pane and waits until the stand-in has read it. Takes the
+    /// pane and the prompt.
+    fn type_turn(pane: &mut Pane, prompt: &str) {
+        pane.session.send(prompt).unwrap();
+        let pasted = format!("\x1b[200~{prompt}\x1b[201~\r");
+        let until = Instant::now() + Duration::from_secs(15);
+        while !std::fs::read(pane.home.join("typed"))
+            .unwrap_or_default()
+            .ends_with(pasted.as_bytes())
+        {
+            assert!(Instant::now() < until, "the prompt was never typed");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Reads the session's events until none comes for half a second. Takes the pane.
+    /// Returns the events.
+    fn events(pane: &mut Pane) -> Vec<LaunchEvent> {
+        let mut events = Vec::new();
+        while let Some(event) = pane.session.next_event(Duration::from_millis(500)).unwrap() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Whether the events hold a turn's end. Takes the events. Returns the answer.
+    fn ended(events: &[LaunchEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnFinished { .. }))
+    }
+
+    /// Starts an engine turn that ends held for its background command. Takes the pane.
+    fn held_turn(pane: &mut Pane) {
+        type_turn(pane, "Run the check.");
+        pane.write(&[
+            &user("Run the check."),
+            BACKGROUND_USE,
+            BACKGROUND_STARTED,
+            &reply("Waiting for the check."),
+        ]);
+        let first = events(pane);
+        assert!(!ended(&first), "{first:?}");
+        assert!(pane.session.held(), "{first:?}");
+    }
+
+    /// HB-F2B: a message typed into an agent held for its background command starts a turn
+    /// of its own. When that turn fails, the held task's work still stands: its failure and
+    /// its rate limit are not given, the hold goes on, and the notice turn ends the task.
+    #[test]
+    fn a_turn_typed_over_a_hold_that_fails_goes_back_to_the_hold() {
+        let mut pane = start("over-hold-1");
+        held_turn(&mut pane);
+
+        pane.write(&[&user("[crazyagent msg 1] Status?"), RATE_LIMITED]);
+        let typed = events(&mut pane);
+        assert!(!ended(&typed), "{typed:?}");
+        assert!(
+            !typed
+                .iter()
+                .any(|event| matches!(event, LaunchEvent::TurnError { .. })),
+            "{typed:?}"
+        );
+        assert!(pane.session.held(), "the hold goes on");
+
+        pane.write(&[BACKGROUND_NOTICE, &reply("Check passed.")]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: true }),
+            "{last:?}"
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// The owner's Interrupt of a turn typed over a hold still ends that turn and its task,
+    /// though a background command runs.
+    #[test]
+    fn interrupting_a_turn_typed_over_a_hold_still_ends_it() {
+        let mut pane = start("over-hold-2");
+        held_turn(&mut pane);
+
+        pane.write(&[&user("[crazyagent msg 1] Status?")]);
+        let started = events(&mut pane);
+        assert!(!ended(&started), "{started:?}");
+        assert!(!pane.session.held());
+        pane.session.interrupt().unwrap();
+        pane.write(&[&user("[Request interrupted by user]")]);
+        assert_eq!(
+            events(&mut pane),
+            vec![
+                LaunchEvent::Interrupted,
+                LaunchEvent::TurnFinished { success: false },
+            ]
+        );
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// A turn that fails before it was ever held ends as it did, though a background
+    /// command still runs: only a turn typed over a hold goes back to the hold.
+    #[test]
+    fn a_turn_that_fails_before_any_hold_still_ends() {
+        let mut pane = start("over-hold-3");
+        type_turn(&mut pane, "Run the check.");
+        pane.write(&[
+            &user("Run the check."),
+            BACKGROUND_USE,
+            BACKGROUND_STARTED,
+            RATE_LIMITED,
+        ]);
+        let failed = events(&mut pane);
+        assert!(
+            failed.contains(&LaunchEvent::TurnError { rate_limited: true }),
+            "{failed:?}"
+        );
+        assert!(
+            failed.contains(&LaunchEvent::TurnFinished { success: false }),
+            "{failed:?}"
+        );
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// HB-F2B (TEAM-14-F1): an interrupt pressed in the agent's own terminal, in a turn typed
+    /// over a hold, is not given: the engine asked for none, the held work stands, and the
+    /// notice turn ends the task.
+    #[test]
+    fn an_interrupted_line_in_a_turn_typed_over_a_hold_goes_back_to_the_hold() {
+        let mut pane = start("over-hold-4");
+        held_turn(&mut pane);
+
+        pane.write(&[
+            &user("[crazyagent msg 1] Status?"),
+            &user("[Request interrupted by user]"),
+        ]);
+        let typed = events(&mut pane);
+        assert!(!ended(&typed), "{typed:?}");
+        assert!(!typed.contains(&LaunchEvent::Interrupted), "{typed:?}");
+        assert!(pane.session.held(), "the hold goes on");
+
+        pane.write(&[BACKGROUND_NOTICE, &reply("Check passed.")]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: true }),
+            "{last:?}"
+        );
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// HB-F2B (TEAM-14-L2): the held command can end inside a turn typed over the hold. When
+    /// that turn then fails no notice turn is left to decide the task, so it ends as the
+    /// held turn did: well, with no failure given.
+    #[test]
+    fn a_turn_typed_over_a_hold_that_fails_after_its_command_ended_ends_as_the_held_turn_did() {
+        let mut pane = start("over-hold-5");
+        held_turn(&mut pane);
+
+        pane.write(&[
+            &user("[crazyagent msg 1] Status?"),
+            BACKGROUND_NOTICE,
+            RATE_LIMITED,
+        ]);
+        assert_eq!(
+            events(&mut pane),
+            vec![LaunchEvent::TurnFinished { success: true }]
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// The notice turn starts once the last command ended, so it is no turn typed over the
+    /// hold: it decides the task, and its failure and rate limit are given.
+    #[test]
+    fn a_notice_turn_that_fails_ends_its_task_as_failed() {
+        let mut pane = start("over-hold-6");
+        held_turn(&mut pane);
+
+        pane.write(&[BACKGROUND_NOTICE, RATE_LIMITED]);
+        let last = events(&mut pane);
+        assert!(
+            last.contains(&LaunchEvent::TurnError { rate_limited: true }),
+            "{last:?}"
+        );
+        assert!(
+            last.contains(&LaunchEvent::TurnFinished { success: false }),
+            "{last:?}"
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
 }
 
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.

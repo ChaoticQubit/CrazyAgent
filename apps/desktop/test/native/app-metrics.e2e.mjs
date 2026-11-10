@@ -85,7 +85,7 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     await me.waitFor("the second project's Hand off form", (text) => text.includes("Hand off"));
     assert.equal(await handOff(me, page, second, runtime), "done", "the second project's Codex sub-agent finished");
 
-    await me.click("Metrics", ".app-nav a.nav-item");
+    await me.click("Metrics", '.app-nav a[href="#/metrics"]');
     let shown = await tilesShow(page, everyProject, "both projects added up", true);
     await me.capture("app-metrics-all");
     assert.equal(shown.tiles[1][2], CACHE_LINE);
@@ -115,7 +115,7 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     const tab = await tilesShow(page, one, `${name}'s Metrics tab`, true);
     assert.deepEqual(picked.tiles, tab.tiles, "the filtered page shows the same tiles as the project's own Metrics tab");
 
-    await me.click("Metrics", ".app-nav a.nav-item");
+    await me.click("Metrics", '.app-nav a[href="#/metrics"]');
     shown = await tilesShow(page, everyProject, "both projects added up", true);
     await pick(page, first);
     await tilesShow(page, one, `${name}'s own runs`, false);

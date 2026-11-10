@@ -85,3 +85,87 @@ test("a read the engine cut says older activity is not shown and counts with a p
   assert.match(seen.text, /2\+ items/);
   assert.match(seen.text, /Older activity isn't shown here\./);
 });
+
+test("a read still waiting holds the next one, however long it takes", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mount("alpha");
+    return Fixture.wait(Fixture.EVERY * 3);
+  `);
+  assert.equal(seen.asked.length, 1, "no second read starts while the first waits");
+  assert.equal(seen.waiting, 1);
+});
+
+test("an empty read says there is nothing yet", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mount("alpha");
+    return Fixture.reply(${JSON.stringify(ok([]))});
+  `);
+  assert.match(seen.text, /Nothing yet\./);
+  assert.equal(seen.rows, 0);
+  assert.equal(seen.live, true);
+});
+
+test("a build without the activity read says so and never reads again", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mount("alpha");
+    const shown = await Fixture.reply({ kind: "not_ready" });
+    const later = await Fixture.wait(Fixture.EVERY * 3);
+    await Fixture.hide(true);
+    const back = await Fixture.hide(false);
+    return { shown, later, back };
+  `);
+  assert.match(seen.shown.text, /Not ready yet: project activity isn't in this build\./);
+  assert.equal(seen.shown.live, false, "nothing was read, so it is not Live");
+  assert.equal(seen.later.asked.length, 1, "the poll stops");
+  assert.equal(seen.back.asked.length, 1, "the window showing again does not start it");
+});
+
+test("the window showing again reads at once, and the next read waits a full interval", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mount("alpha");
+    await Fixture.reply(${JSON.stringify(ok([]))});
+    await Fixture.hide(true);
+    const hidden = await Fixture.wait(Fixture.EVERY * 1.5);
+    const shown = await Fixture.hide(false);
+    const held = await Fixture.wait(Fixture.EVERY * 1.5);
+    await Fixture.reply(${JSON.stringify(ok([]))});
+    const early = await Fixture.wait(Fixture.EVERY / 2);
+    const next = await Fixture.wait(Fixture.EVERY);
+    return { hidden, shown, held, early, next };
+  `);
+  assert.equal(seen.hidden.asked.length, 1, "no read while the window is hidden");
+  assert.equal(seen.shown.asked.length, 2, "the read starts as the window shows, with no wait");
+  assert.equal(seen.held.asked.length, 2, "the timer from before the window hid does not add a read");
+  assert.equal(seen.early.asked.length, 2, "the next read waits for the interval");
+  assert.equal(seen.next.asked.length, 3, "the poll goes on after that read");
+});
+
+test("the window showing again while a read is waiting starts no second read", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mount("alpha");
+    await Fixture.hide(true);
+    return Fixture.hide(false);
+  `);
+  assert.equal(seen.asked.length, 1);
+  assert.equal(seen.waiting, 1);
+});
+
+test("the window showing again after the section is gone reads nothing", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mount("alpha");
+    await Fixture.reply(${JSON.stringify(ok([]))});
+    await Fixture.hide(true);
+    await Fixture.unmount(0);
+    return Fixture.hide(false);
+  `);
+  assert.equal(seen.asked.length, 1);
+});
+
+test("Overview reads activity through the real bridge call and says when the engine cut it", { timeout: 60_000 }, async () => {
+  const answer = { project_id: "alpha", items: [item(1, "Newest"), item(2, "Older")], more: true };
+  const seen = await steps(`return Fixture.mountReal("alpha", ${JSON.stringify(answer)});`);
+  assert.deepEqual(seen.sent, [{ command: "desktop_project_activity", args: { id: "alpha", limit: 200 } }]);
+  assert.equal(seen.rows, 2);
+  assert.match(seen.text, /2\+ items/);
+  assert.match(seen.text, /Older activity isn't shown here\./);
+});

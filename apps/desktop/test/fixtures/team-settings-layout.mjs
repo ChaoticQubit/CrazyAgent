@@ -5,6 +5,8 @@ import * as agents from "../../src/screens/project/agents.tsx";
 import * as team from "../../src/screens/team/controls.tsx";
 import * as coordination from "../../src/screens/team/coordination.tsx";
 
+export { boxOf } from "./settings-tab.mjs";
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let root = null;
 const PAGE = '<div class="shell"><nav class="sidebar"></nav><main class="main"><div class="page"><div class="pj" id="mount"></div></div></main></div>';
@@ -34,6 +36,7 @@ let saveAnswer = null;
 let saveDelay = SAVE_MS;
 let render = null;
 let poolAssigned = "pool-a";
+let policyRefusal = null;
 const poolRecord = (id) => ({ kind: "pool", pool: { id, projects: poolAssigned === id ? ["alpha"] : [] } });
 
 /** Answers the app's engine calls as a quick engine does: the reads these screens make, the
@@ -55,7 +58,10 @@ function engine(status) {
     transformCallback: () => 0,
     async invoke(command, args) {
       sent.push({ command, args });
-      if (command === "desktop_project_agent_policy") return policy;
+      if (command === "desktop_project_agent_policy") {
+        if (policyRefusal !== null) throw { code: policyRefusal };
+        return policy;
+      }
       if (command === "desktop_set_project_agent_policy") {
         policy = { ...policy, access: args.policy.access, version: policy.version + 1 };
         return RECEIPT;
@@ -94,6 +100,11 @@ function engine(status) {
 export function answerSaves(receipt, delay = SAVE_MS) {
   saveAnswer = receipt;
   saveDelay = delay;
+}
+
+/** Makes the agent policy read refuse from now on. Input: the engine's code. Output: none. */
+export function refusePolicy(code) {
+  policyRefusal = code;
 }
 
 /** Puts the focus on a segmented row's checked option, as Tab does. Input: the row's label.
@@ -159,9 +170,9 @@ export async function mount(css, view, status, section) {
   };
   const views = {
     page: [team.TeamControls, { projectId: "alpha", status, reload() {}, navigate() {}, data }],
-    drawer: [conversation.MasterSettings, { data }],
+    drawer: [conversation.MasterSettings, { data, liveHarness: true }],
     agents: [agents.AgentsTab, { data, section: section ?? undefined }],
-    button: [conversation.MasterSettingsButton, { data }],
+    button: [conversation.MasterSettingsDrawer, { data, liveHarness: true, children: createElement(conversation.MasterSettingsButton) }],
   };
   const [component, props] = views[view];
   if (typeof component !== "function") return false;

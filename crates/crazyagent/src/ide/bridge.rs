@@ -4,6 +4,7 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
+use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -289,7 +290,11 @@ pub enum IdeCall {
     #[serde(rename = "ide.session")]
     Session {},
     #[serde(rename = "ide.terminal")]
-    Terminal { cols: u16, rows: u16 },
+    Terminal {
+        cols: u16,
+        rows: u16,
+        level: AgentAccess,
+    },
     #[serde(rename = "ide.git")]
     Git { args: Vec<String>, folder: String },
 }
@@ -360,7 +365,7 @@ impl IdeRequest {
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
             IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
-            IdeCall::Terminal { cols, rows } => {
+            IdeCall::Terminal { cols, rows, .. } => {
                 (SIZE_MIN..=SIZE_MAX).contains(cols) && (SIZE_MIN..=SIZE_MAX).contains(rows)
             }
             IdeCall::ExtensionRequest { id, version }
@@ -480,6 +485,10 @@ pub(crate) struct Grants {
     terminals: std::sync::Arc<Mutex<terminal::Terminals>>,
     #[cfg(unix)]
     git_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
+    #[cfg(unix)]
+    index_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
+    #[cfg(unix)]
+    index_gates: remote_git::index::Gates,
 }
 
 /// One project's capability for one IDE server launch. Until `taken`, the token is the
@@ -917,8 +926,8 @@ async fn serve_within(
             return;
         }
         #[cfg(unix)]
-        Ok(Ok((project, IdeCall::Terminal { cols, rows }))) => {
-            terminal::serve(stream, packet, runtime, project, (cols, rows)).await;
+        Ok(Ok((project, IdeCall::Terminal { cols, rows, level }))) => {
+            terminal::serve(stream, packet, runtime, project, (cols, rows), level).await;
             return;
         }
         #[cfg(not(unix))]
@@ -1118,7 +1127,9 @@ async fn change_call(
 
 /// Runs one git network command of the IDE in the project folder outside the IDE sandbox
 /// ([`remote_git::answer`]) once it has a place among the running ones
-/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable.
+/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable. The shim's
+/// [`remote_git::index::VERB`] call carries staged changes instead, with places of its own, so
+/// a long push cannot fail a stage.
 /// Inputs: the owner runtime, the project, git's arguments and the folder git ran in.
 /// Output: the reply data, or `ide_git_busy` when the places are taken.
 async fn git_call(
@@ -1130,6 +1141,13 @@ async fn git_call(
     #[cfg(unix)]
     {
         let root = runtime.ide()?.root;
+        if args.first().map(String::as_str) == Some(remote_git::index::VERB) {
+            let grants = runtime.ide_grants();
+            let place = remote_git::place(&grants.index_calls, project)?;
+            let gate = remote_git::index::gate(&grants.index_gates, project)?;
+            return remote_git::index::answer(root, project.clone(), args, folder, place, gate)
+                .await;
+        }
         let place = remote_git::place(&runtime.ide_grants().git_calls, project)?;
         remote_git::answer(root, project.clone(), args, folder, place).await
     }
@@ -1139,6 +1157,19 @@ async fn git_call(
         Err(failure("ide_request_unavailable"))
     }
 }
+
+/// The engine's index step for a row that plays the relay. Inputs: the private folder, the
+/// engine's folder, the project folder and the slot. Output: the exit code the shim reads.
+#[cfg(all(test, unix))]
+pub(crate) fn carry_index(private: &Path, engine: &Path, project: &Path, slot: &str) -> i32 {
+    remote_git::index::carry(&Mutex::new(()), private, engine, project, slot)
+        .unwrap()
+        .code
+}
+
+/// The first argument of the shim's index call.
+#[cfg(unix)]
+pub(super) const INDEX_VERB: &str = remote_git::index::VERB;
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
 /// show-all switch first when given. Inputs: the owner runtime, project and switch.
@@ -1323,6 +1354,8 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
 mod changes;
 #[cfg(unix)]
 mod comments;
+#[cfg(all(test, unix))]
+pub(crate) mod engine_step;
 mod extensions;
 #[cfg(unix)]
 mod remote_git;

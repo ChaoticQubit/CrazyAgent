@@ -23,6 +23,7 @@ export interface ChangeSet {
   message: string;
   waiting: boolean;
   outside: boolean;
+  regenerated: string[];
   number?: number | null;
 }
 

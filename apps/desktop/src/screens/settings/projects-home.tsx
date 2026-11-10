@@ -4,7 +4,7 @@ import { intakeCopy, loadFolderSize, loadProjectsHome, moveProjectsHome, setProj
 import { receiptState } from "../../api-projects";
 import type { FolderSize, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, LoadError, NotReady, Skeleton } from "../../ui";
+import { Button, ConfirmDialog, LoadError, NotReady, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { homeLine, pickedFolderProblem } from "../intake/intake";
 import { formatBytes } from "../new-project/wizard";
@@ -13,6 +13,11 @@ import "../project/projects.css";
 import "../intake/intake.css";
 
 const trimSlash = (path: string) => path.replace(/\/+$/u, "") || "/";
+
+const HOME_TOP = <div className="settings-top"><div>
+  <h2>Projects folder</h2>
+  <p>CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with Finder and it shows up on Home.</p>
+</div></div>;
 
 /** Checks a folder picked as the new projects folder. Inputs: the picked path and the current
  * projects folder or null. Output: a plain problem, or null when the folder can be used. */
@@ -47,9 +52,10 @@ export function sizedAsk(path: string, size: Exclude<Loaded<FolderSize>, { kind:
   return { path, bytes: null, sizeProblem: intakeCopy(size.value.size_problem ?? "folder_size_unreadable") };
 }
 
-/** Settings, Projects folder as a view of its state: the folder in use, a picked folder with
- * Use this folder (moves nothing) and Move my projects there. Inputs: the home read, the picked
- * folder, a busy flag, the last problem and the handlers. Output: the page. */
+/** Settings, Projects folder as a view of its state: the title in every state, the Folder
+ * section with the folder in use, and a picked folder's section with Use this folder (moves
+ * nothing) and Move my projects there. Inputs: the home read, the picked folder, a busy flag,
+ * the last problem and the handlers. Output: the page. */
 export function ProjectsHomeSettingsView({ home, picked, busy, problem, onChoose, onUse, onMove, onCancel, onRetry }: {
   home: Loaded<ProjectsHome>;
   picked: string | null;
@@ -61,28 +67,35 @@ export function ProjectsHomeSettingsView({ home, picked, busy, problem, onChoose
   onCancel: () => void;
   onRetry: () => void;
 }) {
-  if (home.kind === "loading") return <Skeleton shape="line" count={3} />;
-  if (home.kind === "not_ready") return <NotReady what="The projects folder" />;
-  if (home.kind === "error") return <LoadError message={home.message} onRetry={onRetry} />;
+  if (home.kind === "loading") return <>{HOME_TOP}<Skeleton shape="line" count={3} /></>;
+  if (home.kind === "not_ready") return <>{HOME_TOP}<NotReady what="The projects folder" /></>;
+  if (home.kind === "error") return <>{HOME_TOP}<LoadError message={home.message} onRetry={onRetry} /></>;
   const current = home.value.path;
   const line = homeLine(home.value);
-  return <div className="pj pj-stack">
-    <p className="pj-secondary">CrazyAgent keeps each project in its own folder inside this one. Drop a project folder into it with Finder and it shows up on Home.</p>
-    {current ? <p>Your projects folder is <span className="pj-mono" title={current}>{displayText(folderLabel(current))}</span>.</p>
-      : <p>No projects folder yet. Choose one to start.</p>}
-    {line && <p className="pj-small pj-muted">{line}</p>}
-    {picked && <section className="pj-stack-s in-panel" aria-label="New projects folder">
-      <p>Use <span className="pj-mono" title={picked}>{displayText(folderLabel(picked))}</span>?</p>
-      {current && <p className="pj-secondary">{`Use this folder moves nothing. Projects already in ${displayText(folderLabel(current))} stay there. Move my projects there takes them with you.`}</p>}
-      <span className="pj-row">
-        <Button variant="primary" icon="check" pending={busy} pendingLabel="Saving..." onClick={onUse}>Use this folder</Button>
-        {current && <Button icon="folder-input" disabled={busy} onClick={onMove}>Move my projects there</Button>}
-        <Button variant="quiet" disabled={busy} onClick={onCancel}>Cancel</Button>
-      </span>
-    </section>}
-    {problem && <p className="pj-error" role="alert">{problem}</p>}
-    {!picked && <span><Button icon="folder-open" disabled={busy} onClick={onChoose}>{current ? "Choose another folder" : "Choose folder"}</Button></span>}
-  </div>;
+  return <>
+    {HOME_TOP}
+    <div className="pj set-groups">
+      <SettingSection title="Folder" about={line}>
+        <SettingLine label="Projects folder" help={current
+          ? <>Your projects folder is <span className="pj-mono" title={current}>{displayText(folderLabel(current))}</span>.</>
+          : "No projects folder yet. Choose one to start."}>
+          {!picked && <Button icon="folder-open" disabled={busy} onClick={onChoose}>{current ? "Choose another folder" : "Choose folder"}</Button>}
+        </SettingLine>
+      </SettingSection>
+      {picked && <SettingSection title="New projects folder">
+        <div className="set-body">
+          <p>Use <span className="pj-mono" title={picked}>{displayText(folderLabel(picked))}</span>?</p>
+          {current && <p className="pj-secondary">{`Use this folder moves nothing. Projects already in ${displayText(folderLabel(current))} stay there. Move my projects there takes them with you.`}</p>}
+          <span className="pj-row">
+            <Button variant="primary" icon="check" pending={busy} pendingLabel="Saving..." onClick={onUse}>Use this folder</Button>
+            {current && <Button icon="folder-input" disabled={busy} onClick={onMove}>Move my projects there</Button>}
+            <Button variant="quiet" disabled={busy} onClick={onCancel}>Cancel</Button>
+          </span>
+        </div>
+      </SettingSection>}
+      {problem && <p className="pj-error" role="alert">{problem}</p>}
+    </div>
+  </>;
 }
 
 /** Settings, Projects folder: reads the folder, picks another in the macOS chooser, then either

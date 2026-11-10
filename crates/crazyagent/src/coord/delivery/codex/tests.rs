@@ -74,3 +74,207 @@ fn a_turn_id_is_kept_only_when_it_is_short_plain_text() {
         assert_eq!(turn_id(id), None, "{id:?}");
     }
 }
+
+/// SECAUDIT codex-bridge-oversized-server-ping-panics-team-runtime: a ping larger than a
+/// control frame may be is refused as a broken bridge, with no panic in the engine.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = base.join("p");
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accepted(&listener);
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        stream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .unwrap();
+        let mut frame = vec![0x89, 0x7f];
+        frame.extend_from_slice(&1_048_577u64.to_be_bytes());
+        frame.resize(frame.len() + 1_048_577, 0);
+        let _ = stream.write_all(&frame);
+        let mut rest = Vec::new();
+        let _ = stream.read_to_end(&mut rest);
+    });
+    let answer = super::wire::deliver(&socket, "dummy", true, own_group());
+    assert_eq!(answer, Err("codex_bridge_reply_too_large"));
+    server.join().unwrap();
+}
+
+/// Serves one bridge socket that answers the upgrade and sends a ping of `length` bytes.
+/// Takes the length. Returns what `deliver` answered and the payload of the pong the
+/// server read back, none when no pong came.
+#[cfg(target_os = "macos")]
+fn ping_of(length: usize) -> (Result<Option<String>, &'static str>, Option<Vec<u8>>) {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = base.join("p");
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accepted(&listener);
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        stream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .unwrap();
+        let mut ping = vec![0x89];
+        if length < 126 {
+            ping.push(u8::try_from(length).unwrap());
+        } else {
+            ping.push(0x7e);
+            ping.extend(u16::try_from(length).unwrap().to_be_bytes());
+        }
+        ping.resize(ping.len() + length, b'p');
+        let _ = stream.write_all(&ping);
+        loop {
+            let mut head = [0u8; 2];
+            stream.read_exact(&mut head).ok()?;
+            let size = match head[1] & 0x7f {
+                126 => {
+                    let mut wide = [0u8; 2];
+                    stream.read_exact(&mut wide).ok()?;
+                    usize::from(u16::from_be_bytes(wide))
+                }
+                short => usize::from(short),
+            };
+            let mut mask = [0u8; 4];
+            stream.read_exact(&mut mask).ok()?;
+            let mut payload = vec![0u8; size];
+            stream.read_exact(&mut payload).ok()?;
+            if head[0] & 0x0f == 0xa {
+                for (at, byte) in payload.iter_mut().enumerate() {
+                    *byte ^= mask[at % 4];
+                }
+                return Some(payload);
+            }
+        }
+    });
+    let answer = super::wire::deliver(&socket, "dummy", true, own_group());
+    (answer, server.join().unwrap())
+}
+
+/// SECAUDIT codex-bridge-oversized-server-ping-panics-team-runtime: a ping at the control
+/// frame limit is answered with the same payload, and one byte more is refused by name.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_ping_at_the_control_limit_is_answered_and_one_byte_more_is_refused() {
+    assert_eq!(
+        ping_of(125),
+        (Err("codex_bridge_closed"), Some(vec![b'p'; 125]))
+    );
+    assert_eq!(ping_of(126), (Err("codex_bridge_reply_too_large"), None));
+}
+
+/// A pane's script that starts a stand-in app-server in its background, as the bridge
+/// script starts the real one. The stand-in listens on the socket named by `$1`, takes two
+/// connections in turn and writes the length of each one's first read to `$1.got`.
+#[cfg(target_os = "macos")]
+const BACKGROUND_LISTENER: &str = r#"/usr/bin/perl -MIO::Socket::UNIX -e '
+alarm 30;
+my $listener = IO::Socket::UNIX->new(Local => $ARGV[0], Listen => 2) or die;
+open(my $got, ">", "$ARGV[0].got") or die;
+$got->autoflush(1);
+for (1, 2) {
+    my $peer = $listener->accept or die;
+    my $size = sysread($peer, my $first, 4096);
+    print $got (($size // 0), "\n");
+    close $peer;
+}
+' "$1" </dev/null >/dev/null 2>&1 &
+wait
+"#;
+
+/// The process group this test process runs in, the one a listener it binds is seen in.
+#[cfg(target_os = "macos")]
+fn own_group() -> u32 {
+    u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap()
+}
+
+/// SECAUDIT codex-bridge-socket-check-then-connect-follows-swapped-link: an agent whose
+/// pane cannot be read is not reached through the bridge at all.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_with_no_pane_to_compare_is_not_reached_through_its_bridge() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        deliver(home.path(), "dummy", true, None),
+        Bridged::Unavailable("codex_bridge_peer_unknown")
+    );
+}
+
+/// SECAUDIT codex-bridge-socket-check-then-connect-follows-swapped-link: a real pane's
+/// background listener passes for that pane, though its own pid is not the pane's, and is
+/// refused with no byte sent when compared with another agent's pane, the redirect a
+/// swapped link makes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bridge_is_used_only_when_its_listener_runs_in_the_agents_pane() {
+    use crate::terminal::Host;
+    let mut fixture = super::super::tests::Fixture::new();
+    let host = fixture.host();
+    let owner = fixture.agent("sub", "codex", "idle", None);
+    let other = fixture.agent("sub", "codex", "idle", None);
+    let socket = fixture.base.join("p");
+    let got = fixture.base.join("p.got");
+    fixture.pane(&host, owner, BACKGROUND_LISTENER, &socket);
+    fixture.pane(
+        &host,
+        other,
+        "exec /bin/sleep 60\n",
+        &fixture.base.join("other"),
+    );
+    super::super::tests::until("the stand-in listening", || got.exists());
+    let pane_of = |agent| {
+        host.pane_pid(&crate::terminal::AgentId::team(agent).unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        super::wire::deliver(&socket, "dummy", true, pane_of(other)),
+        Err("codex_bridge_peer_unknown")
+    );
+    assert_eq!(
+        super::wire::deliver(&socket, "dummy", true, pane_of(owner)),
+        Err("codex_bridge_closed")
+    );
+    super::super::tests::until("both connections read", || {
+        std::fs::read_to_string(&got).is_ok_and(|text| text.lines().count() == 2)
+    });
+    let sizes: Vec<usize> = std::fs::read_to_string(&got)
+        .unwrap()
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect();
+    assert_eq!(sizes[0], 0, "the refused connection got no byte");
+    assert!(sizes[1] > 0, "the accepted connection got the upgrade");
+}
+
+/// Takes the one connection a peer makes, polling a non-blocking listener so the spawn gate
+/// is never held across a wait: a spawn queued behind a held gate would stop the peer's own
+/// connect. Takes the listener. Returns the stream, blocking again.
+#[cfg(target_os = "macos")]
+fn accepted(listener: &std::os::unix::net::UnixListener) -> std::os::unix::net::UnixStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match crate::spawn_gate::accept_unix_std(listener) {
+            Ok(stream) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(std::time::Instant::now() < deadline, "no connection came");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}

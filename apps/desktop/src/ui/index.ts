@@ -5,8 +5,9 @@ export { StatusBadge, statusTone, statusIcon, Notice, Banner, Toast, EmptyState,
 export { Dialog, Drawer, ConfirmDialog, Menu, useOverlayShown, type MenuItem } from "./overlay";
 export { isMac, shortcutKey, keyLabel, sendsMessage, type ComposerKeyEvent, type ModifierEvent } from "./keys";
 export { PageHeader, Tabs, Panel, type TabLink } from "./layout";
+export { SettingLine, SettingSection } from "./setting";
 export { WindowedList, windowRange } from "./windowed-list";
-export { AppShell, Sidebar, type EngineState, type SidebarProject } from "./shell";
+export { AppShell, Sidebar, agentsWorking, type EngineState, type SidebarProject } from "./shell";
 export { BrandMark } from "./brand";
 export { Icon, ProviderMark, ICON_NAMES, type IconName } from "./icon";
 export { parseRoute, formatRoute, navigate, useRoute, type Route, type SettingsTab, type ProjectTab, type NewProjectStep } from "./router";

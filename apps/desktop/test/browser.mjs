@@ -11,6 +11,7 @@ const CHROME = process.env.CRAZYAGENT_CHROME || "/Applications/Google Chrome.app
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
+const PAGE = '<!doctype html><html lang="en"><head></head><body></body></html>';
 
 /** Bundles one test fixture and the production modules it imports into a script that defines
  * `Fixture` in the page. Input: the fixture path. Output: the script text. */
@@ -122,8 +123,10 @@ const chrome = await launch();
  * so no storage, permission or cache crosses tests, and always closes that context afterwards.
  * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
  * `send(method, params)` for DevTools commands, `on(method, listener)` for DevTools events such
- * as `Network.loadingFailed` and `context`, the browser context id. Output: what the check
- * returns. */
+ * as `Network.loadingFailed` and `context`, the browser context id. The page has the doctype
+ * the app's page has, so a check measures the layout the app shows. A promise a script returns
+ * is held by a DevTools object until it settles: awaited unheld, DevTools can answer "Promise was
+ * collected" while the page goes on working. Output: what the check returns. */
 export async function withPage(check) {
   const browser = await connect(chrome.browser);
   try {
@@ -134,10 +137,17 @@ export async function withPage(check) {
       const page = await connect(`${chrome.origin}/devtools/page/${targetId}`);
       try {
         const evaluate = async (expression) => {
-          const reply = await page.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-          if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
-          return reply.result.value;
+          const failed = (reply) => {
+            if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
+            return reply;
+          };
+          const { result } = failed(await page.send("Runtime.evaluate", { expression }));
+          if (result.subtype === "promise") return failed(await page.send("Runtime.awaitPromise", { promiseObjectId: result.objectId, returnByValue: true })).result.value;
+          if (!result.objectId) return result.value;
+          return failed(await page.send("Runtime.callFunctionOn", { objectId: result.objectId, functionDeclaration: "function () { return this; }", returnByValue: true })).result.value;
         };
+        await evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();`);
+        assert.equal(await evaluate("document.compatMode"), "CSS1Compat", "the page is in standards mode, as the app's page is");
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
         return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });

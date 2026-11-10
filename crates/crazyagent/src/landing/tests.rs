@@ -7782,6 +7782,150 @@ fn a_master_review_of_a_sub_s_work_keeps_its_claims_until_the_set_closes() {
     }
 }
 
+/// Registers agent 2 and the project's master, agent 3, in the team tables and returns the
+/// master's workspace. Input: the case. Output: the workspace.
+fn team_with_master(case: &Case) -> Workspace {
+    let master = master_agent(case);
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (2,'project-1','sub','claude-code',1,'working',1,1),
+                    (3,'project-1','master','claude-code',1,'working',1,1);",
+        )
+        .unwrap();
+    master
+}
+
+/// Has the master start and finish work on README, so it holds that claim on ended work.
+/// Input: the case. Output: none.
+fn master_finishes_readme(case: &Case) {
+    let now = crate::team::now_ms();
+    let (work, _) = crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        3,
+        "Readme".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        1,
+        crate::coord::Finish::Complete,
+        "Done.".into(),
+        3,
+        now,
+    )
+    .unwrap();
+}
+
+/// T5-R2-L1: the master's finished work holds its claims while the change set carrying it
+/// waits, as a sub-agent's does, and that set's Accept releases them.
+#[test]
+fn a_master_s_finished_work_keeps_its_claims_until_its_set_lands() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    master_finishes_readme(&case);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// T5-R2-L1: a master's turn that leaves nothing to land releases its finished claims, so
+/// they never hold forever.
+#[test]
+fn a_master_s_finished_work_is_released_by_a_turn_end_with_nothing_to_land() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    master_finishes_readme(&case);
+    assert_eq!(second_start(&case), 1, "the turn has not ended yet");
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-master".into(),
+        prompt_line: "Nothing to change".into(),
+    };
+    assert_eq!(record_turn_end(&case.db, &master, &turn).unwrap(), None);
+    assert_eq!(second_start(&case), 0, "nothing waits to land");
+}
+
+/// T5-R2-L1: a stopped master has no more turn ends, so the sweep holds the claims of work
+/// it finished for its open set, and that set's Accept releases them.
+#[test]
+fn a_stopped_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// Land-7 r2: a team master's set is recorded as a sub-agent's with its row id, so the sweep
+/// finds it by that id and holds the work the master finished before it stopped.
+#[test]
+fn a_stopped_team_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
+    let case = Case::new();
+    let mut master = team_with_master(&case);
+    master.agent.kind = AgentKind::Sub;
+    master.agent.id = "3".into();
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// Land-7 r2: with two open master sets the sweep holds a stopped master's finished work for
+/// the newest, so closing the older one does not end the hold.
+#[test]
+fn a_stopped_master_s_finished_work_is_held_for_its_newest_open_set() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    case.start();
+    case.edit("OLDER", "older\n");
+    let older = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut record = store::load(&case.db, &older).unwrap();
+    record.agent.kind = AgentKind::Master;
+    store::save(&case.db, &record).unwrap();
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let newer = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(
+        crate::coord::held_sets(&case.db, 3).unwrap(),
+        vec![newer.as_str().to_owned()]
+    );
+}
+
 /// OS-8 L1: closing a change set releases only the claims of the work it holds. Work the
 /// agent finished after the set's last turn end keeps its claims through that set's Accept
 /// and is released by the Accept of the next set, which holds it.
@@ -8157,15 +8301,49 @@ const BOTH_FOURTH_LINES: &str = "one\ntwo\nthree\nfour from the owner\nfour from
 /// in the master, at Full access with Merge into main itself. Input: the case. Output: the
 /// conflicted set, its head and the master's workspace.
 fn conflicted_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_from(case, &[], |case| {
+        case.owner_commit(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\n",
+            "Owner adds four",
+        );
+    })
+}
+
+/// Makes a set of the agent's fourth line and the given files conflict with what `on_main`
+/// commits to main, then brings in the master at Full access with Merge into main itself.
+/// Inputs: the case, the set's other files and the change on main. Output: the conflicted
+/// set, its head and the master's workspace.
+fn conflicted_set_from(
+    case: &Case,
+    files: &[(&str, &str)],
+    on_main: impl FnOnce(&Case),
+) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_changing(
+        case,
+        |case| {
+            case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+            for (path, text) in files {
+                case.edit(path, text);
+            }
+        },
+        on_main,
+    )
+}
+
+/// Makes a set of whatever `in_set` changes conflict with what `on_main` commits to main,
+/// then brings in the master at Full access with Merge into main itself. Inputs: the case
+/// and both changes. Output: the conflicted set, its head and the master's workspace.
+fn conflicted_set_changing(
+    case: &Case,
+    in_set: impl FnOnce(&Case),
+    on_main: impl FnOnce(&Case),
+) -> (ChangeSetId, String, Workspace) {
     use crate::sandbox::policy::AgentAccess;
     case.start();
-    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    in_set(case);
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
-    case.owner_commit(
-        "README",
-        "one\ntwo\nthree\nfour from the owner\n",
-        "Owner adds four",
-    );
+    on_main(case);
     assert!(matches!(
         case.accept(&sub).unwrap(),
         AcceptOutcome::Conflict { .. }
@@ -8566,7 +8744,7 @@ fn a_master_merge_committed_with_a_conflict_marker_waits_for_the_owner() {
 fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
     let case = Case::new();
     let (sub, sub_head, master) = conflicted_set_and_master(&case);
-    let text = "one\ntwo\nthree\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
+    let text = "one\ntwo\nthree\nfour from the agent\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
     master_resolves(&case, &master, &sub_head, &[("README", text)]);
     let fix = turn_of(&case, &master, "Resolve the README conflict");
     let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
@@ -8576,7 +8754,8 @@ fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
 }
 
 /// MASTER-LAND-SPLIT r2: a fix that resolves the conflict by deleting the file has no
-/// markers to find, so it lands by itself (CODE M2).
+/// markers to find, so it lands by itself (CODE M2). The set whose edit it dropped stays
+/// open (LAND-3 r2).
 #[test]
 fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
     let case = Case::new();
@@ -8602,7 +8781,7 @@ fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
             .owner(&["ls-tree", "--name-only", "main"])
             .contains("README")
     );
-    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    set_stayed_open(&case, &sub, "the fix dropped the file the set edited");
 }
 
 /// MASTER-LAND-SPLIT r2: an edit the owner Discarded while the master's worktree was busy
@@ -8792,6 +8971,535 @@ fn a_conflict_fix_on_a_path_with_a_configured_merge_driver_waits_for_the_owner()
         ChangeState::Conflict,
         "a configured merge driver",
     );
+}
+
+/// Lands the master's fix and checks that the set it conflicted with stayed open while the
+/// set's clean file reached main. Inputs: the case, the master's set and the conflicted set.
+/// Output: none.
+fn land_leaves_the_set_open(case: &Case, fix: &ChangeSetId, sub: &ChangeSetId) {
+    let outcome = land_master_set(&case.db, &case.home, fix).unwrap();
+    assert!(
+        matches!(outcome, Some(AcceptOutcome::Landed { .. })),
+        "the master's fix lands: {outcome:?}"
+    );
+    assert_eq!(case.owner(&["show", "main:NEW"]), "new\n");
+    assert_eq!(
+        case.view(sub).state,
+        ChangeState::Conflict,
+        "a set whose work on a conflicted path did not land stays open"
+    );
+    assert!(store::load(&case.db, sub).unwrap().landed.is_none());
+}
+
+/// LAND-3: one conflicted path left as main had it means the set's work there was dropped,
+/// even when its other conflicted path and its clean file landed, so the set stays open
+/// for the owner (rv-secreview land-1 r2 F1).
+#[test]
+fn a_master_land_that_kept_mains_side_of_one_conflict_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(
+        &case,
+        &[("NOTES", "notes of the agent\n"), ("NEW", "new\n")],
+        |case| {
+            case.owner_commit(
+                "README",
+                "one\ntwo\nthree\nfour from the owner\n",
+                "Owner adds four",
+            );
+            case.owner_commit("NOTES", "notes of the owner\n", "Owner adds notes");
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[
+            ("README", BOTH_FOURTH_LINES),
+            ("NOTES", "notes of the owner\n"),
+            ("NEW", "new\n"),
+        ],
+    );
+    let fix = turn_of(&case, &master, "Keep the owner's notes");
+    land_leaves_the_set_open(&case, &fix, &sub);
+}
+
+/// LAND-3: a conflicted path that neither the landed commit nor the commit under it holds
+/// was left as main had it too, so the set whose edit of that file was dropped stays open.
+#[test]
+fn a_master_land_that_kept_mains_deletion_of_a_conflicted_file_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[("NEW", "new\n")], |case| {
+        case.owner(&["rm", "-q", "README"]);
+        case.owner(&["commit", "-q", "-m", "Owner drops the README"]);
+    });
+    master_resolves(&case, &master, &sub_head, &[("NEW", "new\n")]);
+    let fix = turn_of(&case, &master, "Keep the deletion");
+    land_leaves_the_set_open(&case, &fix, &sub);
+}
+
+/// LAND-3: git writes longer markers on a path with this attribute, which the marker read
+/// does not know, so a fix of such a path waits for the owner (land-1 r2 L1, F2).
+#[test]
+fn a_conflict_fix_on_a_path_with_a_marker_size_attribute_waits_for_the_owner() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "README conflict-marker-size=10\n",
+    );
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a marker size attribute",
+    );
+}
+
+/// LAND-3: the marker size attribute counts from the commits' own .gitattributes too, here
+/// from the set's, which neither main nor the owner's checkout holds.
+#[test]
+fn a_conflict_fix_on_a_path_a_commit_gives_a_marker_size_waits_for_the_owner() {
+    let case = Case::new();
+    let attributes = (".gitattributes", "README conflict-marker-size=10\n");
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[attributes], |case| {
+        case.owner_commit(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\n",
+            "Owner adds four",
+        );
+    });
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", BOTH_FOURTH_LINES), attributes],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a committed marker size attribute",
+    );
+}
+
+/// Lands the master's fix. Inputs: the case and the master's set. Output: none.
+fn master_fix_lands(case: &Case, fix: &ChangeSetId) {
+    let outcome = land_master_set(&case.db, &case.home, fix).unwrap();
+    assert!(
+        matches!(outcome, Some(AcceptOutcome::Landed { .. })),
+        "the master's fix lands: {outcome:?}"
+    );
+}
+
+/// Asserts a conflicted set stayed open with nothing recorded as landed. Inputs: the case,
+/// the set and what the row is about. Output: none.
+fn set_stayed_open(case: &Case, set: &ChangeSetId, about: &str) {
+    assert_eq!(case.view(set).state, ChangeState::Conflict, "{about}");
+    assert!(
+        store::load(&case.db, set).unwrap().landed.is_none(),
+        "{about}"
+    );
+}
+
+/// Asserts a conflicted set closed as landed. Inputs: the case, the set and what the row is
+/// about. Output: none.
+fn set_closed(case: &Case, set: &ChangeSetId, about: &str) {
+    assert_eq!(case.view(set).state, ChangeState::Accepted, "{about}");
+    assert!(
+        store::load(&case.db, set).unwrap().landed.is_some(),
+        "{about}"
+    );
+}
+
+/// The README a master's fix holds when it keeps main's line and both sets' lines.
+const ALL_FOURTH_LINES: &str =
+    "one\ntwo\nthree\nfour from the owner\nfour from the agent\nfour from the second\n";
+
+/// The README a master's fix holds when it keeps main's line and the second set's.
+const OWNER_AND_SECOND: &str = "one\ntwo\nthree\nfour from the owner\nfour from the second\n";
+
+/// Makes two agents' sets conflict with the owner's fourth line and brings in the master, at
+/// Full access with Merge into main itself. Input: the case. Output: each set with its head,
+/// and the master's workspace.
+fn two_conflicted_sets_and_master(
+    case: &Case,
+) -> ((ChangeSetId, String), (ChangeSetId, String), Workspace) {
+    use crate::sandbox::policy::AgentAccess;
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let other = numbered_agent(case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(
+        &other.worktree.join("README"),
+        "one\ntwo\nthree\nfour from the second\n",
+    );
+    let second = turn_of(case, &other, "Add the second line");
+    case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    for set in [&first, &second] {
+        assert!(matches!(
+            case.accept(set).unwrap(),
+            AcceptOutcome::Conflict { .. }
+        ));
+    }
+    let master = master_at_work(case);
+    master_may_land(case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    let (first_head, second_head) = (case.view(&first).head, case.view(&second).head);
+    ((first, first_head), (second, second_head), master)
+}
+
+/// Commits a merge of a set in the master's worktree with `path` removed. Inputs: the case,
+/// the master, the set's head and the path. Output: none.
+fn master_merges_without(case: &Case, master: &Workspace, head: &str, path: &str) {
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    in_master(&["merge", "--no-commit", "-s", "ours", head]);
+    in_master(&["rm", "-q", path]);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Drop the file",
+    ]);
+}
+
+/// LAND-3 r2 (rv-code H1): the second fix kept the first set's line and dropped the second's.
+#[test]
+fn a_master_land_that_dropped_the_second_set_leaves_it_open_and_closes_the_first() {
+    let case = Case::new();
+    let ((first, first_head), (second, second_head), master) =
+        two_conflicted_sets_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &first_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &second_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflicts");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &second, "its line is not in the landed file");
+    set_closed(&case, &first, "its line is in the landed file");
+}
+
+/// LAND-3 r2 (rv-code H1): the second fix took the second set's line and dropped the first's.
+#[test]
+fn a_master_land_that_dropped_the_first_set_leaves_it_open_and_closes_the_second() {
+    let case = Case::new();
+    let ((first, first_head), (second, second_head), master) =
+        two_conflicted_sets_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &first_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &second_head,
+        &[("README", OWNER_AND_SECOND)],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflicts");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &first, "its line is not in the landed file");
+    set_closed(&case, &second, "its line is in the landed file");
+}
+
+/// LAND-3 r2: a fix that uses every set's line closes every set.
+#[test]
+fn a_master_land_that_kept_both_sets_lines_closes_both() {
+    let case = Case::new();
+    let ((first, first_head), (second, second_head), master) =
+        two_conflicted_sets_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &first_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &second_head,
+        &[("README", ALL_FOURTH_LINES)],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflicts");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &first, "its line is in the landed file");
+    set_closed(&case, &second, "its line is in the landed file");
+}
+
+/// LAND-3 r2: main's side plus any other line differs from main and still holds none of the
+/// set's work (rv-code H1, sec land-3 F2).
+#[test]
+fn a_master_land_of_mains_side_and_an_unrelated_line_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\nunrelated\n",
+        )],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "its line is not in the landed file");
+}
+
+/// LAND-3 r2 (sec land-3 F1): a land whose tree equals main makes no commit, and the commit
+/// it records is the tip, so only the landed file can say the set's work is missing.
+#[test]
+fn a_master_land_that_made_no_commit_leaves_a_one_file_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    let tip = case.tip();
+    master_resolves(&case, &master, &sub_head, &[]);
+    let fix = turn_of(&case, &master, "Keep main's README");
+    master_fix_lands(&case, &fix);
+    assert_eq!(case.tip(), tip, "the land made no commit");
+    set_stayed_open(&case, &sub, "its line is not on main");
+}
+
+/// LAND-3 r2: a set that added one line twice needs both copies in the landed file.
+#[test]
+fn a_master_land_that_kept_one_copy_of_a_line_added_twice_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(
+        &case,
+        &[("README", "one\ntwo\nthree\nsame\nsame\n")],
+        |case| {
+            case.owner_commit(
+                "README",
+                "one\ntwo\nthree\nfour from the owner\n",
+                "Owner adds four",
+            );
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nthree\nfour from the owner\nsame\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "one copy of its line is missing");
+}
+
+/// Conflicts a set that only removes README's third line with an edit of that line on main
+/// and brings in the master. Input: the case. Output: the set, its head and the master.
+fn removed_line_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_from(case, &[("README", "one\ntwo\n")], |case| {
+        case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edits three");
+    })
+}
+
+/// LAND-3 r2: a set that only removed a line, with the line back in the landed file.
+#[test]
+fn a_master_land_that_brought_a_removed_line_back_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = removed_line_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nthree\nTHREE\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the line it removed is back");
+}
+
+/// LAND-3 r2: a set that only removed a line, with the line gone from the landed file.
+#[test]
+fn a_master_land_that_kept_a_removed_line_gone_closes_the_set() {
+    let case = Case::new();
+    let (sub, sub_head, master) = removed_line_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nTHREE\nmore\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &sub, "the line it removed is gone");
+}
+
+/// Conflicts a set that deletes README with an edit of README on main and brings in the
+/// master. Input: the case. Output: the set, its head and the master.
+fn deleted_file_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_changing(
+        case,
+        |case| std::fs::remove_file(case.workspace.worktree.join("README")).unwrap(),
+        |case| {
+            case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edits three");
+        },
+    )
+}
+
+/// LAND-3 r2: a set that deleted a file needs it absent from the landed tree.
+#[test]
+fn a_master_land_that_kept_a_file_the_set_deleted_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = deleted_file_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nTHREE\nmore\n")],
+    );
+    let fix = turn_of(&case, &master, "Keep the README");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the file it deleted is still there");
+}
+
+/// LAND-3 r2: a set that deleted a file closes when the landed tree lacks it.
+#[test]
+fn a_master_land_that_deleted_the_file_the_set_deleted_closes_the_set() {
+    let case = Case::new();
+    case.owner_commit("KEEP", "keep\n", "Owner adds a file");
+    let (sub, sub_head, master) = deleted_file_set_and_master(&case);
+    master_merges_without(&case, &master, &sub_head, "README");
+    let fix = turn_of(&case, &master, "Delete the README");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &sub, "the file it deleted is gone");
+}
+
+/// The README of a set that only added its fourth line, with main not touching README.
+const AGENT_FOURTH_LINE: &str = "one\ntwo\nthree\nfour from the agent\n";
+
+/// Conflicts a set that changes a binary file with another change of it on main and brings
+/// in the master. Input: the case. Output: the set, its head and the master.
+fn binary_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    case.owner_commit("data", "base\0\n", "Owner adds data");
+    conflicted_set_from(case, &[("data", "agent\0\n")], |case| {
+        case.owner_commit("data", "owner\0\n", "Owner edits data");
+    })
+}
+
+/// LAND-3 r2: a binary path has no lines to read, so the landed blob must be the set's.
+#[test]
+fn a_master_land_that_took_mains_binary_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(&case, &master, &sub_head, &[("README", AGENT_FOURTH_LINE)]);
+    let fix = turn_of(&case, &master, "Keep main's data");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the landed blob is not the set's");
+}
+
+/// LAND-3 r2: a binary path closes when the landed blob is the set's.
+#[test]
+fn a_master_land_that_took_the_sets_binary_closes_the_set() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), ("data", "agent\0\n")],
+    );
+    let fix = turn_of(&case, &master, "Take the set's data");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &sub, "the landed blob is the set's");
+}
+
+/// LAND-3 r2: a binary file's bytes are not lines, so holding the set's bytes and more is
+/// another blob.
+#[test]
+fn a_master_land_that_added_to_the_sets_binary_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), ("data", "agent\0\nextra\n")],
+    );
+    let fix = turn_of(&case, &master, "Change the set's data");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the landed blob is not the set's");
+}
+
+/// LAND-3-R2: a conflicted path holding a line break cannot be read in the one-line-per-path
+/// batch, and a read failure leaves the set open.
+#[test]
+fn a_master_land_whose_conflicted_path_cannot_be_read_leaves_the_set_open() {
+    const NAME: &str = "line\nbreak";
+    let case = Case::new();
+    case.owner_commit(NAME, "one\n", "Owner adds a file");
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[(NAME, "agent\n")], |case| {
+        case.owner_commit(NAME, "owner\n", "Owner edits the file");
+    });
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), (NAME, "owner\nagent\n")],
+    );
+    let fix = turn_of(&case, &master, "Keep both sides");
+    assert!(matches!(
+        case.accept(&fix).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    set_stayed_open(&case, &sub, "its conflicted path could not be read");
+}
+
+/// LAND-3 r2: main renamed the file the set edited, so the conflict sits at a path the set
+/// never had and no line of the set's can be read there. That waits for the owner, though
+/// the fix may have used the set's work.
+#[test]
+fn a_master_land_at_a_path_the_set_never_had_leaves_the_set_open() {
+    let case = Case::new();
+    let long: String = (1..=12).map(|number| format!("line {number}\n")).collect();
+    case.owner_commit("LONG", &long, "Owner adds a long file");
+    case.agent(&["merge", "-q", "--ff-only", "main"]);
+    let (sub, sub_head, master) = conflicted_set_changing(
+        &case,
+        |case| case.edit("LONG", &format!("{long}from the agent\n")),
+        |case| {
+            case.owner(&["mv", "LONG", "RENAMED"]);
+            case.owner_commit(
+                "RENAMED",
+                &format!("{long}from the owner\n"),
+                "Owner renames and edits",
+            );
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[(
+            "RENAMED",
+            &format!("{long}from the owner\nfrom the agent\n"),
+        )],
+    );
+    let fix = turn_of(&case, &master, "Resolve the renamed file");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the conflicted path was never the set's");
 }
 
 /// MASTER-LAND-SPLIT r2: a set already on the first parent of the fix came in by no fix,
@@ -9470,6 +10178,408 @@ fn undoing_a_master_merge_names_and_marks_the_sets_it_closed() {
     );
 }
 
+/// T4-R2-L1: an Accept that made no commit records the branch tip as where it landed. An
+/// undo of the commit at that tip reverts nothing of the set when that commit changed none
+/// of the set's files, so the set keeps its Accept and the Undone row does not name it.
+#[test]
+fn undoing_a_commit_leaves_a_set_accepted_above_it_whose_files_it_never_changed() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let already = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner takes the line");
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("src/kept.rs"), "kept\n");
+    let later = turn_of(&case, &other, "Add kept");
+    let AcceptOutcome::Landed { commit: tip, .. } = case.accept(&later).unwrap() else {
+        panic!("the later set conflicted");
+    };
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&already).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &later).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &already).unwrap().undone,
+        None,
+        "the undo reverted nothing of this set"
+    );
+    let label = store::load(&case.db, &already).unwrap().agent.label;
+    let rows: Vec<_> = activity_of(&case, &later)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        !rows[0].text.contains(&label),
+        "the Undone row claims a revert that did not happen: {}",
+        rows[0].text
+    );
+}
+
+/// Has a new agent write the README and lands its set. Inputs: the case, the agent's number
+/// and the README's text. Output: the set.
+fn readme_landed_by(case: &Case, number: usize, text: &str) -> ChangeSetId {
+    let other = numbered_agent(case, number);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("README"), text);
+    let id = turn_of(case, &other, "Change the README");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    id
+}
+
+/// Lands one set's README line from a second agent, optionally has the owner commit one
+/// unrelated file above it, then commits `files`, so the case's own set, holding the same line
+/// and `files`, is accepted with no commit at the tip. Inputs: the case, the files and whether
+/// a commit sits between. Output: the set accepted with no commit and the set that made it.
+fn same_change_accepted(
+    case: &Case,
+    files: &[(&str, &str)],
+    between: bool,
+) -> (ChangeSetId, ChangeSetId) {
+    keeps_activity(case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    for (path, text) in files {
+        case.edit(path, text);
+    }
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let maker = readme_landed_by(case, 3, "one\ntwo\nthree\nfour\n");
+    let mut tip = case.tip();
+    if between {
+        tip = case.owner_commit("BETWEEN", "between\n", "Owner adds a file");
+    }
+    for (path, text) in files {
+        tip = case.owner_commit(path, text, "Owner takes the file");
+    }
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&same).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    (same, maker)
+}
+
+/// Undoes a set and asserts another set was marked undone by that commit and named on the
+/// one Undone row. Inputs: the case, the set undone, the other set and what the row is
+/// about. Output: none.
+fn undo_marks_and_names(case: &Case, undone: &ChangeSetId, other: &ChangeSetId, about: &str) {
+    use crate::activity::ActivityKind;
+    let AcceptOutcome::Landed { commit, .. } = undo_landing(&case.db, &case.home, undone).unwrap()
+    else {
+        panic!("the undo conflicted");
+    };
+    let stored = store::load(&case.db, other).unwrap();
+    assert_eq!(stored.undone.as_deref(), Some(commit.as_str()), "{about}");
+    let rows: Vec<_> = activity_of(case, undone)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].text.contains(&stored.agent.label),
+        "{about}: {}",
+        rows[0].text
+    );
+}
+
+/// LAND-4 L1: an Accept that made no commit records whatever commit was the tip, which can
+/// sit above the commit that really made the change. Undoing that commit reverts the set
+/// too, so the set is marked and named.
+#[test]
+fn undoing_a_commit_marks_a_set_accepted_above_it_with_the_same_change() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    undo_marks_and_names(&case, &maker, &same, "the undo reverted this set's change");
+}
+
+/// LAND-4 L2: one reverted file is enough, since the set's work is then not all there.
+#[test]
+fn undoing_a_commit_marks_a_set_when_only_one_of_its_files_was_reverted() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[("OTHER", "other\n")], true);
+    undo_marks_and_names(&case, &maker, &same, "one of its two files was reverted");
+}
+
+/// LAND-4 L2 and SEC-F1: a set recorded at the undone commit whose head git can no longer
+/// read counts as reverted, since the branch has already moved and the undo must not fail.
+#[test]
+fn undoing_a_commit_marks_a_set_recorded_at_it_whose_head_git_cannot_read() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], false);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET head=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    undo_marks_and_names(&case, &maker, &same, "an unreadable set counts as reverted");
+}
+
+/// Land-6 r2: an unreadable set above the undone commit proves nothing about that commit,
+/// so the undo does not name it.
+#[test]
+fn undoing_a_commit_leaves_a_set_above_it_whose_head_git_cannot_read() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET head=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+}
+
+/// Land-6 r2: sharing a file is not enough. A later set on the same file whose lines the
+/// revert left in place is neither marked nor named, so the Undone row stays true.
+#[test]
+fn undoing_a_commit_leaves_a_later_set_on_the_same_file_whose_lines_survive() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "zero\none\ntwo\nthree\n");
+    let later = case.turn(TurnOutcome::Succeeded).unwrap();
+    let older = readme_landed_by(&case, 3, "one\ntwo\nthree\nfour\n");
+    readme_landed_by(&case, 4, "zero\none\ntwo\nthree\nfour\n");
+    let tip = case.tip();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&later).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &older).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let stored = store::load(&case.db, &later).unwrap();
+    assert_eq!(stored.undone, None, "its line is still on main");
+    let rows: Vec<_> = activity_of(&case, &older)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        !rows[0].text.contains(&stored.agent.label),
+        "the Undone row claims a revert that did not happen: {}",
+        rows[0].text
+    );
+}
+
+/// Land-6 r2: sets below the undone commit cost no git run, since one read of the range
+/// decides for all of them.
+#[test]
+fn undoing_a_commit_costs_the_same_git_runs_for_any_number_of_sets_below_it() {
+    let runs = |copies: usize| {
+        let case = Case::new();
+        keeps_activity(&case);
+        case.start();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let already = case.turn(TurnOutcome::Succeeded).unwrap();
+        case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner takes the line");
+        assert!(matches!(
+            case.accept(&already).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let record = store::load(&case.db, &already).unwrap();
+        for copy in 0..copies {
+            let mut below = record.clone();
+            below.id = ChangeSetId::new(format!("{copy:032x}")).unwrap();
+            store::save(&case.db, &below).unwrap();
+        }
+        let later = readme_landed_by(&case, 3, "zero\none\ntwo\nthree\nfour\n");
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        undo_landing(&case.db, &case.home, &later).unwrap();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    assert_eq!(
+        runs(5),
+        runs(0),
+        "sets below the undone commit cost git runs"
+    );
+}
+
+/// Land-6 r2: a git failure reading what the undo reverted stops the step and leaves the
+/// intent, so the next look at the set runs it again instead of marking on a guess.
+#[test]
+fn a_read_failure_in_a_finished_undo_is_left_for_settle_to_retry() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    let landed = store::load(&case.db, &maker).unwrap().landed.unwrap();
+    assert!(
+        owner::undo(&case.db, &case.home, &maker, &|step| {
+            step == owner::Step::BranchMoved
+        })
+        .is_err()
+    );
+    let set_landed = |value: &str| {
+        case.db
+            .execute(
+                "UPDATE landing_change_sets SET landed=?1 WHERE id=?2",
+                [value, maker.as_str()],
+            )
+            .unwrap();
+    };
+    set_landed("0123456789abcdef0123456789abcdef01234567");
+    assert!(owner::settled(&case.db, &maker).is_err());
+    assert!(store::load(&case.db, &maker).unwrap().intent.is_some());
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+    set_landed(&landed);
+    owner::settled(&case.db, &maker).unwrap();
+    assert!(store::load(&case.db, &maker).unwrap().intent.is_none());
+    assert!(store::load(&case.db, &same).unwrap().undone.is_some());
+}
+
+/// LAND-4 L1: only sets above the undone commit can hold its change. A set accepted with no
+/// commit before it landed keeps its Accept, though the commit changed the same file.
+#[test]
+fn undoing_a_commit_leaves_a_set_accepted_below_it_on_the_same_file() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let already = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner takes the line");
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&already).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(
+        &other.worktree.join("README"),
+        "one\ntwo\nthree\nfour\nfive\n",
+    );
+    let later = turn_of(&case, &other, "Add five");
+    assert!(matches!(
+        case.accept(&later).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &later).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &already).unwrap().undone,
+        None,
+        "the undo left this set's line in place"
+    );
+}
+
+/// Land-6 r2: a set marked undone keeps the commit that really reverted it. A later undo of
+/// another commit on the same file finds its work already gone and does not rewrite that.
+#[test]
+fn undoing_a_second_commit_keeps_the_first_undo_of_a_set() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let older = readme_landed_by(&case, 3, "one\ntwo\nthree\nfour\n");
+    let newer = readme_landed_by(&case, 4, "zero\none\ntwo\nthree\nfour\n");
+    assert!(matches!(
+        case.accept(&same).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let AcceptOutcome::Landed { commit: first, .. } =
+        undo_landing(&case.db, &case.home, &older).unwrap()
+    else {
+        panic!("the first undo conflicted");
+    };
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone.as_deref(),
+        Some(first.as_str()),
+        "that undo removed this set's line"
+    );
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &newer).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone.as_deref(),
+        Some(first.as_str()),
+        "the later undo rewrote the first one"
+    );
+}
+
+/// LAND-4 L1: a set whose recorded commit the repository no longer holds sits above nothing,
+/// so an undo leaves it Accepted, as a landed commit that is gone counts as not landed.
+#[test]
+fn undoing_a_commit_leaves_a_set_whose_recorded_commit_is_gone() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET landed=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+}
+
+/// LAND-4 L1: an undo moves one branch. A set accepted with no commit at a commit only
+/// another branch holds still has its change there, so it keeps its Accept.
+#[test]
+fn undoing_a_commit_leaves_a_set_accepted_on_another_branch() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let maker = turn_of(&case, &other, "Add the line");
+    assert!(matches!(
+        case.accept(&maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let tree = case.owner(&["rev-parse", "main^{tree}"]);
+    let on_stage = case.owner(&["commit-tree", tree.trim(), "-p", "main", "-m", "On stage"]);
+    let on_stage = on_stage.trim().to_owned();
+    case.owner(&["branch", "stage", &on_stage]);
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&same).unwrap() else {
+        panic!("the set on stage conflicted");
+    };
+    assert_eq!(
+        (commit, branch),
+        (on_stage, "stage".to_owned()),
+        "no commit, on stage"
+    );
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone,
+        None,
+        "stage still holds the change"
+    );
+}
+
 #[test]
 fn an_undo_reverts_on_the_branch_the_set_landed_on_after_land_on_changes() {
     let case = Case::new();
@@ -9546,6 +10656,104 @@ fn a_master_worktree_start_is_recorded_once_and_never_moves_past_its_commits() {
     );
 }
 
+/// T3-R2-S1: a master turn reads its stored start without the repository hold, so a long
+/// holder of that hold never delays the turn.
+#[test]
+fn a_master_turn_with_a_stored_start_does_not_wait_for_the_repository_hold() {
+    let case = Case::new();
+    case.start();
+    let master = master_agent(&case);
+    record_master_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let held = flow::hold(&master.repository);
+    let engine = case.repo.parent().unwrap().join("engine");
+    let home = git::OWNER_HOME.with(|home| home.borrow().clone());
+    let turn = master.clone();
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        git::OWNER_HOME.with(|owner| *owner.borrow_mut() = home);
+        let db = open(&engine).unwrap();
+        let _ = sent.send(record_master_start(
+            &db,
+            &turn.repository,
+            &turn.worktree,
+            &turn.git_dir,
+        ));
+    });
+    let waited = got.recv_timeout(Duration::from_secs(30));
+    drop(held);
+    assert!(matches!(waited, Ok(Ok(()))), "the turn waited: {waited:?}");
+}
+
+/// T3-R2-S2: a master that only fast-forwarded its worktree to main has nothing to land, so
+/// its turn end opens no empty set.
+#[test]
+fn a_master_that_only_fast_forwarded_to_main_opens_no_change_set() {
+    let case = Case::new();
+    case.start();
+    let master = master_agent(&case);
+    record_master_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    case.owner_commit("LATER", "later\n", "Owner adds a file");
+    git_in(
+        &case.home,
+        &master.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    assert_eq!(
+        record_turn_end(&case.db, &master, &merge_turn()).unwrap(),
+        None
+    );
+}
+
+/// T3-R2-S2: the same holds for a team agent, since the rule sits where every set opens.
+#[test]
+fn a_team_agent_that_only_fast_forwarded_to_main_opens_no_change_set() {
+    let case = Case::new();
+    case.start();
+    let agent = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    case.owner_commit("LATER", "later\n", "Owner adds a file");
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    assert_eq!(
+        record_turn_end(&case.db, &agent, &merge_turn()).unwrap(),
+        None
+    );
+}
+
+/// T3-R2-S4: an ordinary Accept's stored intent keeps the shape an older engine reads, and a
+/// master's still carries its mark.
+#[test]
+fn an_ordinary_land_intent_is_stored_in_the_shape_an_older_engine_reads() {
+    let land = |master| store::Intent::Land {
+        reference: "refs/heads/main".into(),
+        old: "a".into(),
+        new: "b".into(),
+        master,
+    };
+    let stored = serde_json::to_value(land(false)).unwrap();
+    assert!(stored.get("master").is_none(), "{stored}");
+    let marked = serde_json::to_string(&land(true)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<store::Intent>(&marked).unwrap(),
+        land(true)
+    );
+}
+
 /// A set's proposed message names only the agent's own commits: owner commits the agent
 /// brought in by merging main are already on main, so they never become its subject or
 /// its list (T4 r2: an undo named the owner's commit).
@@ -9610,7 +10818,11 @@ fn unplant(case: &Case, runs: &std::sync::atomic::AtomicUsize) -> usize {
 /// resets ran the one counted by `runs`. Inputs: the git folder and the count. Output: the
 /// runs.
 fn unplant_from(git_dir: &Path, runs: &std::sync::atomic::AtomicUsize) -> usize {
-    for planted in [&flow::BEFORE_RESET, &flow::AFTER_READ_TREE] {
+    for planted in [
+        &flow::BEFORE_RESET,
+        &flow::AFTER_READ_TREE,
+        &flow::AFTER_HEAD_MOVE,
+    ] {
         planted
             .lock()
             .unwrap()
@@ -9743,6 +10955,7 @@ fn an_agent_edit_inside_the_reset_an_engine_start_finishes_survives() {
     stopped.intent = Some(store::Intent::Reset {
         from: Some(head.clone()),
         target: case.tip(),
+        earlier: None,
     });
     store::save(&case.db, &stopped).unwrap();
     let runs = edit_inside_resets(&case);
@@ -9797,6 +11010,36 @@ fn cargo_workspace(case: &mut Case) {
     case.owner(&["commit", "-q", "-m", "Start a Cargo workspace"]);
     case.agent(&["checkout", "-q", "--detach", "main"]);
     case.start();
+}
+
+/// The notes the engine left in the owner's team conversation, oldest first, read every
+/// 50 ms until one is there or `within` passes. Inputs: the case and the time. Output: the
+/// texts.
+fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        let notes: Vec<String> = case
+            .db
+            .prepare("SELECT text FROM team_messages WHERE project=?1 AND state='note' ORDER BY id")
+            .unwrap()
+            .query_map([case.workspace.project.as_str()], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        if !notes.is_empty() || started.elapsed() >= within {
+            return notes;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What the owner reads once a set they heard waits in Changes went back to its agent.
+/// Input: the set. Output: the note.
+fn went_back_note(set: &ChangeSetView) -> String {
+    format!(
+        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
+        set.agent.label
+    )
 }
 
 /// The agent adds a dev-dependency of `app` and the owner then adds a dependency of `app` on
@@ -9974,6 +11217,7 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
 
 const TURN_END_WITHIN: Duration = Duration::from_secs(20);
 const REGENERATED_WITHIN: Duration = Duration::from_secs(120);
+const OWNER_NOTE_WITHIN: Duration = Duration::from_secs(5);
 
 /// Ends the agent's turn the way a team turn does, on its own thread and store connection,
 /// and waits at most `within` for it to return. Inputs: the case, the turn id and the time.
@@ -10202,6 +11446,11 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
         "CrazyAgent <engine@crazyagent.invalid>\nRegenerate Cargo.lock on main\n"
     );
     assert_eq!(
+        set.regenerated,
+        vec!["Cargo.lock".to_owned()],
+        "Changes can say the project's tools wrote this lockfile"
+    );
+    assert_eq!(
         case.owner(&["rev-parse", &format!("{}^2", set.head)])
             .trim(),
         tip
@@ -10249,6 +11498,24 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
     );
 }
 
+/// Once a later turn moves a regenerated set's head, Changes no longer says the project's
+/// tools wrote its lockfile, since the agent may have rewritten it (T8-R1-WORDING).
+#[test]
+fn a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert_eq!(set.regenerated, vec!["Cargo.lock".to_owned()]);
+    case.edit("app/src/lib.rs", "pub fn later() {}\n");
+    turn_end_within(&case, "turn-2", TURN_END_WITHIN);
+    let later = set_within(&case, &id, TURN_END_WITHIN, |later| later.head != set.head);
+    assert_ne!(later.head, set.head);
+    assert_eq!(later.regenerated, Vec::<String>::new());
+}
+
 /// When cargo cannot rewrite the clashing lockfile, here offline on a crate it never
 /// fetched, the turn end falls back to Task 7's update: the set goes back to its agent with
 /// main merged into its worktree, no regeneration note goes out and nothing temporary is
@@ -10257,8 +11524,12 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
 fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_end() {
     let mut case = Case::new();
     cargo_workspace(&mut case);
-    let (id, _) =
+    let (id, landed) =
         lockfile_clash_at_turn_end(&case, "zzz-never-fetched = \"1\"", "zzz-never-fetched");
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone()))
+    );
     let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
         set.state == ChangeState::Updating
     });
@@ -10273,6 +11544,11 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
             .iter()
             .all(|note| !note.contains("regenerated")),
         "no regeneration note goes out"
+    );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set)],
+        "the owner, told the edits wait in Changes, hears they went back"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
@@ -10401,7 +11677,168 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
         ChangeState::Updating,
         "past its time the tool is stopped and the agent fixes the clash"
     );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set)]
+    );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// One lockfile tool a row runs for real on a workspace whose packages are all local, so no
+/// registry is asked. Fields: the program, its lockfile, the manifest both sides edit, that
+/// manifest and the lockfile at the start, the owner's and the agent's, the other files, what
+/// the tool's lockfile must name and what the landed manifest must hold.
+struct RealTool {
+    program: &'static str,
+    lockfile: &'static str,
+    manifest: &'static str,
+    start: (String, String),
+    owner: (String, String),
+    agent: (String, String),
+    others: Vec<(&'static str, String)>,
+    locks: [&'static str; 2],
+    keeps: [&'static str; 2],
+}
+
+/// Whether a program runs on the PATH the engine gives its tools. Input: the program.
+/// Output: the answer.
+fn runs_for_the_engine(program: &str) -> bool {
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/env")
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+            )
+            .env("HOME", "/tmp")
+            .args([program, "--version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
+}
+
+/// A clash in one tool's lockfile alone is rewritten by the real tool in its sandbox, and
+/// the set lands with both sides locked; only `cargo update` ran in a row before
+/// (T8-R1-TOOLS). A tool this machine does not have is skipped. pnpm and uv have no row
+/// yet: neither regenerates in the tool sandbox today. Input: the tool.
+fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
+    let program = tool.program;
+    if !runs_for_the_engine(program) {
+        eprintln!("skipped: {program} is not installed");
+        return;
+    }
+    let mut case = Case::new();
+    seat_team_agent(&mut case);
+    for (path, text) in &tool.others {
+        write(&case.repo.join(path), text);
+    }
+    write(&case.repo.join(tool.manifest), &tool.start.0);
+    write(&case.repo.join(tool.lockfile), &tool.start.1);
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Start a workspace"]);
+    case.agent(&["checkout", "-q", "--detach", "main"]);
+    case.start();
+    write(&case.repo.join(tool.manifest), &tool.owner.0);
+    write(&case.repo.join(tool.lockfile), &tool.owner.1);
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Depend on a"]);
+    case.edit(tool.manifest, &tool.agent.0);
+    case.edit(tool.lockfile, &tool.agent.1);
+    let landed = turn_end_within(&case, "turn-1", TURN_END_WITHIN);
+    let id = list(&case.db, &case.workspace.project)
+        .unwrap()
+        .first()
+        .expect("the agent's turn kept a change set")
+        .id
+        .clone();
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone())),
+        "{program}"
+    );
+    let subject = format!("Regenerate {} on main", tool.lockfile);
+    let head_subject = |set: &ChangeSetView| {
+        case.owner(&["log", "-1", "--format=%s", &set.head])
+            .trim()
+            .to_owned()
+    };
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || head_subject(set) == subject
+    });
+    assert_eq!(
+        (head_subject(&set), set.state),
+        (subject, ChangeState::Pending),
+        "{program}: its lockfile did not land"
+    );
+    let lock = case.owner(&["show", &format!("{}:{}", set.head, tool.lockfile)]);
+    for name in tool.locks {
+        assert!(lock.contains(name), "{program}: {name} in\n{lock}");
+    }
+    assert_eq!(
+        regenerate_leftovers(&case),
+        Vec::<String>::new(),
+        "{program}"
+    );
+    let outcome = case.accept(&id).unwrap();
+    assert!(
+        matches!(outcome, AcceptOutcome::Landed { .. }),
+        "{program}: {outcome:?}"
+    );
+    let manifest = std::fs::read_to_string(case.repo.join(tool.manifest)).unwrap();
+    for kept in tool.keeps {
+        assert!(manifest.contains(kept), "{program}: {kept} in\n{manifest}");
+    }
+}
+
+/// A package.json whose two dependency lists sit far enough apart for git to merge edits to
+/// each. Inputs: the two lists' entries. Output: the text.
+fn node_app(dependencies: &str, dev_dependencies: &str) -> String {
+    format!(
+        "{{\n  \"name\": \"app\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {{{dependencies}}},\n  \"private\": true,\n  \"license\": \"MIT\",\n  \"devDependencies\": {{{dev_dependencies}}}\n}}\n"
+    )
+}
+
+/// The packages a Node workspace links, beside its root manifest. Input: extra root fields.
+/// Output: the files.
+fn node_packages(root_fields: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "package.json",
+            format!("{{\"name\":\"root\",\"version\":\"1.0.0\",\"private\":true{root_fields}}}\n"),
+        ),
+        (
+            "packages/a/package.json",
+            "{\"name\":\"a\",\"version\":\"1.0.0\"}\n".to_owned(),
+        ),
+        (
+            "packages/b/package.json",
+            "{\"name\":\"b\",\"version\":\"1.0.0\"}\n".to_owned(),
+        ),
+    ]
+}
+
+#[test]
+fn real_npm_rewrites_a_clashing_package_lock() {
+    let lock = |version: &str| {
+        format!(
+            "{{\"name\":\"root\",\"version\":\"{version}\",\"lockfileVersion\":3,\"requires\":true,\"packages\":{{}}}}\n"
+        )
+    };
+    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
+        program: "npm",
+        lockfile: "package-lock.json",
+        manifest: "packages/app/package.json",
+        start: (node_app("", ""), lock("1.0.0")),
+        owner: (node_app("\"a\": \"1.0.0\"", ""), lock("1.0.1")),
+        agent: (node_app("", "\"b\": \"1.0.0\""), lock("1.0.2")),
+        others: node_packages(",\"workspaces\":[\"packages/*\"]"),
+        locks: [
+            "\"resolved\": \"packages/a\"",
+            "\"resolved\": \"packages/b\"",
+        ],
+        keeps: ["\"a\": \"1.0.0\"", "\"b\": \"1.0.0\""],
+    });
 }
 
 /// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
@@ -10425,20 +11862,21 @@ fn a_tool_that_also_rewrites_a_manifest_falls_back_to_the_agent_update() {
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
-/// A Cargo.lock-only clash of an agent the owner stopped, or of a project whose team the
-/// owner paused, is not regenerated and its agent gets no note; the stopped agent's set
-/// keeps its head for the owner (OS-8).
+/// A Cargo.lock-only clash of an agent the owner or the master stopped, or of a project
+/// whose team the owner paused, is not regenerated and its agent gets no note; the stopped
+/// set keeps its head and waits for the owner (OS-8, HB-S5-B, T8-R2-S3).
 #[test]
 fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
-    for stop in ["owner stop", "paused team"] {
+    for stop in ["owner stop", "master stop", "paused team"] {
         let mut case = Case::new();
         cargo_workspace(&mut case);
         let project = case.workspace.project.as_str().to_owned();
-        if stop == "owner stop" {
+        if stop != "paused team" {
+            let maker = stop.trim_end_matches(" stop");
             case.db
                 .execute(
-                    "INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,1)",
-                    rusqlite::params![CLONE_AGENT, project],
+                    "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,?3)",
+                    rusqlite::params![CLONE_AGENT, project, maker],
                 )
                 .unwrap();
         } else {
@@ -10461,10 +11899,175 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
                 .all(|note| !note.contains("regenerated")),
             "{stop}: the agent got a regeneration note"
         );
-        if stop == "owner stop" {
-            assert_eq!(set.head, head, "the stopped agent's set keeps its head");
-        }
+        assert_eq!(set.head, head, "{stop}: the set keeps its head");
+        assert_eq!(
+            set.state,
+            ChangeState::Pending,
+            "{stop}: the set waits for the owner"
+        );
     }
+}
+
+/// Starts a Cargo.lock-only clash whose stand-in tool is still running when the turn end
+/// returns, then runs `during`. Inputs: the case and what happens while the tool runs.
+/// Output: the set, its head before the regeneration and what `during` returned.
+fn clash_during_a_slow_tool<T>(
+    case: &mut Case,
+    during: impl FnOnce(&Case) -> T,
+) -> (ChangeSetId, String, T) {
+    cargo_workspace(case);
+    stand_in_cargo(
+        case,
+        "",
+        ": > .tool-started\nsleep 8\nrm -f .tool-started",
+        Duration::from_secs(60),
+    );
+    let (id, _) = lockfile_clash_at_turn_end(case, "b = { path = \"../b\" }", "b");
+    let head = case.view(&id).head;
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(".tool-started");
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the tool never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let done = during(case);
+    (id, head, done)
+}
+
+/// Waits until a set's regeneration has ended. Input: the set. Output: none.
+fn regeneration_ended(id: &ChangeSetId) {
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while lockfiles::is_running(id) {
+        assert!(Instant::now() < deadline, "the regeneration never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// T8-R2-S2: the owner's stop while the tool runs lands nothing, keeps the set for the owner
+/// and sends the agent no note.
+#[test]
+fn an_owner_stop_while_the_lockfile_tool_runs_lands_nothing() {
+    let mut case = Case::new();
+    let (id, head, ()) = clash_during_a_slow_tool(&mut case, |case| {
+        case.db
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+                rusqlite::params![CLONE_AGENT, case.workspace.project.as_str()],
+            )
+            .unwrap();
+    });
+    regeneration_ended(&id);
+    let set = case.view(&id);
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        (set.head.as_str(), set.state),
+        (head.as_str(), ChangeState::Pending)
+    );
+    assert!(
+        engine_notes(&case)
+            .iter()
+            .all(|note| !note.contains("regenerated")),
+        "the stopped agent got a regeneration note"
+    );
+}
+
+/// T8-R2-S2 and S3: a pause while the tool runs lands nothing, and the engine's update waits
+/// too, so the paused team's worktree is left alone.
+#[test]
+fn a_pause_while_the_lockfile_tool_runs_lands_nothing_and_starts_no_update() {
+    let mut case = Case::new();
+    let (id, head, ()) = clash_during_a_slow_tool(&mut case, |case| {
+        case.db
+            .execute(
+                "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,1)",
+                [case.workspace.project.as_str()],
+            )
+            .unwrap();
+    });
+    regeneration_ended(&id);
+    let set = set_within(&case, &id, Duration::from_secs(5), |set| {
+        set.state != ChangeState::Pending
+    });
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        (set.head.as_str(), set.state),
+        (head.as_str(), ChangeState::Pending)
+    );
+}
+
+/// T8-R2-S2: main moving while the tool runs throws that run away and regenerates on the new
+/// main.
+#[test]
+fn main_moving_while_the_lockfile_tool_runs_regenerates_on_the_new_main() {
+    let mut case = Case::new();
+    let (id, _, moved) = clash_during_a_slow_tool(&mut case, |case| {
+        case.owner_commit("LATER", "later\n", "Owner moves main")
+    });
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set) && is_ancestor(&case, &moved, &set.head)
+    });
+    assert!(regenerated(&case, &set), "the set was never regenerated");
+    assert!(
+        is_ancestor(&case, &moved, &set.head),
+        "it ran on the old main"
+    );
+    assert_eq!(set.state, ChangeState::Pending);
+}
+
+/// T8-R2-S2: an edit the agent makes while the tool runs stops the regeneration from landing
+/// and survives, on a file the regeneration would not change.
+#[test]
+fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
+    let mut case = Case::new();
+    let (id, _, ()) =
+        clash_during_a_slow_tool(&mut case, |case| case.edit("README", "edited mid-run\n"));
+    regeneration_ended(&id);
+    let set = case.view(&id);
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "edited mid-run\n"
+    );
+}
+
+/// T8-R2-S4: past the most regenerations one repository runs at once, a clash goes straight
+/// to Task 7's update.
+#[test]
+fn a_third_lockfile_regeneration_in_one_repository_goes_to_the_agent_update() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let word = token(&case);
+    let _busy = [
+        lockfiles::occupy(&case.repo, &format!("{word}-1")),
+        lockfiles::occupy(&case.repo, &format!("{word}-2")),
+    ];
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || regenerated(&case, set)
+    });
+    assert!(!regenerated(&case, &set), "a third regeneration ran");
+    assert_eq!(set.state, ChangeState::Updating);
+}
+
+/// T8-R2-S4: under that limit a regeneration still runs.
+#[test]
+fn a_second_lockfile_regeneration_in_one_repository_still_runs() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let _busy = lockfiles::occupy(&case.repo, &format!("{}-1", token(&case)));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert!(
+        regenerated(&case, &set),
+        "the second regeneration never ran"
+    );
 }
 
 /// The engine's start removes the temporary worktree, its admin folder and the engine's
@@ -10830,6 +12433,620 @@ fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
     );
 }
 
+/// The case's master agent opened for a reset onto a new owner commit. Input: the case.
+/// Output: its workspace, the opened agent, the commit it holds, its lease branch's full
+/// name and the owner commit.
+fn master_to_reset(case: &Case) -> (Workspace, flow::Agent, String, String, String) {
+    let master = master_agent(case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let lease = git_in(&case.home, &master.worktree, &["symbolic-ref", "HEAD"])
+        .trim()
+        .to_owned();
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    (master, agent, from, lease, target)
+}
+
+/// What the agent does at the last step of a reset in the rows below: commits a new file
+/// where it stands, then moves to a new branch. Inputs: the owner home and the worktree.
+/// Output: none.
+fn commit_then_switch(home: &Path, worktree: &Path) {
+    write(&worktree.join("later.txt"), "later\n");
+    git_in(home, worktree, &["add", "later.txt"]);
+    git_in(
+        home,
+        worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Later work",
+        ],
+    );
+    git_in(home, worktree, &["switch", "-q", "-c", "side"]);
+}
+
+/// Commits what the agent's index holds, the way an agent can inside a reset. Inputs: the
+/// home and the worktree. Output: none.
+fn commit_the_index(home: &Path, worktree: &Path) {
+    git_in(
+        home,
+        worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Later work",
+        ],
+    );
+}
+
+/// Land-2 r1 M1: a commit made after the files moved took them with it, so putting them
+/// back would stage a reversal of the agent's own commit for its next turn to post.
+#[test]
+fn an_agent_commit_after_a_reset_moved_the_files_gets_no_reversal() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        commit_the_index(&home, &worktree);
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["status", "--porcelain"]),
+        "",
+        "the engine staged a reversal of the agent's commit"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    let committed = case.agent(&["show", "HEAD:README"]);
+    assert_ne!(
+        committed,
+        case.agent(&["show", &format!("{}:README", before.head)]),
+        "the commit holds what the reset moved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        committed,
+        "the file stays at what the reset moved it to"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// Land-2 r1 M1: an unstaged edit of another file does not make the agent's commit any less
+/// its own. The index says whether the moved files were committed, the worktree cannot.
+#[test]
+fn an_agent_commit_and_an_edit_elsewhere_after_a_reset_moved_the_files_gets_no_reversal() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        write(&worktree.join("later.txt"), "later\n");
+        git_in(&home, &worktree, &["add", "later.txt"]);
+        commit_the_index(&home, &worktree);
+        write(&worktree.join("later.txt"), "edited\n");
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["status", "--porcelain"]),
+        " M later.txt\n",
+        "the engine staged a reversal of the agent's commit"
+    );
+}
+
+/// Land-2 r1 F1: a commit made before the files moved holds none of them, so they still go
+/// back under it, or the next turn would post the reset as the agent's change.
+#[test]
+fn an_agent_commit_before_a_reset_moved_the_files_still_gets_them_back() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    let original = case.agent(&["show", &format!("{}:README", before.head)]);
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(
+        &flow::BEFORE_READ_TREE,
+        &case.workspace.git_dir,
+        move || {
+            write(&worktree.join("later.txt"), "later\n");
+            git_in(&home, &worktree, &["add", "later.txt"]);
+            commit_the_index(&home, &worktree);
+        },
+    );
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(case.agent(&["status", "--porcelain"]), "");
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        original,
+        "the files the reset moved did not go back"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// Land-2 r1 L1: an update an engine stopped after the files moved, with the agent then
+/// committing, drops the reset and puts the set back. The files stay in the agent's commit.
+#[test]
+fn an_update_stopped_after_its_files_moved_is_put_back_once_the_agent_committed() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    let original = case.agent(&["show", &format!("{}:README", before.head)]);
+    stopped_inside_reset(&case, &flow::AFTER_READ_TREE, || update(&case.db, &id));
+    assert!(store::load(&case.db, &id).unwrap().intent.is_some());
+    assert_put_back(&case, &id, &before, Some(&before.head));
+    assert_ne!(
+        case.agent(&["show", "HEAD:README"]),
+        original,
+        "the agent's commit took what the reset moved"
+    );
+}
+
+/// Land-2 r1 L1: an update an engine stopped after the files moved, with the agent then
+/// editing, moves nothing and puts the set back, the edit and HEAD as the agent left them.
+#[test]
+fn an_update_stopped_after_its_files_moved_is_put_back_once_the_agent_edited() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    stopped_inside_reset(&case, &flow::AFTER_READ_TREE, || update(&case.db, &id));
+    case.edit("README", "agent edit\n");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        before.head,
+        "HEAD moved over the agent's edit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "agent edit\n"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// A set of the case's agent that conflicts with an owner commit, held by a refused
+/// Accept. Input: the case. Output: its id.
+fn conflicted(case: &Case) -> ChangeSetId {
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    id
+}
+
+/// Stores the case's set as discarded with a reset left to finish, the way an engine stop
+/// leaves it. Inputs: the case, the set, where the reset starts and its target. Output:
+/// none.
+fn discarded_with_reset(case: &Case, id: &ChangeSetId, from: Option<&str>, target: &str) {
+    let mut stopped = store::load(&case.db, id).unwrap();
+    stopped.state = ChangeState::Discarded;
+    stopped.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    stopped.intent = Some(reset_intent(from, target));
+    store::save(&case.db, &stopped).unwrap();
+}
+
+/// A stored reset step, as an engine wrote it. Inputs: where it starts, None for an engine
+/// from before resets recorded that, and its target. Output: the step.
+fn reset_intent(from: Option<&str>, target: &str) -> store::Intent {
+    serde_json::from_value(serde_json::json!({"step": "reset", "from": from, "target": target}))
+        .unwrap()
+}
+
+/// Stops a step of the engine inside a reset the way an engine stop does, after the step
+/// stored its intent and moved its pending ref. Inputs: the case, the seam it stops at and
+/// the step. Output: none.
+fn stopped_inside_reset<T>(
+    case: &Case,
+    seam: &std::sync::Mutex<Vec<(PathBuf, flow::PlantedEdit)>>,
+    step: impl FnOnce() -> T,
+) {
+    let runs = plant(seam, &case.workspace.git_dir, || {
+        panic!("the engine stopped inside a reset")
+    });
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(step));
+    unplant(case, &runs);
+    assert!(stopped.is_err(), "the step never reached its reset");
+}
+
+/// Has the agent commit after a stopped reset, runs the engine's next look at the set and
+/// asserts the commit stayed, the set is as it was and its pending ref names `pending`.
+/// Inputs: the case, the set, the record before the step and the commit the ref names, or
+/// None when no ref should exist.
+fn assert_put_back(case: &Case, id: &ChangeSetId, before: &store::Record, pending: Option<&str>) {
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert_eq!(&store::load(&case.db, id).unwrap(), before);
+    let reference = flow::pending_ref(id);
+    let found = case.owner(&["for-each-ref", "--format=%(objectname)", &reference]);
+    assert_eq!(found.trim(), pending.unwrap_or(""));
+}
+
+/// An agent that switches branch right after a reset moved HEAD holds the reset's commit
+/// on the new branch, so the engine writes no reversal there: it reports no reset, puts
+/// the lease branch back and leaves the new branch's files alone (RK-R2-S1).
+#[test]
+fn a_branch_switch_after_a_reset_moved_head_writes_no_reversal_on_the_new_branch() {
+    let case = Case::new();
+    let (master, agent, from, lease, target) = master_to_reset(&case);
+    let (home, worktree) = (case.home.clone(), master.worktree.clone());
+    let runs = plant(&flow::AFTER_HEAD_MOVE, &master.git_dir, move || {
+        git_in(&home, &worktree, &["switch", "-q", "-c", "side"]);
+    });
+    let reset = flow::reset_agent(&agent, &from, &target).unwrap();
+    assert_eq!(unplant_from(&master.git_dir, &runs), 1);
+    assert!(
+        !reset,
+        "a reset whose agent switched branches was reported as done"
+    );
+    let git = |args: &[&str]| git_in(&case.home, &master.worktree, args).trim().to_owned();
+    assert_eq!(git(&["rev-parse", "side"]), target);
+    assert_eq!(git(&["rev-parse", &lease]), from);
+    assert_eq!(
+        git(&["status", "--porcelain"]),
+        "",
+        "the engine wrote a reversal onto the branch holding the reset's commit"
+    );
+}
+
+/// An agent that commits on its branch and leaves it inside a reset keeps everything: the
+/// lease branch cannot go back over the commit, so the engine writes no files and answers
+/// busy instead of reporting a plain refusal its caller would undo (RK-R2-S1).
+#[test]
+fn a_reset_whose_branch_moved_on_before_it_could_go_back_writes_no_files() {
+    let case = Case::new();
+    let (master, agent, from, lease, target) = master_to_reset(&case);
+    let (home, worktree) = (case.home.clone(), master.worktree.clone());
+    let runs = plant(&flow::AFTER_HEAD_MOVE, &master.git_dir, move || {
+        commit_then_switch(&home, &worktree);
+    });
+    let outcome = flow::reset_agent(&agent, &from, &target).map_err(|refused| refused.0);
+    assert_eq!(unplant_from(&master.git_dir, &runs), 1);
+    let git = |args: &[&str]| git_in(&case.home, &master.worktree, args).trim().to_owned();
+    assert_eq!(
+        git(&["status", "--porcelain"]),
+        "",
+        "the engine wrote files after its branch moved on"
+    );
+    assert_eq!(
+        std::fs::read_to_string(master.worktree.join("README")).unwrap(),
+        "one\ntwo\nTHREE\n"
+    );
+    assert_eq!(git(&["rev-parse", "side^"]), target);
+    assert_eq!(git(&["rev-parse", &lease]), git(&["rev-parse", "side"]));
+    assert_eq!(outcome, Err("changes_agent_busy".to_owned()));
+}
+
+/// An update whose agent builds on the merge and leaves its HEAD inside the reset stays
+/// the update it was: the engine answers busy with the step still stored, and its next
+/// look finds the work on the merge and keeps the set there (RK-R2-S1).
+#[test]
+fn an_update_whose_agent_built_on_the_merge_and_left_keeps_the_merge() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_HEAD_MOVE, &case.workspace.git_dir, move || {
+        commit_then_switch(&home, &worktree);
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    let stopped = store::load(&case.db, &id).unwrap();
+    assert!(
+        stopped.intent.is_some(),
+        "a reset that reached its branch was undone as if it never ran"
+    );
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(case.agent(&["rev-parse", "side^"]).trim(), stopped.head);
+    assert_eq!(case.agent(&["status", "--porcelain"]), "");
+    let pending = case.owner(&["rev-parse", &flow::pending_ref(&id)]);
+    assert_eq!(pending.trim(), stopped.head);
+    assert_eq!(
+        store::load(&case.db, &id).unwrap(),
+        store::Record {
+            intent: None,
+            ..stopped
+        }
+    );
+}
+
+/// A discard whose agent builds on the reset and leaves its HEAD inside it still ends as a
+/// discard with no step left, and the worktree's next set opens above the commit the reset
+/// reached (RK-R2-S1).
+#[test]
+fn a_discard_whose_agent_built_on_the_reset_and_left_starts_from_the_reset() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (head, tip) = (case.view(&id).head, case.tip());
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_HEAD_MOVE, &case.workspace.git_dir, move || {
+        commit_then_switch(&home, &worktree);
+    });
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(case.agent(&["status", "--porcelain"]), "");
+    assert_eq!(case.agent(&["rev-parse", "side^"]).trim(), tip);
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+    assert_eq!(recorded_start(&case), Some(tip));
+}
+
+/// LAND-2-L2: a discard an engine stopped after HEAD moved, with an agent commit on top,
+/// reached its reset, so the next set opens above it and does not show the discarded work
+/// as removed by the agent.
+#[test]
+fn a_discard_stopped_after_head_moved_starts_the_next_set_from_its_reset_once_the_agent_committed()
+{
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (head, tip) = (case.view(&id).head, case.tip());
+    stopped_inside_reset(&case, &flow::AFTER_HEAD_MOVE, || {
+        discard(&case.db, &id, &head, NOW_MS)
+    });
+    case.edit("later.txt", "later\n");
+    case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(recorded_start(&case), Some(tip));
+}
+
+/// LAND-2-L2: a discard's target is an ancestor of its head, so being built on the target
+/// proves nothing alone. A commit on the set's head never saw the reset and the next set
+/// keeps opening above that head.
+#[test]
+fn a_discard_stopped_before_its_reset_starts_the_next_set_from_its_head_once_the_agent_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
+        discard(&case.db, &id, &head, NOW_MS)
+    });
+    case.edit("later.txt", "later\n");
+    case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
+/// Stops a restore of a discarded set holding a claim after HEAD moved, runs `then`, settles
+/// the set and asserts the restore finished: pending, its discarded ref gone and its claim
+/// held again. Inputs: the case and what happens before the settle. Output: none.
+fn restore_stopped_after_head_moved_finishes(mut case: Case, then: impl FnOnce(&Case)) {
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 0, "the discarded set holds no claim");
+    stopped_inside_reset(&case, &flow::AFTER_HEAD_MOVE, || {
+        restore(&case.db, &id, NOW_MS + DAY_MS)
+    });
+    then(&case);
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        case.owner(&["for-each-ref", "refs/crazyagent/discarded/"]),
+        ""
+    );
+    assert_eq!(second_start(&case), 1, "the restored set holds its claim");
+}
+
+/// LAND-2-L3: a restore finished by the next look at the set does what the live restore
+/// does last, so its claims hold again and its discarded ref does not leak.
+#[test]
+fn a_restore_stopped_after_head_moved_finishes_its_claims_and_ref_when_settled() {
+    restore_stopped_after_head_moved_finishes(Case::new(), |_| {});
+}
+
+/// LAND-2-L3: the same, reached with an agent commit on top of the restored head.
+#[test]
+fn a_restore_stopped_after_head_moved_finishes_its_claims_and_ref_once_the_agent_committed() {
+    restore_stopped_after_head_moved_finishes(Case::new(), |case| {
+        case.edit("later.txt", "later\n");
+        case.agent_commit("Later work");
+    });
+}
+
+/// A reset an engine stopped after the files moved and before HEAD moved, stored before
+/// resets recorded where they start, finishes when the worktree holds exactly its target:
+/// the files never reach the agent's next turn as its own change (RK-R2-S2).
+#[test]
+fn a_reset_stored_without_its_start_finishes_when_the_files_are_already_at_its_target() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (head, tip) = (case.view(&id).head, case.tip());
+    discarded_with_reset(&case, &id, None, &tip);
+    case.agent(&["read-tree", "-u", "-m", &head, &tip]);
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(case.agent_head(), tip, "the stopped reset was not finished");
+    assert_eq!(case.agent(&["status", "--porcelain"]), "");
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+    assert_eq!(recorded_start(&case), Some(tip));
+}
+
+/// An update stopped the same way, stored without its start, also finishes: HEAD holds the
+/// set's old head, an ancestor of the merge the worktree already holds (RK-R2-S2).
+#[test]
+fn an_update_stored_without_its_start_finishes_onto_the_merge_the_files_hold() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    update(&case.db, &id).unwrap();
+    let mut stopped = store::load(&case.db, &id).unwrap();
+    let merged = stopped.head.clone();
+    case.agent(&["update-ref", "--no-deref", "HEAD", &before.head]);
+    stopped.intent = Some(reset_intent(None, &merged));
+    store::save(&case.db, &stopped).unwrap();
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        merged,
+        "the stopped update was not finished"
+    );
+    assert_eq!(case.agent(&["status", "--porcelain"]), "");
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+}
+
+/// A commit the agent made whose files equal the reset's target is still the agent's: a
+/// reset stored without its start never moves HEAD off it, because that commit is neither
+/// the set's head nor behind the target (RK-R2-S2).
+#[test]
+fn a_reset_stored_without_its_start_never_moves_a_commit_matching_its_target() {
+    let case = Case::new();
+    let original = case.owner(&["show", "HEAD:README"]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.tip();
+    case.edit("README", &original);
+    let later = case.agent_commit("Put it back");
+    discarded_with_reset(&case, &id, None, &tip);
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+}
+
+/// A stored reset moves HEAD only from the commit it recorded: a later agent commit stays
+/// on its branch though the step recorded a start (RK-R2-C1).
+#[test]
+fn a_stored_reset_never_moves_a_commit_other_than_its_start() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (head, tip) = (case.view(&id).head, case.tip());
+    discarded_with_reset(&case, &id, Some(&head), &tip);
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
+/// An update an engine stopped before its reset moved anything, with the agent committing
+/// meanwhile, drops the reset and puts the set and its pending ref back as they were, as
+/// the live refusal does (RK-R1-S2).
+#[test]
+fn an_update_stopped_inside_its_reset_is_put_back_once_the_agent_committed() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || update(&case.db, &id));
+    assert!(store::load(&case.db, &id).unwrap().intent.is_some());
+    assert_put_back(&case, &id, &before, Some(&before.head));
+}
+
+/// A restore an engine stopped the same way leaves the set discarded with no pending ref,
+/// as the live refusal does (RK-R1-S2).
+#[test]
+fn a_restore_stopped_inside_its_reset_stays_discarded_once_the_agent_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    let before = store::load(&case.db, &id).unwrap();
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
+        restore(&case.db, &id, NOW_MS + DAY_MS)
+    });
+    assert_eq!(
+        store::load(&case.db, &id).unwrap().state,
+        ChangeState::Pending
+    );
+    assert_put_back(&case, &id, &before, None);
+}
+
+/// LAND-4 SEC-F1: a set restored once keeps that mark when a later restore is put back, so
+/// the put-back restores what the set held and not a constant.
+#[test]
+fn a_restore_stopped_inside_its_reset_keeps_the_mark_of_an_earlier_restore() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    discard(&case.db, &id, &head, NOW_MS + DAY_MS + 1).unwrap();
+    let before = store::load(&case.db, &id).unwrap();
+    assert!(before.restored, "the set was restored once");
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
+        restore(&case.db, &id, NOW_MS + 2 * DAY_MS)
+    });
+    assert_put_back(&case, &id, &before, None);
+}
+
+/// A lockfile regeneration an engine stopped the same way puts the set and its pending ref
+/// back on the agent's own head (RK-R1-S2).
+#[test]
+fn a_regeneration_stopped_inside_its_reset_is_put_back_once_the_agent_committed() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
+    let before = store::load(&case.db, &id).unwrap();
+    let mut record = before.clone();
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()])
+    });
+    assert!(store::load(&case.db, &id).unwrap().intent.is_some());
+    assert_put_back(&case, &id, &before, Some(&before.head));
+}
+
+/// A reset that reached its commit before an engine stop stays done when the agent commits
+/// on that commit afterwards: the set keeps the update, never the state before it
+/// (RK-R1-S2).
+#[test]
+fn an_update_stopped_after_head_moved_keeps_the_merge_once_the_agent_commits_on_it() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    stopped_inside_reset(&case, &flow::AFTER_HEAD_MOVE, || update(&case.db, &id));
+    let stopped = store::load(&case.db, &id).unwrap();
+    assert!(stopped.intent.is_some());
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(case.agent_head(), later);
+    assert_eq!(
+        store::load(&case.db, &id).unwrap(),
+        store::Record {
+            intent: None,
+            ..stopped
+        }
+    );
+}
+
 /// Saves a closed copy of `first` under a new id, made at `created_ms`, in `project`.
 /// Inputs: the case, the record copied, the id's hex digit, the time and the project.
 /// Output: the new id.
@@ -10840,14 +13057,26 @@ fn closed_copy(
     created_ms: u64,
     project: &str,
 ) -> ChangeSetId {
+    let copy = unsaved_copy(first, digit, created_ms, project);
+    store::save(&case.db, &copy).unwrap();
+    copy.id
+}
+
+/// Copies a change set as a discarded set with another id, not stored yet. Inputs: the
+/// record, the digit its id repeats, when it was made and its project. Output: the copy.
+fn unsaved_copy(
+    first: &store::Record,
+    digit: char,
+    created_ms: u64,
+    project: &str,
+) -> store::Record {
     let mut copy = first.clone();
     copy.id = ChangeSetId::new(digit.to_string().repeat(32)).unwrap();
     copy.project = ProjectId::new(project).unwrap();
     copy.state = ChangeState::Discarded;
     copy.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
     copy.created_ms = created_ms;
-    store::save(&case.db, &copy).unwrap();
-    copy.id
+    copy
 }
 
 /// The number each listed change set of a project carries, by id. Inputs: the case and
@@ -10908,6 +13137,81 @@ fn change_sets_are_numbered_in_the_order_a_project_adds_them() {
     again.prompt_line = "Saved again".into();
     store::save(&case.db, &again).unwrap();
     assert_eq!(case.view(&first).number, Some(1));
+}
+
+/// Two connections saving at once each take the next number of the project: every save is
+/// applied and no two sets share a number (MOCK-FIX-C r1, rv-sec F4).
+#[test]
+fn two_connections_saving_at_once_each_take_the_next_number() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let path = PathBuf::from(case.db.path().unwrap());
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let saving: Vec<_> = [['a', 'b', 'c'], ['d', 'e', 'f']]
+        .into_iter()
+        .map(|digits| {
+            let (record, path, start) = (record.clone(), path.clone(), start.clone());
+            std::thread::spawn(move || {
+                let db = Connection::open(&path).unwrap();
+                db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                start.wait();
+                for digit in digits {
+                    let copy = unsaved_copy(&record, digit, record.created_ms - 10, "project-1");
+                    store::save(&db, &copy).unwrap();
+                }
+            })
+        })
+        .collect();
+    for thread in saving {
+        thread.join().unwrap();
+    }
+    let mut given: Vec<u64> = numbers(&case, "project-1")
+        .into_values()
+        .map(Option::unwrap)
+        .collect();
+    given.sort_unstable();
+    assert_eq!(given, (1..=7).collect::<Vec<u64>>());
+}
+
+/// A save inside a caller's transaction nests in it: a refused save leaves the caller's
+/// earlier work to commit, and rolling the caller back undoes the set and its number
+/// (MOCK-FIX-C r1, rv-sec F4).
+#[test]
+fn a_save_inside_a_callers_transaction_commits_and_rolls_back_with_it() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let copy = |digit| unsaved_copy(&record, digit, record.created_ms - 10, "project-1");
+    let tx = case.db.unchecked_transaction().unwrap();
+    let kept = copy('b');
+    store::save(&tx, &kept).unwrap();
+    let mut second_open = copy('c');
+    second_open.state = ChangeState::Pending;
+    second_open.restorable_until_ms = None;
+    assert_eq!(
+        refused(store::save(&tx, &second_open)),
+        "changes_agent_has_pending"
+    );
+    tx.commit().unwrap();
+    assert_eq!(case.view(&kept.id).number, Some(2));
+    assert_eq!(
+        refused(store::load(&case.db, &second_open.id)),
+        "changes_not_found"
+    );
+    let tx = case.db.unchecked_transaction().unwrap();
+    let dropped = copy('d');
+    store::save(&tx, &dropped).unwrap();
+    tx.rollback().unwrap();
+    assert_eq!(
+        refused(store::load(&case.db, &dropped.id)),
+        "changes_not_found"
+    );
+    let next = copy('e');
+    store::save(&case.db, &next).unwrap();
+    assert_eq!(case.view(&next.id).number, Some(3));
 }
 
 /// AL17 (2): change sets stored before numbers existed get numbers at the next engine
@@ -11077,4 +13381,322 @@ fn the_owners_accept_names_the_set_by_its_number_in_the_activity() {
         texts,
         vec!["You accepted change set #1 (Agent 1: Add the fourth line, 1 file)".to_owned()]
     );
+}
+
+/// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
+/// red, else a few seconds. Output: the seconds.
+#[cfg(target_os = "macos")]
+fn race_seconds() -> u64 {
+    std::env::var("CRAZYAGENT_LANDING_RACE_SECONDS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(5)
+}
+
+/// The engine's git on the case's agent worktree, confined for one step. Inputs: the case and
+/// what the step may write. Output: the repository.
+#[cfg(target_os = "macos")]
+fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
+    git::Repo::open(
+        &case.repo,
+        &case.workspace.git_dir,
+        Some(&case.workspace.worktree),
+    )
+    .unwrap()
+    .confined(writes)
+    .unwrap()
+}
+
+/// SECAUDIT unconfined-git-add-reads-through-raced-symlink, with no timing: a step on the work
+/// tree cannot read a file behind a link, while a plain file in the work tree still reads.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
+    let case = Case::new();
+    let outside = case.home.join("marker");
+    write(&outside, "secret\n");
+    let worktree = &case.workspace.worktree;
+    std::os::unix::fs::symlink(&outside, worktree.join("link")).unwrap();
+    write(&worktree.join("plain"), "plain\n");
+    let repo = confined_agent(&case, git::Writes::Objects);
+    let hash = |path: &str| {
+        repo.exec(&["hash-object", "--", path], None, &[], 4096)
+            .unwrap()
+            .code
+    };
+    assert_eq!(hash("plain"), 0);
+    assert_ne!(hash("link"), 0, "a step read the file behind the link");
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: a step writes
+/// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
+/// filling the work tree writes no git metadata, and a step adding the work tree writes
+/// nothing in it. What each may write still works.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
+    use super::git::Writes::{Objects, WorkTree};
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let folder = case.repo.join(".git");
+    let private = case.workspace.git_dir.clone();
+    let outside = case.home.join("outside");
+    let checkout = |writes: git::Writes, into: &Path| {
+        let prefix = format!("--prefix={}/", into.display());
+        confined_agent(&case, writes)
+            .exec(&["checkout-index", "-a", "-f", &prefix], None, &[], 4096)
+            .unwrap()
+    };
+    for (writes, into) in [
+        (WorkTree, outside.clone()),
+        (WorkTree, folder.join("hooks")),
+        (WorkTree, folder.join("objects")),
+        (WorkTree, private),
+        (Objects, worktree.join("out")),
+        (Objects, outside),
+        (Objects, folder.join("hooks")),
+    ] {
+        checkout(writes, &into);
+        assert!(
+            std::fs::symlink_metadata(into.join("README")).is_err(),
+            "a step wrote in {}",
+            into.display()
+        );
+    }
+    assert_eq!(checkout(WorkTree, &worktree.join("ok")).code, 0);
+    assert!(worktree.join("ok/README").is_file());
+    assert_eq!(checkout(Objects, &folder.join("objects/ok")).code, 0);
+    assert!(folder.join("objects/ok/README").is_file());
+}
+
+/// SECAUDIT unconfined-git-add-reads-through-raced-symlink: a file an agent keeps swapping for
+/// a link while its turn ends leaves no blob of what the link points at.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_points_at() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let case = Case::new();
+    let marker = format!("{}\n", "S".repeat(63));
+    let secret = case.home.join("marker");
+    std::fs::write(&secret, &marker).unwrap();
+    let decoy = case.workspace.worktree.join("decoy.txt");
+    std::fs::write(&decoy, format!("{}\n", "D".repeat(63))).unwrap();
+    let side = case.home.join("swap");
+    std::fs::create_dir_all(&side).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = std::thread::spawn({
+        let (stop, decoy, secret) = (stop.clone(), decoy.clone(), secret.clone());
+        move || {
+            let (plain, link) = (side.join("plain"), side.join("link"));
+            let mut round = 0u64;
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::fs::write(&plain, format!("{round:063}\n")).unwrap();
+                let _ = std::fs::rename(&plain, &decoy);
+                let _ = std::fs::remove_file(&link);
+                std::os::unix::fs::symlink(&secret, &link).unwrap();
+                let _ = std::fs::rename(&link, &decoy);
+                round += 1;
+            }
+        }
+    });
+    let mut turns = 0u32;
+    while turns < 200 && Instant::now() < deadline {
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: format!("turn-{turns}"),
+            prompt_line: "Probe".into(),
+        };
+        let _ = record_turn_end(&case.db, &case.workspace, &turn);
+        turns += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(turns > 0);
+    let listing = git_in(
+        &case.home,
+        &case.repo,
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+    );
+    let found = listing
+        .lines()
+        .filter(|line| line.ends_with(" blob 64"))
+        .filter_map(|line| line.split(' ').next())
+        .any(|sha| git_in(&case.home, &case.repo, &["cat-file", "-p", sha]) == marker);
+    assert!(!found, "a blob holds the bytes behind the link");
+}
+
+/// One attempt of the read-tree race: a lead's worktree on its branch holding `x/keep.txt`
+/// from one landed set, and a waiting second set adding `x/planted.bin` with `known`.
+/// Input: the file's text. Output: the case, the lead and the waiting set.
+#[cfg(target_os = "macos")]
+fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
+    let case = Case::new();
+    let agents = case
+        .repo
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("worktrees");
+    std::fs::create_dir_all(&agents).unwrap();
+    let worktree = agents.join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let lead = Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-2".into(),
+            label: "Agent 2".into(),
+        },
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        ..case.workspace.clone()
+    };
+    assert_eq!(named(&case, &lead).unwrap(), "crazyagent/agent-2");
+    case.edit("x/keep.txt", "keep\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let landed = accept_into(
+        &case.db,
+        &case.home,
+        &id,
+        &case.view(&id).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }));
+    case.edit("x/planted.bin", known);
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    (case, lead, second)
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: the step an
+/// Accept fills an agent's worktree through writes nothing outside that worktree, where the
+/// same step on the owner's checkout still can.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
+    let (case, lead, _) = read_tree_attempt("known\n");
+    let repository =
+        git::Repo::open(&case.repo, &case.repo.join(".git"), Some(&case.repo)).unwrap();
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Sub,
+        &case.repo,
+        &lead.worktree,
+        &lead.git_dir,
+    )
+    .unwrap();
+    let outside = case.home.join("outside");
+    let prefix = format!("--prefix={}/", outside.display());
+    let args = ["checkout-index", "-a", "-f", prefix.as_str()];
+
+    let target = owner::Target::Agent(Box::new(agent));
+    let (confined, refused) = owner::filled_checkout(&target, &repository)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused, "changes_agent_busy");
+    confined.exec(&args, None, &[], 4096).unwrap();
+    assert!(
+        std::fs::symlink_metadata(outside.join("README")).is_err(),
+        "the step wrote outside the agent's worktree"
+    );
+
+    let (plain, refused) = owner::filled_checkout(&owner::Target::Checkout, &repository)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused, "changes_owner_dirty");
+    assert_eq!(plain.exec(&args, None, &[], 4096).unwrap().code, 0);
+    assert!(
+        outside.join("README").is_file(),
+        "the owner's checkout was confined"
+    );
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree: a folder of a lead's worktree
+/// swapped for a link while its worker's set lands writes nothing outside the worktree, and
+/// the same landing with no swap still fills the worktree under the confined step.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_worktree() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let known: String = (0..)
+        .map(|n: u32| format!("{n:08}\n"))
+        .take(466_034)
+        .collect();
+    let (case, lead, second) = read_tree_attempt(&known);
+    let landed = accept_into(
+        &case.db,
+        &case.home,
+        &second,
+        &case.view(&second).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap();
+    assert!(
+        matches!(landed, AcceptOutcome::Landed { .. })
+            && lead.worktree.join("x/planted.bin").is_file(),
+        "the landing with no swap did not fill the worktree"
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (case, lead, second) = read_tree_attempt(&known);
+        let outside = tempfile::tempdir().unwrap();
+        let go = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let x = lead.worktree.join("x");
+        let aside = lead.worktree.join("x.aside");
+        let swapper = std::thread::spawn({
+            let (go, done, x, aside) = (go.clone(), done.clone(), x.clone(), aside.clone());
+            let target = outside.path().to_path_buf();
+            move || {
+                while !go.load(Ordering::Relaxed) {
+                    if done.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                while !done.load(Ordering::Relaxed) {
+                    let _ = std::fs::rename(&x, &aside);
+                    let _ = std::os::unix::fs::symlink(&target, &x);
+                    let _ = std::fs::remove_file(&x);
+                    let _ = std::fs::rename(&aside, &x);
+                }
+            }
+        });
+        let head = case.view(&second).head;
+        let _ = owner::accept_to(
+            &case.db,
+            &case.home,
+            &second,
+            &head,
+            None,
+            Some("crazyagent/agent-2"),
+            owner::By::Named(crate::activity::ENGINE_ACTOR),
+            &|step| {
+                if step == owner::Step::Recorded {
+                    go.store(true, Ordering::Relaxed);
+                }
+                false
+            },
+        );
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
 }

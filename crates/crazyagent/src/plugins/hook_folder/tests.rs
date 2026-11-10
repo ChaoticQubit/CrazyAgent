@@ -2,7 +2,8 @@ use super::*;
 use std::path::PathBuf;
 
 fn plugin(parent: &Path, name: &str) -> PathBuf {
-    let folder = parent.join(name);
+    fs::create_dir_all(parent).unwrap();
+    let folder = parent.canonicalize().unwrap().join(name);
     fs::create_dir_all(folder.join("hooks")).unwrap();
     fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
     fs::write(
@@ -175,4 +176,161 @@ fn a_stored_hook_one_file_past_the_launch_bound_is_refused_and_the_tally_stays_a
         Err("hooks_too_large")
     );
     assert_eq!(tally.files, LAUNCH_FILES_MAX);
+}
+
+/// SECAUDIT hook_folder copy_entry path-walk-follows-swapped-parent: a subfolder swapped for
+/// a link while it is copied never brings files from behind that link into the store.
+#[test]
+fn a_subfolder_swapped_for_a_link_during_the_copy_brings_in_nothing_from_outside() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let parent = tempfile::tempdir().unwrap();
+    let raced = plugin(parent.path(), "raced");
+    let sub = raced.join("hooks/sub");
+    let outside = parent.path().join("outside");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    for index in 0..16 {
+        let name = format!("f{index:02}");
+        fs::write(sub.join(&name), vec![b'a'; 16 * 1024]).unwrap();
+        fs::write(outside.join(&name), vec![b'z'; 16 * 1024]).unwrap();
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let parked = parent.path().join("parked");
+        let (sub, outside) = (sub.clone(), outside.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                fs::rename(&sub, &parked).unwrap();
+                std::os::unix::fs::symlink(&outside, &sub).unwrap();
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                fs::remove_file(&sub).unwrap();
+                fs::rename(&parked, &sub).unwrap();
+            }
+        })
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut outside_bytes = false;
+    let mut attempt = 0;
+    while std::time::Instant::now() < until && !outside_bytes {
+        attempt += 1;
+        let destination = parent.path().join(format!("copy-{attempt}"));
+        if super::copy(&raced, &destination, &[]).is_ok() {
+            let copied = destination.join("hooks/sub");
+            outside_bytes = fs::read_dir(&copied).is_ok_and(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| fs::read(entry.path()).is_ok_and(|bytes| bytes.contains(&b'z')))
+            });
+        }
+        let _ = fs::remove_dir_all(&destination);
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(
+        !outside_bytes,
+        "a copy held bytes from behind the swapped link"
+    );
+}
+
+/// SECAUDIT hook_folder copy_entry path-walk-follows-swapped-parent: a plugin folder that
+/// became a link after it was read is refused and leaves no copy.
+#[test]
+fn a_plugin_folder_swapped_for_a_link_before_the_copy_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let real = plugin(parent.path(), "real");
+    fs::write(real.join("hooks/run.sh"), "x").unwrap();
+    let link = real.with_file_name("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let copied = parent.path().join("copy");
+    assert_eq!(copy(&link, &copied, &[]), Err("skill_folder_not_found"));
+    assert!(fs::symlink_metadata(&copied).is_err());
+}
+
+/// The walk's entry bound: a folder at the bound copies, one entry past it is refused.
+#[test]
+fn a_folder_at_the_entry_bound_copies_and_one_past_it_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let crowded = |name: &str, links: usize| {
+        let folder = plugin(parent.path(), name);
+        for index in 0..links {
+            std::os::unix::fs::symlink("missing", folder.join(format!("hooks/link-{index}")))
+                .unwrap();
+        }
+        folder
+    };
+    let at = crowded("at", ENTRIES_MAX);
+    copy(&at, &parent.path().join("at-copy"), &[]).unwrap();
+    let past = crowded("past", ENTRIES_MAX + 1);
+    let copied = parent.path().join("past-copy");
+    assert_eq!(copy(&past, &copied, &[]), Err("hooks_too_large"));
+    assert!(fs::symlink_metadata(&copied).is_err());
+}
+
+/// The walk's depth bound: a file at the bound copies, one a folder deeper is refused.
+#[test]
+fn a_file_at_the_depth_bound_copies_and_one_deeper_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let nested = |name: &str, folders: usize| {
+        let root = parent.path().join(name);
+        let mut path = root.clone();
+        for index in 0..folders {
+            path = path.join(format!("d{index}"));
+        }
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("file"), "x").unwrap();
+        root
+    };
+    let mut tally = Tally::default();
+    let at = nested("at", DEPTH_MAX - 1);
+    copy_stored(&at, &parent.path().join("at-copy"), &mut tally).unwrap();
+    let past = nested("past", DEPTH_MAX);
+    assert_eq!(
+        copy_stored(&past, &parent.path().join("past-copy"), &mut tally),
+        Err("hooks_too_large")
+    );
+}
+
+/// SECAUDIT hook_folder copy_entry path-walk-follows-swapped-parent r2: a parent of the
+/// plugin folder swapped for a link after the folder was read cannot redirect the copy,
+/// though the folder is opened by its canonical path.
+#[test]
+fn a_parent_swapped_for_a_link_before_the_copy_brings_in_nothing_from_outside() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().canonicalize().unwrap();
+    let real = plugin(&base.join("ancestor"), "real");
+    fs::write(real.join("hooks/run.sh"), "real").unwrap();
+    let other = plugin(&base.join("elsewhere"), "real");
+    fs::write(other.join("hooks/run.sh"), "outside").unwrap();
+    fs::rename(base.join("ancestor"), base.join("parked")).unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), base.join("ancestor")).unwrap();
+    let copied = base.join("copy");
+    assert_eq!(copy(&real, &copied, &[]), Err("skill_folder_not_found"));
+    assert!(fs::symlink_metadata(&copied).is_err());
+}
+
+/// SECAUDIT hook_folder copy_entry path-walk-follows-swapped-parent r2, with no timing: a
+/// folder swapped for a link after it was opened is still the folder the copy reads.
+#[test]
+fn a_held_folder_copies_only_its_own_files_after_its_name_becomes_a_link() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().canonicalize().unwrap();
+    let sub = base.join("sub");
+    let outside = base.join("outside");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(sub.join("file"), "real").unwrap();
+    fs::write(outside.join("file"), "outside").unwrap();
+    fs::write(outside.join("extra"), "outside").unwrap();
+    let held = open_folder(&sub).unwrap();
+    fs::rename(&sub, base.join("parked")).unwrap();
+    std::os::unix::fs::symlink(&outside, &sub).unwrap();
+    let target = base.join("copy");
+    fs::create_dir(&target).unwrap();
+    let mut tally = Tally::default();
+    copy_children(&held, &target, 0, &mut tally, (FILES_MAX, BYTES_MAX)).unwrap();
+    assert_eq!(fs::read_to_string(target.join("file")).unwrap(), "real");
+    assert!(fs::symlink_metadata(target.join("extra")).is_err());
+    assert_eq!(tally.files, 1);
 }

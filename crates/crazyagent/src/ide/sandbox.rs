@@ -48,14 +48,20 @@ pub fn qualified() -> bool {
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
-/// config and agent git folders in the project are denied for reading ([`agent_config`]),
-/// and last the project's own git index and its lock are given back for writing, so the IDE
-/// stages and commits in the Project section while agents never write that index (IN1-F1).
-/// Network:
-/// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, and connect to an owner socket.
-/// Inputs: the grants and the server port. Output: the profile text, or
-/// `ide_sandbox_invalid` for an unsafe place.
-pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
+/// config and agent git folders in the project are denied for reading ([`agent_config`]).
+/// The project's own git index and its lock stay denied: the IDE stages on a private index
+/// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
+/// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
+/// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
+/// On the open network it never binds or listens on `kept_ports`, the owner's local model
+/// ports. Inputs: the grants, the server port, the network and the ports kept. Output: the
+/// profile text, or `ide_sandbox_invalid` for an unsafe place.
+pub fn profile(
+    grants: &Grants,
+    port: u16,
+    network: SandboxNetwork,
+    kept_ports: &[u16],
+) -> Result<String, EngineError> {
     let invalid = |_| failure("ide_sandbox_invalid");
     let data = grants.data;
     let writes: Vec<&Path> = std::iter::once(grants.home)
@@ -94,15 +100,12 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("ide_sandbox_invalid"))?;
     let homes = ToolHomes::owner().map_err(invalid)?;
-    let sandbox = ProjectSandbox::new(
-        grants.root,
-        grants.home,
-        grants.tmp,
-        SandboxNetwork::Only(Vec::new()),
-    )
-    .and_then(|sandbox| sandbox.allow_read(grants.build))
-    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
-    .map_err(invalid)?;
+    let closed = matches!(&network, SandboxNetwork::Only(remotes) if remotes.is_empty());
+    let sandbox = ProjectSandbox::new(grants.root, grants.home, grants.tmp, network)
+        .and_then(|sandbox| sandbox.keep_ports(kept_ports))
+        .and_then(|sandbox| sandbox.allow_read(grants.build))
+        .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
+        .map_err(invalid)?;
     let mut text = sandbox.profile();
     let base = text.len();
     text.push_str(&format!(
@@ -141,12 +144,6 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
     ));
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
-    let index = grants.root.join(".git").join("index");
-    text.push_str(&format!(
-        "(allow file-write*\n  (literal \"{}\")\n  (literal \"{}.lock\"))\n",
-        index.display(),
-        index.display()
-    ));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
@@ -156,7 +153,7 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
         data.display()
     )));
     assert!(text.ends_with("(global-name \"com.apple.FSEvents\"))\n"));
-    assert!(!text.contains("(remote ip"));
+    assert!(!closed || !text.contains("(remote ip"));
     if text.len() > PROFILE_BYTES_MAX {
         return Err(failure("ide_sandbox_invalid"));
     }
@@ -166,9 +163,16 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
 /// Writes an IDE server's profile to `<folder>/server.sb` with mode 0600, never through a
 /// link, replacing the last launch's. The folder is the engine's private IDE folder of the
 /// project, which no grant lets the server write. Inputs: the folder and the grants with the
-/// port. Output: the profile path, or `ide_sandbox_invalid` or `ide_state_unavailable`.
-pub fn install(folder: &Path, grants: &Grants, port: u16) -> Result<PathBuf, EngineError> {
-    let text = profile(grants, port)?;
+/// port, the network and the ports kept. Output: the profile path, or `ide_sandbox_invalid`
+/// or `ide_state_unavailable`.
+pub fn install(
+    folder: &Path,
+    grants: &Grants,
+    port: u16,
+    network: SandboxNetwork,
+    kept_ports: &[u16],
+) -> Result<PathBuf, EngineError> {
+    let text = profile(grants, port, network, kept_ports)?;
     let path = folder.join(PROFILE);
     if grants
         .writable

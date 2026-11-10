@@ -1,17 +1,17 @@
-import { harnessCatalog, nextGeneration, type Result } from "../../api";
+import { harnessCatalog, type Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
-import { cancelTeamTask, failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
 import { loadUncommittedImport } from "../../api-process";
 import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, useLoad, type Loaded } from "../../state";
-import { ConfirmDialog, Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
+import { Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { HEARTBEAT_MS, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { MetricsView } from "../metrics/view";
 import { WaitingChanges } from "../changes/waiting";
-import { AgentsTab } from "./agents";
+import { AgentsTab, usePauseAll } from "./agents";
 import { ContextTab } from "./context";
 import { IdeExtensionConfirm } from "./ide-extensions";
 import { IDE_POLL_MS, IdeTab, IdeUnavailable, useCloseIde } from "./ide";
@@ -24,7 +24,7 @@ import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab, folderLabel, projectFolder } from "./overview";
 import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
 import { QuestionsTab } from "./questions";
-import { pauseSummary, shouldPoll } from "./research";
+import { shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
 import { routeSection, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -133,12 +133,9 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   return { data, toast, session };
 }
 
-function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly { id: TabId; label: string; icon: IconName }[] }) {
-  const [pausing, setPausing] = useState(false);
-  const [busy, setBusy] = useState(false);
+export function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly { id: TabId; label: string; icon: IconName }[] }) {
+  const pause = usePauseAll(data);
   const team = data.team.result;
-  const summary = pauseSummary(team?.kind === "ok" ? team.value.tasks : []);
-  const researching = (valueOf(data.research)?.jobs ?? []).some((job) => job.status === "running");
   const stopped = team?.kind === "ok" && team.value.paused;
   const stopAll = useStopAll(data.id, data.reloadTeam, (note, stopping) => data.notify(note
     || (stopping ? "Stopped. Every agent of this project stays stopped until you start them again." : "Started again. The agents of this project run again.")));
@@ -147,37 +144,15 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
     const result = await revealProjectFolder(data.id);
     if (result.kind !== "ok") data.notify(result.kind === "not_ready" ? "Not ready yet: Show folder in Finder isn't in this build." : "Couldn't open the folder.");
   }
-  function askPause() {
-    if (team === undefined) return data.notify("Still loading the team. Try again in a moment.");
-    if (team.kind === "not_ready") return data.notify("Not ready yet: pausing agents isn't in this build.");
-    if (team.kind === "error") return data.notify(`Couldn't load the team. ${failureCopy(team)}`);
-    if (summary.count === 0) return data.notify(summary.line);
-    setPausing(true);
-  }
-  async function pause() {
-    setBusy(true);
-    const result = await cancelTeamTask(data.id, null, nextGeneration());
-    setBusy(false);
-    setPausing(false);
-    data.reloadTeam();
-    if (result.kind !== "ok") return data.notify(result.kind === "not_ready" ? "Not ready yet: pausing agents isn't in this build." : failureCopy(result));
-    const state = receiptState(result.value);
-    if (state.kind === "applied") return data.notify("Paused. Running tasks are stopping and waiting tasks are cancelled.");
-    data.notify(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the Agents tab before trying again.");
-  }
   return <>
     <Menu label="Project actions" items={[
       ...replaced.map((item) => ({ label: `Open ${item.label}`, icon: item.icon, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/${item.id}`) })),
       { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
-      { label: "Pause all agents", icon: "circle-pause", onSelect: askPause },
+      { label: "Pause all agents", icon: "circle-pause", onSelect: pause.ask },
       stopped ? { label: "Start all again", icon: "refresh-cw", onSelect: stopAll.start } : { label: "Stop all", icon: "circle-stop", danger: true, onSelect: stopAll.ask },
       { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove&ask=remove`) },
     ]} />
-    <ConfirmDialog open={pausing} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
-      onCancel={() => setPausing(false)} onConfirm={() => void pause()}>
-      {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
-      {researching ? " Research agents keep running." : ""}
-    </ConfirmDialog>
+    {pause.dialog}
     {stopAll.dialog}
   </>;
 }

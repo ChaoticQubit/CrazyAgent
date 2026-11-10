@@ -406,6 +406,117 @@ fn update_is_shown_and_not_installed_until_approved() {
     assert_eq!(cache_files(root.path()), [format!("{ID}-1.1.0.vsix")]);
 }
 
+/// DEC-098: the build grants Copilot Chat the default chat participant, which brings the Chat
+/// view back whatever `chat.disableAIFeatures` says, so an ask or an approval of it is refused
+/// before the network and an ask or pin an older engine kept no longer counts.
+#[test]
+fn copilot_chat_is_refused_at_ask_and_approval_and_an_old_pin_no_longer_counts() {
+    let root = root();
+    let project = project();
+    let chat = "github.copilot-chat";
+    let (server, registry) = registry(vec![Release::genuine("1.0.0", b"chat")], "1.0.0");
+    assert_eq!(
+        ask(root.path(), &project, chat, "1.0.0", NOW)
+            .unwrap_err()
+            .0,
+        "ide_extension_ai_locked"
+    );
+    assert_eq!(
+        approve(root.path(), &registry, &project, chat, "1.0.0", NOW)
+            .unwrap_err()
+            .0,
+        "ide_extension_ai_locked"
+    );
+    assert!(
+        server.seen().is_empty(),
+        "a refusal never reaches the network"
+    );
+
+    let old = Policy {
+        approved: vec![Approved {
+            id: chat.to_owned(),
+            version: "1.0.0".to_owned(),
+            sha256: sha256(b"chat"),
+            approved_ms: NOW,
+        }],
+        asks: vec![Ask {
+            project: project.clone(),
+            id: chat.to_owned(),
+            version: "1.0.0".to_owned(),
+            asked_ms: NOW,
+        }],
+        ..Policy::default()
+    };
+    save(root.path(), &old).unwrap();
+    assert!(
+        allowed(root.path()).get(chat).is_none(),
+        "an old pin is not allowed"
+    );
+    assert!(
+        asks(root.path(), &project, NOW).unwrap().is_empty(),
+        "an old ask is not shown"
+    );
+    assert!(
+        listing(root.path(), &project, NOW)
+            .unwrap()
+            .approved
+            .is_empty()
+    );
+}
+
+/// A pin of Copilot Chat an older engine saved is gone once the policy loads, and only that
+/// pin: the listing and the allowed setting keep every other extension (DEC-098).
+#[test]
+fn an_old_pin_of_copilot_chat_is_dropped_when_the_policy_loads() {
+    let root = root();
+    let project = project();
+    let pin = |id: &str| Approved {
+        id: id.to_owned(),
+        version: "1.0.0".to_owned(),
+        sha256: sha256(id.as_bytes()),
+        approved_ms: NOW,
+    };
+    let old = Policy {
+        approved: vec![pin(AI_LOCKED), pin(ID)],
+        ..Policy::default()
+    };
+    save(root.path(), &old).unwrap();
+    assert_eq!(
+        listing(root.path(), &project, NOW).unwrap().approved,
+        [Update {
+            id: ID.to_owned(),
+            version: "1.0.0".to_owned(),
+        }]
+    );
+    let allowed = allowed(root.path());
+    assert!(allowed.get(AI_LOCKED).is_none(), "{allowed:?}");
+    assert!(allowed.get(ID).is_some(), "{allowed:?}");
+}
+
+/// An update of Copilot Chat that an earlier check left waiting is gone once the policy
+/// loads, and only that update, so the owner is never offered it (DEC-098).
+#[test]
+fn a_pending_update_of_copilot_chat_is_dropped_when_the_policy_loads() {
+    let root = root();
+    let project = project();
+    let waiting = |id: &str| Update {
+        id: id.to_owned(),
+        version: "1.1.0".to_owned(),
+    };
+    let old = Policy {
+        updates: vec![waiting(AI_LOCKED), waiting(ID)],
+        ..Policy::default()
+    };
+    save(root.path(), &old).unwrap();
+    let shown = listing(root.path(), &project, NOW).unwrap();
+    let ids: Vec<&str> = shown
+        .updates
+        .iter()
+        .map(|update| update.id.as_str())
+        .collect();
+    assert_eq!(ids, [ID]);
+}
+
 #[test]
 fn an_approval_needs_the_ide_ask_and_a_decline_or_dismissal_drops_it() {
     let root = root();
@@ -466,4 +577,45 @@ fn an_approval_needs_the_ide_ask_and_a_decline_or_dismissal_drops_it() {
     assert_eq!(kept.len(), ASKS_PER_PROJECT_MAX);
     assert_eq!(kept[0].id, "acme.tool1", "a project keeps its newest asks");
     assert!(server.seen().is_empty(), "an ask never reaches the network");
+}
+
+/// The ids a product file gives the Chat view: its default chat extension and every extension
+/// holding the `defaultChatParticipant` proposal, in lower case. Input: the parsed file.
+/// Output: the set of ids.
+fn chat_ids(product: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let chat = product["defaultChatAgent"]["chatExtensionId"]
+        .as_str()
+        .unwrap()
+        .to_lowercase();
+    let granted = product["extensionEnabledApiProposals"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, proposals)| {
+            proposals
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|proposal| proposal == "defaultChatParticipant")
+        })
+        .map(|(id, _)| id.to_lowercase());
+    std::iter::once(chat).chain(granted).collect()
+}
+
+/// [`AI_LOCKED`] is one literal, so the pinned build's product file has to agree with it: the
+/// only id it gives the Chat view is that one, and a product naming another id or granting
+/// the proposal to another id fails this check (IDE-7-L1).
+#[test]
+fn ai_locked_is_the_only_chat_extension_of_the_pinned_product() {
+    let path = crate::ide::server::tests::cached_build().join("product.json");
+    let product: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let locked = std::collections::BTreeSet::from([AI_LOCKED.to_owned()]);
+    assert_eq!(chat_ids(&product), locked);
+    let mut named = product.clone();
+    named["defaultChatAgent"]["chatExtensionId"] = serde_json::json!("Other.chat");
+    assert_ne!(chat_ids(&named), locked);
+    let mut granted = product.clone();
+    granted["extensionEnabledApiProposals"]["Other.chat"] =
+        serde_json::json!(["defaultChatParticipant"]);
+    assert_ne!(chat_ids(&granted), locked);
 }

@@ -17,7 +17,7 @@ enum Step {
     Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
-    Deleted(Result<(DeletePlan, Vec<i64>), String>),
+    Deleted(Result<(PathBuf, Vec<crate::projects_home::RecordedFile>), String>),
 }
 
 enum Work {
@@ -45,7 +45,10 @@ impl Work {
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::New(plan) => Step::Staged(plan.run()),
-            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| (plan, research))),
+            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
+                let files = plan.engine_files(&research);
+                (plan.database, files)
+            })),
         }
     }
 }
@@ -86,7 +89,8 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// work, which runs under its own bounds and without the barrier; a move the
 /// recheck refuses is recorded as Rejected with its code and never runs; a fresh owner deadline then bounds the record and the reply, so a finished
 /// effect is recorded as Applied or as Rejected with the refusal code. A home
-/// move then sends a settle job for this exchange's pending move: one whose
+/// move then sends a settle job for this exchange's pending move, trying again
+/// when that fails: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
 /// is finished from disk, and one whose disk work never ran is forgotten. A Delete
 /// everything stops the project's IDE server before its wait and moves, and forgets
@@ -171,7 +175,7 @@ pub(super) async fn serve(
         _ => None,
     };
     let deleted = match &step {
-        Ok(Step::Deleted(Ok((plan, research)))) => Some((plan.clone(), research.clone())),
+        Ok(Step::Deleted(Ok(files))) => Some(files.clone()),
         _ => None,
     };
     let answer = async {
@@ -200,17 +204,26 @@ pub(super) async fn serve(
         )
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
-    if let (Ok((_, true, _)), Some((plan, research))) = (&answered, deleted) {
-        let _ = tokio::task::spawn_blocking(move || plan.remove_engine_files(&research)).await;
+    if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
+        let done = tokio::task::spawn_blocking(move || {
+            crate::projects_home::remove_engine_files(&database, &files)
+        })
+        .await
+        .unwrap_or_default();
+        if let Err(e) = engine
+            .owner_job(|reply| Job::DeleteFilesClear(done, reply))
+            .await
+        {
+            eprintln!("project_delete_files_not_cleared cause={}", e.0);
+        }
     }
     let forgotten = matches!(&answered, Ok((_, _, true)));
     let answered = answered.map(|(written, _, _)| written);
-    if moving
-        && let Err(e) = engine
-            .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
-            .await
-    {
-        eprintln!("projects_home_move_not_settled cause={}", e.0);
+    if moving {
+        settled(engine, "projects_home_move_not_settled", |reply| {
+            Job::HomeMoveSettle(exchange, ran, reply)
+        })
+        .await;
     }
     if deleting && !forgotten {
         settle_delete(engine, exchange).await;
@@ -218,20 +231,30 @@ pub(super) async fn serve(
     answered.map_err(|_| failure(UNKNOWN))?
 }
 
-/// Forgets a Delete everything's plan, trying again after a full queue or a SQLite failure,
-/// since a plan left behind refuses every projects home move until the engine restarts.
-/// Inputs: the engine and the exchange. Output: whether the plan is gone.
+/// Forgets a Delete everything's plan. Inputs: the engine and the exchange. Output: whether
+/// the plan is gone.
 async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+    settled(engine, "project_delete_not_settled", |reply| {
+        Job::DeleteSettle(exchange, reply)
+    })
+    .await
+}
+
+/// Runs one settling job, trying again after a full queue or a SQLite failure, since a row
+/// left behind refuses later projects home changes until the engine restarts. Inputs: the
+/// engine, the log line's name and the job for one try. Output: whether it settled.
+async fn settled(
+    engine: &Arc<Engine>,
+    name: &str,
+    job: impl Fn(oneshot::Sender<Result<(), EngineError>>) -> Job,
+) -> bool {
     for attempt in 0..SETTLE_TRIES {
         if attempt > 0 {
             tokio::time::sleep(SETTLE_GAP).await;
         }
-        match engine
-            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
-            .await
-        {
+        match engine.owner_job(&job).await {
             Ok(()) => return true,
-            Err(e) => eprintln!("project_delete_not_settled cause={}", e.0),
+            Err(e) => eprintln!("{name} cause={}", e.0),
         }
     }
     false
@@ -450,7 +473,8 @@ async fn finish(
         Step::Deleted(outcome) => OwnerResponse::Applied {
             operation: engine
                 .owner_job(|reply| {
-                    Job::DeleteRecord(a.clone(), Box::new(request), outcome.map(|_| ()), reply)
+                    let files = outcome.map(|(_, files)| files);
+                    Job::DeleteRecord(a.clone(), Box::new(request), files, reply)
                 })
                 .await?,
         },

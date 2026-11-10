@@ -29,6 +29,8 @@ const features = [
     extensions_js_1.extensions,
     reveal_js_1.reveal,
     terminal_js_1.sandboxedTerminal,
+    terminal_js_1.terminalMenu,
+    terminal_js_1.terminalGit,
     trust_js_1.registerTrust,
     git_js_1.remoteGit,
 ];

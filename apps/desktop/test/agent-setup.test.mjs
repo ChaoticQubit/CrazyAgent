@@ -59,8 +59,8 @@ test("setting an account up outside the desktop shell reports the engine as unre
   assert.equal(result.code, "engine_unreachable");
 });
 
-test("a pool's saved-key, URL and local members can be set up for agents again from its menu", async () => {
-  const { keyedMembers, PoolsView } = await import("../src/screens/settings/pools.tsx");
+test("a pool's saved-key, URL and local members can be set up for agents again from its row", async () => {
+  const { keyedMembers, PoolsScreenView } = await import("../src/screens/settings/pools.tsx");
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
   const member = (id, kind) => ({ id, kind, provider: "Provider", status: "set_up", status_label: "Set up" });
@@ -68,8 +68,13 @@ test("a pool's saved-key, URL and local members can be set up for agents again f
   assert.deepEqual(keyedMembers(pool), ["a", "c", "d"]);
   assert.deepEqual(keyedMembers({ ...pool, members: [member("b", "claude")] }), []);
   const forbidden = () => { throw new Error("static rendering must not act"); };
-  const markup = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [pool] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onPrepare: forbidden }));
+  const NOT_READ = { kind: "loading" };
+  const view = (pools) => renderToStaticMarkup(createElement(PoolsScreenView, { pools: { kind: "ok", value: pools }, accounts: NOT_READ, schedule: NOT_READ, ranking: NOT_READ, limits: NOT_READ, nowMs: 0, selected: undefined, onSelect: forbidden, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onRetryOrder: forbidden, onPrepare: forbidden }));
+  const markup = view([pool]);
   assert.match(markup, /Research/);
+  assert.match(markup, /aria-label="Get ready for agents: Research"/);
+  const subscriptions = view([{ ...pool, members: [member("b", "claude")] }]);
+  assert.doesNotMatch(subscriptions, /Get ready for agents/);
 });
 
 test("an account added to a pool from Add account is set up for agents the way the pool editor sets it up", async () => {

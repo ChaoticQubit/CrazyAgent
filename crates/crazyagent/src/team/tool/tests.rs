@@ -546,14 +546,22 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
         read_reply(&mailbox.join(format!("{first}{REPLY_SUFFIX}"))),
         Some(("Two agents are working.".into(), false))
     );
-    assert!(!mailbox.join(format!("{first}{PART_SUFFIX}")).exists());
+    assert!(
+        !mailbox
+            .join(format!("{first}{ANSWER_PART_SUFFIX}"))
+            .exists()
+    );
     let long = "é".repeat(REPLY_TEXT_MAX);
     answer_call(&mailbox, &second, &long, true).unwrap();
     let (text, error) = read_reply(&mailbox.join(format!("{second}{REPLY_SUFFIX}"))).unwrap();
     assert!(error && text.len() <= REPLY_TEXT_MAX && text.chars().all(|c| c == 'é'));
 
     let planted = "4".repeat(32);
-    symlink(&secret, mailbox.join(format!("{planted}{PART_SUFFIX}"))).unwrap();
+    symlink(
+        &secret,
+        mailbox.join(format!("{planted}{ANSWER_PART_SUFFIX}")),
+    )
+    .unwrap();
     assert!(answer_call(&mailbox, &planted, "never", false).is_err());
     assert_eq!(std::fs::read(&secret).unwrap(), b"{\"tool\":\"changes\"}");
 }
@@ -1274,4 +1282,23 @@ fn log_activity_is_listed_unless_switched_off_and_keeps_only_a_bounded_call() {
         Some(&json!({"goal": "Build the service", "text": "Started the build"})),
     );
     assert!(matches!(no_kind, Some(Err(_))), "{no_kind:?}");
+}
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line r2: a work title reaches other agents
+/// in the engine's overlap note, so one holding any of the seven line breaks is refused.
+#[test]
+fn a_work_title_holding_any_line_break_is_refused_by_name() {
+    for line_break in [
+        '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ] {
+        assert_eq!(
+            live_call(
+                START_WORK_TOOL,
+                Some(&json!({"title": format!("a{line_break}b"), "claims": ["src/page.md"]}))
+            )
+            .unwrap(),
+            Err(START_INVALID),
+            "{line_break:?}"
+        );
+    }
 }

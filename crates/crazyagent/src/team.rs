@@ -58,9 +58,15 @@ pub const LIMIT_CHOICES_SECS: [u32; 5] = [1800, 3600, 7200, 14_400, 28_800];
 /// How long an idle sub-agent may wait for work before it stops, in seconds: 2 min, 10 min
 /// and 1 h. Never stopping is the other choice, stored as zero.
 pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
-/// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
-/// stopped while that work still runs, and no owner setting changes it.
+/// How long the owner's 15 min choice keeps an idle master once its work is done, in seconds:
+/// the engine's idle bound, of which the 1 h choice counts four. It is never stopped while
+/// that work still runs.
 pub const MASTER_IDLE_STOP_SECS: u32 = 900;
+
+/// How many of the engine's master idle bounds the 1 h choice keeps a master for.
+const MASTER_IDLE_HOUR_BOUNDS: u32 = 4;
+const _: () = assert!(MASTER_IDLE_STOP_SECS == 900);
+const _: () = assert!(MASTER_IDLE_STOP_SECS * MASTER_IDLE_HOUR_BOUNDS == 3600);
 /// The longest Master's branch name the owner may choose, in bytes.
 pub const MASTER_BRANCH_BYTES_MAX: usize = 255;
 /// The idle stop a team starts with: 10 minutes.
@@ -732,9 +738,21 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    MasterIdleStop {
+        project_id: ProjectId,
+        choice: MasterIdleStop,
+    },
+    MasterLiveTerminal {
+        project_id: ProjectId,
+        on: bool,
+    },
     CatchUpMain {
         project_id: ProjectId,
         mode: CatchUpMain,
+    },
+    ReuseIdle {
+        project_id: ProjectId,
+        mode: ReuseIdle,
     },
     NewFolderLimit {
         project_id: ProjectId,
@@ -994,8 +1012,11 @@ impl TeamAction {
             | Self::AskBeforeMerge { .. }
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
+            | Self::MasterIdleStop { .. }
+            | Self::MasterLiveTerminal { .. }
             | Self::TerminalsPerWindow { .. }
             | Self::CatchUpMain { .. }
+            | Self::ReuseIdle { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -1025,7 +1046,10 @@ impl TeamAction {
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
+            | Self::MasterIdleStop { project_id, .. }
+            | Self::MasterLiveTerminal { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
+            | Self::ReuseIdle { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::TerminalsPerWindow { project_id, .. }
             | Self::MessageSettings { project_id, .. }
@@ -1494,11 +1518,19 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 reask INTEGER NOT NULL CHECK(reask IN (0,1))
             );
+            CREATE TABLE IF NOT EXISTS team_master_idle_stop (
+                project TEXT PRIMARY KEY,
+                choice TEXT NOT NULL CHECK(choice IN ('off','fifteen_minutes','one_hour'))
+            );
             CREATE TABLE IF NOT EXISTS team_wall (
                 project TEXT PRIMARY KEY,
                 per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))
             );
             CREATE TABLE IF NOT EXISTS team_catch_up_main (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('on','off'))
+            );
+            CREATE TABLE IF NOT EXISTS team_reuse_idle (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('on','off'))
             );
@@ -1542,7 +1574,16 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_owner_stops (
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
-                stopped_ms INTEGER NOT NULL
+                stopped_ms INTEGER NOT NULL,
+                stopped_by TEXT NOT NULL DEFAULT 'owner'
+            );
+            CREATE TABLE IF NOT EXISTS team_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                task INTEGER,
+                at_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS team_caps (
                 project TEXT PRIMARY KEY,
@@ -1605,6 +1646,27 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     names::initialize(connection)?;
     questions::initialize(connection)?;
     direct::erase_typed_input(connection)
+}
+
+/// Logs each real status change of a team agent while its project exists, so a live agent
+/// stopped after a removal leaves no row (HB-S5-I). Apart from [`initialize`] because it
+/// reads `projects`, which only the engine's own schema has. Takes the engine database.
+/// Returns a SQLite failure.
+pub(crate) fn log_status_changes(connection: &Connection) -> Result<(), EngineError> {
+    connection
+        .execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS team_status_logged
+            AFTER UPDATE OF status ON team_agents
+            WHEN NEW.status <> OLD.status
+                AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project)
+            BEGIN
+                INSERT INTO team_status_log(project,agent,status,task,at_ms)
+                VALUES (NEW.project,NEW.id,NEW.status,NEW.task,
+                        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER));
+                DELETE FROM team_status_log WHERE id <= last_insert_rowid() - 20000;
+            END;",
+        )
+        .map_err(error)
 }
 
 /// Finds the plan slot a sub-agent on this harness runs under. An empty plan means any
@@ -1953,25 +2015,35 @@ pub fn admit_resolve(
 /// to that agent, so the runtime starts the same agent again under its own id and name, in
 /// its own worktree, with the message as its first input, and the master hears how it ends.
 /// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes,
-/// and never one the owner stopped (AW-1): only the owner's Wake or restart starts that one.
-/// Takes the transaction, live access, the setup, the agent, the message and the time.
-/// Returns the task id, or a plain refusal code: `team_agent_not_found`,
-/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`, or one of
-/// `admit`'s.
+/// and never one stopped by someone above the waker: only the owner's Wake or restart starts
+/// one the owner stopped (AW-1), and a lead does not wake one the master stopped (HB-S5-B).
+/// Takes the transaction, live access, the setup, the agent, the message, who wakes it and
+/// the time. Returns the task id, or a plain refusal code: `team_agent_not_found`,
+/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`,
+/// `team_agent_master_stopped`, or one of `admit`'s.
 pub fn admit_wake(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     stored: &StoredSetup,
     agent: i64,
     prompt: &str,
+    waker: StoppedBy,
     now: i64,
 ) -> Result<Result<i64, &'static str>, EngineError> {
+    assert!(
+        waker != StoppedBy::Owner,
+        "the owner wakes through WakeAgent"
+    );
     let project = &stored.project_id;
     if let Some(code) = wake_refusal(tx, project, agent)? {
         return Ok(Err(code));
     }
-    if owner_stopped(tx, agent)? {
-        return Ok(Err(OWNER_STOPPED));
+    match stop_of(tx, agent)? {
+        Some((StoppedBy::Owner, _)) => return Ok(Err(OWNER_STOPPED)),
+        Some((StoppedBy::Master, _)) if waker == StoppedBy::Lead => {
+            return Ok(Err(MASTER_STOPPED));
+        }
+        _ => {}
     }
     let harness: String = tx
         .query_row(
@@ -2475,12 +2547,24 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MasterIdleStop { choice, .. } => {
+            set_master_idle_stop(tx, project, *choice)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterLiveTerminal { on, .. } => {
+            master::set_live_terminal(tx, project, *on)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::TerminalsPerWindow { per_window, .. } => {
             wall::store(tx, project, *per_window)?;
             Ok(Outcome::Applied)
         }
         TeamAction::CatchUpMain { mode, .. } => {
             set_catch_up_main(tx, project, *mode)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::ReuseIdle { mode, .. } => {
+            set_reuse_idle(tx, project, *mode)?;
             Ok(Outcome::Applied)
         }
         TeamAction::NewFolderLimit { files, .. } => {
@@ -2547,18 +2631,8 @@ fn perform(
             Ok(Outcome::Applied)
         }
         TeamAction::StopAgent { agent, .. } => {
-            let role: Option<String> = tx
-                .query_row(
-                    "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
-                    params![agent, project.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(error)?;
-            match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
-                (None, _) => return Ok(rejected("team_agent_not_found")),
-                (_, Some(AgentRole::Master)) => return Ok(rejected("team_stop_master")),
-                _ => {}
+            if let Some(code) = stop_refusal(tx, project, *agent)? {
+                return Ok(rejected(code));
             }
             owner_stop(tx, project, *agent, now)?;
             Ok(Outcome::Applied)
@@ -2751,17 +2825,46 @@ pub fn wake_refusal(
 /// The refusal code for a master's wake of a sub-agent the owner stopped (AW-1).
 pub const OWNER_STOPPED: &str = "team_agent_owner_stopped";
 
+/// The refusal code for the engine's own update in a team the owner paused (T8-R2-S3).
+pub const TEAM_PAUSED: &str = "team_paused";
+
+/// The refusal code for a lead's wake of a sub-agent the master stopped (HB-S5-B).
+pub const MASTER_STOPPED: &str = "team_agent_master_stopped";
+
 /// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
 /// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
 /// whether it was the owner's stop, or a SQLite failure.
 pub fn owner_stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1)",
+            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1 AND stopped_by='owner')",
             [agent],
             |row| row.get(0),
         )
         .map_err(error)
+}
+
+/// Tells whether anyone's stop still holds a sub-agent. Takes a connection and the agent.
+/// Returns the answer, or a SQLite failure.
+pub(crate) fn stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
+    Ok(stop_of(connection, agent)?.is_some())
+}
+
+/// Who stopped a sub-agent that has not started again since, and when. Takes a connection
+/// and the agent. Returns them, None when no stop holds it, or a SQLite failure.
+pub(crate) fn stop_of(
+    connection: &Connection,
+    agent: i64,
+) -> Result<Option<(StoppedBy, i64)>, EngineError> {
+    let row: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT stopped_by,stopped_ms FROM team_owner_stops WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(row.map(|(by, stopped_ms)| (StoppedBy::named(&by), stopped_ms)))
 }
 
 /// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves
@@ -3051,6 +3154,12 @@ fn reask_default() -> bool {
     true
 }
 
+/// The "Live terminal" setting a team status read without one shows: on (DEC-117 Q4).
+/// Output: the default.
+fn live_terminal_default() -> bool {
+    true
+}
+
 /// Everything the clients show about a project's team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStatus {
@@ -3089,7 +3198,13 @@ pub struct TeamStatus {
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
     #[serde(default)]
+    pub master_idle_stop: MasterIdleStop,
+    #[serde(default = "live_terminal_default")]
+    pub master_live_terminal: bool,
+    #[serde(default)]
     pub catch_up_main: CatchUpMain,
+    #[serde(default)]
+    pub reuse_idle: ReuseIdle,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
     #[serde(default)]
@@ -3115,6 +3230,10 @@ pub struct TeamStatus {
     pub live_master: Option<bool>,
     #[serde(default)]
     pub live_problem: Option<String>,
+    /// Whether the line above is the one an idle stop left, so the master view offers Start
+    /// again. Never set while the live master is on.
+    #[serde(default)]
+    pub live_idle_stopped: bool,
     #[serde(default)]
     pub settings_version: u64,
     pub min_agents: u8,
@@ -3423,9 +3542,10 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
 /// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
-/// first named by, PLC (b)) and `team_task_pins.held` (1 when a hold pinned the task, not
-/// its own purpose). Runs on every open and adds each column once. Takes the engine
-/// connection. Returns any SQLite failure.
+/// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
+/// its own purpose) and `team_owner_stops.stopped_by` (who made the stop; one from before
+/// the column was the owner's). Runs on every open and adds each column once. Takes the
+/// engine connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
         ("team_agents", "pane", "TEXT"),
@@ -3434,6 +3554,11 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "team_owner_stops",
+            "stopped_by",
+            "TEXT NOT NULL DEFAULT 'owner'",
+        ),
     ] {
         let present: bool = connection
             .query_row(
@@ -3750,6 +3875,114 @@ pub fn reask_empty_reply(
     Ok(reask.unwrap_or_else(reask_default))
 }
 
+/// The owner's "Stop the master when idle after" setting, per project (DEC-117 Q4). With no
+/// saved choice each kind of master stays as it was: a live master is not stopped as idle
+/// and any other stops after 15 minutes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterIdleStop {
+    Off,
+    #[default]
+    FifteenMinutes,
+    OneHour,
+}
+
+impl MasterIdleStop {
+    /// The stored name of the setting. Output: `off`, `fifteen_minutes` or `one_hour`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::FifteenMinutes => "fifteen_minutes",
+            Self::OneHour => "one_hour",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Off, Self::FifteenMinutes, Self::OneHour]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+
+    /// The words the owner reads for the choice. Output: `Off`, `15 min` or `1 h`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::FifteenMinutes => "15 min",
+            Self::OneHour => "1 h",
+        }
+    }
+
+    /// What a project's saved choice means for one master. Inputs: the choice, none when the
+    /// owner made none, and whether that master is live. Output: the choice in force.
+    pub fn effective(chosen: Option<Self>, live: bool) -> Self {
+        chosen.unwrap_or(if live {
+            Self::Off
+        } else {
+            Self::FifteenMinutes
+        })
+    }
+
+    /// How long this choice keeps an idle master. Input: the engine's idle bound, 15 minutes
+    /// outside tests. Output: the time, none for Off.
+    pub fn after(self, bound: std::time::Duration) -> Option<std::time::Duration> {
+        match self {
+            Self::Off => None,
+            Self::FifteenMinutes => Some(bound),
+            Self::OneHour => Some(bound.saturating_mul(MASTER_IDLE_HOUR_BOUNDS)),
+        }
+    }
+
+    /// Says what the choice does to an idle master. Output: the sentence.
+    pub fn sentence(self) -> String {
+        match self {
+            Self::Off => "An idle master keeps running until the team stops.".to_owned(),
+            stop => format!(
+                "An idle master stops {} after its work is done.",
+                stop.label()
+            ),
+        }
+    }
+}
+
+/// Reads a project's saved "Stop the master when idle after" choice. Takes a connection and
+/// the project. Returns the choice, none when the owner made none.
+pub fn master_idle_stop(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<MasterIdleStop>, EngineError> {
+    let name: Option<String> = connection
+        .query_row(
+            "SELECT choice FROM team_master_idle_stop WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    name.map(|name| {
+        MasterIdleStop::named(&name)
+            .ok_or_else(|| EngineError("team_master_idle_stop_invalid".into()))
+    })
+    .transpose()
+}
+
+/// Saves a project's "Stop the master when idle after" choice, replacing an earlier one.
+/// Takes a connection, the project and the choice. Returns done.
+fn set_master_idle_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    choice: MasterIdleStop,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_master_idle_stop(project,choice) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET choice=excluded.choice",
+            params![project.as_str(), choice.name()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
 /// The owner's "Catch up with main" setting (OS-8): `On`, the default, lets every agent's
 /// own `git` merge `crazyagent/main`, the project's landed main, into its own branch and
 /// tells it to; `Off` keeps the DEC-107 refusal of every merge and says nothing of main.
@@ -3821,6 +4054,79 @@ pub fn set_catch_up_main(
     connection
         .execute(
             "INSERT INTO team_catch_up_main(project,mode) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+            params![project.as_str(), value.name()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The owner's "Reuse idle agents" setting (HB-S5-A): `Off`, the default, starts a new
+/// agent for each new task, in its own worktree on the current branch; `On` lets an idle
+/// agent of the same lead take it, on the history it already has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReuseIdle {
+    #[default]
+    Off,
+    On,
+}
+
+impl ReuseIdle {
+    /// The stored name of the setting. Output: `off` or `on`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Off, Self::On]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+}
+
+/// Reads a project's "Reuse idle agents" setting: `Off` when no choice is saved and for a
+/// store that keeps no team tables. Takes a connection and the project. Returns the
+/// setting, or `team_reuse_idle_invalid` for a stored name it does not know.
+pub fn reuse_idle(connection: &Connection, project: &ProjectId) -> Result<ReuseIdle, EngineError> {
+    let kept: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_reuse_idle')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !kept {
+        return Ok(ReuseIdle::default());
+    }
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_reuse_idle WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode {
+        None => Ok(ReuseIdle::default()),
+        Some(mode) => ReuseIdle::named(&mode).ok_or_else(|| failure("team_reuse_idle_invalid")),
+    }
+}
+
+/// Saves a project's "Reuse idle agents" setting, replacing an earlier choice. Takes a
+/// connection, the project and the setting. Returns done.
+pub fn set_reuse_idle(
+    connection: &Connection,
+    project: &ProjectId,
+    value: ReuseIdle,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_reuse_idle(project,mode) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
             params![project.as_str(), value.name()],
         )
@@ -3973,6 +4279,78 @@ pub fn spread_accounts(connection: &Connection, project: &ProjectId) -> Result<b
         .map_err(error)
 }
 
+/// Who made a stop, in rising standing: a stop holds against any waker below its maker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoppedBy {
+    Lead,
+    Master,
+    Owner,
+}
+
+impl StoppedBy {
+    /// The word stored for this maker. Returns it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lead => "lead",
+            Self::Master => "master",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// The maker a stored word names. Takes the word. Returns it, the owner for any word this
+    /// engine does not know, as that stop is the one nobody else lifts.
+    pub(crate) fn named(word: &str) -> Self {
+        match word {
+            "lead" => Self::Lead,
+            "master" => Self::Master,
+            _ => Self::Owner,
+        }
+    }
+}
+
+/// Why an agent cannot be stopped, if it cannot. Takes a connection, the project and the
+/// agent. Returns a plain refusal code or None, or a SQLite failure.
+fn stop_refusal(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<&'static str>, EngineError> {
+    let role: Option<String> = connection
+        .query_row(
+            "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(
+        match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
+            (None, _) => Some("team_agent_not_found"),
+            (_, Some(AgentRole::Master)) => Some("team_stop_master"),
+            _ => None,
+        },
+    )
+}
+
+/// Records a stop made by the master or a lead (HB-S5-B), which never locks the agent to the
+/// owner: its unfinished tasks fail and its maker or anyone above can wake it. Takes a
+/// connection, the project, the agent, who stopped it and the time. Returns a plain refusal
+/// code, or any SQLite failure.
+pub(crate) fn agent_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    by: StoppedBy,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    assert!(by != StoppedBy::Owner, "the owner stops through owner_stop");
+    if let Some(code) = stop_refusal(connection, project, agent)? {
+        return Ok(Err(code));
+    }
+    record_stop(connection, project, agent, by, now)?;
+    Ok(Ok(()))
+}
+
 /// Records the owner's stop of a sub-agent and of every agent it leads, down its whole
 /// lead tree, so each stays stopped across restarts until the owner wakes it or its lead.
 /// Takes a connection, the project, the agent and the time. Returns any SQLite failure.
@@ -3980,6 +4358,20 @@ pub(crate) fn owner_stop(
     connection: &Connection,
     project: &ProjectId,
     agent: i64,
+    now: i64,
+) -> Result<(), EngineError> {
+    record_stop(connection, project, agent, StoppedBy::Owner, now)
+}
+
+/// Records a stop of a sub-agent and of every agent it leads, down its whole lead tree. A
+/// stop already there keeps the higher standing of its maker and this one and takes this
+/// one's time, so a wake queued before this stop fails. Takes a connection, the project, the
+/// agent, who stopped it and the time. Returns any SQLite failure.
+fn record_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    by: StoppedBy,
     now: i64,
 ) -> Result<(), EngineError> {
     connection
@@ -3990,9 +4382,13 @@ pub(crate) fn owner_stop(
                  SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
                  WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?4
              )
-             INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms)
-             SELECT id, ?2, ?3 FROM led",
-            params![agent, project.as_str(), now, DEPTH_WALK_MAX],
+             INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by)
+             SELECT id, ?2, ?3, ?5 FROM led WHERE true
+             ON CONFLICT(agent) DO UPDATE SET stopped_ms=excluded.stopped_ms,
+             stopped_by=CASE WHEN excluded.stopped_by='owner'
+             OR (excluded.stopped_by='master' AND team_owner_stops.stopped_by='lead')
+             THEN excluded.stopped_by ELSE team_owner_stops.stopped_by END",
+            params![agent, project.as_str(), now, DEPTH_WALK_MAX, by.name()],
         )
         .map_err(error)?;
     Ok(())
@@ -4023,10 +4419,10 @@ pub(crate) fn owner_start(
     Ok(())
 }
 
-/// Clears the owner's stop of one agent that starts again for anything but the owner's
-/// Wake or restart of it, such as the owner's change-set Update or a pinned task. The
-/// stops of the agents it leads stay, so each of them waits for the owner (AW-1). Takes a
-/// connection, the project and the agent. Returns any SQLite failure.
+/// Clears the stop of one agent that starts again for anything but the owner's Wake or
+/// restart of it, such as the owner's change-set Update or a pinned task. The stops of the
+/// agents it leads stay, so each waits for whoever may wake it (AW-1). Takes a connection,
+/// the project and the agent. Returns any SQLite failure.
 pub(crate) fn owner_start_alone(
     connection: &Connection,
     project: &ProjectId,
@@ -4542,7 +4938,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     }
     let stopped: BTreeSet<i64> = {
         let mut statement = connection
-            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1")
+            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1 AND stopped_by='owner'")
             .map_err(error)?;
         statement
             .query_map([project.as_str()], |row| row.get(0))
@@ -4557,6 +4953,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
+    let live_idle_stopped =
+        live_master == Some(false) && live_problem.as_deref().is_some_and(master::idle_stopped);
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
     let limited = caps::read(connection, project)?;
@@ -4579,7 +4977,13 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands: offered_master_lands(connection, project)?,
         reask_empty_reply: reask_empty_reply(connection, project)?,
+        master_idle_stop: MasterIdleStop::effective(
+            master_idle_stop(connection, project)?,
+            master::live(connection, project)?,
+        ),
+        master_live_terminal: master::live_terminal(connection, project)?,
         catch_up_main: catch_up_main(connection, project)?,
+        reuse_idle: reuse_idle(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,
@@ -4594,6 +4998,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         terminals_per_window: terminals_per_window(connection, project)?,
         live_master,
         live_problem,
+        live_idle_stopped,
         settings_version: settings_version(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,

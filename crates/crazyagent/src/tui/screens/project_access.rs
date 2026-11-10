@@ -10,6 +10,10 @@ pub(in crate::tui) const FULL_ACCESS_WARNING: &str = "Agents run with your user'
 /// started above it, but not what a Full access agent started outside its terminal.
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
+/// What saving a new level, hooks or network choice does to the project's open IDE, the same
+/// in the desktop app.
+pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
+
 /// What turning a toolchain off does to work already running: the engine stops each agent,
 /// research job and master turn whose sandbox granted it.
 pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
@@ -18,7 +22,7 @@ pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain
 pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks";
 
 /// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
-pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
+pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. Applies when the IDE next starts.";
 
 /// Why the network choice has no effect under Full access: Full access runs agents with no
 /// sandbox, so nothing bounds their network.
@@ -139,11 +143,11 @@ impl AccessEdit {
     /// network row with its help, the IDE hooks row with its line, the warning or the refusal,
     /// and the save line, all of them when they fit. Else the warning or refusal and the save
     /// line stay whole at the bottom, and the settings above them show a window that keeps the
-    /// cursor's row, with how many lines sit above and below it. Input: the look and the rows
-    /// for the body. Output: at most that many rows, or the action lines, the cursor's row and
-    /// the counts when even those do not fit.
+    /// cursor's row and as many of its help lines as fit, with how many lines sit above and
+    /// below it. Input: the look and the rows for the body. Output: at most that many rows, or
+    /// the action lines, the cursor's row and the counts when even those do not fit.
     pub fn rows(&self, look: &Look, room: usize) -> Vec<Row> {
-        let (form, at) = self.form(look);
+        let (form, at, end) = self.form(look);
         let actions = self.actions(look);
         let actions_len = actions.len();
         if form.len() + actions_len <= room {
@@ -154,7 +158,7 @@ impl AccessEdit {
         let keep = room.saturating_sub(actions_len).max(1);
         let mut size = keep;
         let first = loop {
-            let first = window(at, form.len(), size);
+            let first = window(end, form.len(), size).min(at);
             let counts = usize::from(first > 0) + usize::from(first + size < form.len());
             if size + counts <= keep || size == 1 {
                 break first;
@@ -177,8 +181,9 @@ impl AccessEdit {
     }
 
     /// The box's settings lines, through the blank line after the IDE hooks switch, and the
-    /// line the cursor's row is on. Input: the look. Output: the rows and that line.
-    fn form(&self, look: &Look) -> (Vec<Row>, usize) {
+    /// line the cursor's row is on. Input: the look. Output: the rows, that line and the last
+    /// line of the help under it.
+    fn form(&self, look: &Look) -> (Vec<Row>, usize, usize) {
         let mut body: Vec<Row> = wrap_words(
             "Who decides what this project's agents may touch. Applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.",
             TEXT_WIDTH,
@@ -223,6 +228,12 @@ impl AccessEdit {
                 .into_iter()
                 .map(|line| Row::of(line, look.muted)),
         );
+        body.extend(
+            wrap_words(POLICY_RESTARTS_IDE, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
+        let mut end = body.len() - 1;
         body.push(Row::default());
         body.push(Row::of("Toolchains agents may use", look.accent));
         if self.view.toolchains.is_empty() {
@@ -241,6 +252,7 @@ impl AccessEdit {
             };
             if self.cursor == index + 1 {
                 at = body.len();
+                end = at;
             }
             body.push(
                 Row::of(mark(index + 1), look.accent)
@@ -290,6 +302,9 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
+        if self.cursor == network_row {
+            end = body.len() - 1;
+        }
         body.push(Row::default());
         body.push(Row::of("IDE git", look.accent));
         let hooks = self.hooks_row();
@@ -312,9 +327,16 @@ impl AccessEdit {
                 .into_iter()
                 .map(|line| Row::of(format!("  {line}"), look.muted)),
         );
+        if self.cursor == hooks {
+            end = body.len() - 1;
+        }
         body.push(Row::default());
         assert!(at < body.len(), "the cursor's row is a settings line");
-        (body, at)
+        assert!(
+            at <= end && end < body.len(),
+            "the cursor's help follows its row"
+        );
+        (body, at, end)
     }
 
     /// The box's closing lines: the Full access warning with its y and n, or the refusal and

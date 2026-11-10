@@ -53,6 +53,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_servers_closed",
     "ide_servers_full",
     "ide_settings_invalid",
+    "ide_settings_unavailable",
     "ide_settings_unwritable",
     "ide_state_unavailable",
     "ide_tab_outcome_unknown",
@@ -318,15 +319,14 @@ async fn open(
     if authority.ide_servers.deleting(&project) {
         return Err(failure("ide_project_deleting"));
     }
-    let (build, written, folder, hooks) = tokio::task::spawn_blocking({
+    let (build, written, folder) = tokio::task::spawn_blocking({
         let project = project.clone();
         move || match fetch::state(&root) {
             BuildState::Ready { root: build, .. } => {
                 let written = crate::ide::workspace::write(&root, &project)?;
                 let folder = crate::ide::workspace::folder(&root, &project)?;
                 crate::projects_home::exclude_agents(&folder)?;
-                let hooks = crate::ide::workspace::project_hooks(&root, &project)?;
-                Ok((build, written, folder, hooks))
+                Ok((build, written, folder))
             }
             _ => Err(failure("ide_build_not_ready")),
         }
@@ -335,7 +335,7 @@ async fn open(
     .map_err(|_| unknown())??;
     let info = authority
         .ide_servers
-        .open(&project, &folder, &build, hooks)
+        .open(&project, &folder, &build)
         .await?;
     if !info.url.starts_with("http://127.0.0.1:") {
         return Err(failure("ide_server_not_loopback"));

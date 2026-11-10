@@ -1,6 +1,6 @@
 import { createElement, type ReactElement } from "react";
 import type { MoneyView, Tokens } from "../../api-usage";
-import { compactCount, headlineTokens } from "../settings/usage";
+import { compactCount, headlineTokens } from "./usage-model";
 
 export const COST_LABEL = "Estimated cost at API prices";
 export const ACTIVITY_NAMES: Record<string, string> = { coding: "Coding", debugging: "Debugging", feature: "Feature", refactoring: "Refactoring", testing: "Testing", exploration: "Exploration", planning: "Planning", delegation: "Delegation", git: "Git", build_deploy: "Build/deploy", conversation: "Conversation", brainstorming: "Brainstorming", general: "General" };

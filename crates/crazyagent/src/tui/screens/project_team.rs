@@ -20,7 +20,7 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, SwitchApply,
+    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
     SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
     TeamStatus, TeamTask,
 };
@@ -180,9 +180,10 @@ pub(in crate::tui) enum CoordRow {
     TaskStart,
     Counted,
     Skills(SkillRole),
+    ReuseIdle,
 }
 
-const COORD_ROWS: [CoordRow; 16] = [
+const COORD_ROWS: [CoordRow; 17] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::ClaudeDisplay,
@@ -199,6 +200,7 @@ const COORD_ROWS: [CoordRow; 16] = [
     CoordRow::Skills(SkillRole::Master),
     CoordRow::Skills(SkillRole::Lead),
     CoordRow::Skills(SkillRole::Worker),
+    CoordRow::ReuseIdle,
 ];
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 4] = [
@@ -744,6 +746,8 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
+            KeyCode::Char('I') => self.master_idle_stop(),
+            KeyCode::Char('V') => self.live_terminal(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
@@ -1575,7 +1579,7 @@ impl TeamView {
         };
         self.changing = Some(match which {
             Limit::Idle => format!(
-                "{} An idle master stops {} after its work is done.",
+                "{} {}",
                 idle.map_or_else(
                     || "Idle sub-agents now keep running until the team stops.".to_owned(),
                     |secs| {
@@ -1585,7 +1589,7 @@ impl TeamView {
                         )
                     },
                 ),
-                crate::team::span_words(crate::team::MASTER_IDLE_STOP_SECS.into())
+                status.master_idle_stop.sentence()
             ),
             Limit::Task | Limit::Session => format!(
                 "Each task may now run {}, each agent session {}.",
@@ -2089,6 +2093,66 @@ impl TeamView {
         })
     }
 
+    /// Moves "Stop the master when idle after" to its next choice: 15 min, 1 h, Off and back
+    /// to 15 min (DEC-117 Q4). Output: the change to send, or Handled with a notice while
+    /// loading or saving.
+    fn master_idle_stop(&mut self) -> TeamReply {
+        use crate::team::MasterIdleStop::{FifteenMinutes, Off, OneHour};
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let (choice, words) = match status.master_idle_stop {
+            FifteenMinutes => (OneHour, "An idle master now stops after 1 h."),
+            OneHour => (
+                Off,
+                "An idle master now keeps running until the team stops.",
+            ),
+            Off => (FifteenMinutes, "An idle master now stops after 15 min."),
+        };
+        self.changing = Some(words.to_owned());
+        TeamReply::Change(TeamAction::MasterIdleStop {
+            project_id: self.project.clone(),
+            choice,
+        })
+    }
+
+    /// Turns "Live terminal" off or on, each way with its plain notice (DEC-117 Q4). Output:
+    /// the change to send, or Handled with a notice while loading or saving.
+    fn live_terminal(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if !master_runs_live(status) {
+            self.notice = Some(Notice::plain(NO_LIVE_TERMINAL));
+            return TeamReply::Handled;
+        }
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let on = !status.master_live_terminal;
+        let words = if on {
+            "Live terminal is on: the master runs in a terminal you see and type into."
+        } else {
+            "Live terminal is off: the master ends at its next stop and its conversation is the console."
+        };
+        self.changing = Some(words.to_owned());
+        TeamReply::Change(TeamAction::MasterLiveTerminal {
+            project_id: self.project.clone(),
+            on,
+        })
+    }
+
     /// Moves "Terminals per window", how many terminals each terminal wall window holds,
     /// to its next choice: 4, 6, 9 and back to 4. Output: the change to send, or Handled
     /// with a notice while loading or saving.
@@ -2422,13 +2486,28 @@ impl TeamView {
                         "Catch up with main is on for agents started from now on: they may git merge crazyagent/main."
                     }
                     CatchUpMain::Off => {
-                        "Catch up with main is off for agents started from now on: their git merge of main is refused."
+                        "Catch up with main is off for agents started from now on: the git the app writes for an agent refuses git merge crazyagent/main, except a master at Full access. It is a guide, not a lock: landed work can still come in another way."
                     }
                 };
                 (
                     TeamAction::CatchUpMain { project_id, mode },
                     done.to_owned(),
                 )
+            }
+            CoordRow::ReuseIdle => {
+                let mode = match self.status.as_ref().map(|status| status.reuse_idle) {
+                    Some(ReuseIdle::On) => ReuseIdle::Off,
+                    Some(ReuseIdle::Off) | None => ReuseIdle::On,
+                };
+                let done = match mode {
+                    ReuseIdle::On => {
+                        "Reuse idle agents is on: an idle agent may take the next task, on the history it already has."
+                    }
+                    ReuseIdle::Off => {
+                        "Reuse idle agents is off: each new task starts a new agent on the current branch."
+                    }
+                };
+                (TeamAction::ReuseIdle { project_id, mode }, done.to_owned())
             }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
@@ -2660,6 +2739,15 @@ impl TeamView {
                     .to_owned(),
                     "",
                 ),
+                CoordRow::ReuseIdle => (
+                    "Reuse idle agents".to_owned(),
+                    match self.status.as_ref().map(|status| status.reuse_idle) {
+                        Some(ReuseIdle::On) => "On",
+                        Some(ReuseIdle::Off) | None => "Off",
+                    }
+                    .to_owned(),
+                    "",
+                ),
                 CoordRow::Nudges => (
                     "Workflow nudges".to_owned(),
                     view.settings.nudges.words().to_owned(),
@@ -2831,8 +2919,12 @@ impl TeamView {
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
-        let every_harness_runs = status.harnesses.iter().all(|harness| harness.runnable);
-        let plan_gives_way = usize::from(every_harness_runs && over > spacers);
+        let plan_can_go = status.harnesses.iter().all(|harness| harness.runnable)
+            && status
+                .harnesses
+                .iter()
+                .any(|harness| harness.role == AgentRole::Master);
+        let plan_gives_way = usize::from(plan_can_go && over > spacers);
         let folded = (over - spacers - plan_gives_way).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
@@ -2840,7 +2932,7 @@ impl TeamView {
         );
         assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         assert!(
-            folded == 0 || plan_gives_way == 1 || !every_harness_runs,
+            folded == 0 || plan_gives_way == 1 || !plan_can_go,
             "the plan line goes before settings"
         );
         if plan_gives_way == 1 {
@@ -2969,8 +3061,8 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
-    /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
+    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3062,6 +3154,19 @@ impl TeamView {
                 branch_words(status.agent_branches).to_owned(),
             ),
             setting("Max harnesses", cap_words(status.max_harnesses)),
+        ];
+        let live_terminal = master_runs_live(status).then(|| {
+            setting(
+                "Live terminal",
+                if status.master_live_terminal {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_owned(),
+            )
+        });
+        let middle = [
             setting("Max teammates", cap_words(status.max_teammates)),
             setting(
                 "Spread accounts",
@@ -3115,6 +3220,10 @@ impl TeamView {
                 format!("{} files", status.new_folder_files_max),
             ),
             setting(
+                "Master idle stop",
+                status.master_idle_stop.label().to_owned(),
+            ),
+            setting(
                 "Terminals per window",
                 u8::from(status.terminals_per_window).to_string(),
             ),
@@ -3125,7 +3234,13 @@ impl TeamView {
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
-        for item in settings.into_iter().chain(master_lands).chain(later) {
+        for item in settings
+            .into_iter()
+            .chain(live_terminal)
+            .chain(middle)
+            .chain(master_lands)
+            .chain(later)
+        {
             let used = match (left.width(), right.width()) {
                 (0, 0) => 0,
                 (0, taken) | (taken, 0) => taken + 2,
@@ -3470,6 +3585,8 @@ impl TeamView {
             ("g", "Ask before merge"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
+            ("I", "Stop the master when idle after"),
+            ("V", "Live terminal"),
             ("F", "New folder limit"),
             ("W", "Terminals per window"),
             ("B", "Background commands"),
@@ -3489,9 +3606,33 @@ impl TeamView {
         if unseen {
             help.push(("s", "Seen"));
         }
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| !master_runs_live(status))
+        {
+            help.retain(|(key, _)| *key != "V");
+        }
         help.push(("Esc", "Back"));
         help
     }
+}
+
+/// What V says for a master with no live terminal, whose conversation already is the console.
+const NO_LIVE_TERMINAL: &str = "This master has no live terminal: its conversation is the console.";
+
+/// Says whether "Live terminal" governs the project's master (OWNER-Q4-2-L3). Input: the team
+/// status. Output: true for a master harness the engine reads as a terminal app, and with no
+/// master yet, whose choice is stored for the master that comes.
+fn master_runs_live(status: &TeamStatus) -> bool {
+    status
+        .harnesses
+        .iter()
+        .find(|harness| harness.role == AgentRole::Master)
+        .is_none_or(|harness| {
+            crate::harnesses::interactive::support(&harness.harness)
+                == crate::harnesses::interactive::Support::Terminal
+        })
 }
 
 /// Which cap on running agents a key moves.

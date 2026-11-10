@@ -31,7 +31,7 @@ pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
 /// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
 /// for the JSON-RPC envelope around it.
-const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
+pub(crate) const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -633,7 +633,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref()),
+        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref())?,
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
@@ -712,16 +712,31 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
-fn codex_invocation(request: &LaunchRequest, context: bool, key_file: Option<&str>) -> Invocation {
+/// The Codex app-server command line. Every folder of the working folder's walk is recorded
+/// untrusted, so the app server neither loads a repository's `.codex` nor trusts a folder by
+/// itself. Inputs: the request, whether context is on and the key file. Output: the
+/// arguments and variables, or `launch_working_dir_unavailable`.
+fn codex_invocation(
+    request: &LaunchRequest,
+    context: bool,
+    key_file: Option<&str>,
+) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
     let environment = vec![("CODEX_HOME", home)];
+    let folder = request
+        .working_dir
+        .canonicalize()
+        .map_err(|_| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file) {
+    for setting in codex_configuration(request, context, key_file)
+        .into_iter()
+        .chain([super::codex_folder::untrusted(&folder)?])
+    {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
     arguments.extend(["app-server", "--listen", "stdio://"].map(OsString::from));
-    (arguments, environment)
+    Ok((arguments, environment))
 }
 
 /// Checks the path of an account's key file before a harness is told to read it: an

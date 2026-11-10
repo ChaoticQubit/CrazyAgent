@@ -339,6 +339,12 @@ pub fn master_of(db: &Connection, project: &ProjectId) -> Result<Option<AgentId>
     .map_err(state)
 }
 
+/// Says whether an agent is its project's master. Takes the database and the id. Returns
+/// the answer, false for an agent with no row.
+pub fn is_master(db: &Connection, id: AgentId) -> Result<bool, EngineError> {
+    Ok(agent(db, id)?.is_some_and(|row| row.master()))
+}
+
 /// Says whether two agents are lead and sub-agent of each other, whose shared scope is
 /// expected and never an overlap (Concord). Takes the database and both ids.
 pub(super) fn related(db: &Connection, a: AgentId, b: AgentId) -> Result<bool, EngineError> {

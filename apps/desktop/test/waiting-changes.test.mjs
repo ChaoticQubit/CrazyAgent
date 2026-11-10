@@ -11,7 +11,7 @@ const view = await import("../src/screens/changes/waiting.tsx");
 const set = (state, id) => ({
   id, agent: { kind: "sub", id: "team-1", label: "agent-1" }, state, base: "a".repeat(40), head: "b".repeat(40),
   files: 1, added: 1, removed: 0, last_outcome: "succeeded", checked: false, created_ms: 1, updated_ms: 2,
-  restorable_until_ms: null, conflicts: [], message: "Add a file", waiting: false,
+  restorable_until_ms: null, conflicts: [], regenerated: [], message: "Add a file", waiting: false,
 });
 
 test("only change sets the owner has to act on count as waiting for them", () => {

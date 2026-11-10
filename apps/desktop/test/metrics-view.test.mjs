@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const view = await import("../src/screens/metrics/view.tsx");
+const chartModule = await import("../src/screens/metrics/chart.tsx");
 const page = await import("../src/screens/project/index.tsx");
 const router = await import("../src/ui/router.ts");
 
@@ -34,7 +35,7 @@ const usage = (patch = {}) => ({
   money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
 const metrics = (patch = {}) => ({
-  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null,
+  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null, projects: [],
   series: [
     { start_ms: SINCE, tokens: tokens({ input: 100, cache_write: 50, output: 20, cache_read: 999 }) },
     { start_ms: SINCE + 4 * HOUR, tokens: tokens({ input: 300, cache_write: 10, output: 40 }) },
@@ -43,14 +44,14 @@ const metrics = (patch = {}) => ({
     { project: "alpha", agent: "team-8", session: "rollout-2026-11-07-abc", task: 142, title: "Calendar API endpoints", status: "running", last_ms: NOW - 5 * MINUTE, tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }) },
     { project: "alpha", agent: "master-alpha", session: "m-1", task: null, title: null, status: null, last_ms: NOW - 11 * MINUTE, tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }) },
   ],
-  accounts: [{ key: "acct-a", tokens: tokens({ input: 1200, output: 300, cache_read: 4000, cache_write: 800 }), agents: 2, runs: 2 }],
+  accounts: [{ key: "acct-a", tokens: tokens({ input: 1200, output: 300, cache_read: 4000, cache_write: 800 }), agents: 2, runs: 2, projects: ["alpha"], more_projects: 0 }],
   agents: [
     { project: "alpha", agent: "team-8", label: "Juniper", harnesses: ["codex"], more_harnesses: 0, accounts: ["acct-a"], more_accounts: 0, tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), turns: 12 },
     { project: "alpha", agent: "master-alpha", label: "Master", harnesses: ["claude-code"], more_harnesses: 0, accounts: ["acct-a"], more_accounts: 0, tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), turns: 9 },
   ],
   harnesses: [
-    { key: "codex", tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), agents: 1, runs: 1 },
-    { key: "claude-code", tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), agents: 1, runs: 1 },
+    { key: "codex", tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), agents: 1, runs: 1, projects: ["alpha"], more_projects: 0 },
+    { key: "claude-code", tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), agents: 1, runs: 1, projects: ["alpha"], more_projects: 0 },
   ],
   ...patch,
 });
@@ -104,12 +105,12 @@ test("the chart draws a stacked bar for every two hours since midnight and never
 
 test("the chart fills a week with one bar a day and labels each by its date", () => {
   const since = SINCE - 6 * DAY;
-  const bars = view.chartBars(metrics({ bucket_ms: DAY, series: [{ start_ms: since + 2 * DAY, tokens: tokens({ input: 5 }) }] }), since, NOW);
+  const bars = chartModule.chartBars(metrics({ bucket_ms: DAY, series: [{ start_ms: since + 2 * DAY, tokens: tokens({ input: 5 }) }] }), since, NOW);
   assert.deepEqual(bars.map((bar) => (bar.start_ms - since) / DAY), [0, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(bars.map((bar) => bar.tokens.input), [0, 0, 5, 0, 0, 0, 0]);
-  assert.equal(view.barLabel(SINCE, DAY, 0), new Date(SINCE).toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" }));
-  assert.equal(view.barLabel(SINCE + 14 * HOUR, 2 * HOUR, 60), "15:00");
-  assert.throws(() => view.chartBars(metrics({ bucket_ms: 0 }), SINCE, NOW), /a chart bar spans time/);
+  assert.equal(chartModule.barLabel(SINCE, DAY, 0), new Date(SINCE).toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" }));
+  assert.equal(chartModule.barLabel(SINCE + 14 * HOUR, 2 * HOUR, 60), "15:00");
+  assert.throws(() => chartModule.chartBars(metrics({ bucket_ms: 0 }), SINCE, NOW), /a chart bar spans time/);
 });
 
 test("By agent lists each agent's tokens in four parts, its turns in the range, its tool counts and its share, with a total", () => {
@@ -129,6 +130,24 @@ test("By agent leaves Turns empty for an agent the engine gives no turns: a row 
     assert.match(table, /Juniper · Codex 1\.4K 700 500 200 3K 12 44 37 6 61%/);
     assert.match(table, /Master · Claude Code 900 500 300 100 1K 58 41 4 39%/, JSON.stringify(agents));
   }
+});
+
+test("By agent lists an agent that ended turns but used no tokens in the range, with its turns and a zero share", () => {
+  const [juniper, master] = metrics().agents;
+  const ash = { project: "alpha", agent: "team-9", label: "Ash", harnesses: [], more_harnesses: 0, accounts: [], more_accounts: 0, tokens: tokens({}), turns: 5 };
+  const table = tableText(render({ metrics: { kind: "ok", value: metrics({ agents: [juniper, master, ash] }) } }));
+  assert.match(table, /Juniper · Codex 1\.4K 700 500 200 3K 12 44 37 6 61%/);
+  assert.match(table, /Ash 0 0 0 0 0 5 0%/, table);
+});
+
+test("By agent draws once an agent the usage read lists with no tokens and the engine gives turns", () => {
+  const ash = { project: "alpha", agent: "team-9", label: "Ash", harnesses: [], more_harnesses: 0, accounts: [], more_accounts: 0, tokens: tokens({}), turns: 5 };
+  const markup = render({
+    usage: { kind: "ok", value: { ...usage(), total: tokens({}), agents: [row("team-9", { tokens: tokens({}) })] } },
+    metrics: { kind: "ok", value: metrics({ agents: [ash] }) },
+  });
+  const body = markup.slice(markup.indexOf("<tbody"), markup.indexOf("</tbody>"));
+  assert.equal([...body.matchAll(/<tr>/gu)].length, 1, tableText(markup));
 });
 
 test("By run titles each run by its task and shows its agent, end and result", () => {
@@ -176,14 +195,14 @@ test("the project page lists Metrics after Process, and its route opens it", () 
 });
 
 test("both Metrics views open on 7 days, as the mockup does", () => {
-  for (const props of [{ projectId: "p" }, { projectId: null, filter: { projects: [], onProject: forbidden } }]) {
+  for (const props of [{ projectId: "p" }, { projectId: null, filter: { projects: [], onProject: forbidden, limits: { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden } } }]) {
     const markup = renderToStaticMarkup(createElement(view.MetricsView, props));
     assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
   }
 });
 
 test("one project on the app page is named in the singular", () => {
-  const markup = render({ projectId: null, filter: { projects: [{ id: "alpha", name: "Alpha" }], onProject: forbidden } });
+  const markup = render({ projectId: null, filter: { projects: [{ id: "alpha", name: "Alpha" }], onProject: forbidden, limits: { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden } } });
   assert.match(text(markup), /1 project · Updated/u);
 });
 
@@ -198,7 +217,7 @@ const priced = (money) => render({
 });
 
 test("a chart bar keeps its dollars, an empty bar has none", () => {
-  const bars = view.chartBars(metrics({ bucket_ms: HOUR, series: [{ start_ms: SINCE, tokens: tokens({ input: 1 }), cost_nanos: 7 }] }), SINCE, SINCE + HOUR);
+  const bars = chartModule.chartBars(metrics({ bucket_ms: HOUR, series: [{ start_ms: SINCE, tokens: tokens({ input: 1 }), cost_nanos: 7 }] }), SINCE, SINCE + HOUR);
   assert.deepEqual(bars.map((bar) => bar.cost_nanos), [7, 0]);
 });
 
@@ -296,7 +315,7 @@ const panels = (patch = {}, usagePatch = {}) => render({
 
 test("the page shows models, activities, the first-try rate and tools over time", () => {
   const shown = text(panels());
-  for (const words of ["By model", "gpt-5", "Model not recorded", "By activity", "Build/deploy", "Coding", "67% of 6 editing turns worked first try", "Tools over time", `Since ${view.barLabel(SINCE, DAY, 0)}`]) assert.ok(shown.includes(words), words);
+  for (const words of ["By model", "gpt-5", "Model not recorded", "By activity", "Build/deploy", "Coding", "67% of 6 editing turns worked first try", "Tools over time", `Since ${chartModule.barLabel(SINCE, DAY, 0)}`]) assert.ok(shown.includes(words), words);
   assert.equal(shown.split("Since ").length - 1, 2);
   assert.ok(shown.indexOf("By model") < shown.indexOf("By activity"));
   assert.ok(shown.indexOf("By activity") < shown.indexOf("Tools over time"));
@@ -306,7 +325,7 @@ test("tools over time has one row per bar, newest first and most-used first", ()
   const markup = panels();
   const table = markup.slice(markup.indexOf("mx-tools-time"));
   const rows = table.slice(0, table.indexOf("</table>")).split("<tr>").slice(2).map((row) => text(row).trim());
-  assert.deepEqual(rows, [`${view.barLabel(SINCE + 2 * HOUR, 2 * HOUR, 0)} Edit 12, Bash 3`, `${view.barLabel(SINCE, 2 * HOUR, 0)} Read 1.5K`]);
+  assert.deepEqual(rows, [`${chartModule.barLabel(SINCE + 2 * HOUR, 2 * HOUR, 0)} Edit 12, Bash 3`, `${chartModule.barLabel(SINCE, 2 * HOUR, 0)} Read 1.5K`]);
 });
 
 test("a range with nothing counted shows none of the three panels", () => {
@@ -346,4 +365,37 @@ test("tools over time says a time shows at most its eight most-used tools", () =
   const eight = Array.from({ length: 8 }, (_, n) => ({ start_ms: SINCE, tool: `T${n}`, count: 8 - n }));
   assert.ok(text(panels({ tools: eight })).includes(note));
   assert.ok(!text(panels()).includes(note));
+});
+
+test("All starts the chart at the oldest bar the engine kept, not at the epoch", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bucket = 5 * DAY;
+  const first = NOW - 20 * DAY;
+  const bars = chart.chartBars(metrics({ bucket_ms: bucket, series: [{ start_ms: first, tokens: tokens({ input: 5 }) }] }), 0, NOW);
+  assert.equal(bars[0].start_ms, first);
+  assert.equal(bars[0].tokens.input, 5);
+  assert.equal(bars.length, 5);
+});
+
+test("a chart with more bars than it can draw keeps the newest", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bucket = 5 * DAY;
+  const first = NOW - 1000 * DAY;
+  const bars = chart.chartBars(metrics({ bucket_ms: bucket, series: [{ start_ms: first, tokens: tokens({ input: 5 }) }] }), 0, NOW);
+  assert.equal(bars.length, 64);
+  assert.equal(bars[63].start_ms, first + 200 * bucket);
+});
+
+test("the readout names the highest bar, or the bar under the pointer", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bars = [{ start_ms: SINCE, tokens: tokens({ input: 5 }) }, { start_ms: SINCE + DAY, tokens: tokens({ input: 1200 }) }];
+  assert.match(chart.chartReadout(bars, DAY, 0, null), /^Highest, [A-Z][a-z]{2} \d+: 1\.2K$/);
+  assert.match(chart.chartReadout(bars, DAY, 0, 0), /^[A-Z][a-z]{2} \d+: 5$/);
+  assert.equal(chart.chartReadout([], DAY, 0, null), "No tokens in this range");
+});
+
+test("a readout asked for a bar past the drawn ones is a programming error", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bars = [{ start_ms: SINCE, tokens: tokens({ input: 5 }) }];
+  assert.throws(() => chart.chartReadout(bars, DAY, 0, 1), /a readout names a drawn bar/);
 });

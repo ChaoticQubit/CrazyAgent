@@ -24,7 +24,7 @@ test("the usage check holds one check of the trial 4 shape, run at the end", () 
 test("every account showing its 5-hour and weekly use, meter and reset passes and any gap names its place", () => {
   assert.equal(limitsVerdict([card(), card({ reset: "Resets in 3 d 4 h (your time)" }, { used: "100% used", reset: "Resets in under a minute" })]),
     "2 accounts each show their 5-hour and weekly use and reset time");
-  assert.throws(() => limitsVerdict([]), /Settings, Usage shows no account limits/);
+  assert.throws(() => limitsVerdict([]), /Metrics shows no account limits/);
   assert.throws(() => limitsVerdict([card(), card({}, { used: "Not reported", reset: "The provider hasn't reported this window." })]),
     /account 2 of 2 Weekly: shows "Not reported", not how much is used/);
   assert.throws(() => limitsVerdict([card({ reset: "Next reset not known yet" })]), /account 1 of 1 5-hour: shows "Next reset not known yet", not when it resets/);

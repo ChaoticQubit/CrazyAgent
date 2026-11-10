@@ -190,10 +190,11 @@ pub(crate) enum Job {
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
     DeleteSettle(u64, oneshot::Sender<Result<(), EngineError>>),
+    DeleteFilesClear(Vec<String>, oneshot::Sender<Result<(), EngineError>>),
     DeleteRecord(
         Admission,
         Box<OwnerRequest>,
-        Result<(), String>,
+        Result<Vec<crate::projects_home::RecordedFile>, String>,
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     SetupPlan(
@@ -278,6 +279,7 @@ impl Storage {
         mut sources: Option<settings::SettingsSources>,
     ) -> Result<(Self, EffectiveConfig), EngineError> {
         let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
+        let delete_files_jobs = (!readonly).then(|| sender.clone());
         let path = path.to_path_buf();
         let (ready_send, ready_receive) = oneshot::channel();
         std::thread::Builder::new()
@@ -297,10 +299,19 @@ impl Storage {
                 };
                 let mut custody = Some(custody);
                 let mut config = config;
-                if !readonly
-                    && let Err(e) =
-                        settings::recover(&mut connection, &mut config, sources.as_ref())
-                {
+                let recovered = if readonly {
+                    Ok(())
+                } else {
+                    settings::recover(&mut connection, &mut config, sources.as_ref()).and_then(
+                        |()| {
+                            trash::sweep_at_start(
+                                &connection,
+                                config.settings.model_access.as_ref(),
+                            )
+                        },
+                    )
+                };
+                if let Err(e) = recovered {
                     drop(connection);
                     drop(custody.take());
                     drop(lock);
@@ -320,6 +331,12 @@ impl Storage {
                     }
                     if let Err(e) = projects_home::delete_settle(&connection, None) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
+                    }
+                    if let Some(jobs) = delete_files_jobs
+                        && let Err(e) =
+                            projects_home::delete_files_finish(&connection, &path, jobs)
+                    {
+                        eprintln!("project_delete_files_not_cleared cause={}", e.0);
                     }
                     home_watch.restart(&connection);
                 }
@@ -637,6 +654,14 @@ impl Storage {
                                 Err(error("project_setup_readonly"))
                             } else {
                                 projects_home::delete_settle(&connection, Some(exchange))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteFilesClear(names, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_files_clear(&connection, &names)
                             };
                             let _ = reply.send(result);
                         }
@@ -974,7 +999,6 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
-        trash::sweep(&connection, &canonical_root)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -1000,6 +1024,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::team::log_status_changes(connection)?;
     crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;
     crate::activity::initialize(connection)?;
@@ -2191,7 +2216,7 @@ fn owner_apply(
 enum Effect<'a> {
     Home(&'a crate::projects_home::HomeEffect),
     NewProject(&'a Result<crate::project_setup::Staged, String>),
-    Delete(&'a Result<(), String>),
+    Delete(&'a Result<Vec<crate::projects_home::RecordedFile>, String>),
 }
 
 /// Checks what a Delete everything of a project would take and whether it may go, for the
@@ -2555,8 +2580,9 @@ fn owner_read(
                 .collect(),
         },
         OwnerRead::ProjectAgentPolicy { project_id } => {
-            let setup = crate::project_setup::load_setup(&tx, project_id)?
-                .ok_or_else(|| error("invalid_project"))?;
+            let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
+                return Err(error(no_setup_code(&tx, project_id)?));
+            };
             let homes = crate::sandbox::toolchains::ToolHomes::owner()
                 .map_err(|_| error("agent_policy_unreadable"))?;
             OwnerData::ProjectAgentPolicy {
@@ -2725,6 +2751,60 @@ fn stored_setup(
     crate::project_setup::load_setup(tx, project_id)?.ok_or_else(|| error("project_setup_missing"))
 }
 
+/// Names why a project has no setup to read. Takes the transaction and the project. Returns
+/// `project_setup_missing` for a project the store holds, made before project setup, and
+/// `invalid_project` for one it does not hold.
+fn no_setup_code(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<&'static str, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(if exists {
+        "project_setup_missing"
+    } else {
+        "invalid_project"
+    })
+}
+
+/// Whether a native managed connection's latest sign-in ended authenticated. Takes the store
+/// and the connection. Returns false for any other connection or a latest operation that did
+/// not end so; a stored fact past its bound is a `native_auth_fact_bounds` failure.
+pub(crate) fn latest_sign_in_authenticated(
+    connection: &Connection,
+    model: &crate::config::ModelConnection,
+) -> Result<bool, EngineError> {
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
+        return Ok(false);
+    };
+    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let fact: Option<Option<Vec<u8>>> = connection
+        .query_row(
+            "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+            [&key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(bytes) = fact else {
+        return Ok(false);
+    };
+    let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
+    let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+    Ok(
+        fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
+            && matches!(
+                fact.action,
+                crate::engine::owner::NativeAuthAction::SignIn { .. }
+            ),
+    )
+}
+
 /// Reads one page of the plain pool list with each member's sign-in status.
 /// Input: the read transaction, current config and the index of the first pool.
 /// Output: pools from that index while the reply stays within 30000 bytes, and
@@ -2737,30 +2817,8 @@ fn pool_summaries(
     let catalog = config.settings.model_access.clone().unwrap_or_default();
     let mut signed_in = std::collections::BTreeSet::new();
     for connection in &catalog.connections {
-        let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth
-        else {
-            continue;
-        };
-        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
-        let fact: Option<Option<Vec<u8>>> = tx
-            .query_row(
-                "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-                [&key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(error)?;
-        if let Some(bytes) = fact {
-            let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
-            let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-            if fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
-                && matches!(
-                    fact.action,
-                    crate::engine::owner::NativeAuthAction::SignIn { .. }
-                )
-            {
-                signed_in.insert(connection.id.clone());
-            }
+        if latest_sign_in_authenticated(tx, connection)? {
+            signed_in.insert(connection.id.clone());
         }
     }
     let all = crate::pools::summarize(&catalog, |connection| signed_in.contains(&connection.id));

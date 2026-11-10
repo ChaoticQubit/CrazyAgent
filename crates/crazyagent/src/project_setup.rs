@@ -2406,7 +2406,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 40] = [
+const REMOVED_WITH_PROJECT: [&str; 44] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2431,13 +2431,17 @@ const REMOVED_WITH_PROJECT: [&str; 40] = [
     "team_merge_ask",
     "team_master_lands",
     "team_reask_empty",
+    "team_master_idle_stop",
+    "team_master_live_terminal",
     "team_wall",
     "team_catch_up_main",
+    "team_reuse_idle",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
     "team_wake_requests",
     "team_owner_stops",
+    "team_status_log",
     "team_owner_turns",
     "team_caps",
     "team_token_budgets",
@@ -2625,22 +2629,34 @@ fn remove(
 }
 
 /// Records a Delete everything once the owner transport finished its disk work: the
-/// project's records go as in Remove from dashboard when every folder reached the Trash, and
+/// project's records go as in Remove from dashboard when every folder reached the Trash, the
+/// exact names and folder identities of its engine files recorded in the same write, and
 /// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
 /// the transport's outcome and the revision. Output: the outcome to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
-    outcome: &Result<(), String>,
+    outcome: &Result<Vec<crate::projects_home::RecordedFile>, String>,
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     let SetupAction::Delete { project_id, .. } = action else {
         return Err(failure("delete_record_invalid"));
     };
-    match outcome {
-        Ok(()) => remove(tx, project_id, revision),
-        Err(code) => Ok(rejected(code)),
+    let files = match outcome {
+        Ok(files) => files,
+        Err(code) => return Ok(rejected(code)),
+    };
+    let recorded = remove(tx, project_id, revision)?;
+    if matches!(recorded, Outcome::Applied) {
+        for (name, inode) in files {
+            tx.execute(
+                "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+                params![name, inode],
+            )
+            .map_err(error)?;
+        }
     }
+    Ok(recorded)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks

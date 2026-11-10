@@ -49,7 +49,7 @@ pub(crate) use presence::add_tool_hour;
 #[cfg(test)]
 pub(crate) use presence::{TOOL_HOURS_MAX, TOOLS_PER_HOUR_MAX};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
-pub use store::{ensure, forget_project, master_of, message};
+pub use store::{ensure, forget_project, is_master, master_of, message};
 pub use work::{finish, start_work, transfer, work, works};
 
 /// A team agent's id, the `team_agents` row id.

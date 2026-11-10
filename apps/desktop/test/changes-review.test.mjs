@@ -8,7 +8,7 @@ const NOW = Date.UTC(2026, 10, 8, 9, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 1, added: 400, removed: 0, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, conflicts: [], message: "Add lines", waiting: false, ...extra,
+  restorable_until_ms: null, conflicts: [], regenerated: [], message: "Add lines", waiting: false, ...extra,
 });
 const page = (text, next = null) => ({ kind: "ok", value: { files: [], text, next, truncated: false } });
 const LONG = Array.from({ length: 400 }, (_, at) => `+line ${at + 1}\n`).join("");

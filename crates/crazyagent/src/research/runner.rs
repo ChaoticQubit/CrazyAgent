@@ -1870,6 +1870,9 @@ fn codex_arguments(
         })
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
+    let trust = crate::harnesses::codex_folder::untrusted(worktree)
+        .map_err(|_| RunError::Invalid("research worktree path".into()))?;
+    command.arg("-c").arg(trust);
     if !tools {
         for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
             command.arg("-c").arg(setting);
@@ -2362,11 +2365,19 @@ pub(crate) fn setup_git() -> &'static Path {
 /// `git pack-objects` and the rest) in its `libexec/git-core` instead of falling through the
 /// search path to the `/usr/bin` shims.
 #[cfg(unix)]
-const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+pub(crate) const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
 /// The Command Line Tools root, which every agent profile reads.
 #[cfg(unix)]
-const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
+pub(crate) const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// How many times this thread asked for [`sandboxed_git`], so a row can show an async path
+    /// leaves that lookup, which can run xcrun, to a blocking thread.
+    pub(crate) static SANDBOXED_GIT_LOOKUPS: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
 
 /// The git for commands that run inside an agent's sandbox: the agent's own git script and
 /// the engine's setup steps under the agent profile. On a Mac that is the Command Line Tools
@@ -2375,6 +2386,8 @@ const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
 /// outside any sandbox keeps the selected toolchain's [`setup_git`]. Returns the path.
 #[cfg(unix)]
 pub(crate) fn sandboxed_git() -> &'static Path {
+    #[cfg(test)]
+    SANDBOXED_GIT_LOOKUPS.set(SANDBOXED_GIT_LOOKUPS.get() + 1);
     if cfg!(target_os = "macos") && agent_git_problem_at(Path::new(TOOLS_ROOT)).is_none() {
         Path::new(TOOLS_GIT)
     } else {
@@ -3643,6 +3656,41 @@ mod tests {
                     "{tools} {setting}: {args:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_research_codex_records_its_folders_untrusted() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir(worktree.join(".git")).unwrap();
+        let wanted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
+            worktree.display()
+        );
+        for tools in [false, true] {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                &worktree,
+                &worktree.join("report.md"),
+                Path::new("/home"),
+                tools,
+                &account,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap())
+                .collect();
+            assert!(
+                args.windows(2).any(|pair| pair == ["-c", wanted.as_str()]),
+                "{tools}: {args:?}"
+            );
         }
     }
 

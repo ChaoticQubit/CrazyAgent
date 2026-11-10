@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, IDE_NOT_CLOSED, IDE_NOT_HIDDEN, IDE_NOT_PLACED, bounds, closeIde, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, IDE_NOT_CLOSED, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, closeIde, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, sameBounds, touchIde } from "../../api-ide";
 import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
 import { Button, useOverlayShown } from "../../ui";
 import "./ide.css";
@@ -53,7 +53,9 @@ export function useCloseIde(projectId: string, notify: (line: string) => void) {
  * is left or a dialog, drawer or menu opens over the page, and the engine hears every minute
  * that the owner still uses it. Every state it reads goes to `onView`, so the page swaps
  * Context and Changes back when the build fails. A failed move shows on the tab; a failed hide
- * goes to the page, whose line stays outside the box the IDE webview may still cover.
+ * goes to the page, whose line stays outside the box the IDE webview may still cover. The IDE can
+ * also move to a window of its own: the tab then says so and offers to bring it forward until
+ * that window closes.
  * Inputs: the project id, the view handler and the hide's problem, null once it worked. Output:
  * the tab. */
 export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void }) {
@@ -61,6 +63,10 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
   const [state, setState] = useState<IdeTabState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [outProject, setOutProject] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  const acting = useRef(false);
+  const out = outProject === projectId;
   const ready = state !== null && ideStatus(state).ready;
   const covered = useOverlayShown();
   const waiting = state === null
@@ -85,20 +91,31 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
   }, [projectId, waiting]);
 
   useEffect(() => {
+    if (!out) return;
+    let live = true;
+    const timer = window.setInterval(() => {
+      void ideWindowOut(projectId).then((result) => {
+        if (live && result.kind === "ok" && !result.value) setOutProject(null);
+      });
+    }, IDE_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [projectId, out]);
+
+  useEffect(() => {
     const element = panel.current;
-    if (!ready || !element || covered) return;
+    if (!ready || !element || covered || out) return;
     let live = true;
     let shown = false;
     let last: IdeBounds | null = null;
     let frame = 0;
     let misplaced = false;
+    let sending = false;
+    let waiting: IdeBounds | null = null;
     const hide = () => void hideIde(projectId).then((result) => onHideProblem(result.kind === "ok" ? null : IDE_NOT_HIDDEN));
-    const place = () => {
-      if (!shown) return;
-      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
-      if (!box || sameBounds(box, last)) return;
-      last = box;
+    const send = (box: IdeBounds) => {
+      sending = true;
       void placeIde(projectId, box).then((result) => {
+        sending = false;
         if (!live) return;
         if (result.kind !== "ok") {
           misplaced = true;
@@ -107,7 +124,18 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
           misplaced = false;
           setProblem(null);
         }
+        const next = waiting;
+        waiting = null;
+        if (next) send(next);
       });
+    };
+    const place = () => {
+      if (!shown) return;
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
+      if (!box || sameBounds(box, last)) return;
+      last = box;
+      if (sending) waiting = box;
+      else send(box);
     };
     const follow = () => {
       if (!live || !shown) {
@@ -130,6 +158,10 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
         setProblem(failureLine(result, openFailure));
         return;
       }
+      if (result.value === true) {
+        setOutProject(projectId);
+        return;
+      }
       shown = true;
       last = null;
       setProblem(null);
@@ -148,7 +180,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
       window.clearInterval(beat);
       hide();
     };
-  }, [projectId, ready, covered]);
+  }, [projectId, ready, covered, out]);
 
   const act = async () => {
     setBusy(true);
@@ -162,10 +194,35 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
     }
   };
 
+  const once = async (work: () => Promise<void>) => {
+    if (acting.current) return;
+    acting.current = true;
+    setMoving(true);
+    await work();
+    acting.current = false;
+    setMoving(false);
+  };
+
+  const moveOut = () => once(async () => {
+    const result = await openIdeWindow(projectId);
+    setProblem(result.kind === "ok" ? null : IDE_NOT_MOVED);
+    if (result.kind === "ok") setOutProject(projectId);
+  });
+
+  const bringForward = () => once(async () => {
+    const result = await focusIdeWindow(projectId);
+    setProblem(result.kind === "ok" ? null : IDE_NOT_FORWARD);
+  });
+
   return <div className="ide-tab">
     {problem && <p className="ide-problem" role="alert">{problem}</p>}
     {state && !ready && <IdeStatus state={state} busy={busy} onAction={() => void act()} />}
     {!state && !problem && <p className="ide-status" role="status">Checking the IDE.</p>}
-    <div ref={panel} className="ide-panel" aria-label="IDE" hidden={!ready} />
+    {ready && !out && <div className="ide-bar"><Button size="small" disabled={moving} onClick={() => void moveOut()}>Open in its own window</Button></div>}
+    {out && <div className="ide-status" role="status">
+      <p>This IDE is in its own window</p>
+      <Button size="small" disabled={moving} onClick={() => void bringForward()}>Bring it forward</Button>
+    </div>}
+    <div ref={panel} className="ide-panel" aria-label="IDE" hidden={!ready || out} />
   </div>;
 }

@@ -5,7 +5,7 @@ mod e2e_support;
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::ide;
 use crazyagent::ide::fetch::BuildState;
-use crazyagent::ide::terminal::{IDE_SHELL, SANDBOXED};
+use crazyagent::ide::terminal::SANDBOXED;
 use crazyagent::protocol::{FRAME_BYTES_MAX, ProjectId};
 use crazyagent::sandbox::ide_shell;
 use crazyagent::terminal::TerminalRequest;
@@ -286,7 +286,7 @@ fn sandboxed_probe(database: &Path, granted: &Path, other: &Path, port: u16) -> 
 /// through the engine's bridge (`ide.terminal`, the engine's own launch and pane) starts in
 /// the project folder under the agent sandbox: the engine's database denied, the project
 /// and the owner's read-only folder readable, that folder not writable, a folder not
-/// granted unreadable, and the network open.
+/// granted unreadable, and no network.
 #[tokio::test(flavor = "multi_thread")]
 async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_agent_sandbox() {
     let mut case = Terminal::start("ca-v2opt-term-sbx-").await;
@@ -351,7 +351,7 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
     let mut terminal = send(
         &socket,
         &token,
-        serde_json::json!({ "name": "ide.terminal", "args": { "cols": 200, "rows": 40 } }),
+        serde_json::json!({ "name": "ide.terminal", "args": { "cols": 200, "rows": 40, "level": "sandboxed" } }),
     )
     .await;
     let started = frame(&mut terminal).await;
@@ -385,7 +385,7 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
         "granted-1".to_owned(),
         "granted-write-0".to_owned(),
         "other-0".to_owned(),
-        "net-1".to_owned(),
+        "net-0".to_owned(),
     ] {
         assert!(seen.contains(&answer), "{answer} missing in: {seen}");
     }
@@ -394,15 +394,19 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ide_terminal_ide_shell_runs_the_owner_shell_inside_the_ide_sandbox_with_no_network() {
+async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_network() {
     let case = Terminal::start("ca-v2opt-term-ide-").await;
     let started = case.open_ide().await;
     let shell = ide_shell::owner_shell().unwrap();
-    let profile = &started.settings["terminal.integrated.profiles.osx"][IDE_SHELL];
+    let profile = &started.settings["terminal.integrated.automationProfile.osx"];
     assert_eq!(profile["path"], serde_json::json!(shell.to_str().unwrap()));
-    assert_eq!(
-        &started.settings["terminal.integrated.automationProfile.osx"], profile,
-        "tasks run in the IDE shell too"
+    assert!(
+        started.settings["terminal.integrated.profiles.osx"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(serde_json::Value::is_null),
+        "a project below Full access is offered no shell hosted in the IDE server"
     );
     let arguments: Vec<String> = profile["args"]
         .as_array()
@@ -430,6 +434,6 @@ async fn ide_terminal_ide_shell_runs_the_owner_shell_inside_the_ide_sandbox_with
     assert!(seen.contains("READ-project\n"), "{seen}");
     assert!(
         seen.contains("NET-CLOSED\n") && seen.contains("not permitted"),
-        "the IDE shell runs inside the IDE server's own sandbox, which has no network: {seen}"
+        "tasks run inside the IDE server's own sandbox, which has no network: {seen}"
     );
 }

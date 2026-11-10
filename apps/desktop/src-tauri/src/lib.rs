@@ -1154,6 +1154,51 @@ async fn desktop_team_catch_up_main(
 }
 
 #[tauri::command]
+async fn desktop_team_master_idle_stop(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    choice: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_idle_stop(&id, &choice, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_master_live_terminal(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_live_terminal(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_reuse_idle(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_reuse_idle(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_new_folder_limit(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -1699,18 +1744,20 @@ fn desktop_focus_terminal_window(
     }
 }
 
-/// Closes one project's terminal wall windows once the main window removed the project.
+/// Closes one project's terminal wall windows: for the main window once it removed the
+/// project, and for a wall window of that project once its read finds the project gone.
 /// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
-/// from any window but main, or `invalid_project`.
+/// from any other window or a wall window of another project, or `invalid_project`.
 #[tauri::command]
 fn desktop_close_project_walls(
     webview: Webview,
     app: AppHandle,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&webview)?;
+    terminal_window_for(&webview, &id)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     close_walls(&app, Some(&project));
+    ide::shut_own_windows(app, Some(project));
     Ok(())
 }
 
@@ -1737,12 +1784,17 @@ fn app_page(url: &tauri::Url) -> bool {
 }
 
 /// The project name a terminal wall window shows in its title: the shown name without
-/// control characters, at most WALL_NAME_CHARS_MAX characters, or "Project" when blank.
-/// Takes the name the main window sent. Returns the name to show.
+/// control characters and with every other hidden character as its visible escape, at most
+/// WALL_NAME_CHARS_MAX characters, or "Project" when blank. Takes the name the main window
+/// sent. Returns the name to show.
 fn wall_name(name: &str) -> String {
-    let shown: String = name
+    let plain: String = name
         .chars()
         .filter(|c| !c.is_control())
+        .take(WALL_NAME_CHARS_MAX)
+        .collect();
+    let shown: String = crazyagent::memory::visible_text(&plain)
+        .chars()
         .take(WALL_NAME_CHARS_MAX)
         .collect();
     let shown = shown.trim();
@@ -3109,6 +3161,7 @@ async fn desktop_usage_decide_recount(
 #[tauri::command]
 async fn desktop_ide_focus(
     webview: Webview,
+    app: AppHandle,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
 ) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
@@ -3118,7 +3171,9 @@ async fn desktop_ide_focus(
     }
     let call = lock(&state).await?.ide_focus()?;
     let focus = call.await?;
-    if focus.is_some() {
+    if let Some(revealed) = &focus
+        && !ide::focus_own_window(&app, &views, &revealed.project).unwrap_or(false)
+    {
         let window = webview.window();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -3448,7 +3503,7 @@ async fn desktop_ide_open(
     views: State<'_, ide::IdeViews>,
     project_id: String,
     bounds: ide::Bounds,
-) -> Result<(), BridgeError> {
+) -> Result<bool, BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
@@ -3459,15 +3514,9 @@ async fn desktop_ide_open(
         call.await?
     };
     let workbench = ide::workbench(&opened)?;
-    ide::show(
-        &app,
-        &webview.window(),
-        &views,
-        &project,
-        workbench,
-        bounds,
-        ticket,
-    )
+    let window = webview.window();
+    let bounds = bounds.in_window(&window)?;
+    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
 }
 
 #[tauri::command]
@@ -3480,7 +3529,8 @@ async fn desktop_ide_place<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    ide::place(&app, &views, &project, bounds.checked()?)
+    let bounds = bounds.checked()?.in_window(&webview.window())?;
+    ide::place(&app, &views, &project, bounds)
 }
 
 #[tauri::command]
@@ -3504,18 +3554,71 @@ async fn desktop_ide_close<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    let closing = views.closing(&project);
-    ide::close(&app, &views, &project)?;
+    if views.keep_for_own_window(&project) {
+        return Ok(());
+    }
+    close_ide(&app, &state, &views, &project).await
+}
+
+/// Closes a project's IDE webview and stops its server, in the project's turn. Inputs: the app,
+/// the engine bridge, the views and the project. Output: Ok, or the engine's refusal.
+async fn close_ide<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &NativeState,
+    views: &ide::IdeViews,
+    project: &ProjectId,
+) -> Result<(), BridgeError> {
+    let closing = views.closing(project);
+    ide::close(app, views, project)?;
     let Some(closing) = closing else {
         return Ok(());
     };
     views
-        .stop_closed(&project, closing, || async {
-            let call = read(&state).await?.ide_stop(project.clone())?;
+        .stop_closed(project, closing, || async {
+            let call = read(state).await?.ide_stop(project.clone())?;
             call.await
         })
         .await
         .map(|_| ())
+}
+
+/// Moves a project's loaded IDE into a maximized window of its own. Input: the project.
+/// Output: Ok, or the refusal.
+#[tauri::command]
+async fn desktop_ide_window_open(
+    webview: Webview,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::move_out(&app, &webview.window(), &views, &project)
+}
+
+/// Brings a project's own IDE window forward. Input: the project. Output: Ok, also when the
+/// project has none, or the refusal.
+#[tauri::command]
+async fn desktop_ide_window_focus(
+    webview: Webview,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::focus_own_window(&app, &views, &project).map(|_| ())
+}
+
+/// Whether a project's IDE sits in its own window. Input: the project. Output: true then.
+#[tauri::command]
+async fn desktop_ide_window_out(
+    webview: Webview,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    Ok(views.in_own_window(&bridge::ide::ide_project(&project_id)?))
 }
 
 #[tauri::command]
@@ -4023,6 +4126,9 @@ native_commands! {
     desktop_team_master_lands,
     desktop_team_reask_empty_reply,
     desktop_team_catch_up_main,
+    desktop_team_master_idle_stop,
+    desktop_team_master_live_terminal,
+    desktop_team_reuse_idle,
     desktop_team_new_folder_limit,
     desktop_team_coordination,
     desktop_team_harness_mode,
@@ -4210,6 +4316,9 @@ native_commands! {
     desktop_ide_hide,
     desktop_ide_close,
     desktop_ide_touch,
+    desktop_ide_window_open,
+    desktop_ide_window_focus,
+    desktop_ide_window_out,
     desktop_instruction_settings,
     desktop_save_instruction_settings,
     desktop_adoption,
@@ -4275,6 +4384,10 @@ pub fn run() {
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
                     close_walls(&handle, None);
+                    ide::shut_own_windows(handle.clone(), None);
+                }
+                if matches!(event, tauri::WindowEvent::Focused(true)) {
+                    ide::main_focused(&handle);
                 }
             });
             let handle = app.handle().clone();
@@ -4339,6 +4452,24 @@ mod tests {
             },
         )
         .map(|_| ())
+    }
+
+    #[test]
+    fn a_wall_title_shows_hidden_characters_as_their_escapes_and_stays_bounded() {
+        assert_eq!(
+            wall_name("Lark\u{202e}spur\u{200b} \u{e0041}Booking"),
+            "Lark\\u202espur\\u200b \\u{e0041}Booking"
+        );
+        assert_eq!(wall_name("Lark\n\tspur\u{1}"), "Larkspur");
+        assert_eq!(wall_name("\u{200b}"), "\\u200b");
+        assert_eq!(wall_name(" \u{1} "), "Project");
+        assert_eq!(wall_name(&wall_name("Lark\u{202e}spur")), "Lark\\u202espur");
+        assert_eq!(
+            wall_name("Larkspur \u{2764}\u{fe0f}"),
+            "Larkspur \u{2764}\u{fe0f}"
+        );
+        let long = wall_name(&"\u{200b}x".repeat(WALL_NAME_CHARS_MAX * 4));
+        assert_eq!(long.chars().count(), WALL_NAME_CHARS_MAX);
     }
 
     #[test]

@@ -67,12 +67,15 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
 /// applied setup run starts installing in the background, and every removal, applied or
-/// not, sweeps the folders and secrets it moved aside or left. Inputs: the engine, its
-/// authority, the request, its reply and the exchange deadline. Output: the reply, with
-/// the dependencies filled in for a setup status read.
+/// not, sweeps the folders and secrets it moved aside or left, an applied agent policy
+/// reaches the project's open IDE, and a Reconcile answered Committed with an applied result
+/// reaches every open IDE, since a Save's lost reply leaves that the only call after its
+/// commit and its answer names no project. Inputs: the engine, its authority, the request,
+/// its reply and the exchange deadline. Output: the reply, with the dependencies filled in
+/// for a setup status read.
 pub(super) async fn after_owner(
     engine: &Engine,
-    authority: &Authority,
+    authority: &Arc<Authority>,
     request: &OwnerRequest,
     result: Result<OwnerReply, EngineError>,
     deadline: Instant,
@@ -108,10 +111,50 @@ pub(super) async fn after_owner(
         ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
             start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
         }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::SetProjectAgentPolicy { project_id, .. },
+            },
+            OwnerResponse::Applied { operation },
+        ) if matches!(operation.result, OwnerResult::Applied) => {
+            follow_saved_level(authority, project_id.clone());
+        }
+        (OwnerOperation::Reconcile { .. }, OwnerResponse::Committed { operation })
+            if matches!(operation.result, OwnerResult::Applied) =>
+        {
+            follow_saved_levels(authority);
+        }
         _ => {}
     }
     Ok(reply)
 }
+
+/// Stops a project's IDE in the background when the agent policy just committed no longer
+/// fits it. Detached so a Save never waits on a launch holding the start lock or on a
+/// server's stop grace, and a replay of the same Save follows too, since the check only
+/// compares. Inputs: the authority and the project.
+#[cfg(unix)]
+fn follow_saved_level(authority: &Arc<Authority>, project: crate::protocol::ProjectId) {
+    let authority = Arc::clone(authority);
+    tokio::spawn(async move {
+        authority.ide_servers.follow_level(&project).await;
+    });
+}
+
+#[cfg(not(unix))]
+fn follow_saved_level(_authority: &Arc<Authority>, _project: crate::protocol::ProjectId) {}
+
+/// Compares every project's open IDE with its saved policy, each in the background so a
+/// launch holding one project's start lock never delays another's stop. Input: the authority.
+#[cfg(unix)]
+fn follow_saved_levels(authority: &Arc<Authority>) {
+    for project in authority.ide_servers.projects() {
+        follow_saved_level(authority, project);
+    }
+}
+
+#[cfg(not(unix))]
+fn follow_saved_levels(_authority: &Arc<Authority>) {}
 
 fn start_check(root: &Path) {
     let begin = progress::with(root, |state| {

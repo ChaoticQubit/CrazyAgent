@@ -13,15 +13,15 @@ const shared = await import("../src/screens/project/shared.tsx");
 const rows = await import("../src/screens/team/setup-rows.tsx").catch(() => ({}));
 
 const GROUPS = [
-  ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
+  ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
   ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]],
   ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER_GROUPS = [
-  ["Master", ["Harness", "Account"]],
-  ["Conversation", ["On master harness switch", "Apply a master harness change"]],
+  ["Master", ["Harness", "Account", "Live terminal"]],
+  ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
@@ -175,7 +175,7 @@ test("the Master settings drawer holds Master, Conversation, Messages and Access
   assert.match(account, /<option value="pool-b"[^>]*>Any in Pool B<\/option>/);
   assert.match(plain(account), /From the project's pool; fails over to the next account\./);
   assert.doesNotMatch(found[0].body, />(Change master|Change pool|Choose pool)</, "no button leaves the drawer to pick the harness or account");
-  assert.doesNotMatch(html, /Stop the master when idle after/, "no idle-stop row while it has no setting");
+  assert.match(plain(row(html, "Stop the master when idle after")), /A master in a live terminal stops too, once no turn is open and you have no unsent line\./, "the idle-stop row says a live master stops too");
   assert.match(found[3].body, />Change in Agent settings</);
 });
 

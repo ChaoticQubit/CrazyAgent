@@ -1688,6 +1688,9 @@ async fn running_sign_in(ui: &mut Ui, running: &std::path::Path) {
     assert!(ui.app.model_access.signing_in());
 }
 
+/// The engine ends a sign-in whose own account was removed at its custodian's next check, so
+/// the panel's read lands before or after that end. Before it, the sign-in shows stuck and c
+/// clears it once it ends; after it, nothing is left stuck. Both are what the owner should see.
 #[tokio::test]
 async fn real_sign_in_whose_own_account_was_removed_elsewhere_shows_stuck_and_c_clears_it_once_it_ends()
  {
@@ -1699,16 +1702,22 @@ async fn real_sign_in_whose_own_account_was_removed_elsewhere_shows_stuck_and_c_
         assert!(!healthy.contains("c clears a stuck sign-in"), "{healthy}");
         remove_elsewhere(&case, "b-claude").await;
         ui.connections(0).await;
-        let stuck = ui.render(160, 50);
-        assert!(stuck.contains("c clears a stuck sign-in"), "{stuck}");
+        let seen = ui.render(160, 50);
+        if !ui.app.model_access.signing_in() {
+            std::fs::write(&stop, "").unwrap();
+            assert!(!seen.contains("c clears a stuck sign-in"), "{seen}");
+            return;
+        }
+        assert!(seen.contains("c clears a stuck sign-in"), "{seen}");
         ui.key(KeyCode::Char('c'));
         let waiting = ui.auth().await;
-        assert_eq!(
-            waiting.result.as_ref().err().map(String::as_str),
-            Some("native_profile_source_conflict")
+        let answer = waiting.result.as_ref().err().map(String::as_str);
+        assert!(
+            answer == Some("native_profile_source_conflict")
+                || answer.is_some_and(crate::engine::owner::ends_operation),
+            "{answer:?}"
         );
         ui.apply(waiting);
-        assert!(ui.app.model_access.signing_in());
         std::fs::write(&stop, "").unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
         while ui.app.model_access.signing_in() {
@@ -1760,6 +1769,9 @@ async fn replace_elsewhere(case: &Case, id: &str) {
     ));
 }
 
+/// The engine ends a sign-in whose own account was replaced at its custodian's next check, so
+/// the panel's read lands before or after that end: a sign-in it still holds shows stuck, and
+/// one the engine ended shows nothing stuck.
 #[tokio::test]
 async fn real_sign_in_whose_own_account_was_replaced_elsewhere_shows_stuck_with_its_panel_closed() {
     run(|case| async move {
@@ -1768,9 +1780,13 @@ async fn real_sign_in_whose_own_account_was_replaced_elsewhere_shows_stuck_with_
         running_sign_in(&mut ui, &running).await;
         replace_elsewhere(&case, "b-claude").await;
         ui.connections(1).await;
-        let stuck = ui.render(160, 50);
+        let seen = ui.render(160, 50);
         std::fs::write(&stop, "").unwrap();
-        assert!(stuck.contains("c clears a stuck sign-in"), "{stuck}");
+        assert_eq!(
+            seen.contains("c clears a stuck sign-in"),
+            ui.app.model_access.signing_in(),
+            "{seen}"
+        );
     })
     .await;
 }
@@ -1827,6 +1843,87 @@ async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and
             Some("b-claude")
         );
         std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
+
+/// Shapes a reply into a sign-in still awaiting the owner. Input: the reply. Output: none.
+fn unit_still_awaiting(reply: &mut NativeAuthReply) {
+    reply.fact.phase = NativeAuthPhase::AwaitingOwner;
+    reply.account = None;
+}
+
+/// A sign-in awaiting the owner with its panel closed, a recheck started on a moved config and
+/// the reply to that read. Inputs: the basis, the connection and the reply's shape. Output: the
+/// state and the reply's event.
+fn unit_recheck(
+    basis: model_access::Basis,
+    connection: ModelConnection,
+    shape: impl FnOnce(&mut NativeAuthReply),
+) -> (State, Event) {
+    let (mut state, job) = unit_started(basis.clone(), connection);
+    let started = job.clone();
+    let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
+    unit_still_awaiting(&mut reply);
+    state
+        .apply(Event {
+            job,
+            result: Ok(Output::Auth(Box::new(reply))),
+        })
+        .unwrap();
+    state.hide().unwrap();
+    let mut moved = basis;
+    moved.config_id = ConfigId::new("other-config").unwrap();
+    assert!(state.recheck(Some(&moved)));
+    let read = state.request().unwrap();
+    let Command::Read(query) = &read.command else {
+        panic!("a recheck reads the held sign-in");
+    };
+    let mut answer = unit_signed_out_reply(&started, "unit@example.invalid");
+    answer.request_id = query.request_id.clone();
+    shape(&mut answer);
+    let event = Event {
+        job: read,
+        result: Ok(Output::Auth(Box::new(answer))),
+    };
+    (state, event)
+}
+
+#[tokio::test]
+async fn unit_healthy_recheck_leaves_the_notice_the_owner_was_reading() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("b-claude").await;
+        let (mut state, healthy) = unit_recheck(basis, connection, unit_still_awaiting);
+        state.notice = Cow::Borrowed("What the owner was reading");
+        state.apply(healthy).unwrap();
+        assert_eq!(state.notice.as_ref(), "What the owner was reading");
+        assert!(state.has_pending());
+    })
+    .await;
+}
+
+/// The line the owner reads on the page, with the panel closed: a healthy recheck leaves it,
+/// and a result that changes the sign-in still reaches it.
+#[tokio::test]
+async fn unit_page_keeps_its_notice_through_a_healthy_recheck_and_shows_a_changed_result() {
+    const SAVED: &str = "Metadata saved; authentication and execution remain unavailable";
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("b-claude").await;
+        let (state, healthy) = unit_recheck(basis.clone(), connection.clone(), unit_still_awaiting);
+        ui.app.model_access.native_auth = state;
+        ui.app.model_access.notice = SAVED.into();
+        ui.apply(healthy);
+        assert_eq!(ui.app.model_access.notice, SAVED);
+        let (state, ended) = unit_recheck(basis, connection, |_| {});
+        ui.app.model_access.native_auth = state;
+        ui.app.model_access.notice = SAVED.into();
+        ui.apply(ended);
+        assert_ne!(ui.app.model_access.notice, SAVED);
+        assert_eq!(
+            ui.app.model_access.notice,
+            ui.app.model_access.native_auth.notice()
+        );
     })
     .await;
 }

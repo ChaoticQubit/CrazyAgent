@@ -2,7 +2,8 @@ import { loadUsage, usageNotReady, usageRefusal, type UsageReport } from "../../
 import type { TeamAgent } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Panel, Skeleton } from "../../ui";
-import { agentLabel, offsetMinutes, PartialNotice, rangeStart, tokenText, headlineTokens } from "../settings/usage";
+import { agentLabel, offsetMinutes, PartialNotice, rangeStart, tokenText, headlineTokens } from "../metrics/usage-model";
+import "../metrics/metrics.css";
 
 const TICK_MS = 30_000;
 

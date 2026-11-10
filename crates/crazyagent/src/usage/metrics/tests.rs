@@ -1683,6 +1683,82 @@ fn each_agent_row_counts_the_turns_it_ended_in_the_range_in_its_own_project() {
     assert_eq!(earlier[0], row("alpha", "master-alpha", Some(3)));
 }
 
+/// A team agent that ended turns in the range but used no tokens has its row after the rows
+/// that used tokens, most turns first, with zero tokens; an agent outside a team gets none,
+/// and neither does a turn before the range (AL4 r1, rv-code note).
+#[test]
+fn an_agent_that_ended_turns_but_used_no_tokens_has_its_row_after_the_token_rows() {
+    let (_directory, db) = database();
+    used(
+        &db,
+        MIDNIGHT + HOUR,
+        "alpha",
+        "acct-a",
+        "team-7",
+        "codex",
+        "s-7",
+        100,
+        10,
+        0,
+        0,
+    );
+    for (agent, at) in [
+        ("team-7", MIDNIGHT + HOUR),
+        ("team-5", MIDNIGHT + HOUR),
+        ("team-9", MIDNIGHT + HOUR),
+        ("team-9", MIDNIGHT + 2 * HOUR),
+        ("onboarding", MIDNIGHT + 2 * HOUR),
+        ("team-3", MIDNIGHT - HOUR),
+    ] {
+        crate::usage::turns::count(&db, &alpha(), agent, at).unwrap();
+    }
+    let rows = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap().agents;
+    let shown: Vec<(&str, Option<u64>)> = rows
+        .iter()
+        .map(|row| (row.agent.as_str(), row.turns))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("team-7", Some(1)),
+            ("team-9", Some(2)),
+            ("team-5", Some(1))
+        ]
+    );
+    assert_eq!(rows[1].tokens, Tokens::default());
+    assert!(rows[1].harnesses.is_empty());
+    let every = read(&db, None, MIDNIGHT, NOW).unwrap().agents;
+    assert_eq!(every.len(), 3, "the read for every project lists them too");
+}
+
+/// A list already full of agents that used tokens stays at `ROWS_MAX`: an agent with turns
+/// only does not push one out (AL4 r1, rv-code note).
+#[test]
+fn turns_without_tokens_never_grow_a_full_agent_list() {
+    let (_directory, db) = database();
+    for at in 0..ROWS_MAX {
+        let agent = format!("team-{at}");
+        let session = format!("s-{at}");
+        used(
+            &db,
+            MIDNIGHT + HOUR,
+            "alpha",
+            "acct-a",
+            &agent,
+            "codex",
+            &session,
+            100,
+            10,
+            0,
+            0,
+        );
+    }
+    crate::usage::turns::count(&db, &alpha(), "team-idle", MIDNIGHT + HOUR).unwrap();
+    let rows = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap().agents;
+    assert_eq!(rows.len(), ROWS_MAX);
+    assert!(rows.iter().all(|row| row.agent != "team-idle"));
+}
+
 /// Removing a project moves its usage turn rows to the removed projects' rows with their
 /// counts, as its token rows move: they add into a row already kept there for the same hour
 /// and agent, the removed rows' Turns read those counts, and every other project's rows stay

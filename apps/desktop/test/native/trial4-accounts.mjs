@@ -231,7 +231,7 @@ export async function findAccount(kit, name) {
   if ((await kit.hash()) !== "#/settings/accounts") await kit.go("#/settings/accounts");
   await type(SEARCH, name);
   await kit.until(async () => (await rowNames()).includes(name), kit.UI_MS, `Settings, Accounts never listed ${name}`);
-  return (await ownTexts("main .toolbar .count"))[0];
+  return (await ownTexts("main .set-bar .count"))[0];
 }
 
 /** Closes the open dialog or drawer with its Close button and waits until none is open.

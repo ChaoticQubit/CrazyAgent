@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { saveProfile, type OwnerProfile } from "../../api";
-import { BrandMark, Button, ChipInput, Notice, Segmented, TextArea, TextField, navigate, type Route } from "../../ui";
+import { BrandMark, Button, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
 import "../intake/intake.css";
@@ -68,27 +68,41 @@ export function validateProfile(draft: ProfileDraft): { profile: OwnerProfile } 
 }
 
 /** The profile fields shared by Welcome and Settings, Profile. Inputs: the draft, its change
- * handler and field errors. Output: the fields. */
-export function ProfileFields({ draft, onDraft, errors }: { draft: ProfileDraft; onDraft: (draft: ProfileDraft) => void; errors: ProfileErrors }) {
+ * handler, field errors and whether to draw them as setting rows. Output: the fields. */
+export function ProfileFields({ draft, onDraft, errors, rows = false }: { draft: ProfileDraft; onDraft: (draft: ProfileDraft) => void; errors: ProfileErrors; rows?: boolean }) {
   const set = (patch: Partial<ProfileDraft>) => onDraft({ ...draft, ...patch });
+  const name = <TextField id="profile-name" label="Name" labelOutside={rows} value={draft.name} onValue={(value) => set({ name: value })} maxLength={NAME_MAX} required
+    autoComplete="name" error={errors.name} />;
+  const role = <TextField id="profile-role" label="Role" labelOutside={rows} value={draft.role} onValue={(value) => set({ role: value })} maxLength={ROLE_MAX}
+    helper="For example: Founder, Full-stack engineer, Designer" error={errors.role} />;
+  const bio = <TextArea id="profile-bio" label="Short bio" labelOutside={rows} value={draft.bio} onValue={(value) => set({ bio: value })} rows={3} maxLength={BIO_MAX} counterAt={450}
+    helper="What you work on and what you care about." error={errors.bio} />;
+  const stack = <ChipInput id="profile-stack" label="Preferred stack" labelOutside={rows} values={draft.stack} onValues={(value) => set({ stack: value })}
+    suggestions={STACK_SUGGESTIONS} max={STACK_MAX} maxLength={STACK_ITEM_MAX} helper={errors.stack ?? "Agents use these unless a project says otherwise."} />;
+  const replies = <Segmented label="Replies" value={draft.detail} onValue={(detail) => set({ detail })}
+    options={[{ value: "terse", label: "Short" }, { value: "detailed", label: "Detailed" }]} />;
+  const acting = <Segmented label="Before acting" value={draft.initiative} onValue={(initiative) => set({ initiative })}
+    options={[{ value: "ask_first", label: "Ask first" }, { value: "act_first", label: "Act first" }]} />;
+  const style = errors.style && <p className="field-error" role="alert">{errors.style}</p>;
+  if (rows) return <>
+    <SettingLine label="Name" htmlFor="profile-name">{name}</SettingLine>
+    <SettingLine label="Role" htmlFor="profile-role">{role}</SettingLine>
+    <SettingLine label="Short bio" htmlFor="profile-bio" wide>{bio}</SettingLine>
+    <SettingLine label="Preferred stack" htmlFor="profile-stack" wide>{stack}</SettingLine>
+    <SettingLine label="Replies">{replies}</SettingLine>
+    <SettingLine label="Before acting">{acting}</SettingLine>
+    {style && <div className="set-body">{style}</div>}
+  </>;
   return <>
-    <TextField id="profile-name" label="Name" value={draft.name} onValue={(name) => set({ name })} maxLength={NAME_MAX} required
-      autoComplete="name" error={errors.name} />
-    <TextField id="profile-role" label="Role" value={draft.role} onValue={(role) => set({ role })} maxLength={ROLE_MAX}
-      helper="For example: Founder, Full-stack engineer, Designer" error={errors.role} />
-    <TextArea id="profile-bio" label="Short bio" value={draft.bio} onValue={(bio) => set({ bio })} rows={3} maxLength={BIO_MAX} counterAt={450}
-      helper="What you work on and what you care about." error={errors.bio} />
-    <ChipInput id="profile-stack" label="Preferred stack" values={draft.stack} onValues={(stack) => set({ stack })}
-      suggestions={STACK_SUGGESTIONS} max={STACK_MAX} maxLength={STACK_ITEM_MAX} helper={errors.stack ?? "Agents use these unless a project says otherwise."} />
+    {name}
+    {role}
+    {bio}
+    {stack}
     <div className="two">
-      <div className="field"><span className="field-label" id="profile-replies">Replies</span>
-        <Segmented label="Replies" value={draft.detail} onValue={(detail) => set({ detail })}
-          options={[{ value: "terse", label: "Short" }, { value: "detailed", label: "Detailed" }]} /></div>
-      <div className="field"><span className="field-label" id="profile-acting">Before acting</span>
-        <Segmented label="Before acting" value={draft.initiative} onValue={(initiative) => set({ initiative })}
-          options={[{ value: "ask_first", label: "Ask first" }, { value: "act_first", label: "Act first" }]} /></div>
+      <div className="field"><span className="field-label" id="profile-replies">Replies</span>{replies}</div>
+      <div className="field"><span className="field-label" id="profile-acting">Before acting</span>{acting}</div>
     </div>
-    {errors.style && <p className="field-error" role="alert">{errors.style}</p>}
+    {style}
   </>;
 }
 

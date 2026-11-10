@@ -37,7 +37,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),
     undone TEXT,
     landed_on TEXT,
-    restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1))
+    restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1)),
+    regenerated_head TEXT,
+    regenerated_files TEXT NOT NULL DEFAULT '[]'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -66,8 +68,8 @@ const NUMBER_PASS_MAX: i64 = 10_000;
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
     restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on,\
-    restored";
-const ADDED_COLUMNS: [(&str, &str); 7] = [
+    restored,regenerated_head,regenerated_files";
+const ADDED_COLUMNS: [(&str, &str); 9] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -87,14 +89,21 @@ const ADDED_COLUMNS: [(&str, &str); 7] = [
         "restored",
         "restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1))",
     ),
+    ("regenerated_head", "regenerated_head TEXT"),
+    (
+        "regenerated_files",
+        "regenerated_files TEXT NOT NULL DEFAULT '[]'",
+    ),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
 /// `old` to the squash commit `new`, `master` when it is the master landing its own set;
 /// `Reset` points the agent's worktree at `target` only while its HEAD is still `from`
-/// (an intent stored before `from` existed never moves a worktree); `Undo` moves
-/// `reference` from `old` to the commit `new` that reverts the set's landed commit.
+/// (an intent stored before `from` existed moves it only to finish a step whose files
+/// already moved), and `earlier` is what an open set goes back to when it does not happen;
+/// `Undo` moves `reference` from `old` to the commit `new` that reverts the set's landed
+/// commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Intent {
@@ -102,19 +111,82 @@ pub(super) enum Intent {
         reference: String,
         old: String,
         new: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         master: bool,
     },
     Reset {
         #[serde(default)]
         from: Option<String>,
         target: String,
+        #[serde(default)]
+        earlier: Option<Earlier>,
     },
     Undo {
         reference: String,
         old: String,
         new: String,
     },
+}
+
+/// What a change set held before a reset that may never happen: the fields an update, a
+/// restore or a regeneration changes, so an engine start can put them back as the step's
+/// own refusal does. An open state means the set's pending ref named `head`, any other
+/// state that it had none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Earlier {
+    state: ChangeState,
+    waiting: bool,
+    base: String,
+    head: String,
+    conflicts: Vec<String>,
+    files: u32,
+    added: u32,
+    removed: u32,
+    updated_ms: u64,
+    restorable_until_ms: Option<u64>,
+    #[serde(default)]
+    restored: bool,
+}
+
+impl Earlier {
+    /// Copies what a change set holds now. Input: the set. Output: the copy.
+    pub(super) fn of(record: &Record) -> Self {
+        Self {
+            state: record.state,
+            waiting: record.waiting,
+            base: record.base.clone(),
+            head: record.head.clone(),
+            conflicts: record.conflicts.clone(),
+            files: record.files,
+            added: record.added,
+            removed: record.removed,
+            updated_ms: record.updated_ms,
+            restorable_until_ms: record.restorable_until_ms,
+            restored: record.restored,
+        }
+    }
+
+    /// Tells whether the copy was of a discarded set, as a restore's is. Output: the answer.
+    pub(super) fn was_discarded(&self) -> bool {
+        self.state == ChangeState::Discarded
+    }
+
+    /// Writes the copy back onto a change set, for the caller to save. Input: the set.
+    /// Output: none.
+    pub(super) fn put_back(self, record: &mut Record) {
+        record.state = self.state;
+        record.waiting = self.waiting;
+        record.base = self.base;
+        record.head = self.head;
+        record.conflicts = self.conflicts;
+        record.files = self.files;
+        record.added = self.added;
+        record.removed = self.removed;
+        record.updated_ms = self.updated_ms;
+        record.restorable_until_ms = self.restorable_until_ms;
+        record.restored = self.restored;
+    }
 }
 
 /// One stored change set with everything the engine needs to act on it. `made` says the
@@ -151,6 +223,8 @@ pub(super) struct Record {
     pub(super) undone: Option<String>,
     pub(super) landed_on: Option<String>,
     pub(super) restored: bool,
+    pub(super) regenerated_head: Option<String>,
+    pub(super) regenerated_files: Vec<String>,
 }
 
 impl Record {
@@ -176,6 +250,11 @@ impl Record {
             waiting: self.waiting && self.state == ChangeState::Updating,
             outside: self.outside,
             number,
+            regenerated: if self.regenerated_head.as_ref() == Some(&self.head) {
+                self.regenerated_files.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -339,6 +418,8 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         undone: row.get(28)?,
         landed_on: row.get(29)?,
         restored: row.get::<_, bool>(30)?,
+        regenerated_head: row.get(31)?,
+        regenerated_files: serde_json::from_str(&text(32)?).map_err(|_| invalid(32))?,
     })
 }
 
@@ -370,6 +451,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
         .map(|intent| serde_json::to_string(intent).map_err(storage))
         .transpose()?;
     let conflicts = serde_json::to_string(&record.conflicts).map_err(storage)?;
+    let regenerated_files = serde_json::to_string(&record.regenerated_files).map_err(storage)?;
     let updates = COLUMNS
         .split(',')
         .filter(|column| *column != "id")
@@ -379,7 +461,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -414,6 +496,8 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
             record.undone,
             record.landed_on,
             record.restored,
+            record.regenerated_head,
+            regenerated_files,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
@@ -811,19 +895,19 @@ pub(super) fn open_of(
     }
 }
 
-/// Reads the other change sets of a project that closed as landed in the commit a set's
-/// own Accept made, as a master's merge closes the sets its head holds. Inputs: the store,
-/// the project, that commit and the set that made it. Output: the sets.
-pub(super) fn closed_in(
+/// Reads the other change sets of a project accepted with no commit of their own: a
+/// master's merge closes the sets its head holds that way, and an Accept of
+/// work the branch already held records whatever commit was the tip. Inputs: the store, the
+/// project and the set being undone. Output: the sets.
+pub(super) fn closed_without_commit(
     db: &Connection,
     project: &ProjectId,
-    landed: &str,
     maker: &ChangeSetId,
 ) -> Result<Vec<Record>, EngineError> {
     let closed = collect(
         db,
-        "project=?1 AND landed=?2 AND id<>?3 AND state='accepted' AND made=0",
-        [project.as_str(), landed, maker.as_str()],
+        "project=?1 AND id<>?2 AND state='accepted' AND made=0",
+        [project.as_str(), maker.as_str()],
     )?;
     assert!(closed.iter().all(|record| record.id != *maker));
     Ok(closed)

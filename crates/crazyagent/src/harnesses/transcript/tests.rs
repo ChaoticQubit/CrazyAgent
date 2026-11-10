@@ -341,6 +341,60 @@ fn claude_a_background_command_the_agent_stops_ends_by_its_task_id() {
     );
 }
 
+/// A background command Claude Code ends with its caller's final response sends no
+/// notification, so it is not followed: an id waited on would never end (HB-BEFR).
+#[test]
+fn claude_a_background_command_that_ends_with_the_final_response_is_not_followed() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b30aa."}]},"toolUseResult":{"backgroundTaskId":"b30aa","backgroundEndsWithFinalResponse":true}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Command running in background with ID: b30ab."}]},"toolUseResult":{"backgroundTaskId":"b30ab","backgroundEndsWithFinalResponse":false}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![TranscriptEvent::BackgroundStarted { id: "b30ab".into() }]
+    );
+}
+
+/// A background command the agent read as settled with GetTask ends by that snapshot, since
+/// Claude Code then withdraws its notification; a snapshot still working ends nothing
+/// (HB-TASKGET).
+#[test]
+fn claude_a_get_task_snapshot_of_a_settled_command_ends_it() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b40aa."}]},"toolUseResult":{"backgroundTaskId":"b40aa"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Command running in background with ID: b40ab."}]},"toolUseResult":{"backgroundTaskId":"b40ab"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","content":"{\"taskId\":\"b40aa\"}"}]},"toolUseResult":{"taskId":"b40aa","status":"working","statusMessage":"Still running.","createdAt":"2026-11-10T04:00:00Z","lastUpdatedAt":"2026-11-10T04:00:00Z"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t4","content":"{\"taskId\":\"b40aa\"}"}]},"toolUseResult":{"taskId":"b40aa","status":"completed","statusMessage":"Done.","createdAt":"2026-11-10T04:00:00Z","lastUpdatedAt":"2026-11-10T04:01:00Z"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t5","content":"{\"taskId\":\"b40ab\"}"}]},"toolUseResult":{"taskId":"b40ab","status":"cancelled","statusMessage":"Stopped.","createdAt":"2026-11-10T04:00:00Z","lastUpdatedAt":"2026-11-10T04:01:00Z"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::BackgroundStarted { id: "b40aa".into() },
+            TranscriptEvent::BackgroundStarted { id: "b40ab".into() },
+            TranscriptEvent::BackgroundEnded { id: "b40aa".into() },
+            TranscriptEvent::BackgroundEnded { id: "b40ab".into() },
+        ]
+    );
+}
+
 #[test]
 fn claude_transcript_behind_a_symlink_is_not_followed() {
     let case = Case::new();

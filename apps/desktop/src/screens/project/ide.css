@@ -36,6 +36,11 @@
   margin: 0;
 }
 
+.ide-bar {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .ide-problem {
   margin: 0;
   color: var(--danger);

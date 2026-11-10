@@ -12,6 +12,9 @@ export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: the
  * but not what a Full access agent started outside its terminal. */
 export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
+/** What saving a new level, hooks or network choice does to the project's open IDE, the same in the TUI. */
+export const POLICY_RESTARTS_IDE = "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
+
 /** What turning a toolchain off does to work already running: the engine stops each agent, research job and master turn its sandbox granted it to. */
 export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
 
@@ -19,7 +22,7 @@ export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents,
 export const IDE_GIT_HOOKS = "IDE git runs the project's hooks";
 
 /** What the IDE hooks switch does and never does, the same in the TUI. */
-export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
+export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. Applies when the IDE next starts.";
 
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [

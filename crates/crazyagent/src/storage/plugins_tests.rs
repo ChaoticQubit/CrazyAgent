@@ -409,7 +409,7 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
         );
     }
 
-    crate::storage::trash::sweep(&connection, root).unwrap();
+    crate::storage::trash::sweep(&connection, root, None).unwrap();
     assert!(
         !absolute.exists(),
         "the project skill folder is reclaimed after the sweep"
@@ -486,7 +486,7 @@ fn a_rolled_back_removal_keeps_the_project_skill_folder() {
         absolute.is_dir(),
         "a removal rolled back before commit leaves the skill folder on disk"
     );
-    crate::storage::trash::sweep(&connection, root).unwrap();
+    crate::storage::trash::sweep(&connection, root, None).unwrap();
     assert!(
         absolute.is_dir(),
         "the rolled back removal queued no trash, so the sweep keeps the folder"
@@ -617,7 +617,7 @@ fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
         .unwrap();
     assert_eq!(items, 0, "the orphaned rows are gone");
 
-    crate::storage::trash::sweep(&connection, root).unwrap();
+    crate::storage::trash::sweep(&connection, root, None).unwrap();
     assert!(!absolute.exists(), "the orphaned skill folder is reclaimed");
     assert!(
         !secret_saved(root, &reference),

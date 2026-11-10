@@ -1,6 +1,6 @@
 use super::clone;
 use super::diff::{self, plain};
-use super::git::{Repo, failure, is_object_id, object_id};
+use super::git::{Repo, Writes, failure, is_object_id, object_id};
 use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
@@ -302,12 +302,11 @@ pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
     subject
 }
 
-/// The message an Accept proposes from the commits the agent made itself above the
-/// point the set is measured from: the latest subject, then the earlier ones newest first
-/// as a list. Commits the engine made, merges and commits already on the landing branch
-/// are left out. Inputs: the agent repository, the record, the measured-from commit and
-/// the folders paths are shown relative to. Output: the message, empty when the agent
-/// made no commit, at most `PROPOSED_BYTES_MAX` bytes.
+/// The message an Accept proposes from the commits above the set's measured-from point: the
+/// latest subject, then earlier ones newest first as a list. Engine commits, merges and
+/// commits on the landing branch are left out; a lead's worker on Land on main lists the
+/// lead's unlanded commits too, which land in its squash. Inputs: the agent repository, the
+/// record, that commit and the display roots. Output: the message, up to `PROPOSED_BYTES_MAX`.
 fn proposed(
     repo: &Repo,
     record: &Record,
@@ -479,6 +478,23 @@ impl Agent {
             return Err(invalid());
         }
         Ok(commit)
+    }
+
+    /// Tells whether the agent's own pointer holds a commit or work built on it, whichever
+    /// branch HEAD names now: its branch, or HEAD itself for a detached agent. A commit the
+    /// repository no longer holds counts as no. Input: the commit. Output: the answer.
+    pub(super) fn built_on(&self, target: &str) -> Result<bool, EngineError> {
+        let pointer = match &self.pointer {
+            Pointer::Detached => "HEAD".to_owned(),
+            Pointer::Branch(branch) => format!("refs/heads/{branch}"),
+        };
+        let Some(commit) = self.repo.commit_of(&pointer)? else {
+            return Ok(false);
+        };
+        Ok(self.repo.commit_of(target)?.is_some()
+            && self
+                .repo
+                .test(&["merge-base", "--is-ancestor", target, &commit])?)
     }
 
     /// Moves HEAD from `old`, when given, to `new`. A detached HEAD is rewritten by the
@@ -860,11 +876,23 @@ pub(super) type PlantedEdit = std::sync::Arc<dyn Fn() + Send + Sync>;
 pub(super) static BEFORE_RESET: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test seam (land-2 r2): edits [`reset_agent`] makes after it checked HEAD and refreshed
+/// the index and before its two-tree read-tree, the way an agent can write in that window.
+#[cfg(test)]
+pub(super) static BEFORE_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Test seam (RESET-KEEP r2): edits [`reset_agent`] makes right after its two-tree
 /// read-tree moved the files and before HEAD moves, the way an agent can write in that
 /// window.
 #[cfg(test)]
 pub(super) static AFTER_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test seam (RK-R2-S1): edits [`reset_agent`] makes right after HEAD moved and before it
+/// reads HEAD again, the way an agent can write in that window.
+#[cfg(test)]
+pub(super) static AFTER_HEAD_MOVE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Runs the edit a test planted in `planted` for this agent's git folder, if any. Inputs:
@@ -887,14 +915,21 @@ fn run_planted(planted: &std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>>, agent: &
     }
 }
 
+/// The refusal [`reset_agent`] gives when the agent's pointer moved on from a reset it
+/// reached. The owner reads it as the agent still writing, which it is.
+pub(super) const POINTER_MOVED_ON: &str = "changes_agent_busy";
+
 /// Moves an agent worktree from the commit it holds to another, never over the agent's
 /// work: an index git cannot refresh (locked, mid-merge) refuses; git's two-tree
 /// read-tree moves its index and tracked files and refuses, changing nothing, when a path
 /// it would change was edited, staged or is in its way untracked; then HEAD moves only
-/// while it still holds `from` and must still be the agent's pointer after, else HEAD and
-/// the files go back. A stop between the steps leaves a state an engine start can finish.
-/// Inputs: the worktree and both commits. Output: true once it holds `target`, false when
-/// it refused.
+/// while it still holds `from` and must still be the agent's pointer after. When HEAD did
+/// not move, the files go back unless the agent committed them meanwhile; when the pointer
+/// left, HEAD goes back and the files too when the agent's checkout holds `from`. A stop
+/// between the steps leaves a state an engine start can finish. Inputs: the worktree and
+/// both commits.
+/// Output: true once it holds `target`, false when it refused, [`POINTER_MOVED_ON`] when
+/// the pointer cannot go back, so the caller leaves the step stored and undoes nothing.
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
     assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
@@ -908,9 +943,14 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if refreshed.code != 0 {
         return Ok(false);
     }
-    let moved = agent
-        .repo
-        .exec(&["read-tree", "-u", "-m", from, target], None, &[], 4096)?;
+    #[cfg(test)]
+    run_planted(&BEFORE_READ_TREE, agent);
+    let moved = agent.repo.confined(Writes::WorkTree)?.exec(
+        &["read-tree", "-u", "-m", from, target],
+        None,
+        &[],
+        4096,
+    )?;
     if moved.code != 0 {
         return Ok(false);
     }
@@ -923,6 +963,8 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
         files_back(agent, from, target);
         return Ok(false);
     }
+    #[cfg(test)]
+    run_planted(&AFTER_HEAD_MOVE, agent);
     if agent.head().is_err() {
         eprintln!("landing_reset_head_left_its_pointer");
         if agent
@@ -930,21 +972,46 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
             .is_err()
         {
             eprintln!("landing_reset_pointer_not_put_back");
+            return Err(failure(POINTER_MOVED_ON));
         }
-        files_back(agent, from, target);
+        if agent.repo.commit_of("HEAD").ok().flatten().as_deref() == Some(from) {
+            files_back(agent, from, target);
+        }
         return Ok(false);
     }
     Ok(true)
 }
 
+/// As [`reset_agent`], for a caller with nobody left to refuse: a pointer that moved on
+/// from the reset counts as done, because the agent built on what the reset reached.
+/// Inputs: the worktree and both commits. Output: true once it holds `target` or moved on
+/// from it, false when it refused.
+pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
+    match reset_agent(agent, from, target) {
+        Err(moved) if moved.0 == POINTER_MOVED_ON => Ok(true),
+        other => other,
+    }
+}
+
 /// Puts an agent worktree's index and files back from `target` to `from` after its reset
 /// did not hold, with the same two-tree read-tree, so an edit the agent made meanwhile is
-/// never overwritten: git refuses, writing nothing, and the refusal is logged. Inputs:
-/// the worktree and both commits. Output: none.
+/// never overwritten: git refuses, writing nothing, and the refusal is logged. An index
+/// equal to HEAD stays: the agent committed what the reset moved, and putting it back would
+/// stage a reversal of that commit. Inputs: the worktree and both commits. Output: none.
 fn files_back(agent: &Agent, from: &str, target: &str) {
+    let committed = agent.repo.exec(
+        &["diff-index", "--quiet", "--cached", "HEAD", "--"],
+        None,
+        &[],
+        4096,
+    );
+    if committed.is_ok_and(|committed| committed.code == 0) {
+        return;
+    }
     let back = agent
         .repo
-        .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
+        .confined(Writes::WorkTree)
+        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096));
     if !back.is_ok_and(|back| back.code == 0) {
         eprintln!("landing_reset_files_back_refused");
     }
@@ -990,9 +1057,10 @@ pub(super) fn reset_if_quiet(
     record.intent = Some(Intent::Reset {
         from: Some(expected.to_owned()),
         target: target.to_owned(),
+        earlier: None,
     });
     store::save(db, record)?;
-    let start = if reset_agent(&agent, expected, target)? {
+    let start = if reset_settling(&agent, expected, target)? {
         target
     } else {
         expected
@@ -1779,7 +1847,8 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
-    repo.run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
+    repo.confined(Writes::Objects)?
+        .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;
     if tree == repo.tree_of(head)? {
         return Ok(None);
@@ -1817,10 +1886,10 @@ pub(super) fn start(
 }
 
 /// Records the commit a master's leased worktree holds as the base its change sets open
-/// above, as [`start`] does for a team agent's new worktree, unless a base is stored for it
-/// already, which then never moves past commits the master made. Inputs: the store, the
-/// owner checkout, the worktree on its lease branch and its git folder. Output: Ok once a
-/// base is stored.
+/// above, as [`start`] does for a team agent's new worktree, unless one is stored already,
+/// which never moves past commits the master made and is read without the repository hold,
+/// so a long holder never delays a master turn. Inputs: the store, the owner checkout, the
+/// worktree on its lease branch and its git folder. Output: Ok once a base is stored.
 pub(super) fn start_master(
     db: &Connection,
     repository: &Path,
@@ -1828,16 +1897,17 @@ pub(super) fn start_master(
     git_dir: &Path,
 ) -> Result<(), EngineError> {
     store::initialize(db)?;
+    let stored = super::subagent::path_text(worktree)?;
+    if store::base_of(db, stored)?.is_some() {
+        return Ok(());
+    }
     let _held = hold(repository);
-    if store::base_of(db, super::subagent::path_text(worktree)?)?.is_some() {
+    if store::base_of(db, stored)?.is_some() {
         return Ok(());
     }
     let head = open_agent(db, AgentKind::Master, repository, worktree, git_dir)?.head()?;
     set_base(db, repository, worktree, git_dir, &head)?;
-    assert_eq!(
-        store::base_of(db, super::subagent::path_text(worktree)?)?.as_deref(),
-        Some(head.as_str())
-    );
+    assert_eq!(store::base_of(db, stored)?.as_deref(), Some(head.as_str()));
     Ok(())
 }
 
@@ -2032,7 +2102,11 @@ pub(super) fn record(
         None => None,
     };
     let mut record = match open {
-        None if committed.is_none() && head == base => return Ok(None),
+        None if committed.is_none()
+            && (head == base || already_on_tip(&shared, &head, tip.as_deref())?) =>
+        {
+            return Ok(None);
+        }
         None => Record {
             id: new_id()?,
             project: workspace.project.clone(),
@@ -2053,6 +2127,8 @@ pub(super) fn record(
             undone: None,
             landed_on: None,
             restored: false,
+            regenerated_head: None,
+            regenerated_files: Vec::new(),
             files: 0,
             added: 0,
             removed: 0,
@@ -2103,6 +2179,16 @@ pub(super) fn record(
         agent.move_head(Some(&head), &commit, "CrazyAgent: turn end")?;
     }
     Ok(Some(record.id))
+}
+
+/// Says whether a commit is already on the branch a set would land on, so an agent that only
+/// fast-forwarded its worktree to it has nothing to land. Inputs: the owner repository, the
+/// commit and the landing tip, None while it cannot be read. Output: the answer.
+fn already_on_tip(owner: &Repo, commit: &str, tip: Option<&str>) -> Result<bool, EngineError> {
+    match tip {
+        Some(tip) => owner.test(&["merge-base", "--is-ancestor", commit, tip]),
+        None => Ok(false),
+    }
 }
 
 /// Notes that the agent of an updating change set was handed the work that resolves it,
@@ -2180,12 +2266,14 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
 /// Discards an open change set: keeps its head under a discarded ref, then points the
 /// agent's worktree at the owner's current commit when it holds nothing newer. A lead's
 /// workers' open sets close with it (DEC-107). Inputs: the store, the change set, the head
-/// the owner reviewed and the time now. Output: the time it stays restorable until.
+/// that was reviewed, the time now and whether the owner pressed it. Output: the time it
+/// stays restorable until.
 pub(super) fn discard(
     db: &Connection,
     id: &ChangeSetId,
     expected_head: &str,
     now: u64,
+    owner_pressed: bool,
 ) -> Result<u64, EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -2195,7 +2283,7 @@ pub(super) fn discard(
         return Err(failure("changes_stale"));
     }
     let until = discard_held(db, &mut record, now)?;
-    if let Err(error) = super::subagent::close_with_lead(db, &record) {
+    if let Err(error) = super::subagent::close_with_lead(db, &record, owner_pressed) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
@@ -2218,7 +2306,7 @@ pub(super) fn release_agent_claims(db: &Connection, record: &Record) {
     );
 }
 
-/// Holds a sub-agent's claims on its ended work for the change set its turn end leaves
+/// Holds an agent's claims on its ended work for the change set its turn end leaves
 /// open, or releases them when the turn leaves nothing to land, after releasing those of
 /// any set that closed while its release failed (OS-8, DEC-117 Q7). A failure is logged by
 /// its plain code, never fails the turn end, and is tried again at the next one. Inputs:
@@ -2229,16 +2317,17 @@ pub(super) fn hold_agent_claims(
     open: Option<&ChangeSetId>,
     now: u64,
 ) {
-    if workspace.agent.kind != AgentKind::Sub {
-        return;
-    }
-    let Ok(agent) = workspace.agent.id.parse::<crate::coord::AgentId>() else {
-        return;
-    };
     logged_claims(
         i64::try_from(now)
             .map_err(|_| failure("changes_unavailable"))
             .and_then(|now| {
+                let agent = match workspace.agent.kind {
+                    AgentKind::Sub => workspace.agent.id.parse().ok(),
+                    AgentKind::Master => crate::coord::master_of(db, &workspace.project)?,
+                };
+                let Some(agent) = agent else {
+                    return Ok(0);
+                };
                 for set in crate::coord::held_sets(db, agent)? {
                     let closed = ChangeSetId::new(&set)
                         .ok()
@@ -2258,7 +2347,8 @@ pub(super) fn hold_agent_claims(
 }
 
 /// Settles a project's claims no turn end will, as [`super::sweep_claims`] says. Reads
-/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones.
+/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones. A chat
+/// master's set records its session id, so a master takes the newest open master set.
 /// Inputs: the store, the project and the time now. Output: Ok or the first failure.
 pub(super) fn sweep_claims(
     db: &Connection,
@@ -2281,9 +2371,11 @@ pub(super) fn sweep_claims(
     }
     for agent in crate::coord::stopped_with_unheld(db, project)? {
         let id = agent.to_string();
-        let set = open
-            .iter()
-            .find(|record| record.agent.kind == AgentKind::Sub && record.agent.id == id);
+        let master = crate::coord::is_master(db, agent)?;
+        let set = open.iter().rev().find(|record| match record.agent.kind {
+            AgentKind::Master => master,
+            AgentKind::Sub => record.agent.id == id,
+        });
         match set {
             Some(record) => crate::coord::hold_for_set(db, agent, record.id.as_str())?,
             None => crate::coord::release_unheld(db, agent, now)?,
@@ -2401,8 +2493,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         record.restored = true;
         record.updated_ms = now;
         store::save(db, &record)?;
-        logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
-        return set_engine_ref(&shared, &record.repository, &discarded_ref(id), None);
+        return finish_restore(db, &record);
     }
     let agent = agent(db, &record)?;
     let current = agent.head()?;
@@ -2426,6 +2517,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     record.intent = Some(Intent::Reset {
         from: Some(current.clone()),
         target: record.head.clone(),
+        earlier: Some(store::Earlier::of(&before)),
     });
     store::save(db, &record)?;
     if !reset_agent(&agent, &current, &record.head)? {
@@ -2435,9 +2527,21 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     }
     record.intent = None;
     store::save(db, &record)?;
-    logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
-    set_engine_ref(&shared, &record.repository, &discarded_ref(id), None)?;
-    Ok(())
+    finish_restore(db, &record)
+}
+
+/// Does what a restore does last, once its set is pending again: the claims the close
+/// released hold again and its discarded ref goes, which pruning never would, since it reads
+/// discarded sets only. A failed claim step is logged and never fails the restore. Inputs:
+/// the store and the restored set. Output: Ok once the ref is gone.
+pub(super) fn finish_restore(db: &Connection, record: &Record) -> Result<(), EngineError> {
+    logged_claims(crate::coord::restore_set(db, record.id.as_str()).map(drop));
+    set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &discarded_ref(&record.id),
+        None,
+    )
 }
 
 /// Deletes the discarded refs whose restore window ended by `now`, once each. A change set

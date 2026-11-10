@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { bundle, withPage } from "./browser.mjs";
+import { press } from "./settings-tab-steps.mjs";
 
 const fixture = await bundle(new URL("./fixtures/team-settings-layout.mjs", import.meta.url).pathname);
 
@@ -20,15 +21,15 @@ const STATUS = {
     wake: { app: null, app_version: 0, project: null, project_version: 0, agents: [], cleared: [], effective: { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 }, level: "shipped" } },
 };
 const GROUPS = [
-  ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
+  ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
   ["Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER = [
-  ["Master", ["Harness", "Account"]],
-  ["Conversation", ["On master harness switch", "Apply a master harness change"]],
+  ["Master", ["Harness", "Account", "Live terminal"]],
+  ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
@@ -120,6 +121,19 @@ test("a coordination save keeps a change the TUI or another window made after th
     [["warn", "ten_minutes", "on"], ["block", "ten_minutes", "off"]], "the reminder save keeps the Block set elsewhere");
 });
 
+test("Agent access on a project made before setup says so, not that the project is gone", { timeout: 120_000 }, async () => {
+  const said = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.refusePolicy("project_setup_missing")`);
+    assert.equal(await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`), true);
+    await page.evaluate("Fixture.settle(150)");
+    return page.evaluate(`document.querySelector('[data-setting="Agent access"]').textContent`);
+  });
+  assert.match(said, /This project was created before project setup existed\./);
+  assert.doesNotMatch(said, /no longer exists/);
+});
+
 test("Agent access in place moves its choice on arrow keys and clicks, says first when saving stops agents, and saves only on Save, Full access after its warning", { timeout: 120_000 }, async () => {
   const sentAccess = `Fixture.sentTo("desktop_set_project_agent_policy").args.map((call) => call.policy.access)`;
   const rowText = `document.querySelector('[data-setting="Agent access"]').textContent`;
@@ -205,4 +219,61 @@ test("Master settings opens its drawer with the master's four groups, and Close 
   assert.deepEqual(seen.open, { title: "Master settings", groups: MASTER.map(([title]) => title) });
   assert.equal(seen.closed, true);
   assert.equal(seen.after, null, "Close shuts the drawer");
+});
+
+test("Esc on the No pool question closes only the question, and the focus goes back to the select", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "button", ${JSON.stringify(STATUS)})`);
+    await press(page, "button", "Master settings");
+    await press(page, "dialog.drawer h2");
+    await page.evaluate(`Fixture.markFocus("master-set-alpha-account")`);
+    await page.evaluate(`Fixture.pickOther("Account", "")`);
+    const asked = await page.evaluate(`document.querySelector("dialog.dialog[open] h2")?.textContent ?? null`);
+    for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await page.evaluate("Fixture.settle(50)");
+    return {
+      asked,
+      question: await page.evaluate(`document.querySelector("dialog.dialog[open]") !== null`),
+      drawer: await page.evaluate("Fixture.shown().drawer?.title ?? null"),
+      focus: await page.evaluate("Fixture.markedHasFocus()"),
+      sent: await page.evaluate(`Fixture.sentTo("desktop_edit_model_access")`),
+    };
+  });
+  assert.equal(seen.asked, "Use no pool for this project?");
+  assert.equal(seen.question, false, "Esc closes the question");
+  assert.equal(seen.drawer, "Master settings", "Master settings stays open");
+  assert.equal(seen.focus, true, "the focus goes back to the select that asked");
+  assert.deepEqual(seen.sent.args, [], "saying no changes nothing");
+});
+
+test("a master harness save holds the sub-agent rows until the read, so a quick change there sends no second save", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    await page.evaluate(`Fixture.answerSaves({ outcome: "applied", pending: false, rejection: null })`);
+    const picked = await page.evaluate(`Fixture.pickOther("Master harness", "claude")`);
+    const held = await page.evaluate(`document.querySelector('button[aria-label="More Codex agents"]').disabled`);
+    const clicked = await page.evaluate(`Fixture.click('button[aria-label="More Codex agents"]', "+")`);
+    await page.evaluate("Fixture.settle(120)");
+    return { picked, held, clicked, sent: await page.evaluate(`Fixture.sentTo("desktop_update_project_setup")`) };
+  });
+  assert.equal(seen.picked.shown, "claude", "the master row shows the change");
+  assert.equal(seen.clicked, true, "the sub-agent stepper is there to press");
+  assert.equal(seen.held, true, "the sub-agent row waits for the read too");
+  assert.equal(seen.sent.args.length, 1, "one save, so the engine refuses none as stale");
+});
+
+test("a refused master harness save says why under that row only", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    await page.evaluate(`Fixture.answerSaves({ outcome: "rejected", pending: false, rejection: "stale_revision" })`);
+    await page.evaluate(`Fixture.pickOther("Master harness", "claude")`);
+    return page.evaluate(`["Master harness", "Sub-agent harnesses"].map((row) => document.querySelectorAll('[data-setting="' + row + '"] [role="alert"]').length)`);
+  });
+  assert.deepEqual(seen, [1, 0]);
 });

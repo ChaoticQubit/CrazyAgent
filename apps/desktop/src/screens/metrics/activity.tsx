@@ -1,7 +1,7 @@
 import type { ActivityRow, ModelRow, MoneyView, ToolBucket } from "../../api-usage";
 import { Panel } from "../../ui";
 import { displayText } from "../conversation";
-import { compactCount } from "../settings/usage";
+import { compactCount } from "./usage-model";
 import { ACTIVITY_NAMES, COST_LABEL, Figure, dollarsBeside, firstTryText } from "./money";
 
 const DAY_MS = 86_400_000;

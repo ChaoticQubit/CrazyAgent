@@ -1,4 +1,4 @@
-use crate::config::ModelAccess;
+use crate::config::{ModelAccess, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome};
 use crate::storage::versioned;
@@ -287,11 +287,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Applies one owner scheduling change inside the engine transaction when the schedule is
-/// still at the version the owner's screen showed. Removing a row needs no known pool or
-/// connection, so a row whose target is gone can still be deleted. Takes the transaction,
-/// the current model access, the change and that version. Returns Applied, or a rejection
-/// for a row kept for an unknown pool or connection, a value out of range, a full table or
-/// `stale_revision`.
+/// still at the version the owner's screen showed. Removing a row needs no known pool,
+/// connection or project, so a row whose target is gone can still be deleted. Takes the
+/// transaction, the current model access, the change and that version. Returns Applied, or
+/// a rejection for a row kept for an unknown pool, connection or project, a value out of
+/// range, a full table or `stale_revision`.
 pub fn apply(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -306,6 +306,9 @@ pub fn apply(
         ScheduleChange::PoolStrategy { pool, strategy } => (strategy.is_some()
             && !access.pools.iter().any(|known| &known.id == pool))
         .then_some("pool_not_found"),
+        ScheduleChange::ProjectStrategy { project, strategy } => (strategy.is_some()
+            && !project_known(tx, project.as_str())?)
+        .then_some("project_not_found"),
         ScheduleChange::Account { connection, plan } => (*plan != AccountPlan::default()
             && !access
                 .connections
@@ -439,6 +442,18 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
             [name],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Whether a project is still registered. Takes the store and the project id. Returns the
+/// answer or any SQLite failure.
+fn project_known(connection: &Connection, project: &str) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project],
             |row| row.get(0),
         )
         .map_err(error)
@@ -628,8 +643,9 @@ pub fn load_page(
 }
 
 /// Deletes the pool strategies and account plans whose pool or connection the model access
-/// no longer holds, as after the owner removed one, so no row outlives its target.
-/// Takes the engine transaction and the new model access. Returns any SQLite failure.
+/// no longer holds, as after the owner removed one, so no row outlives its target, and
+/// moves the schedule's version once when a row went. Takes the engine transaction and the
+/// new model access. Returns any SQLite failure.
 pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), EngineError> {
     if !table_exists(tx, "account_strategies")? || !table_exists(tx, "account_plans")? {
         return Ok(());
@@ -640,6 +656,7 @@ pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), 
         .iter()
         .map(|connection| connection.id.as_str())
         .collect();
+    let mut removed = 0;
     for (stored, delete, known) in [
         (
             "SELECT id FROM account_strategies WHERE scope='pool'",
@@ -660,22 +677,45 @@ pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), 
             .collect::<Result<_, _>>()
             .map_err(error)?;
         for id in ids.iter().filter(|id| !known.contains(id.as_str())) {
-            tx.execute(delete, [id]).map_err(error)?;
+            removed += tx.execute(delete, [id]).map_err(error)?;
         }
+    }
+    if removed > 0 {
+        move_version_after_removal(tx)?;
     }
     Ok(())
 }
 
-/// Deletes the strategy override of a project being removed, so no row outlives it.
-/// Takes the engine transaction and the project id. Returns any SQLite failure.
+/// Deletes the strategy override of a project being removed, so no row outlives it, and
+/// moves the schedule's version when there was one. Takes the engine transaction and the
+/// project id. Returns any SQLite failure.
 pub fn forget_project(tx: &Transaction<'_>, project: &str) -> Result<(), EngineError> {
-    if table_exists(tx, "account_strategies")? {
-        tx.execute(
-            "DELETE FROM account_strategies WHERE scope='project' AND id=?1",
-            [project],
-        )
-        .map_err(error)?;
+    if table_exists(tx, "account_strategies")?
+        && tx
+            .execute(
+                "DELETE FROM account_strategies WHERE scope='project' AND id=?1",
+                [project],
+            )
+            .map_err(error)?
+            > 0
+    {
+        move_version_after_removal(tx)?;
     }
+    Ok(())
+}
+
+/// Moves the schedule's version after a removal deleted rows, so a screen still showing
+/// them reads the schedule again and a save from it is refused as stale. Takes the engine
+/// transaction. Returns any SQLite failure.
+fn move_version_after_removal(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let item = versioned::account_schedule_item();
+    let version = versioned::current(tx, &item)?.version;
+    let moved = versioned::owner_write(tx, &item, version)?;
+    assert_eq!(
+        moved.ok(),
+        Some(version + 1),
+        "the version was read in this transaction"
+    );
     Ok(())
 }
 
@@ -877,9 +917,28 @@ fn limit_reached(
         })
 }
 
+/// Why a ready account stands where it does: the first field of the real sort key that
+/// sets it apart from the account above it, so the words cannot drift from the order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OrderWhy {
+    UseLast,
+    LimitReported,
+    NoReading,
+    ResetsSoonest { resets_ms: i64 },
+    ResetsLater { resets_ms: i64 },
+    LeastUsed,
+    MoreUsed,
+    MoreFiveHourUsed,
+    Ranked { rank: u16 },
+    Unranked,
+    TiedRank { rank: Option<u16> },
+    TiedOrder,
+}
+
 /// Where one account stands in its pool's ranking now: next in line, with its weekly
-/// reset and the weekly percent it may still use before its reserve, or held with why
-/// and until when, in ms since the epoch.
+/// reset, the weekly percent it may still use before its reserve and why it stands there,
+/// or held with why and until when, in ms since the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Standing {
@@ -887,7 +946,10 @@ pub enum Standing {
         weekly_resets_ms: Option<i64>,
         weekly_left_percent: Option<u8>,
         use_last: bool,
+        why: OrderWhy,
     },
+    NotSignedIn,
+    SignInUnconfirmed,
     Paused {
         until_ms: i64,
     },
@@ -910,34 +972,48 @@ pub struct RankedAccount {
 }
 
 /// One pool's ranking: the strategy that orders it, the accounts work would try now in
-/// that order, then every held account in pool order.
+/// that order, then every held account in pool order, and how many of the pool's projects
+/// set their own order, which this ranking does not show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolRanking {
     pub pool: CredentialRef,
     pub strategy: Strategy,
     pub accounts: Vec<RankedAccount>,
+    pub own_order_projects: u32,
 }
 
 /// Ranks every pool's accounts with the same choice team, research and master work make
-/// (DEC-096 item 8): a paused account is held, the rest go through `Choice::order`. Live
-/// load and the account work already runs on only break ties, so they are left out.
-/// Takes the engine connection, model access and clock. Returns one ranking per pool.
+/// (DEC-096 item 8): an account the pick's own sign-in check refuses, or a paused one, is held,
+/// the rest go through `Choice::order`, each with why it stands where it does. Live load and the
+/// account work already runs on only break ties, so they are left out.
+/// Takes the owner read's transaction, model access and clock. Returns one ranking per pool.
 pub fn ranking(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     access: &ModelAccess,
     now_ms: i64,
 ) -> Result<Vec<PoolRanking>, EngineError> {
-    let pauses = table_exists(connection, "team_paused_accounts")?;
+    let pauses = table_exists(tx, "team_paused_accounts")?;
+    let sign_ins = table_exists(tx, "native_auth_operations")?;
+    let run = active_run(tx)?;
     let mut pools = Vec::with_capacity(access.pools.len());
     for pool in &access.pools {
-        let choice = Choice::read(connection, access, None, &[&pool.id], now_ms)?;
+        let choice = Choice::read(tx, access, None, &[&pool.id], now_ms)?;
         let mut held = Vec::new();
         let mut candidates = Vec::new();
         let mut places = Vec::new();
         for (index, member) in pool.members.iter().enumerate() {
-            match paused_until(connection, pauses, member, now_ms)? {
-                Some(until_ms) => held.push((index, Standing::Paused { until_ms })),
+            let held_now = if choice.schedule.plan(member).pin == Some(Pin::NeverUse) {
+                None
+            } else if let Some(standing) = sign_in_hold(tx, sign_ins, run.as_ref(), access, member)?
+            {
+                Some(standing)
+            } else {
+                paused_until(tx, pauses, member, now_ms)?
+                    .map(|until_ms| Standing::Paused { until_ms })
+            };
+            match held_now {
+                Some(standing) => held.push((index, standing)),
                 None => {
                     candidates.push(Candidate {
                         connection: member.clone(),
@@ -949,14 +1025,17 @@ pub fn ranking(
             }
         }
         let order = choice.order(&candidates);
-        let mut accounts: Vec<RankedAccount> = order
-            .ready
-            .iter()
-            .map(|&at| RankedAccount {
+        let mut accounts = Vec::with_capacity(pool.members.len());
+        let mut above = None;
+        for &at in &order.ready {
+            let key = choice.key(&candidates[at], at);
+            let why = choice.why(&key, above.as_ref());
+            accounts.push(RankedAccount {
                 connection: candidates[at].connection.clone(),
-                standing: choice.next(&candidates[at]),
-            })
-            .collect();
+                standing: choice.next(&candidates[at], why),
+            });
+            above = Some(key);
+        }
         held.extend(
             order
                 .excluded
@@ -973,9 +1052,73 @@ pub fn ranking(
             pool: pool.id.clone(),
             strategy: choice.strategy,
             accounts,
+            own_order_projects: u32::try_from(
+                choice
+                    .schedule
+                    .projects
+                    .iter()
+                    .filter(|scoped| pool.projects.contains(&scoped.id))
+                    .count(),
+            )
+            .map_err(error)?,
         });
     }
     Ok(pools)
+}
+
+/// Reads the engine run the real pick proves a sign-in against. Takes the store. Returns its
+/// stamp, or none while no run is active, when the pick takes no managed account either.
+fn active_run(
+    connection: &Connection,
+) -> Result<Option<crate::engine::owner::HostStamp>, EngineError> {
+    if !table_exists(connection, "owner_meta")? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+            [],
+            |row| {
+                Ok(crate::engine::owner::HostStamp {
+                    db_instance: row.get(0)?,
+                    engine_epoch: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(error)
+}
+
+/// Says how the real pick's sign-in check holds this member, if it does. A native managed
+/// account is not signed in when its latest sign-in did not end authenticated or a provider
+/// rejected it. One whose sign-in stands but fails `native_sign_in`, as a doubted sign-in, a
+/// profile a check still holds or a sign-in proved under an earlier run does, needs a check.
+/// Takes the read's transaction, whether it has sign-ins at all, the active run, the model
+/// access and the member. Returns the held standing, or none when the pick can take it.
+fn sign_in_hold(
+    tx: &Transaction<'_>,
+    sign_ins: bool,
+    run: Option<&crate::engine::owner::HostStamp>,
+    access: &ModelAccess,
+    member: &CredentialRef,
+) -> Result<Option<Standing>, EngineError> {
+    if !sign_ins {
+        return Ok(None);
+    }
+    let Some(model) = access.connections.iter().find(|item| &item.id == member) else {
+        return Ok(None);
+    };
+    if !matches!(model.auth, ModelAuthentication::NativeManaged { .. }) {
+        return Ok(None);
+    }
+    if !crate::storage::latest_sign_in_authenticated(tx, model)?
+        || crate::model_gateway::sign_in_rejected(tx, model)?
+    {
+        return Ok(Some(Standing::NotSignedIn));
+    }
+    let proved =
+        run.is_some_and(|run| crate::storage::native_sign_in(tx, run, model, None).is_ok());
+    Ok((!proved).then_some(Standing::SignInUnconfirmed))
 }
 
 fn paused_until(
@@ -998,7 +1141,51 @@ fn paused_until(
 }
 
 impl Choice {
-    fn next(&self, candidate: &Candidate) -> Standing {
+    /// Says why a ready account follows the one above it: the first field of its sort key
+    /// that sets it apart. Takes its sort key and the key above it, if any. Returns the reason.
+    fn why(&self, key: &SortKey, above: Option<&SortKey>) -> OrderWhy {
+        assert!(
+            above.is_none_or(|row| row < key),
+            "the order sorted by these keys"
+        );
+        let (use_last, doubtful, primary, rank, ..) = *key;
+        if use_last {
+            return OrderWhy::UseLast;
+        }
+        if doubtful {
+            return OrderWhy::LimitReported;
+        }
+        if primary.0 {
+            return OrderWhy::NoReading;
+        }
+        let tie = || match above {
+            Some(row) if row.3 != rank => OrderWhy::TiedRank {
+                rank: (rank != u16::MAX).then_some(rank),
+            },
+            _ => OrderWhy::TiedOrder,
+        };
+        match self.strategy {
+            Strategy::ManualRank if rank == u16::MAX => OrderWhy::Unranked,
+            Strategy::ManualRank => OrderWhy::Ranked { rank },
+            Strategy::UseItOrLoseIt => match above {
+                None => OrderWhy::ResetsSoonest {
+                    resets_ms: primary.1,
+                },
+                Some(row) if row.2.1 < primary.1 => OrderWhy::ResetsLater {
+                    resets_ms: primary.1,
+                },
+                Some(_) => tie(),
+            },
+            Strategy::Balanced => match above {
+                None => OrderWhy::LeastUsed,
+                Some(row) if row.2.1 < primary.1 => OrderWhy::MoreUsed,
+                Some(row) if row.2.2 < primary.2 => OrderWhy::MoreFiveHourUsed,
+                Some(_) => tie(),
+            },
+        }
+    }
+
+    fn next(&self, candidate: &Candidate, why: OrderWhy) -> Standing {
         let plan = self.schedule.plan(&candidate.connection);
         let (_, weekly) = self.windows(candidate);
         Standing::Next {
@@ -1009,6 +1196,7 @@ impl Choice {
                 room.floor() as u8
             }),
             use_last: plan.pin == Some(Pin::UseLast),
+            why,
         }
     }
 

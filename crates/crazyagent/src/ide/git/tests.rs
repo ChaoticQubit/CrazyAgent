@@ -247,8 +247,11 @@ fn the_shim_runs_the_resolved_git_and_keeps_the_path_git_otherwise() {
     let tools = Path::new("/Library/Developer/CommandLineTools/usr/bin/git");
     let exec = "exec '/Library/Developer/CommandLineTools/usr/bin/git' \"$@\"\n";
     let head = SHIM_TEXT.strip_suffix("exec git \"$@\"\n").unwrap();
-    assert_eq!(shim_text(None, tools).unwrap(), format!("{head}{exec}"));
-    let on = shim_text(Some(Path::new("/projects/alpha")), tools).unwrap();
+    assert_eq!(
+        shim_text(None, tools, None).unwrap(),
+        format!("{head}{exec}")
+    );
+    let on = shim_text(Some(Path::new("/projects/alpha")), tools, None).unwrap();
     assert!(on.starts_with(head), "{on}");
     assert!(
         on.ends_with(&format!(
@@ -263,7 +266,7 @@ fn the_shim_runs_the_resolved_git_and_keeps_the_path_git_otherwise() {
         Path::new("/odd/line\nbreak/git"),
         Path::new(odd),
     ] {
-        assert_eq!(shim_text(None, kept).unwrap(), SHIM_TEXT, "{kept:?}");
+        assert_eq!(shim_text(None, kept, None).unwrap(), SHIM_TEXT, "{kept:?}");
     }
 }
 
@@ -271,16 +274,16 @@ fn the_shim_runs_the_resolved_git_and_keeps_the_path_git_otherwise() {
 #[test]
 #[should_panic(expected = "the engine resolves git to an absolute path")]
 fn the_shim_refuses_a_relative_git() {
-    let _ = shim_text(None, Path::new("git"));
+    let _ = shim_text(None, Path::new("git"), None);
 }
 
 #[test]
 fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
     let path_git = Path::new(crate::research::runner::GIT);
-    assert_eq!(shim_text(None, path_git).unwrap(), SHIM_TEXT);
+    assert_eq!(shim_text(None, path_git, None).unwrap(), SHIM_TEXT);
     for refused in ["relative/project", "/project/it's", "/project/line\nbreak"] {
         assert!(
-            shim_text(Some(Path::new(refused)), path_git).is_err(),
+            shim_text(Some(Path::new(refused)), path_git, None).is_err(),
             "{refused:?}"
         );
     }
@@ -296,8 +299,8 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
     let on = base.join("on");
     let off = base.join("off");
     for (shim, text) in [
-        (&on, shim_text(Some(&project), path_git).unwrap()),
-        (&off, shim_text(None, path_git).unwrap()),
+        (&on, shim_text(Some(&project), path_git, None).unwrap()),
+        (&off, shim_text(None, path_git, None).unwrap()),
     ] {
         assert!(text.starts_with("#!/bin/sh\n") && text.ends_with("exec git \"$@\"\n"));
         std::fs::write(shim, text).unwrap();
@@ -335,6 +338,70 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
     assert_eq!(hooks_path(&on, &agent), forced);
     assert_eq!(hooks_path(&on, &project.join(".git")), forced);
     assert_eq!(hooks_path(&off, &project), forced);
+}
+
+/// CA-SEC-004 r2: a project's hook under the git the shim runs does not hold the relay's
+/// secret, while the forwarder a network command goes to still does.
+#[test]
+fn the_shim_keeps_the_relay_secret_from_git_and_hands_it_to_the_forwarder() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    ok(&project, &["init", "-q"]);
+    let seen = base.join("seen");
+    let print = |target: &str| {
+        format!("#!/bin/sh\nprintf '%s' \"${{CRAZYAGENT_IDE_GIT_SECRET-absent}}\"{target}\n")
+    };
+    let hook = project.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let forwarder = base.join("forwarder");
+    let shim = base.join("shim");
+    let path_git = Path::new(crate::research::runner::GIT);
+    for (file, text) in [
+        (&hook, print(&format!(" > '{}'", seen.display()))),
+        (&forwarder, print("")),
+        (&shim, shim_text(Some(&project), path_git, None).unwrap()),
+    ] {
+        std::fs::write(file, text).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        crate::spawn_gate::output(
+            Command::new(&shim)
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .env("CRAZYAGENT_IDE_GIT_SECRET", "dummy-secret")
+                .env("CRAZYAGENT_IDE_GIT_NODE", "/bin/sh")
+                .env("CRAZYAGENT_IDE_GIT_FORWARD", &forwarder)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    };
+    let committed = run(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "Plant beds",
+    ]);
+    assert!(committed.status.success(), "{committed:?}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "absent");
+    let pushed = run(&["push", "origin", "main"]);
+    assert!(pushed.status.success(), "{pushed:?}");
+    assert_eq!(String::from_utf8_lossy(&pushed.stdout), "dummy-secret");
 }
 
 /// INT1-1, INT1-R2-1: a git that cannot read an agent folder's `.git` treats it as missing
@@ -632,4 +699,94 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
         marker.exists(),
         "without it, git signs with the project's program"
     );
+}
+
+/// SECAUDIT-IDE-SERVER-INDEX: with a private index the shim runs git on a copy, asks the
+/// engine only through its forwarder, and refuses a folder a shell word cannot hold.
+#[test]
+fn the_shim_works_on_a_private_copy_of_the_index() {
+    let tools = Path::new("/Library/Developer/CommandLineTools/usr/bin/git");
+    let (project, private) = (Path::new("/projects/alpha"), Path::new("/data/git-index"));
+    let text = shim_text(None, tools, Some((project, private))).unwrap();
+    for expected in [
+        "GIT_INDEX_FILE=\"$work\" '/Library/Developer/CommandLineTools/usr/bin/git' \"$@\"",
+        "crazyagent-index \"$$\"",
+        "private='/data/git-index'",
+        "if [ \"$(pwd -P)\" != '/projects/alpha' ]; then",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(text.ends_with("exit \"$step\"\n"), "{text}");
+    for bad in [
+        Path::new("relative"),
+        Path::new("/it's"),
+        Path::new("/a\nb"),
+    ] {
+        assert!(shim_text(None, tools, Some((bad, private))).is_err());
+        assert!(shim_text(None, tools, Some((project, bad))).is_err());
+    }
+}
+
+/// SECAUDIT-IDE-SERVER-INDEX: git and anything under it never hold the relay's secret, only
+/// the forwarder does, and the shim exits with git's failure or else the engine step's.
+#[test]
+fn the_shim_keeps_the_secret_from_git_and_reports_both_failures() {
+    let scratch = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(scratch.path()).unwrap();
+    let (project, private) = (base.join("project"), base.join("private"));
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir(&private).unwrap();
+    std::fs::write(project.join(".git").join("index"), "real").unwrap();
+    let (saw_git, saw_forwarder) = (base.join("saw-git"), base.join("saw-forwarder"));
+    let script = |name: &str, body: String| {
+        let path = base.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    for (git_exit, step_exit, expected) in [(0, 0, 0), (0, 7, 7), (3, 7, 3)] {
+        let fake = script(
+            "fake-git",
+            format!(
+                "printf '%s' \"${{CRAZYAGENT_IDE_GIT_SECRET-absent}}\" > '{}'\nprintf changed >> \"$GIT_INDEX_FILE\"\nexit {git_exit}\n",
+                saw_git.display()
+            ),
+        );
+        let forwarder = script(
+            "forward.sh",
+            format!(
+                "printf '%s' \"${{CRAZYAGENT_IDE_GIT_SECRET-absent}}\" > '{}'\nexit {step_exit}\n",
+                saw_forwarder.display()
+            ),
+        );
+        let shim = script(
+            "shim",
+            shim_text(None, &fake, Some((&project, &private)))
+                .unwrap()
+                .strip_prefix("#!/bin/sh\n")
+                .unwrap()
+                .to_owned(),
+        );
+        let output = crate::spawn_gate::output(
+            Command::new(&shim)
+                .arg("add")
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("CRAZYAGENT_IDE_GIT_NODE", "/bin/sh")
+                .env("CRAZYAGENT_IDE_GIT_FORWARD", &forwarder)
+                .env("CRAZYAGENT_IDE_GIT_SECRET", "row-secret")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{output:?}");
+        assert_eq!(std::fs::read_to_string(&saw_git).unwrap(), "absent");
+        assert_eq!(
+            std::fs::read_to_string(&saw_forwarder).unwrap(),
+            "row-secret"
+        );
+        assert!(std::fs::read_dir(&private).unwrap().next().is_none());
+    }
 }

@@ -30,6 +30,8 @@ const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
 const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
 const MASTER_LABEL: &str = "Master";
+const RECALL_LEFT_OUT: &str =
+    "More memories matched and were left out. Search for something narrower.\n";
 const NOT_LIVE_TOOL: &str = "Not done: without its live terminal the master's team tools are delegate, ask, record_answer, remember and recall.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
@@ -110,6 +112,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 typed_ms INTEGER,
                 draft INTEGER NOT NULL DEFAULT 0,
                 problem TEXT
+            );
+            CREATE TABLE IF NOT EXISTS team_master_live_terminal (
+                project TEXT PRIMARY KEY,
+                terminal INTEGER NOT NULL CHECK(terminal IN (0,1))
             );
             CREATE TABLE IF NOT EXISTS team_master_turns (
                 agent INTEGER NOT NULL,
@@ -266,18 +272,53 @@ pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Resul
     Ok(())
 }
 
-/// Reads whether a project's live master is switched on. Takes the engine database and the
-/// project. Returns the switch, off when never set.
+/// Reads whether a project's master runs live: its run flag is on and the owner's "Live
+/// terminal" setting is not Off (DEC-117 Q4). Takes the engine database and the project.
+/// Returns the answer, no when the flag was never set.
 pub fn live(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT live FROM team_live_masters WHERE project=?1",
+            "SELECT live FROM team_live_masters WHERE project=?1
+             AND NOT EXISTS(SELECT 1 FROM team_master_live_terminal WHERE project=?1 AND terminal=0)",
             [project.as_str()],
             |row| row.get(0),
         )
         .optional()
         .map(|on| on.unwrap_or(false))
         .map_err(state)
+}
+
+/// Reads a project's "Live terminal" setting (DEC-117 Q4): whether its master may run as its
+/// own app in a live terminal. Takes the engine database and the project. Returns the
+/// setting, on when the owner never saved one.
+pub fn live_terminal(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT terminal FROM team_master_live_terminal WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|on| on.unwrap_or(true))
+        .map_err(state)
+}
+
+/// Saves a project's "Live terminal" setting, replacing any earlier one. Off ends a running
+/// live master at its next stop, through `live`. Takes the owner transaction, the project and
+/// the setting. Returns any SQLite failure.
+pub fn set_live_terminal(
+    connection: &Connection,
+    project: &ProjectId,
+    on: bool,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_master_live_terminal(project,terminal) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET terminal=excluded.terminal",
+            params![project.as_str(), on],
+        )
+        .map_err(state)?;
+    Ok(())
 }
 
 /// Reads a project's live master switch as the owner sees it, with why it last could not start.
@@ -569,6 +610,28 @@ pub(crate) fn typable(text: &str) -> bool {
         && !text
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+/// How every line about a live master that was turned off starts.
+pub(crate) const LIVE_STOPPED: &str = "The live master was turned off";
+/// What follows `LIVE_STOPPED` on the line a live master stopped as idle leaves.
+const IDLE_WHY: &str = ": it was idle for ";
+
+/// The line a live master stopped as idle leaves. It names no place to go, since the owner
+/// can already be on the master view, and says a new start continues the conversation.
+/// Input: the idle choice's label. Output: the line.
+pub(crate) fn idle_stopped_line(label: &str) -> String {
+    format!(
+        "{LIVE_STOPPED}{IDLE_WHY}{label}. It continues the same conversation when you start it again."
+    )
+}
+
+/// Whether a problem line is the one `idle_stopped_line` leaves. Input: the line. Output:
+/// the answer.
+pub(crate) fn idle_stopped(problem: &str) -> bool {
+    problem
+        .strip_prefix(LIVE_STOPPED)
+        .is_some_and(|rest| rest.starts_with(IDLE_WHY))
 }
 
 /// Whether a project's live master is quiet now: it runs, no turn is open, the engine's last
@@ -1482,7 +1545,15 @@ fn lead_wake(
             ));
         }
     };
-    let (said, refused) = wake_in(tx, answering.access, answering.stored, agent, text, true)?;
+    let (said, refused) = wake_in(
+        tx,
+        answering.access,
+        answering.stored,
+        agent,
+        text,
+        true,
+        super::StoppedBy::Lead,
+    )?;
     if refused {
         return Ok((said, true));
     }
@@ -1606,6 +1677,10 @@ fn land_on_lead(
             ),
             true,
         ),
+        Err(problem) if problem.0 == crate::landing::WORKER_OPEN => (
+            format!("Not accepted: {}", crate::landing::WORKER_OPEN_TEXT),
+            true,
+        ),
         Err(problem) => (
             format!(
                 "Not accepted: the change set could not land ({}).",
@@ -1697,10 +1772,15 @@ fn recall(
             MemoryOrigin::Selected { .. } => "the owner, from a file",
             MemoryOrigin::Imported { .. } => "the owner, imported from a file",
         };
-        text.push_str(&format!(
+        let line = format!(
             "> ({place}, saved by {by}) {}\n",
             memory.text.trim().replace('\n', "\n> ")
-        ));
+        );
+        if text.len() + line.len() + RECALL_LEFT_OUT.len() > tool::REPLY_TEXT_MAX {
+            text.push_str(RECALL_LEFT_OUT);
+            break;
+        }
+        text.push_str(&line);
     }
     assert!(text.len() <= tool::REPLY_TEXT_MAX);
     Ok((text, false))
@@ -1885,8 +1965,8 @@ fn delegate(
 /// finished one; a name or number that reaches only a running sub-agent, none or one whose
 /// worktree is gone is refused in plain words, which point a live master at its tools and
 /// one that is not live (WK-R5) at its reply lines. Takes the transaction, the access, the
-/// setup, the name, the text and whether the master is live. Returns the sentence and
-/// whether it is a refusal, which wrote nothing, or a SQLite failure.
+/// setup, the name, the text, whether the master is live and who wakes it. Returns the
+/// sentence and whether it is a refusal, which wrote nothing, or a SQLite failure.
 pub(super) fn wake_in(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -1894,6 +1974,7 @@ pub(super) fn wake_in(
     agent: &str,
     text: &str,
     live: bool,
+    waker: super::StoppedBy,
 ) -> Result<(String, bool), EngineError> {
     let project = &stored.project_id;
     let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
@@ -1915,7 +1996,7 @@ pub(super) fn wake_in(
         return Ok((unknown, true));
     };
     let label = super::events::label(tx, id)?;
-    let admitted = super::admit_wake(tx, access, stored, id, text, now_ms())?;
+    let admitted = super::admit_wake(tx, access, stored, id, text, waker, now_ms())?;
     let reason = match admitted {
         Ok(_) => {
             super::names::reclaim(tx, project, id)?;
@@ -1931,6 +2012,12 @@ pub(super) fn wake_in(
         Err(super::OWNER_STOPPED) => {
             return Ok((
                 format!("The owner stopped {label}. Only the owner can wake it."),
+                true,
+            ));
+        }
+        Err(super::MASTER_STOPPED) => {
+            return Ok((
+                format!("The master stopped {label}. Only the master or the owner can wake it."),
                 true,
             ));
         }
@@ -1953,10 +2040,14 @@ pub(super) fn wake_in(
 }
 
 fn changes(answering: &Answering<'_>) -> (String, bool) {
-    let listed = crate::landing::open(answering.landing)
-        .and_then(|db| crate::landing::list(&db, &answering.stored.project_id));
-    let sets = match listed {
-        Ok(sets) => sets,
+    let project = &answering.stored.project_id;
+    let listed = crate::landing::open(answering.landing).and_then(|db| {
+        let sets = crate::landing::list(&db, project)?;
+        let waiting = crate::landing::waiting(&db, Some(project))?;
+        Ok((sets, waiting))
+    });
+    let (sets, waiting) = match listed {
+        Ok(read) => read,
         Err(problem) => {
             return (
                 format!(
@@ -1967,7 +2058,7 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             );
         }
     };
-    let waiting: Vec<String> = sets
+    let open: Vec<String> = sets
         .iter()
         .filter(|set| {
             matches!(
@@ -1978,28 +2069,16 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             )
         })
         .take(CHANGES_LISTED_MAX)
-        .map(|set| {
-            let state = match set.state {
-                crate::landing::ChangeState::Conflict => "conflicts with the owner's branch",
-                crate::landing::ChangeState::Updating => "being updated",
-                _ => "waiting for review",
-            };
-            format!(
-                "- {}: {} files, +{} -{}, {state}",
-                super::bound_text(&set.agent.label, 80),
-                set.files,
-                set.added,
-                set.removed
-            )
-        })
+        .map(|set| format!("- {}", crate::landing::open_set_line(set)))
         .collect();
-    if waiting.is_empty() {
+    if open.is_empty() {
         return ("No change set is waiting for the owner.".into(), false);
     }
+    let here = waiting.here.expect("the count was asked for this project");
     (
         format!(
-            "Change sets waiting for the owner in Changes:\n{}",
-            waiting.join("\n")
+            "Change sets open in Changes, {here} waiting for the owner:\n{}",
+            open.join("\n")
         ),
         false,
     )
@@ -2107,5 +2186,5 @@ mod merge;
 mod sub_merge;
 mod work;
 
-pub(crate) use work::WAKE_TASK;
 pub use work::wait_sentence;
+pub(crate) use work::{WAKE_DELIVERED, WAKE_TASK};

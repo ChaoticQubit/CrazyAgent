@@ -2,10 +2,9 @@ import { randomBytes } from "node:crypto";
 import { click, shown, texts } from "../settings-steps.mjs";
 import { UI_MS, lit } from "../trial-kit.mjs";
 import { memoryVerdict, rememberPrompt } from "../trial4-context.mjs";
+import { sendToMaster, terminalLive } from "./n-d8-master-reply.mjs";
 
 const MASTER_MS = 600000;
-const BOX = "textarea.tg-composer-input";
-const SEND = "//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
 const MEMORY = "//button[contains(@class, \"pj-titem\")][normalize-space(.)=\"Project memory\"]";
 const WRITES = "#memory-agent-writes";
 
@@ -21,7 +20,7 @@ async function projectMemory(kit) {
 /** Reads the source line Settings, Memory shows under one memory row, through WebDriver since
  * the row is found by XPath. Input: the row's XPath. Output: its text, "" when none is shown. */
 async function sourceOf(row) {
-  const line = `${row}//span[contains(@class, "muted")]`;
+  const line = `${row}//span[contains(@class, "set-help")]`;
   return (await shown(line)) ? $(line).getText() : "";
 }
 
@@ -38,21 +37,14 @@ export const checks = [{
     const writes = await $(WRITES).getValue();
     await kit.tab("conversation");
     const request = rememberPrompt(token);
-    await kit.until(() => shown(BOX), UI_MS, "the master's message box was never shown");
-    await kit.paste(BOX, request);
-    await kit.waitFor(async () => {
-      if ((await $(BOX).getValue()) !== request) await kit.paste(BOX, request);
-      const ready = await $(SEND).isEnabled();
-      return { done: ready, seen: ready ? "Send is enabled with the request in the box" : "Send is off with the request in the box" };
-    }, MASTER_MS, "Send never became enabled with the request in the box: the master terminal never went live");
-    await click(SEND);
-    await kit.until(async () => (await $(BOX).getValue()) === "", UI_MS, "the message box kept the request: it was not sent");
+    await terminalLive(kit, MASTER_MS);
+    await sendToMaster(kit, request);
     await kit.waitFor(async () => {
       const saved = (await projectMemory(kit)).includes(token);
       return { done: saved, seen: saved ? `${token} is listed` : `${token} is not listed yet` };
     }, MASTER_MS, `OP-22: Context, Project memory never showed the master's fact ${token}`);
 
-    const row = `//div[contains(@class, "item-row")][.//p[contains(normalize-space(.), ${lit(token)})]]`;
+    const row = `//div[contains(@class, "set-row")][.//p[contains(normalize-space(.), ${lit(token)})]]`;
     const approve = `${row}//button[normalize-space(.)="Approve"]`;
     await kit.go("#/settings/memory");
     await kit.pick("#memory-scope", kit.project());

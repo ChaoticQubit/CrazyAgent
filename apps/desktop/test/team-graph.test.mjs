@@ -8,6 +8,17 @@ const graph = await import("../src/screens/team/graph.ts");
 const io = await import("../src/screens/team/terminal-io.ts");
 const view = await import("../src/screens/team/index.tsx");
 
+/** Renders with the owner's Terminal input saved as Both, as a render with no window reads the
+ * default, Terminal only. Input: the render. Output: what it returns. */
+function withBox(render) {
+  globalThis.window = { localStorage: { getItem: () => "both" } };
+  try {
+    return render();
+  } finally {
+    delete globalThis.window;
+  }
+}
+
 const node = (id, kind, extra = {}) => ({
   id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal: null, ...extra,
 });
@@ -232,7 +243,7 @@ test("the terminal panel names the agent, says it is connecting and offers Close
 test("the terminal panel head is the mockup's: name, harness and state, Message, Stop and Close, then role, branch and the swap hint", () => {
   const harness = (id) => (id === "codex" ? "Codex" : id);
   const sub = { ...team.nodes[0], branch: "crazyagent/calendar-api" };
-  const html = renderToStaticMarkup(createElement(view.TerminalPanel, { node: sub, harness, onClose() {}, onStop() {}, swaps: true }));
+  const html = withBox(() => renderToStaticMarkup(createElement(view.TerminalPanel, { node: sub, harness, onClose() {}, onStop() {}, swaps: true })));
   const head = html.slice(html.indexOf('class="tg-terminal-head"'), html.indexOf('class="tg-terminal-state"'));
   assert.match(head, /<span class="tg-terminal-name">codex-2 · Codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
   const order = [">Message</button>", ">Stop</button>", 'aria-label="Close terminal"'].map((part) => head.indexOf(part));
@@ -251,8 +262,9 @@ test("the terminal panel head is the mockup's: name, harness and state, Message,
   assert.doesNotMatch(master, />Stop<\/button>/, "no Stop without a stop action");
   assert.doesNotMatch(master, /Click another agent/, "only the graph's one panel says it swaps");
   assert.doesNotMatch(master, /tg-terminal-branch/, "no branch, no branch part");
-  const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "sub"), onClose() {} }));
+  const none = withBox(() => renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "sub"), onClose() {} })));
   assert.match(none, /<button type="button" class="btn small" disabled="">(?:(?!<\/button>)[^])*Message<\/button>/, "Message waits for a box to type in");
+  assert.doesNotMatch(renderToStaticMarkup(createElement(view.TerminalPanel, { node: sub, harness, onClose() {}, onStop() {}, swaps: true })), />Message<\/button>/, "with no box there is no Message at all");
 });
 
 test("the terminal head says how long the agent's task has run, after the branch, only while one runs", async () => {
@@ -280,7 +292,7 @@ test("a failed background read keeps the last graph, so an open terminal stays m
   const ok = { kind: "ok", value: team };
   const busy = { kind: "error", code: "busy", message: "The engine is busy. Try again." };
   let state = view.graphRead(view.GRAPH_UNREAD, ok);
-  assert.deepEqual(state, { shown: ok, stale: null });
+  assert.deepEqual(state, { shown: ok, stale: null, gone: false });
   state = view.graphRead(state, busy);
   assert.equal(state.shown, ok, "the graph that holds the open terminal is still shown");
   assert.equal(state.stale, "The engine is busy. Try again.");
@@ -288,8 +300,22 @@ test("a failed background read keeps the last graph, so an open terminal stays m
   assert.equal(state.shown, ok);
   assert.equal(state.stale, "The team graph isn't ready in this build.");
   state = view.graphRead(state, ok);
-  assert.deepEqual(state, { shown: ok, stale: null });
-  assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null }, "with no graph yet the error is the view");
+  assert.deepEqual(state, { shown: ok, stale: null, gone: false });
+  assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null, gone: false }, "with no graph yet the error is the view");
+});
+
+test("a read that finds the project removed is marked gone, and no other read is", () => {
+  const ok = { kind: "ok", value: team };
+  for (const code of ["project_missing", "project_setup_missing"]) {
+    const removed = { kind: "error", code, message: "Gone." };
+    assert.equal(view.graphRead(view.GRAPH_UNREAD, removed).gone, true, code);
+    const after = view.graphRead(view.graphRead(view.GRAPH_UNREAD, ok), removed);
+    assert.equal(after.gone, true, `${code} after a good read`);
+    assert.equal(after.shown, ok, "the last graph stays on screen");
+  }
+  assert.equal(view.graphRead(view.GRAPH_UNREAD, ok).gone, false);
+  assert.equal(view.graphRead(view.GRAPH_UNREAD, { kind: "not_ready" }).gone, false);
+  assert.equal(view.graphRead(view.GRAPH_UNREAD, { kind: "error", code: "owner_read_failed", message: "No." }).gone, false);
 });
 
 test("the one terminal panel is kept by the agent's number, so a Questions node and its graph card share it", () => {
@@ -342,19 +368,21 @@ test("typed keys and a sent prompt go out in order on one queue, and only the pr
 
 test("the note under a live terminal says typed keys are not kept or told to the master", async () => {
   const panel = await import("../src/screens/team/terminal-panel.tsx");
-  assert.equal(panel.typingNote(team.nodes[2]), "Typing goes straight to the master.");
-  assert.equal(panel.typingNote(team.nodes[0]),
+  assert.equal(panel.typingNote(team.nodes[2], true), "Typing goes straight to the master.");
+  assert.equal(panel.typingNote(team.nodes[2], false), "Typing goes straight to the master.");
+  assert.equal(panel.typingNote(team.nodes[0], true),
     "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
-  assert.equal(panel.typingNote(team.nodes[1]), "Typing goes straight to this teammate's pane and is not kept or told to the master.");
+  assert.equal(panel.typingNote(team.nodes[0], false), "Typing goes straight to this agent and is not kept.", "no box, so no word of one");
+  assert.equal(panel.typingNote(team.nodes[1], false), "Typing goes straight to this teammate's pane and is not kept or told to the master.");
   assert.equal(panel.teammatePane(team.nodes[1]), "%12");
   assert.equal(panel.teammatePane(team.nodes[0]), null);
   assert.equal(panel.promptCopy(team.nodes[1]).placeholder, "Tell Teammate %12 what to do. It goes to its pane only.");
-  assert.equal(panel.typingNote({ ...team.nodes[1], agent: 12 }),
+  assert.equal(panel.typingNote({ ...team.nodes[1], agent: 12 }, true),
     "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
 });
 
 test("the composer names who reads the prompt and says a sub-agent's master is told", () => {
-  const panel = (target) => renderToStaticMarkup(createElement(view.TerminalPanel, { node: target, onClose() {} }));
+  const panel = (target) => withBox(() => renderToStaticMarkup(createElement(view.TerminalPanel, { node: target, onClose() {} })));
   const sub = panel(team.nodes[0]);
   assert.match(sub, /<label for="tg-prompt-team-2" class="pj-sr">Prompt codex-2<\/label>/);
   assert.match(sub, /placeholder="Type to codex-2\.\.\."/);
