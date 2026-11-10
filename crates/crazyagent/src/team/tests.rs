@@ -5200,8 +5200,7 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
     }
 }
 
-/// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
-/// output reach it, and cache re-reads, however many, never do.
+/// A budget reads tokens only, so the estimated dollars on a row never spend it.
 #[test]
 fn a_budget_spends_the_same_tokens_whatever_the_rows_cost() {
     let (_directory, mut connection, project) = team_database("team-budget-dollars");
@@ -5225,6 +5224,8 @@ fn a_budget_spends_the_same_tokens_whatever_the_rows_cost() {
     assert_eq!(before, 42);
 }
 
+/// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
+/// output reach it, and cache re-reads, however many, never do.
 #[test]
 fn a_token_budget_spends_new_input_cache_writes_and_output_but_never_cache_reads() {
     let (_directory, mut connection, project) = team_database("team-budget-headline");
