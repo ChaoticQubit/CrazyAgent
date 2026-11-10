@@ -84,6 +84,9 @@ pub(crate) const STATE: &str = "crazyagent";
 /// The folder under a Codex home's `skills` where Codex 0.164.0 installs its own system
 /// skills at each start.
 pub(crate) const CODEX_SYSTEM_SKILLS: &str = ".system";
+/// The code a Codex launch is refused with when skills an earlier run left in its home are
+/// still there after the engine cleared what pins them, so Codex never loads them.
+pub const SKILLS_KEPT: &str = "launch_context_skills_kept";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
 /// The context-mode tools the "Tools to use" section names, in the order it names them.
@@ -1783,11 +1786,15 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
 /// install takes, installing no files. The guard keeps a second launch out of the home
 /// while this one runs, so writing the launch key never lands on a home an agent already
-/// runs on. Inputs: the agent's home and the harness id. Output: the lock guard, or
-/// `launch_home_busy`.
-pub fn lock_only(home: &Path, _harness: &str) -> Result<Installed, LaunchError> {
+/// runs on. A Codex home also loses the skills an earlier run left in it, as a full install
+/// does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the lock guard,
+/// `launch_home_busy` or [`SKILLS_KEPT`].
+pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
     crate::harnesses::launch::validate_home(home)?;
     let lock = lock(home)?;
+    if crate::harnesses::spec(harness).is_some_and(|spec| spec.id == "codex") {
+        remove_copies(home)?;
+    }
     Ok(Installed {
         arguments: Vec::new(),
         files: None,
@@ -1808,9 +1815,10 @@ pub fn lock_only(home: &Path, _harness: &str) -> Result<Installed, LaunchError> 
 /// It never resolves `skills` by path, because the agent may have replaced that folder with
 /// a link: each entry is moved up into the verified home through descriptors and removed
 /// there. A `skills` that is not a real folder of this user is left alone. An entry that does
-/// not move has the flags that pin it cleared and is moved once more (CTX-M1 r1). Input: the
-/// validated agent home. Output: Ok, or `launch_context_skills_kept` when an entry is still
-/// there, so Codex never starts with what the agent left in it.
+/// not move has what pins it cleared ([`unpin`]) and is moved once more, and a parked folder
+/// a plain removal leaves is released and removed ([`clear`]) (CTX-M1 r1, r2 I3). Input: the
+/// validated agent home. Output: Ok, or [`SKILLS_KEPT`] when an entry is still there, so
+/// Codex never starts with what the agent left in it.
 #[cfg(unix)]
 fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -1829,18 +1837,18 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
         let name = format!(".{STATE}-{kind}-{}", std::process::id());
         let parked = home.join(&name);
         let move_up = || {
-            remove(&parked);
+            clear(&parked);
             rustix::fs::renameat(&skills, entry, &parent, name.as_str()).is_ok()
         };
         let mut moved = move_up();
         if !moved && held(&skills, entry) {
-            clear_flags(home, &skills, entry);
+            unpin(home, &skills, entry);
             moved = move_up();
         }
         if moved {
-            remove(&parked);
+            clear(&parked);
         } else if held(&skills, entry) {
-            return Err(failure("launch_context_skills_kept"));
+            return Err(failure(SKILLS_KEPT));
         }
     }
     Ok(())
@@ -1864,18 +1872,17 @@ fn held(skills: &std::os::fd::OwnedFd, entry: &str) -> bool {
     )
 }
 
-/// Clears the user flags that keep an entry from moving, immutable and append only, from the
-/// `skills` folder and from its entry, which an agent could set before its profile denied it
-/// (CTX-M1 r1). A path is changed only while it is a folder or file of this user, never a
-/// link, and every other flag is kept. Inputs: the home, the open `skills` folder and the
+/// Clears what keeps an entry from moving out of `skills`, which an agent could set on the
+/// `skills` folder or on the entry ([`release`]): pinning flags, ACL entries and a mode
+/// without the owner's write (CTX-M1 r1, r2 I3). A path is changed only while it is a folder
+/// or file of this user, never a link. Inputs: the home, the open `skills` folder and the
 /// entry's name.
-#[cfg(target_os = "macos")]
-fn clear_flags(home: &Path, skills: &std::os::fd::OwnedFd, entry: &str) {
-    use nix::sys::stat::FileFlag;
+#[cfg(unix)]
+fn unpin(home: &Path, skills: &std::os::fd::OwnedFd, entry: &str) {
     use rustix::fs::{AtFlags, FileType};
-    let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
     let user = rustix::process::geteuid().as_raw();
     let folder = home.join("skills");
+    assert!(folder.is_absolute());
     for (path, stat) in [
         (folder.clone(), rustix::fs::fstat(skills)),
         (
@@ -1883,23 +1890,62 @@ fn clear_flags(home: &Path, skills: &std::os::fd::OwnedFd, entry: &str) {
             rustix::fs::statat(skills, entry, AtFlags::SYMLINK_NOFOLLOW),
         ),
     ] {
-        let Ok(stat) = stat else {
-            continue;
-        };
-        let flags = FileFlag::from_bits_retain(stat.st_flags);
-        if stat.st_uid == user
-            && FileType::from_raw_mode(stat.st_mode) != FileType::Symlink
-            && flags.intersects(pinning)
-        {
-            let _ = nix::unistd::chflags(path.as_path(), flags.difference(pinning));
+        if stat.is_ok_and(|stat| {
+            stat.st_uid == user && FileType::from_raw_mode(stat.st_mode) != FileType::Symlink
+        }) {
+            release(&path, false);
         }
     }
 }
 
-/// Leaves flags alone where no flag an agent may set keeps an entry from moving. Inputs:
-/// unused.
+/// Removes a folder the engine parked out of `skills`. When a plain removal leaves it,
+/// because an agent left a pinned file or a folder without write inside, everything under it
+/// is released ([`release`]) and it is removed once more (CTX-M1 r2 I3). Anything but a
+/// folder of this user is only removed as it is. Input: the parked path in the agent home.
+#[cfg(unix)]
+fn clear(parked: &Path) {
+    assert!(parked.is_absolute());
+    remove(parked);
+    let user = rustix::process::geteuid().as_raw();
+    if fs::symlink_metadata(parked)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == user)
+    {
+        release(parked, true);
+        remove(parked);
+    }
+}
+
+/// Clears the immutable and append only flags, then every ACL entry, then adds the owner's
+/// read, write and folder search, on one path or on everything under it, with the system's
+/// `chflags` and `chmod`, never following a link and keeping every other flag and mode bit.
+/// A failure leaves the path as it was; the caller checks what is still there. Inputs: the
+/// absolute path and whether to walk the tree under it.
+#[cfg(target_os = "macos")]
+fn release(path: &Path, tree: bool) {
+    use std::process::{Command, Stdio};
+    assert!(path.is_absolute());
+    let walk: &[&str] = if tree { &["-R", "-P"] } else { &["-h"] };
+    for (tool, change) in [
+        ("/usr/bin/chflags", "nouchg,nouappnd"),
+        ("/bin/chmod", "-N"),
+        ("/bin/chmod", "u+rwX"),
+    ] {
+        let _ = crate::spawn_gate::status(
+            Command::new(tool)
+                .args(walk)
+                .arg(change)
+                .arg(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+    }
+}
+
+/// Leaves a path as it is off macOS, where the engine releases nothing an agent set; a home
+/// pinned that way keeps its Codex launches refused with [`SKILLS_KEPT`]. Inputs: unused.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn clear_flags(_home: &Path, _skills: &std::os::fd::OwnedFd, _entry: &str) {}
+fn release(_path: &Path, _tree: bool) {}
 
 fn remove(path: &Path) {
     match fs::symlink_metadata(path) {
