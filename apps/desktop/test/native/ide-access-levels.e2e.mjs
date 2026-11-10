@@ -145,7 +145,6 @@ async function atLevel(t, level, shared) {
 
     if (level.access === "full") {
       await t.test("Full access: the terminal is the owner's login shell and git knows the owner", async () => {
-        await ide.run("Terminal: Focus Terminal");
         const said = await ran("level-shell.txt", `ps -o command= -p $$; git config user.name; git config user.email; git status --porcelain 2>&1 >/dev/null`);
         assert.match(said.split("\n")[0], /\s-[a-z]*l\b/, said);
         assert.ok(said.split("\n").includes(OWNER_NAME), said);
@@ -155,7 +154,6 @@ async function atLevel(t, level, shared) {
     }
 
     await t.test(`${level.label}: the terminal reports what the level allows`, async () => {
-      await ide.run("Terminal: Focus Terminal");
       await ide.until("a terminal in the panel", PANEL_TERMINAL);
       const said = await ran(`level-${level.access}.txt`, probe(port, join(root, `outside-${level.access}`)));
       writeFileSync(join(evidence, `level-${level.access}.txt`), said);

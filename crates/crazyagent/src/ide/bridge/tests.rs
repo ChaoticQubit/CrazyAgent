@@ -1636,7 +1636,7 @@ async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStr
 /// The Sandboxed terminal runs in a pane the engine itself starts, outside the IDE
 /// server's sandbox, under the project's agent profile: it starts in the project folder,
 /// typed input runs, the project's file is readable, the engine database and an IDE
-/// capability file are not, the network is open, at most `TERMINALS_MAX` run at once, a
+/// capability file are not, the network is closed, at most `TERMINALS_MAX` run at once, a
 /// detached terminal's pane ends, and revoking the capability ends the rest.
 #[cfg(target_os = "macos")]
 #[tokio::test]
@@ -1695,7 +1695,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
         format!("cwd-1={}", folder.display()),
         "db-0".to_owned(),
         "project-1".to_owned(),
-        "net-1".to_owned(),
+        "net-0".to_owned(),
     ] {
         assert!(seen.contains(&answer), "{answer} missing in: {seen}");
     }

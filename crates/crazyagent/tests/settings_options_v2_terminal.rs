@@ -286,7 +286,7 @@ fn sandboxed_probe(database: &Path, granted: &Path, other: &Path, port: u16) -> 
 /// through the engine's bridge (`ide.terminal`, the engine's own launch and pane) starts in
 /// the project folder under the agent sandbox: the engine's database denied, the project
 /// and the owner's read-only folder readable, that folder not writable, a folder not
-/// granted unreadable, and the network open.
+/// granted unreadable, and no network.
 #[tokio::test(flavor = "multi_thread")]
 async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_agent_sandbox() {
     let mut case = Terminal::start("ca-v2opt-term-sbx-").await;
@@ -385,7 +385,7 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
         "granted-1".to_owned(),
         "granted-write-0".to_owned(),
         "other-0".to_owned(),
-        "net-1".to_owned(),
+        "net-0".to_owned(),
     ] {
         assert!(seen.contains(&answer), "{answer} missing in: {seen}");
     }
