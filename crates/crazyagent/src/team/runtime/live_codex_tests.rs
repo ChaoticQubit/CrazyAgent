@@ -1,5 +1,7 @@
 use super::live_claude_tests::processes_with;
-use super::managed_agent::{Closing, ManagedAgent, SignedIn, codex, real_codex, shown};
+use super::managed_agent::{
+    Closing, ManagedAgent, SignedIn, codex, keep_rollouts, real_codex, shown,
+};
 use super::{Report, TurnEnd};
 use crate::team::{AgentRole, BackgroundAtEnd};
 use crate::terminal::tmux::{Tmux, installed};
@@ -13,6 +15,16 @@ const CODEX_TURN: Duration = Duration::from_secs(180);
 const REAPED: Duration = Duration::from_secs(10);
 const MARKER_GRACE: Duration = Duration::from_secs(5);
 const FIRST_PROMPT: &str = "Reply with exactly the word OK and nothing else.";
+/// The most characters of one rollout tool record a row prints (G1-DIAG).
+const CALL_SHOWN: usize = 400;
+/// The rollout record kinds that carry a tool call or its output.
+const TOOL_RECORDS: [&str; 5] = [
+    "function_call",
+    "function_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "local_shell_call",
+];
 /// The title row of Codex's folder access screen, as the engine's own screen read finds it.
 const FOLDER_SCREEN_TITLE: &str = "Folder access";
 /// How often a row reads its agent's pane. The engine leaves the folder access screen up
@@ -129,12 +141,35 @@ fn running(command: &str) -> bool {
     })
 }
 
+/// One tool record of a rollout as a row prints it: its kind, the tool's name, and its
+/// arguments, input, action or output as text, cut to `CALL_SHOWN` characters. Input: the
+/// record's payload. Output: the line.
+fn call_line(payload: &serde_json::Value) -> String {
+    let body = ["arguments", "input", "action", "output"]
+        .iter()
+        .map(|key| &payload[key])
+        .find(|value| !value.is_null())
+        .map_or_else(String::new, |value| {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned)
+        });
+    let line = format!(
+        "{} {} {body}",
+        payload["type"].as_str().unwrap_or("-"),
+        payload["name"].as_str().unwrap_or("-")
+    );
+    line.chars().take(CALL_SHOWN).collect()
+}
+
 /// What the real Codex wrote of its sessions under an agent home: each rollout's path, the
-/// `cli_version` each session record names and the text of each assistant message.
+/// `cli_version` each session record names, the text of each assistant message and each
+/// tool call and output as [`call_line`] prints it.
 struct CodexTrace {
     rollouts: Vec<PathBuf>,
     versions: Vec<String>,
     said: Vec<String>,
+    calls: Vec<String>,
 }
 
 impl CodexTrace {
@@ -142,7 +177,7 @@ impl CodexTrace {
     /// Output: the trace, empty when Codex wrote none.
     fn of(home: &Path) -> Self {
         let rollouts = jsonl_files(&home.join("sessions"));
-        let (mut versions, mut said) = (Vec::new(), Vec::new());
+        let (mut versions, mut said, mut calls) = (Vec::new(), Vec::new(), Vec::new());
         for path in &rollouts {
             for line in std::fs::read_to_string(path).unwrap().lines() {
                 let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -163,6 +198,12 @@ impl CodexTrace {
                             .filter(|part| part["type"] == "output_text")
                             .filter_map(|part| part["text"].as_str().map(str::to_owned)),
                     );
+                } else if entry["type"] == "response_item"
+                    && payload["type"]
+                        .as_str()
+                        .is_some_and(|kind| TOOL_RECORDS.contains(&kind))
+                {
+                    calls.push(call_line(payload));
                 }
             }
         }
@@ -170,17 +211,27 @@ impl CodexTrace {
             rollouts,
             versions,
             said,
+            calls,
+        }
+    }
+
+    /// Prints the rollouts, the Codex versions and each tool record, one line each, so a
+    /// failed row's log shows what Codex ran. Output: none.
+    fn print(&self) {
+        println!(
+            "codex rollouts={:?} cli_version={:?}",
+            self.rollouts, self.versions
+        );
+        for call in &self.calls {
+            assert!(call.chars().count() <= CALL_SHOWN);
+            println!("codex tool {call:?}");
         }
     }
 
     /// Checks that the real Codex itself gave a row's reply: a rollout whose session record
     /// names a Codex version, and an assistant message there holding `word`. Input: the
-    /// word. Output: none; prints the rollouts and the version.
+    /// word. Output: none.
     fn assert_said(&self, word: &str) {
-        println!(
-            "codex rollouts={:?} cli_version={:?}",
-            self.rollouts, self.versions
-        );
         assert!(!self.rollouts.is_empty(), "Codex wrote no rollout");
         assert!(
             self.versions.iter().any(|version| !version.is_empty()),
@@ -240,9 +291,10 @@ fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Closing, ManagedAgent) {
 /// SECAUDIT-5-LIVE G1: under Stop, the real Codex as a sub-agent in a pane, on the owner's
 /// signed-in account, runs a script with its shell tool inside the agent's Seatbelt profile
 /// and its process-info deny. The script leaves a `nohup` sleep and a sleep in a session of
-/// its own. The turn ends in success with no problem, the real Codex's rollout holds the
-/// reply, both sleeps were seen running, and within `REAPED` after the turn no process names
-/// either sleep or the agent's home. Runs in a live window only.
+/// its own, each writing a marker first. The turn ends in success with no problem, the real
+/// Codex's rollout holds the reply, both markers exist, the session sleep was seen running
+/// (Codex 0.164 itself ends the `nohup` one with the command's group, G1-DIAG), and within
+/// `REAPED` no process names either sleep or the agent's home. Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
@@ -256,10 +308,21 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
     let kept = format!("/bin/sleep 300.{tag:09}");
     let own_session = format!("/bin/sleep 301.{tag:09}");
     let script = agent.working_dir.join("background.sh");
+    let ran = [
+        agent.working_dir.join("kept-ran"),
+        agent.working_dir.join("own-ran"),
+    ];
+    let [kept_ran, own_ran] = [&ran[0], &ran[1]].map(|path| path.to_str().unwrap().to_owned());
+    assert!(
+        [&kept_ran, &own_ran].iter().all(|path| path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))),
+        "a marker path needs quoting: {kept_ran} {own_ran}"
+    );
     std::fs::write(
         &script,
         format!(
-            "/usr/bin/nohup {kept} > /dev/null 2>&1 &\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid(); exec \"/bin/sleep\", \"301.{tag:09}\"' > /dev/null 2>&1 &\necho started\n"
+            "/usr/bin/nohup /bin/sh -c 'echo ran > {kept_ran}; exec {kept}' > /dev/null 2>&1 &\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid(); exec \"/bin/sh\", \"-c\", \"echo ran > {own_ran}; exec {own_session}\"' > /dev/null 2>&1 &\ntries=0\nwhile [ ! -e {kept_ran} ] || [ ! -e {own_ran} ]; do\n  tries=$((tries + 1))\n  [ \"$tries\" -gt 50 ] && break\n  /bin/sleep 0.1\ndone\necho started\n"
         ),
     )
     .unwrap();
@@ -302,24 +365,77 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
         std::thread::sleep(Duration::from_millis(200));
     };
     host.close();
+    let seen = [
+        seen[0].load(Ordering::SeqCst),
+        seen[1].load(Ordering::SeqCst),
+    ];
+    let marked = [ran[0].exists(), ran[1].exists()];
+    println!(
+        "real codex background stop: seen nohup={} session={} markers nohup={} session={} left={}",
+        seen[0],
+        seen[1],
+        marked[0],
+        marked[1],
+        left.len()
+    );
+    let trace = CodexTrace::of(&agent.home);
+    trace.print();
     let (text, end, cause) = finished(&reports);
     println!("real codex background stop: end={end:?} cause={cause:?} reply={text:?}");
     assert_eq!(problem, None);
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains("STARTED"), "{text}");
-    CodexTrace::of(&agent.home).assert_said("STARTED");
+    trace.assert_said("STARTED");
+    assert!(marked[0], "the agent's nohup sleep never started: {text}");
     assert!(
-        seen[0].load(Ordering::SeqCst),
-        "the agent's nohup sleep never ran: {text}"
+        marked[1],
+        "the agent's sleep in a session of its own never started: {text}"
     );
     assert!(
-        seen[1].load(Ordering::SeqCst),
+        seen[1],
         "the agent's sleep in a session of its own never ran: {text}"
     );
     assert!(
         left.is_empty(),
         "processes of the agent outlived its turn: {left:?}"
     );
+}
+
+/// G1-DIAG: the live keep copies each regular `.jsonl` file below an agent home's sessions
+/// folder, nested ones too, under its own name, and nothing else: no other file, no file or
+/// folder reached through a link the agent could plant, and nothing for a home with no
+/// sessions folder.
+#[test]
+fn the_live_keep_copies_only_the_rollouts_under_the_agent_home() {
+    let root = tempfile::tempdir().unwrap();
+    let sessions = root.path().join("home").join("sessions");
+    let (keep, outside) = (root.path().join("keep"), root.path().join("outside"));
+    std::fs::create_dir_all(sessions.join("2026").join("11")).unwrap();
+    std::fs::create_dir_all(outside.join("deeper")).unwrap();
+    std::fs::write(
+        sessions.join("2026").join("11").join("rollout-a.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    std::fs::write(sessions.join("rollout-b.jsonl"), "{}\n").unwrap();
+    std::fs::write(sessions.join("notes.txt"), "notes\n").unwrap();
+    std::fs::write(outside.join("owner.jsonl"), "{}\n").unwrap();
+    std::fs::write(outside.join("deeper").join("owner.jsonl"), "{}\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("owner.jsonl"), sessions.join("linked.jsonl")).unwrap();
+    std::os::unix::fs::symlink(&outside, sessions.join("linked")).unwrap();
+    assert_eq!(keep_rollouts(&sessions, &keep).unwrap(), 2);
+    let mut kept: Vec<String> = std::fs::read_dir(&keep)
+        .unwrap()
+        .map(|item| item.unwrap().file_name().into_string().unwrap())
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ["rollout-a.jsonl", "rollout-b.jsonl"]);
+    let none = root.path().join("keep-none");
+    assert_eq!(
+        keep_rollouts(&root.path().join("no-home").join("sessions"), &none).unwrap(),
+        0
+    );
+    assert!(!none.exists());
 }
 
 /// What one first turn of a real Codex sub-agent in a pane showed: its reply, end and
@@ -417,6 +533,7 @@ fn a_real_codex_agent_in_a_pane_takes_its_first_prompt_with_no_folder_screen() {
         "real codex pane, no .codex: end={:?} cause={:?} reply={:?} folder_screens={}",
         turn.end, turn.cause, turn.text, turn.screens
     );
+    turn.trace.print();
     assert_eq!(turn.problem, None);
     assert_eq!(turn.end, TurnEnd::Success, "{:?}", turn.cause);
     assert!(turn.text.contains("OK"), "{}", turn.text);
@@ -439,6 +556,7 @@ fn a_real_codex_agent_in_a_pane_with_a_codex_folder_gets_past_the_screen_and_sta
         "real codex pane, .codex planted: end={:?} cause={:?} reply={:?} folder_screens={} plant_started={}",
         turn.end, turn.cause, turn.text, turn.screens, turn.ran
     );
+    turn.trace.print();
     assert_eq!(turn.problem, None);
     assert_eq!(turn.end, TurnEnd::Success, "{:?}", turn.cause);
     assert!(turn.text.contains("OK"), "{}", turn.text);
