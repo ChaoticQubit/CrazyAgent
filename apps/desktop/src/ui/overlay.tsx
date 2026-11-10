@@ -51,7 +51,8 @@ function useModal(open: boolean, returnFocus?: () => HTMLElement | null) {
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog || !open) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active = document.activeElement;
+    const opener = active instanceof HTMLElement && active !== document.body ? active : null;
     if (!dialog.open) dialog.showModal();
     const first = dialog.querySelector<HTMLElement>("[data-autofocus], input:not([type=hidden]), textarea, select");
     first?.focus();
