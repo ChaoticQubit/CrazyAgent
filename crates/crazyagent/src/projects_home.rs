@@ -777,25 +777,52 @@ impl DeletePlan {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
-        for folder in &self.folders {
-            let Some(project) = folder.to_str() else {
-                continue;
-            };
-            let cache = crate::sandbox::tool_cache::project_folder(root, project);
-            assert_eq!(cache.parent(), Some(root.join(TOOL_CACHE_FOLDER).as_path()));
-            if let Some(digest) = cache.file_name().and_then(|name| name.to_str()) {
-                names.push(format!("{TOOL_CACHE_PREFIX}{digest}"));
-            }
-        }
-        names
-            .into_iter()
-            .filter_map(|name| {
-                let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
-                Some((name, inode))
-            })
-            .collect()
+        let mut files = recorded(root, names);
+        files.extend(tool_cache_files(&self.database, &self.folders));
+        files
     }
+}
+
+/// The records of the tool caches (T8) the engine keeps for these project folders, each
+/// with the identity of its folder, for a delete or a Remove from dashboard to remove; a
+/// cache that is not there is left out. Inputs: the engine database path and the project's
+/// folders. Output: the records.
+#[cfg(target_os = "macos")]
+pub fn tool_cache_files(database: &Path, folders: &[PathBuf]) -> Vec<RecordedFile> {
+    let Some(root) = database.parent() else {
+        return Vec::new();
+    };
+    let names = folders
+        .iter()
+        .filter_map(|folder| {
+            let cache = crate::sandbox::tool_cache::project_folder(root, folder.to_str()?);
+            assert_eq!(cache.parent(), Some(root.join(TOOL_CACHE_FOLDER).as_path()));
+            Some(format!(
+                "{TOOL_CACHE_PREFIX}{}",
+                cache.file_name()?.to_str()?
+            ))
+        })
+        .collect();
+    recorded(root, names)
+}
+
+/// Off macOS no project has a tool cache. Inputs: unused. Output: none.
+#[cfg(not(target_os = "macos"))]
+pub fn tool_cache_files(_: &Path, _: &[PathBuf]) -> Vec<RecordedFile> {
+    Vec::new()
+}
+
+/// Pairs each engine file name with the identity of the folder it names, leaving out a
+/// name that is no engine file or whose folder is not there. Inputs: the engine root and
+/// the names. Output: the records.
+fn recorded(root: &Path, names: Vec<String>) -> Vec<RecordedFile> {
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
+            Some((name, inode))
+        })
+        .collect()
 }
 
 /// One engine file a delete recorded: its exact name and the identity of the folder that held
@@ -806,7 +833,7 @@ pub type RecordedFile = (String, i64);
 const TOOL_CACHE_FOLDER: &str = "tool-cache";
 
 /// The start of the name a delete records for one project's tool caches (T8).
-const TOOL_CACHE_PREFIX: &str = "tool-cache-";
+pub(crate) const TOOL_CACHE_PREFIX: &str = "tool-cache-";
 
 /// The length of the hex digest that names one project's tool cache folder (T8).
 const TOOL_CACHE_DIGEST_BYTES: usize = 32;
