@@ -48,7 +48,7 @@ const AGENT_BYTES_MAX: usize = 512
 const TOOLS_PER_AGENT_MAX: usize = 256;
 const LABEL_BYTES_MAX: usize = 64;
 const EDIT_TOOLS: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"];
-const SHELL_TOOLS: [&str; 6] = [
+pub(crate) const SHELL_TOOLS: [&str; 6] = [
     "Bash",
     "shell",
     "shell_command",

@@ -1,6 +1,7 @@
 use super::capture::{MODELS_PER_HOUR_MAX, has_room};
 use super::rules::model_name;
 use super::storage;
+use crate::coord::adoption::SHELL_TOOLS;
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -453,6 +454,9 @@ pub fn classify(words: &Words, tools: &Tools) -> Activity {
 
 const EDITS_MAX: usize = 64;
 const NO_FILE: &str = "__no_file__";
+const MORE_SHELLS: &[&str] = &["BashTool", "PowerShell", "PowerShellTool", "exec"];
+const SHELL_WRAPPERS: &[&str] = &["bash", "sh", "zsh"];
+const PATCH_HEADS: &[&str] = &["*** Update File:", "*** Add File:"];
 const COMMAND_PREFIXES: &[&str] = &[
     "sudo", "doas", "npx", "bunx", "time", "nice", "nohup", "stdbuf", "rtk",
 ];
@@ -633,7 +637,7 @@ impl OpenTurn {
         match name {
             "Edit" | "Write" | "FileEditTool" | "FileWriteTool" | "NotebookEdit" | "write_file"
             | "apply_diff" | "apply_patch" => self.edited(file),
-            "Bash" | "BashTool" | "PowerShell" | "PowerShellTool" | "exec_command" | "exec" => {
+            shell if SHELL_TOOLS.contains(&shell) || MORE_SHELLS.contains(&shell) => {
                 self.tools.bash = true;
                 if !command.is_some_and(read_shaped) {
                     self.last_verify = Some(self.step);
@@ -715,14 +719,30 @@ fn shell_text(command: &Value) -> Option<String> {
     if let Some(text) = command.as_str() {
         return Some(text.to_owned());
     }
-    Some(
-        command
-            .as_array()?
+    let parts: Vec<&str> = command
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    if let [shell, flag, script] = parts[..]
+        && SHELL_WRAPPERS.contains(&shell.rsplit('/').next().unwrap_or(shell))
+        && flag.starts_with('-')
+        && flag.ends_with('c')
+    {
+        return Some(script.to_owned());
+    }
+    Some(parts.join(" "))
+}
+
+/// The first file a Codex patch updates or adds. Input: the patch text. Output: the path, used
+/// only to tell two files apart and never stored.
+fn patched_file(patch: &str) -> Option<&str> {
+    patch.lines().find_map(|line| {
+        PATCH_HEADS
             .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+            .find_map(|head| line.strip_prefix(head))
+            .map(str::trim)
+    })
 }
 
 /// Follows one Codex rollout line. Inputs: the line and the open turn. Output: the turn that
@@ -756,14 +776,24 @@ pub(super) fn codex_line(value: &Value, turn: &mut OpenTurn) -> Option<Closed> {
                     .or_else(|| arguments.get("cmd"))
                     .unwrap_or(&Value::Null),
             );
+            let patch = payload["input"]
+                .as_str()
+                .or_else(|| arguments["input"].as_str());
             let file = arguments["file_path"]
                 .as_str()
-                .or_else(|| arguments["path"].as_str());
+                .or_else(|| arguments["path"].as_str())
+                .or_else(|| patch.and_then(patched_file));
             turn.called(
                 payload["name"].as_str().unwrap_or(""),
                 file,
                 command.as_deref(),
             );
+            None
+        }
+        ("response_item", Some("local_shell_call")) if turn.started => {
+            turn.step = turn.step.saturating_add(1);
+            let command = shell_text(&payload["action"]["command"]);
+            turn.called("local_shell_call", None, command.as_deref());
             None
         }
         ("response_item", Some("web_search_call")) if turn.started => {

@@ -1426,13 +1426,13 @@ fn a_saved_turn_holds_no_message_or_path() {
     assert!(!progress.contains("secret-file"), "{progress}");
 }
 
-fn tools_read(db: &Connection, file: &Path) -> usize {
+fn tools_read(db: &Connection, file: &Path, format: Format) -> usize {
     let mut progress = Progress::default();
     let mut tools = Vec::new();
     let mut seen = Seen::new(db, "usage_messages");
     read_record_with(
         file,
-        Format::Claude,
+        format,
         &mut progress,
         NOW,
         Some(&mut tools),
@@ -1452,13 +1452,17 @@ fn a_resumed_copy_files_its_turns_and_tools_once() {
     append(&copy, &user("add a page"));
     append(&copy, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
     assert_eq!(
-        tools_read(&db, &copy),
+        tools_read(&db, &copy, Format::Claude),
         0,
         "a copied turn's tools are not new calls"
     );
     append(&copy, &user("fix the crash"));
     append(&copy, &calls("m2", Some("end_turn"), edit("/repo/b.rs")));
-    assert_eq!(tools_read(&db, &copy), 1, "the new turn's call is");
+    assert_eq!(
+        tools_read(&db, &copy, Format::Claude),
+        1,
+        "the new turn's call is"
+    );
     scan_it(&db, root.path());
     assert_eq!(
         activity_rows(&db),
@@ -1585,4 +1589,179 @@ fn a_forgotten_projects_turns_stay_in_the_chart_under_removed_projects() {
         vec![super::super::REMOVED_PROJECTS.to_owned()]
     );
     assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 2, 2, 2)]);
+}
+
+fn codex_tool(at: &str, name: &str, arguments: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "response_item", "payload": {"type": "function_call", "name": name, "arguments": arguments.to_string()}})
+    )
+}
+
+fn codex_local_shell(at: &str, command: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "response_item", "payload": {"type": "local_shell_call", "action": {"type": "exec", "command": command}}})
+    )
+}
+
+fn codex_patch(at: &str, head: &str, file: &str) -> String {
+    let patch = format!("*** Begin Patch\n*** {head} File: {file}\n@@\n+x\n*** End Patch\n");
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": patch}})
+    )
+}
+
+fn edits_around(between: &str) -> Vec<(String, i64, i64, i64)> {
+    let (root, db) = store();
+    let file = rollout(root.path(), "one");
+    append(&file, &meta(T0, "one", serde_json::json!({})));
+    append(&file, &codex_user(T0_1, "add a page"));
+    append(&file, &codex_call(T0_1, "apply_patch"));
+    append(&file, between);
+    append(&file, &codex_call(T0_2, "apply_patch"));
+    append(&file, &codex_done(T0_2));
+    scan_codex(&db, root.path());
+    activity_rows(&db)
+}
+
+fn retried() -> Vec<(String, i64, i64, i64)> {
+    vec![("feature".to_owned(), 1, 1, 0)]
+}
+
+#[test]
+fn a_codex_turn_takes_a_turn_context_written_before_its_message() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "one");
+    append(&file, &meta(T0, "one", serde_json::json!({})));
+    append(&file, &context(T0_1));
+    append(&file, &codex_user(T0_1, "add a page"));
+    append(&file, &codex_call(T0_2, "apply_patch"));
+    append(&file, &codex_done(T0_2));
+    scan_codex(&db, root.path());
+    assert_eq!(
+        names(&db, "SELECT model FROM usage_activity"),
+        vec![CODEX.to_owned()]
+    );
+}
+
+#[test]
+fn a_codex_shell_call_with_an_array_command_verifies_an_edit() {
+    let arguments = serde_json::json!({"command": ["bash", "-lc", "cargo test"]});
+    assert_eq!(
+        edits_around(&codex_tool(T0_1, "shell", arguments)),
+        retried()
+    );
+}
+
+#[test]
+fn a_codex_shell_command_call_verifies_an_edit() {
+    let arguments = serde_json::json!({"command": "cargo test"});
+    assert_eq!(
+        edits_around(&codex_tool(T0_1, "shell_command", arguments)),
+        retried()
+    );
+}
+
+#[test]
+fn a_codex_container_exec_call_verifies_an_edit() {
+    let arguments = serde_json::json!({"command": ["cargo", "test"]});
+    assert_eq!(
+        edits_around(&codex_tool(T0_1, "container.exec", arguments)),
+        retried()
+    );
+}
+
+#[test]
+fn a_codex_local_shell_call_verifies_an_edit() {
+    let command = serde_json::json!(["bash", "-lc", "cargo test"]);
+    assert_eq!(edits_around(&codex_local_shell(T0_1, command)), retried());
+}
+
+#[test]
+fn a_lookup_wrapped_in_a_codex_shell_is_still_first_try() {
+    let lookups = [
+        codex_tool(
+            T0_1,
+            "shell",
+            serde_json::json!({"command": ["bash", "-lc", "git status"]}),
+        ),
+        codex_tool(
+            T0_1,
+            "shell",
+            serde_json::json!({"command": ["/bin/zsh", "-lc", "rg foo"]}),
+        ),
+        codex_local_shell(T0_1, serde_json::json!(["bash", "-lc", "cat a.rs"])),
+    ];
+    for between in lookups {
+        assert_eq!(
+            edits_around(&between),
+            vec![("feature".to_owned(), 1, 1, 1)],
+            "{between}"
+        );
+    }
+}
+
+#[test]
+fn a_codex_patch_files_by_its_first_path_and_stores_only_a_hash() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "one");
+    let test = serde_json::json!({"cmd": "cargo test"});
+    append(&file, &meta(T0, "one", serde_json::json!({})));
+    append(&file, &codex_user(T0_1, "add a page"));
+    append(&file, &codex_patch(T0_1, "Update", "src/secret-a.rs"));
+    scan_codex(&db, root.path());
+    let progress: String = db
+        .query_row("SELECT progress FROM usage_files", [], |row| row.get(0))
+        .unwrap();
+    assert!(progress.contains("\"edits\":[["), "{progress}");
+    assert!(!progress.contains("secret-a"), "{progress}");
+    append(&file, &codex_tool(T0_1, "exec_command", test.clone()));
+    append(&file, &codex_patch(T0_1, "Add", "src/secret-b.rs"));
+    append(&file, &codex_done(T0_1));
+    append(&file, &codex_user(T0_2, "fix the crash"));
+    append(&file, &codex_patch(T0_2, "Update", "src/a.rs"));
+    append(&file, &codex_tool(T0_2, "exec_command", test));
+    let patch = "*** Begin Patch\n*** Update File: src/a.rs\n*** End Patch\n";
+    append(
+        &file,
+        &codex_tool(T0_2, "apply_patch", serde_json::json!({"input": patch})),
+    );
+    append(&file, &codex_done(T0_2));
+    scan_codex(&db, root.path());
+    assert_eq!(
+        activity_rows(&db),
+        vec![
+            ("debugging".to_owned(), 1, 1, 0),
+            ("feature".to_owned(), 1, 1, 1),
+        ]
+    );
+}
+
+#[test]
+fn a_forks_replayed_tool_call_is_not_a_new_call() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "fork");
+    append(
+        &file,
+        &meta(
+            LATER,
+            "fork",
+            serde_json::json!({"forked_from_id": "parent"}),
+        ),
+    );
+    append(&file, &codex_call(T0_1, "apply_patch"));
+    assert_eq!(
+        tools_read(&db, &file, Format::Codex),
+        0,
+        "a replayed call outside any turn is not new"
+    );
+    append(&file, &codex_user(PAST_REPLAY, "fix the crash"));
+    append(&file, &codex_call(PAST_REPLAY, "apply_patch"));
+    assert_eq!(
+        tools_read(&db, &file, Format::Codex),
+        1,
+        "the call after the replay is"
+    );
 }
