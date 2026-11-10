@@ -1820,6 +1820,33 @@ fn a_first_process_the_listener_started_is_named() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_first_process_is_not_named_once_the_listener_is_gone() {
+    let (mut child, group) = listeners_group();
+    let stand_in = StandIn::naming(group.0.as_raw_nonzero());
+    assert_eq!(
+        stand_in
+            .host
+            .pane_pid(&stand_in.agent)
+            .map_err(|problem| problem.0),
+        Ok(Some(child.id()))
+    );
+
+    drop(stand_in._listener);
+
+    assert_eq!(
+        stand_in
+            .host
+            .pane_pid(&stand_in.agent)
+            .map_err(|problem| problem.0),
+        Ok(None),
+        "a socket nothing listens at vouched for a process"
+    );
+    drop(group);
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn the_server_pid_comes_only_from_a_listener_bound_at_the_socket_itself() {
     let stand_in = StandIn::naming(2);
     assert_eq!(stand_in.host.server_pid(), Some(std::process::id()));
