@@ -1,13 +1,12 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { AgentSettingsView } from "../../src/screens/process.tsx";
-import { AccountChoiceView, ProjectAccountOrderView } from "../../src/screens/settings/account-choice.tsx";
+import { ProjectAccountOrderView } from "../../src/screens/settings/account-choice.tsx";
 import { MemoryView } from "../../src/screens/settings/memory.tsx";
 import { UpdatesView } from "../../src/screens/settings/updates.tsx";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const SCHEDULE = { strategy: "manual_rank", pools: [{ id: "pool-main", strategy: "balanced" }], projects: [{ id: "project-a", strategy: "use_it_or_lose_it" }], accounts: [], version: 3 };
-const POOL = { id: "pool-main", name: "Main", summary: "1 Claude", members: [], project_count: 1 };
 const nothing = () => undefined;
 const MEMORY = { saved: { kind: "ok", value: { items: [], next: null, agent_writes: "save" } }, suggested: { kind: "ok", value: [] }, scope: "", projects: [], search: "", failure: "", busy: null,
   onSearch: nothing, onScope: nothing, onAdd: nothing, onSave: nothing, onSaveEdited: nothing, onDismiss: nothing, onDelete: nothing, onMore: nothing, onRetry: nothing, onImport: nothing };
@@ -20,7 +19,7 @@ let waiting = [];
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** Mounts one app settings view whose read never comes back after a save, so what stays on
- * screen is the pick. Inputs: "schedule", "project", "memory", "delivery" or "updates", whether
+ * screen is the pick. Inputs: "project", "memory", "delivery" or "updates", whether
  * a save is refused and whether its answers wait for `answer`. Output: nothing. */
 export async function mount(view, refused, manual = false) {
   root?.unmount();
@@ -35,7 +34,6 @@ export async function mount(view, refused, manual = false) {
   const answer = () => reply(refused ? { kind: "error", code: "refused", message: "Refused." } : { kind: "ok", value: undefined });
   const note = () => reply(refused ? "Refused." : "");
   const views = {
-    schedule: [AccountChoiceView, { schedule: { kind: "ok", value: SCHEDULE }, pools: { kind: "ok", value: [POOL] }, names: new Map(), onChange: answer, onRetry: nothing }],
     project: [ProjectAccountOrderView, { schedule: { kind: "ok", value: SCHEDULE }, project: "project-a", pool: "pool-main", onChange: answer }],
     memory: [MemoryView, { ...MEMORY, onWrites: note }],
     delivery: [AgentSettingsView, { settings: DELIVERY, busy: false, failure: "", onSave: note }],

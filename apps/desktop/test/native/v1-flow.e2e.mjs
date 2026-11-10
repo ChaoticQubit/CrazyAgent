@@ -202,13 +202,10 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await go("#/home");
     await click("button=Create pool");
     await type("#pool-name", POOL);
-    await click(`label=${CODEX_ACCOUNT}`);
-    await click(`label=${LOCAL_ACCOUNT}`);
-    assert.equal(await page(`label=${CODEX_ACCOUNT}`, "checked"), true);
-    assert.equal(await page(`label=${LOCAL_ACCOUNT}`, "checked"), true);
+    await click(`button[aria-label=${JSON.stringify(`Add ${CODEX_ACCOUNT}`)}]`);
+    await click(`button[aria-label=${JSON.stringify(`Add ${LOCAL_ACCOUNT}`)}]`);
+    await until(async () => (await text("main .pool-item.on .pool-item-count")) === "2 of 15" && (await text("main .pool-item.on .pool-item-label")) === POOL, 30000, "pool was not saved");
     await shot("05-pool-editor");
-    await click("button=Save pool");
-    await until(async () => !(await page("#pool-name")) && (await text("main")).includes(POOL), 30000, "pool was not saved");
   });
 
   it("creates a project with research picked and the pool assigned", async () => {

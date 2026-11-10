@@ -344,7 +344,10 @@ fn the_sandboxed_terminal_cannot_stage() {
     let output = in_terminal(&case, &format!("{git} add README"));
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!output.status.success(), "{said}");
-    assert!(said.contains("unable to write new index file"), "{said}");
+    assert!(
+        said.contains("index.lock': Operation not permitted"),
+        "{said}"
+    );
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
@@ -363,7 +366,10 @@ fn the_sandboxed_terminal_cannot_commit() {
     let output = in_terminal(&case, &script);
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!output.status.success(), "{said}");
-    assert!(said.contains("unable to write new index file"), "{said}");
+    assert!(
+        said.contains("index.lock': Operation not permitted"),
+        "{said}"
+    );
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 

@@ -1,4 +1,4 @@
-import { click, menu, shown, texts, type } from "../settings-steps.mjs";
+import { click, menu, selectPool, shown, texts, type } from "../settings-steps.mjs";
 import { closeDialog, confirmVerdict, dropScratch, findAccount, noLoop, rowNames, scratchAccount, scratchName, tidy, windowText } from "../trial4-accounts.mjs";
 
 const PICKER = "//div[@role=\"radiogroup\"][@aria-label=\"Pool\"]";
@@ -7,7 +7,7 @@ const CONFIRM = "dialog.dialog[open]";
 
 /** The pool names Settings, Pools lists now. Output: the names. */
 function poolNames() {
-  return texts(".set-row .set-label");
+  return texts(".pool-item-label");
 }
 
 /** Opens the trial project's Settings, Pool section and waits for its pool cards. Input: the kit. */
@@ -40,9 +40,8 @@ async function newPool(kit, name, member) {
   await kit.go("#/settings/pools");
   await click("button=New pool");
   await type("#pool-name", name);
-  await type("main input[type=\"search\"][placeholder=\"Search accounts\"]", member);
-  await click(`//label[contains(concat(" ", normalize-space(@class), " "), " pick ")][.//span[normalize-space(.)=${kit.lit(member)}]]`);
-  await click("button=Save pool");
+  await type(".pool-add input[type=\"search\"]", member);
+  await click(`//button[@aria-label=${kit.lit(`Add ${member}`)}]`);
   await kit.until(async () => (await poolNames()).includes(name), kit.UI_MS, `Settings, Pools never listed the new pool ${name}`);
 }
 
@@ -58,6 +57,7 @@ export const checks = [{
   title: "Unassign a pool, delete it, then delete its account",
   why: "owner: \"I cannot unassign a pool from a project ... it's a dead loop\"",
   after: "end",
+  only: "fixture",
   run: async (kit) => {
     const account = await scratchAccount("pool");
     const pool = scratchName("pool", Date.now());
@@ -71,6 +71,7 @@ export const checks = [{
       noLoop(await assignPool(kit, NO_POOL));
       await kit.screen();
       await kit.go("#/settings/pools");
+      await selectPool(pool);
       await click(`button[aria-label=${JSON.stringify(`Delete pool ${pool}`)}]`);
       await kit.until(() => shown(CONFIRM), kit.UI_MS, `Delete pool on ${pool} never asked to confirm`);
       const poolConfirm = await confirmNames([pool, "Only the pool goes away"]);

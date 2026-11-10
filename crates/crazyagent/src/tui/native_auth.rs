@@ -684,7 +684,11 @@ impl State {
                     .retained
                     .as_ref()
                     .is_some_and(|retained| retained.uncertain);
+                let reading = self.rechecking.is_some().then(|| self.notice.clone());
                 self.accept_reply(&event.job, *reply);
+                if let Some(notice) = reading.filter(|_| running) {
+                    self.notice = notice;
+                }
                 if self.clearing && !running {
                     self.retained = None;
                     self.presentation = None;

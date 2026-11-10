@@ -16,6 +16,12 @@ export const IDE_NOT_HIDDEN = "The IDE couldn't be hidden, so it may still cover
 /** What the owner reads when a project's IDE didn't close with its page. */
 export const IDE_NOT_CLOSED = "The IDE didn't close cleanly. Restart CrazyAgent if it stays on screen.";
 
+/** What the owner reads when the IDE couldn't move to a window of its own. */
+export const IDE_NOT_MOVED = "The IDE couldn't open in its own window. Try again.";
+
+/** What the owner reads when the IDE's own window didn't come forward. */
+export const IDE_NOT_FORWARD = "The IDE's window couldn't be brought forward. Try again.";
+
 /** Where the engine's pinned IDE build stands. */
 export type BuildState =
   | { state: "missing" }
@@ -180,9 +186,25 @@ export function ideView(retry = false): Promise<Result<IdeView>> {
 }
 
 /** Opens a project's IDE and shows it over the panel. Inputs: the project and the panel.
- * Output: done, or the refusal. */
-export function openIde(projectId: string, panel: IdeBounds): Promise<Result<null>> {
-  return call<null>("desktop_ide_open", { projectId, bounds: panel });
+ * Output: true when the IDE stays in its own window instead, or the refusal. */
+export function openIde(projectId: string, panel: IdeBounds): Promise<Result<boolean | null>> {
+  return call<boolean | null>("desktop_ide_open", { projectId, bounds: panel });
+}
+
+/** Moves a project's loaded IDE into a window of its own. Input: the project. Output: done, or
+ * the refusal. */
+export function openIdeWindow(projectId: string): Promise<Result<null>> {
+  return call<null>("desktop_ide_window_open", { projectId });
+}
+
+/** Brings a project's own IDE window forward. Input: the project. Output: done, or the refusal. */
+export function focusIdeWindow(projectId: string): Promise<Result<null>> {
+  return call<null>("desktop_ide_window_focus", { projectId });
+}
+
+/** Asks whether a project's IDE sits in its own window. Input: the project. Output: true then. */
+export function ideWindowOut(projectId: string): Promise<Result<boolean>> {
+  return call<boolean>("desktop_ide_window_out", { projectId });
 }
 
 /** Moves the shown IDE over its panel. Inputs: the project and the panel. */

@@ -86,11 +86,46 @@ test("the master's settings keep the Account and Apply a master harness change p
   const seen = await onSettings(APPLIED, async (page) => ({
     apply: await page.evaluate(`Fixture.pickOther("Apply a master harness change")`),
     account: await page.evaluate(`Fixture.pickOther("Account")`),
+    idle: await page.evaluate(`Fixture.pickOther("Stop the master when idle after")`),
   }), "drawer");
-  for (const [row, value] of Object.entries(seen)) assert.equal(value.shown, value.picked, `${row} holds the pick`);
+  for (const [row, value] of Object.entries(seen)) {
+    assert.notEqual(value, null, `${row} is in the drawer`);
+    assert.equal(value.shown, value.picked, `${row} holds the pick`);
+  }
 });
 
-const APP_SELECTS = [["schedule", "schedule-app", "balanced"], ["schedule", "schedule-pool-main", "manual_rank"], ["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];
+test("each Stop the master when idle after choice reaches the engine under its own name and stays on screen (DEC-117 Q4)", { timeout: 120_000 }, async () => {
+  const choices = ["one_hour", "off", "fifteen_minutes"];
+  const seen = await onSettings(APPLIED, async (page) => {
+    const picks = [];
+    for (const choice of choices) picks.push(await page.evaluate(`Fixture.pickOther("Stop the master when idle after", ${JSON.stringify(choice)})`));
+    return { picks, sent: await page.evaluate(`Fixture.sentTo("desktop_team_master_idle_stop")`) };
+  }, "drawer");
+  assert.deepEqual(seen.picks.map((pick) => pick?.shown ?? null), choices, "each pick stays shown");
+  assert.deepEqual(seen.sent.args.map((call) => call.choice), choices, "each pick is sent by its name");
+  assert.deepEqual([...new Set(seen.sent.args.map((call) => call.id))], ["alpha"], "the save names the project");
+});
+
+test("each Live terminal choice reaches the engine under its own value and stays on screen (DEC-117 Q4)", { timeout: 120000 }, async () => {
+  const selector = JSON.stringify('[data-setting="Live terminal"] [role="switch"]');
+  const seen = await onSettings(APPLIED, async (page) => {
+    const state = () => page.evaluate(`document.querySelector(${selector})?.getAttribute("aria-checked") ?? null`);
+    const before = await state();
+    const picks = [];
+    for (let turn = 0; turn < 2; turn += 1) {
+      await page.evaluate(`Fixture.click(${selector}, "")`);
+      await page.evaluate("Fixture.settle(240)");
+      picks.push(await state());
+    }
+    return { before, picks, sent: await page.evaluate(`Fixture.sentTo("desktop_team_master_live_terminal")`) };
+  }, "drawer");
+  assert.equal(seen.before, "true", "on with nothing saved");
+  assert.deepEqual(seen.picks, ["false", "true"], "each choice stays shown");
+  assert.deepEqual(seen.sent.args.map((call) => call.on), [false, true], "each choice is sent");
+  assert.deepEqual([...new Set(seen.sent.args.map((call) => call.id))], ["alpha"], "the save names the project");
+});
+
+const APP_SELECTS = [["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];
 
 test("the app's own settings selects keep the pick while their reads run, and go back after a refused save", { timeout: 120_000 }, async () => {
   const seen = await withPage(async (page) => {
@@ -189,12 +224,6 @@ test("a help line follows the held pick, not the value the save replaced", { tim
   });
   assert.match(budget.before, /^Off lets the agents/);
   assert.match(budget.after, /^Used /, "the budget's line shows while its pick is held");
-  const strategy = await withPage(async (page) => {
-    await page.evaluate(appFixture);
-    await page.evaluate(`Fixture.mount("schedule", false)`);
-    return page.evaluate(`Fixture.pick("schedule-app", "balanced")`);
-  });
-  assert.equal(strategy.helper, "The account with the least weekly use goes first.");
 });
 
 test("when two picks save at once, the answer to the older one never puts it back on screen", { timeout: 120_000 }, async () => {

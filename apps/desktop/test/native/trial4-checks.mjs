@@ -7,6 +7,9 @@ export const CHECKS = fileURLToPath(new URL("trial4/", import.meta.url));
 export const TUI_CHECKS = fileURLToPath(new URL("../../../../scripts/trial/tui4/", import.meta.url));
 const ID = /^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$/;
 const OP = /^(?:OP|MAP)-[1-9][0-9]*$/;
+/** How long N-D1 waits for a person to finish a browser sign-in, in ms; 0, the default, says
+ * no one is there. */
+export const OWNER_MS = Number(process.env.TRIAL_OWNER_MS ?? 0);
 
 /** Whether a value is a non-empty string. Input: the value. Output: a boolean. */
 function filled(value) {
@@ -24,6 +27,18 @@ function validate(check, file, slugs) {
   assert(filled(check.why), `${where}: why must be a non-empty string`);
   assert(check.after === "end" || slugs.includes(check.after), `${where}: after must name a trial 3 step or "end", not ${check.after}`);
   assert.equal(typeof check.run, "function", `${where}: run must be a function`);
+  assert(check.only === undefined || ["fixture", "asked"].includes(check.only), `${where}: only must be "fixture" or "asked", not ${check.only}`);
+}
+
+/** Whether a run takes one check. A live run drives the owner's real engine and no restore
+ * survives a killed run or a dead battery, so a check with only: "fixture" stays off it and
+ * one with only: "asked" runs only for an owner who set TRIAL_OWNER_MS. Inputs: the check, the
+ * mode and that wait in ms. Output: a boolean. */
+export function runsIn(check, mode, ownerMs) {
+  assert(["live", "fixture"].includes(mode), "the mode is live or fixture");
+  assert(Number.isFinite(ownerMs) && ownerMs >= 0, "the owner's wait is a number of ms");
+  if (check.only === "asked") return ownerMs > 0;
+  return check.only !== "fixture" || mode === "fixture";
 }
 
 /** Loads every check module of a folder in file name order. Inputs: the folder, which may be

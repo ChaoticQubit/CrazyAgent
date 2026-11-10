@@ -546,7 +546,8 @@ impl Drop for MasterRuntimeFolder {
 /// sub-agents, Codex's own sandbox off inside the master's, and exactly one MCP server, the
 /// engine's team server served by exactly the expected engine executable on the turn's own
 /// drop file and mailbox with the team tools switched off. Every `-c` setting must be one the
-/// switch allows. Input: the command and, for tools on, the expected team server parts.
+/// switch allows, and the one recording the working folder's walk untrusted must be there.
+/// Input: the command and, for tools on, the expected team server parts.
 /// Output: Ok, `master_delegate_unverified` for any other server, or the
 /// unsupported-backend refusal.
 fn require_master_tool_policy(
@@ -554,6 +555,10 @@ fn require_master_tool_policy(
     tools: Option<crate::engine::claude_host::MasterTools<'_>>,
 ) -> Result<(), EngineError> {
     let refused = || failure("master_runtime_backend_unsupported");
+    let trust = command
+        .get_current_dir()
+        .and_then(|cwd| crate::harnesses::codex_folder::untrusted(cwd).ok())
+        .ok_or_else(refused)?;
     let required: &[&str] = if tools.is_some() {
         &[
             "sandbox_mode=\"danger-full-access\"",
@@ -606,11 +611,14 @@ fn require_master_tool_policy(
                     return Err(failure("master_delegate_unverified"));
                 }
             }
-            _ if fixed.contains(setting) || setting.starts_with("model=\"") => {}
+            _ if fixed.contains(setting)
+                || setting.starts_with("model=\"")
+                || *setting == trust => {}
             _ => return Err(refused()),
         }
     }
     if servers != usize::from(tools.is_some())
+        || !settings.iter().any(|setting| *setting == trust)
         || required.iter().any(|setting| !fixed.contains(setting))
         || fixed.iter().any(|setting| !settings.contains(setting))
     {
@@ -790,6 +798,9 @@ fn master_command(
     for config in fixed {
         command.arg("-c").arg(config);
     }
+    let trust = crate::harnesses::codex_folder::untrusted(cwd)
+        .map_err(|_| failure("master_runtime_binding"))?;
+    command.arg("-c").arg(trust);
     if let Some(tools) = tools {
         command.arg("-c").arg(delegate_servers(&tools)?);
     }
@@ -1237,6 +1248,63 @@ mod tests {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         root
+    }
+
+    #[test]
+    fn master_command_records_its_folders_untrusted_and_the_policy_requires_that() {
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap().join("repo/sub");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let repo = worktree.parent().unwrap();
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let wanted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}},\"{}\"={{trust_level=\"untrusted\"}}}}",
+            worktree.display(),
+            repo.display()
+        );
+        let command = master_command(
+            Path::new("/registered/codex"),
+            Path::new("/private/profile"),
+            &worktree,
+            "admitted-model",
+            None,
+        )
+        .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted),
+            "{args:?}"
+        );
+        assert_eq!(require_master_tool_policy(&command, None), Ok(()));
+        let rebuilt = |other: Option<&str>| {
+            let mut copy = std::process::Command::new("/registered/codex");
+            copy.current_dir(&worktree);
+            let mut words = args.iter();
+            while let Some(word) = words.next() {
+                if word != "-c" {
+                    copy.arg(word);
+                    continue;
+                }
+                let setting = words.next().unwrap();
+                match (*setting == wanted, other) {
+                    (false, _) => {
+                        copy.arg("-c").arg(setting);
+                    }
+                    (true, Some(other)) => {
+                        copy.arg("-c").arg(other);
+                    }
+                    (true, None) => {}
+                }
+            }
+            copy
+        };
+        assert!(require_master_tool_policy(&rebuilt(None), None).is_err());
+        let trusted = wanted.replace("untrusted", "trusted");
+        assert!(require_master_tool_policy(&rebuilt(Some(&trusted)), None).is_err());
     }
 
     #[test]

@@ -15,6 +15,7 @@ export const checks = [{
   title: "Home shows one sign-in row for a signed-out account",
   why: "owner: Home shows the same \"ChaoticQubit isn't signed in\" banner twice (leader record)",
   after: "end",
+  only: "fixture",
   run: async (kit) => {
     const account = await scratchAccount("home");
     return tidy(async () => {

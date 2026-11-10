@@ -260,7 +260,7 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
     onUndo: (item) => {
       const changeSet = undoable(item);
       if (undoing !== null || changeSet === null) return;
-      setAsking({ changeSet, branch: mergedBranch(item) });
+      setAsking({ changeSet, branch: displayText(mergedBranch(item)) });
     },
   };
   const confirmUndo = () => {

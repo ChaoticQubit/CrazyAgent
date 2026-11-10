@@ -560,11 +560,17 @@ pub(super) fn transport_allowed(url: &str) -> bool {
 }
 
 /// Reads the configuration git will use in the folder, with [`HARDENING`] and the owner's
-/// environment, every entry with the file it came from. Inputs: the folder and environment.
+/// environment, every entry with the file it came from. A `.git/commondir` is refused first:
+/// no project folder has one, it would send git to another folder's configuration, and the
+/// lookup finds every spelling a case-insensitive volume folds together, where git reads it
+/// too. Inputs: the folder and environment.
 /// Output: the entries, or `ide_git_config_refused` when git fails, prints more than
 /// `CONFIG_BYTES_MAX` bytes or prints something else than `-z` entries.
 fn config(folder: &Path, env: &[(OsString, OsString)]) -> Result<Vec<Entry>, EngineError> {
     let refused = || failure("ide_git_config_refused");
+    if std::fs::symlink_metadata(folder.join(".git").join("commondir")).is_ok() {
+        return Err(refused());
+    }
     let ran = ran(
         git(folder, env, &["config", "--list", "--show-origin", "-z"]),
         CONFIG_BYTES_MAX,
@@ -702,14 +708,16 @@ fn urls(
 }
 
 /// Builds one engine git process for the IDE: `/usr/bin/git` with [`HARDENING`] before the
-/// arguments, a cleared environment holding only `env`, the project folder as its working
-/// folder, no input, both outputs piped and its own process group. Inputs: the folder, the
+/// arguments, a cleared environment holding only `env` and the folder's `.git` as git's
+/// common folder, so a `commondir` planted after the check in [`config`] redirects nothing,
+/// the project folder as its working folder, no input, both outputs piped and its own process group. Inputs: the folder, the
 /// environment and the arguments. Output: the unspawned command.
 fn git<S: AsRef<OsStr>>(folder: &Path, env: &[(OsString, OsString)], args: &[S]) -> Command {
     let mut command = Command::new(GIT);
     command
         .env_clear()
         .envs(env.iter().cloned())
+        .env("GIT_COMMON_DIR", folder.join(".git"))
         .current_dir(folder)
         .args(HARDENING)
         .args(args)
@@ -720,26 +728,47 @@ fn git<S: AsRef<OsStr>>(folder: &Path, env: &[(OsString, OsString)], args: &[S])
     command
 }
 
+/// [`ran_stopped`] with no grace. Inputs: the command, the bytes kept per stream and the
+/// limit. Output: as [`ran_stopped`].
+fn ran(command: Command, keep: usize, limit: Duration) -> Result<Ran, EngineError> {
+    ran_stopped(command, keep, limit, Duration::ZERO)
+}
+
+/// Whether a child exits by the deadline. Inputs: the child and the deadline. Output: its
+/// exit code, 128 for a signal, or none when it was still running or cannot be read.
+fn exited(child: &mut std::process::Child, deadline: Instant) -> Option<i32> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status.code().unwrap_or(128)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            _ => break None,
+        }
+    }
+}
+
 /// Runs one process to its end or its time limit, keeping the last `keep` bytes of each
-/// output stream; at the limit its whole process group is killed. Readers that outlive the
-/// process, such as through a descendant holding a pipe, are waited for at most
-/// `DRAIN_TIME`. Inputs: the command, the bytes kept per stream and the limit. Output: what
-/// it left, or `ide_git_unavailable` when it cannot start.
-fn ran(mut command: Command, keep: usize, limit: Duration) -> Result<Ran, EngineError> {
+/// output stream. At the limit a non-zero `grace` sends its process group TERM and waits
+/// that long, so git can remove its own lock; then the whole group is killed. Readers that
+/// outlive the process, such as through a descendant holding a pipe, are waited for at most
+/// `DRAIN_TIME`. Inputs: the command, the bytes kept per stream, the limit and the grace.
+/// Output: what it left, or `ide_git_unavailable` when it cannot start.
+fn ran_stopped(
+    mut command: Command,
+    keep: usize,
+    limit: Duration,
+    grace: Duration,
+) -> Result<Ran, EngineError> {
     let mut child =
         crate::spawn_gate::spawn(&mut command).map_err(|_| failure("ide_git_unavailable"))?;
     let group = Pid::from_child(&child);
     assert!(group.as_raw_nonzero().get() > 1);
     let stdout = reader(child.stdout.take(), keep);
     let stderr = reader(child.stderr.take(), keep);
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status.code().unwrap_or(128)),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            _ => break None,
-        }
-    };
+    let mut status = exited(&mut child, Instant::now() + limit);
+    if status.is_none() && !grace.is_zero() {
+        let _ = rustix::process::kill_process_group(group, Signal::TERM);
+        status = exited(&mut child, Instant::now() + grace);
+    }
     if status.is_none() {
         let _ = rustix::process::kill_process_group(group, Signal::KILL);
         let _ = child.kill();
@@ -828,6 +857,8 @@ pub(super) fn text(bytes: &[u8], keep: usize) -> String {
     assert!(text.len() <= keep);
     text
 }
+
+pub(super) mod index;
 
 #[cfg(test)]
 pub(crate) mod tests;

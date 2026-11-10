@@ -192,6 +192,16 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Restore");
         await me.waitFor("the restored change set", (text) => text.includes("Restored. The changes are ready to review again.") && /Ready to review/.test(text));
 
+        writeFileSync(join(worktree, "seeds.txt"), `${Array.from({ length: 400 }, (_, at) => `seed ${at}`).join("\n")}\n`);
+        recordTurn("List every seed");
+        await me.waitFor("the moved diff", (text) => text.includes("Added seeds.txt"));
+        const acceptHeld = () => page.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Accept")?.disabled ?? null`);
+        assert.equal(await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); return box.scrollHeight > box.clientHeight; })()`), true, "the moved diff needs the box's own scroll");
+        assert.equal(await acceptHeld(), true, "Accept holds until the moved diff's end was on screen");
+        await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); box.scrollTop = box.scrollHeight; })()`);
+        for (const deadline = Date.now() + STEP_MS; await acceptHeld() !== false; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "Accept comes back once the moved diff's end was on screen");
+        await me.capture("changes-moved-diff-read");
+
         await me.click("Accept");
         await me.waitFor("the accept question", (text) => /Accept these changes\?/.test(text) && text.includes("under your own Git name. CrazyAgent did not check them."));
         await me.click("Accept", "dialog button");

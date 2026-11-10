@@ -1533,6 +1533,8 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
             VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
             INSERT INTO team_owner_turns(message,project) VALUES (1,'setup-pooled');
+            INSERT INTO team_master_idle_stop(project,choice) VALUES ('setup-pooled','off');
+            INSERT INTO team_master_live_terminal(project,terminal) VALUES ('setup-pooled',0);
             INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
             VALUES ('setup-pooled',1,NULL,'question','Which theme?','delivered',0);
             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
@@ -1607,6 +1609,8 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             "the words kept for its agents' timelines",
         ),
         ("team_message_settings", "its Messages settings"),
+        ("team_master_idle_stop", "its master idle stop choice"),
+        ("team_master_live_terminal", "its live terminal setting"),
     ] {
         assert_eq!(
             engine.rows(&format!(
@@ -2640,7 +2644,15 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
             [],
         )
         .unwrap();
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_status_log(project,agent,status,at_ms) VALUES ('setup-pooled',1,'idle',1)",
+            [],
+        )
+        .unwrap();
     let tables = [
+        "team_status_log",
         "team_caps",
         "team_token_budgets",
         "team_account_spread",
@@ -2670,6 +2682,58 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
     drop(owner);
     engine.stop().await;
 }
+
+/// A live agent keeps its row when its project is removed, and the status it writes after
+/// that logs nothing: the removal already took the project's history (HB-S5-I).
+#[tokio::test]
+async fn a_live_agent_stopped_after_its_project_is_removed_logs_no_status() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) \
+         VALUES ('setup-pooled','sub','codex',0,'working',1,1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE team_agents SET status='idle' WHERE project='setup-pooled'",
+        [],
+    )
+    .unwrap();
+    let logged = "SELECT count(*) FROM team_status_log WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(logged), 1, "logged while the project exists");
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled'"),
+        1,
+        "the live agent keeps its row"
+    );
+    assert_eq!(engine.rows(logged), 0, "the removal took the history");
+    db.execute(
+        "UPDATE team_agents SET status='stopped' WHERE project='setup-pooled'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(engine.rows(logged), 0, "no history for a removed project");
+    drop(db);
+    drop(owner);
+    engine.stop().await;
+}
+
 /// The owner reads one sub-agent's Messages timeline through the engine (MSG-B) and saves the
 /// project's Messages settings with a team action (MSG-E): the page carries the speakers the
 /// engine stored and the saved settings, the team status shows them too, and a bad page size,

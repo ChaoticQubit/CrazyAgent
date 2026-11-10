@@ -4347,6 +4347,91 @@ fn a_lead_keeps_the_mode_it_first_started_in_whatever_the_setting_says_later() {
     );
 }
 
+/// A stop keeps the highest standing of those who made it, down the stopped agent's lead
+/// tree: a lead's or a master's stop is not the owner's, the owner's stop of such an agent
+/// is, and a later master's stop leaves it the owner's (HB-S5-B).
+#[test]
+fn a_stop_keeps_the_highest_standing_of_who_made_it() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES
+             (7,'team-stop','sub','claude-code',1,'working',1,1,NULL),
+             (8,'team-stop','master','claude-code',1,'working',1,1,NULL),
+             (9,'team-stop','sub','claude-code',1,'working',1,1,7);",
+        )
+        .unwrap();
+    let recorded = || -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_owner_stops WHERE agent IN (7,9)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(recorded(), 0);
+    assert_eq!(
+        agent_stop(&connection, &project, 100, StoppedBy::Master, 1).unwrap(),
+        Err("team_agent_not_found")
+    );
+    assert_eq!(
+        agent_stop(&connection, &project, 8, StoppedBy::Master, 1).unwrap(),
+        Err("team_stop_master")
+    );
+    for by in [StoppedBy::Lead, StoppedBy::Master] {
+        agent_stop(&connection, &project, 7, by, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded(), 2, "{by:?} stops the agent and its worker");
+        assert!(!owner_stopped(&connection, 7).unwrap(), "{by:?}");
+        assert!(!owner_stopped(&connection, 9).unwrap(), "{by:?}");
+    }
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Master, 1)),
+        "the master's stop rises over the lead's"
+    );
+    agent_stop(&connection, &project, 7, StoppedBy::Lead, 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Master, 2)),
+        "a lead's later stop does not lower the master's, and its time stands"
+    );
+    owner_stop(&connection, &project, 7, 2).unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+    assert!(owner_stopped(&connection, 9).unwrap());
+    agent_stop(&connection, &project, 7, StoppedBy::Master, 3)
+        .unwrap()
+        .unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Owner, 3))
+    );
+}
+
+/// A stop recorded before stops named their maker was the owner's own, so an engine DB from
+/// then keeps it locked to the owner once it gains the column.
+#[test]
+fn a_stop_recorded_before_makers_were_kept_stays_the_owners() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_owner_stops (
+                agent INTEGER PRIMARY KEY, project TEXT NOT NULL, stopped_ms INTEGER NOT NULL
+             );
+             INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (7,'team-stop',1);",
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+}
+
 #[test]
 fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane() {
     let (_directory, mut connection) = database();
@@ -4449,6 +4534,14 @@ fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane
             code: "team_teammate_not_found".into()
         }
     );
+}
+
+#[test]
+#[should_panic(expected = "the owner stops through owner_stop")]
+fn the_owner_never_stops_through_agent_stop() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    let _ = agent_stop(&connection, &project, 7, StoppedBy::Owner, 1);
 }
 
 /// RSF2-L2: clearing one agent's owner stop takes a stored agent id; id 0, which no
@@ -5821,6 +5914,185 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
     assert!(
         reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         "the choice is per project"
+    );
+}
+
+/// Each "Stop the master when idle after" choice gives its own time against the engine's
+/// bound, and with no choice each kind of master keeps what it did (DEC-117 Q4).
+#[test]
+fn master_idle_stop_choices_give_their_own_time() {
+    let bound = std::time::Duration::from_secs(MASTER_IDLE_STOP_SECS.into());
+    assert_eq!(
+        MasterIdleStop::FifteenMinutes.after(bound),
+        Some(std::time::Duration::from_secs(900))
+    );
+    assert_eq!(
+        MasterIdleStop::OneHour.after(bound),
+        Some(std::time::Duration::from_secs(3600))
+    );
+    assert_eq!(MasterIdleStop::Off.after(bound), None);
+    assert_eq!(
+        MasterIdleStop::effective(None, false),
+        MasterIdleStop::FifteenMinutes,
+        "a master that is not live stops as it always did"
+    );
+    assert_eq!(
+        MasterIdleStop::effective(None, true),
+        MasterIdleStop::Off,
+        "a live master was never stopped as idle"
+    );
+    for choice in [
+        MasterIdleStop::Off,
+        MasterIdleStop::FifteenMinutes,
+        MasterIdleStop::OneHour,
+    ] {
+        assert_eq!(MasterIdleStop::named(choice.name()), Some(choice));
+        assert_eq!(MasterIdleStop::effective(Some(choice), false), choice);
+        assert_eq!(MasterIdleStop::effective(Some(choice), true), choice);
+    }
+    assert_eq!(MasterIdleStop::named("soon"), None);
+}
+
+/// The team status says what stops a master with no choice saved, by whether it is live,
+/// then keeps each of the owner's choices whatever the master runs as, and the choice is
+/// per project (DEC-117 Q4).
+#[test]
+fn master_idle_stop_shows_each_kind_until_the_owner_chooses() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-idle-stop",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-idle-stop", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "no choice and no live master"
+    );
+    master::set_live(&connection, &project, true).unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::Off,
+        "no choice and a live master"
+    );
+    for choice in [
+        MasterIdleStop::OneHour,
+        MasterIdleStop::Off,
+        MasterIdleStop::FifteenMinutes,
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterIdleStop {
+                    project_id: project.clone(),
+                    choice,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_idle_stop,
+            choice
+        );
+    }
+    master::set_live(&connection, &project, false).unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "the owner's choice stays when the live master ends"
+    );
+    assert_eq!(
+        master_idle_stop(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        None,
+        "the choice is per project"
+    );
+}
+
+/// "Live terminal" is on until the owner turns it off and is per project. Off makes a master
+/// count as not live whatever its run flag says, the run flag stays as it was, and with no
+/// idle stop choice saved that master then stops as any other does (DEC-117 Q4).
+#[test]
+fn live_terminal_is_on_until_the_owner_turns_it_off_and_off_means_not_live() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-live-terminal",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-live-terminal", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().master_live_terminal,
+        "on with nothing saved"
+    );
+    master::set_live(&connection, &project, true).unwrap();
+    assert!(master::live(&connection, &project).unwrap());
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterLiveTerminal {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_live_terminal,
+            on
+        );
+        assert_eq!(master::live(&connection, &project).unwrap(), on);
+    }
+    assert_eq!(
+        master::switch(&connection, &project).unwrap().0,
+        Some(true),
+        "the run flag stays as it was"
+    );
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "a master that is not live stops as any other does"
+    );
+    let elsewhere = ProjectId::new("team-elsewhere").unwrap();
+    master::set_live(&connection, &elsewhere, true).unwrap();
+    assert!(
+        master::live(&connection, &elsewhere).unwrap(),
+        "the setting is per project"
     );
 }
 

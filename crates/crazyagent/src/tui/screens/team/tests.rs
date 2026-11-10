@@ -138,6 +138,7 @@ fn graph() -> Box<TeamGraph> {
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     })
 }
 
@@ -269,6 +270,74 @@ fn relation(from: &str, to: &str, relation: Relation, live: Option<LiveAction>) 
     }
 }
 
+/// A graph with the master waiting on the owner over its line to agent-2. Output: the graph.
+fn waiting_on_owner() -> Box<TeamGraph> {
+    let mut team = graph();
+    team.relations = vec![
+        relation(
+            "master",
+            "agent-2",
+            Relation::Leads,
+            Some(LiveAction::WaitingOn { owner: true }),
+        ),
+        relation("agent-2", "agent-3", Relation::TeammateOf, None),
+        relation("master", "agent-5", Relation::DelegatedTo, None),
+    ];
+    team
+}
+
+/// An owner wait keeps its whole words on the agent's line or moves: at 120 columns the line
+/// never reads "waiting on: ...", and the detail row names the owner.
+#[test]
+fn an_owner_wait_stays_whole_or_moves_to_the_detail_row() {
+    let mut shell = fresh(120, 36);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(waiting_on_owner()),
+    });
+    let shown = render(&mut shell);
+    let at = shown
+        .iter()
+        .position(|row| row.contains("├─ ▸ claude-1"))
+        .unwrap_or_else(|| panic!("{}", shown.join("\n")));
+    assert!(!shown[at].contains("waiting"), "{}", shown[at]);
+    assert!(
+        shown[at + 1].contains("waiting on: your answer"),
+        "{}",
+        shown.join("\n")
+    );
+}
+
+/// An agent with no account or branch has no detail row, so a moved owner wait gets a note row.
+#[test]
+fn an_owner_wait_on_an_agent_with_no_detail_row_moves_to_a_note_row() {
+    let mut team = waiting_on_owner();
+    let lead = team
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "agent-2")
+        .unwrap();
+    lead.account = None;
+    lead.branch = None;
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let shown = render(&mut shell);
+    let note = shown
+        .iter()
+        .position(|row| row.contains("waiting on:"))
+        .unwrap_or_else(|| panic!("{}", shown.join("\n")));
+    assert!(
+        shown[note..=note + 1]
+            .iter()
+            .any(|row| row.contains("answer")),
+        "{}",
+        shown.join("\n")
+    );
+}
+
 #[test]
 fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     let mut team = graph();
@@ -284,6 +353,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         relation("agent-2", "agent-3", Relation::TeammateOf, None),
         relation("master", "agent-5", Relation::DelegatedTo, None),
     ];
+    let wider = team.clone();
     let mut shell = fresh(80, 24);
     shell.arrive(Arrival::TeamGraph {
         project: project(),
@@ -294,10 +364,10 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     for line in [
         "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
-        "  ├─ ▸ claude-1  • handing …",
-        "  │  │  Claude Max - work",
+        "  ├─ ▸ claude-1  Working",
+        "  │  │  • handing off: Fix …",
         "  │  └─ ◌ claude-2  Waiting…",
-        "  └─ ▸ codex-1  Starting  d…",
+        "  └─ ▸ codex-1  Starting",
         "     ChatGPT Plus",
         "",
         "  Tasks",
@@ -312,7 +382,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(
         drawn, expected,
-        "each agent's line names its relation on that same line, so 80x24 shows as many agents as with no labels: the live action right after the name, cut to the width left, and the standing word after the status word"
+        "at 80x24 each agent's line keeps its status word: a live action whose first word does not fit moves to the agent's detail row, and a standing word shows whole or not at all"
     );
     let mut bare = graph();
     bare.relations.clear();
@@ -332,6 +402,40 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         drawn_lines(&render(&mut plain_shell)),
         "the labels take no row of their own"
     );
+    for (columns, lines) in [(80, 24), (100, 30), (120, 36), (160, 40), (200, 50)] {
+        let mut sized = fresh(columns, lines);
+        sized.arrive(Arrival::TeamGraph {
+            project: project(),
+            result: Ok(wider.clone()),
+        });
+        let shown = render(&mut sized);
+        let line = |name: &str| {
+            shown
+                .iter()
+                .find(|row| row.contains(name))
+                .unwrap_or_else(|| panic!("{name} at {columns}x{lines}:\n{}", shown.join("\n")))
+                .clone()
+        };
+        let lead = line("├─ ▸ claude-1");
+        assert!(lead.contains("Working"), "{columns}x{lines}: {lead}");
+        assert!(
+            !lead.contains("•") || lead.contains("• handing"),
+            "{columns}x{lines}: {lead}"
+        );
+        let standing = line("└─ ▸ codex-1");
+        assert!(
+            standing.contains("Starting"),
+            "{columns}x{lines}: {standing}"
+        );
+        assert!(
+            !standing.contains("  d") || standing.contains("delegated to"),
+            "{columns}x{lines}: {standing}"
+        );
+        if columns == 200 {
+            assert!(lead.contains("• handing off: …  Working"), "{lead}");
+            assert!(standing.contains("Starting  delegated to"), "{standing}");
+        }
+    }
     let label = |relation, live| {
         super::edge_label(&RelationEdge {
             from: "a".into(),
@@ -343,6 +447,15 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     assert_eq!(label(Relation::Leads, None), "leads");
     assert_eq!(label(Relation::DelegatedTo, None), "delegated to");
     assert_eq!(label(Relation::TeammateOf, None), "teammate of");
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: " \n\t ".into()
+            })
+        ),
+        "reviewing: change set"
+    );
     assert_eq!(
         label(
             Relation::DelegatedTo,
@@ -1019,6 +1132,8 @@ fn finished_team() -> crate::team::TeamStatus {
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -1027,6 +1142,7 @@ fn finished_team() -> crate::team::TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
+        live_idle_stopped: false,
         settings_version: 0,
         min_agents: 1,
         max_agents: 5,
@@ -1732,6 +1848,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -1740,6 +1858,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         paused: false,
         live_master: None,
         live_problem: None,
+        live_idle_stopped: false,
         settings_version: 0,
         min_agents: 1,
         max_agents: 5,
@@ -2164,6 +2283,8 @@ fn master_status(
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -2172,6 +2293,7 @@ fn master_status(
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),
+        live_idle_stopped: false,
         settings_version: 0,
         min_agents: 0,
         max_agents: 1,
@@ -2565,6 +2687,44 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
         ),
         "a wide view shows both session keys"
     );
+}
+
+/// A master view on a project with Live terminal Off starts nothing and goes back to the
+/// console, whatever the run flag says (DEC-117 Q4).
+#[test]
+fn a_master_view_on_live_terminal_off_starts_nothing_and_goes_back() {
+    for on in [None, Some(false), Some(true)] {
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
+        ctx.width = 80;
+        ctx.height = 24;
+        ctx.link = Link::Ready;
+        let place = Place::Master {
+            id: project(),
+            name: "Tidepool".into(),
+        };
+        let mut screen = open(&place, &mut ctx);
+        screen.shown(&mut ctx);
+        std::iter::from_fn(|| ctx.next_screen_request()).for_each(drop);
+        let mut status = master_status(on, None, None);
+        status.master_live_terminal = false;
+        let flow = screen.arrive(&team_read(status), &mut ctx);
+        assert!(
+            matches!(flow, crate::tui::screens::Flow::Back),
+            "the view goes back with the switch at {on:?}"
+        );
+        let sent: Vec<Request> = std::iter::from_fn(|| ctx.next_screen_request()).collect();
+        assert!(sent.is_empty(), "nothing starts: {sent:?}");
+        assert_eq!(
+            ctx.message().map(|message| message.lead.as_str()),
+            Some("Live terminal is off for this project.")
+        );
+    }
 }
 
 #[test]
@@ -3437,16 +3597,13 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
         sent.iter()
             .filter(|sent| live_master_change(sent, true))
             .count(),
-        1,
-        "{sent:?}"
+        0,
+        "a switch seen on stays off until the owner acts: {sent:?}"
     );
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!(
-            "{:<63}n New session",
-            "Live master on. It starts when you open this view."
-        )
+        format!("{:<51}n New session  l Sessions", "Live master stopped.")
     );
 }
 
@@ -4008,6 +4165,126 @@ fn resume_sent(request: &Request) -> bool {
             ..
         }) if *project_id == project()
     )
+}
+
+const IDLE_LINE: &str = "The live master was turned off: it was idle for 15 min. \
+                         It continues the same conversation when you start it again.";
+
+/// A team read of a switch an idle stop turned off. Output: the arrival.
+fn idle_stopped_read() -> Arrival {
+    let mut status = master_status(Some(false), Some(IDLE_LINE), None);
+    status.live_idle_stopped = true;
+    team_read(status)
+}
+
+/// A master view showing the running live master's terminal. Output: the shell.
+fn open_running_master() -> Shell {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 43,
+            rows: 18,
+        },
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Output {
+            bytes: b"$ make\r\ndone".to_vec(),
+        },
+    });
+    requests(&mut shell);
+    shell
+}
+
+/// A graph read that shows the master stopped. Output: the arrival.
+fn stopped_master_graph() -> Arrival {
+    let mut stopped = graph();
+    stopped.nodes[0].status = Some(AgentStatus::Stopped);
+    stopped.nodes[0].terminal = None;
+    Arrival::TeamGraph {
+        project: project(),
+        result: Ok(stopped),
+    }
+}
+
+fn starts_asked(shell: &mut Shell) -> usize {
+    requests(shell)
+        .iter()
+        .filter(|sent| live_master_change(sent, true))
+        .count()
+}
+
+/// A master idle-stopped on the open view reads why, stays stopped and says s starts it
+/// again, one start for the key, the terminal's keys included (DEC-117 Q4).
+#[test]
+fn a_master_idle_stopped_on_the_open_view_says_why_and_s_starts_it_again() {
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    let sent = requests(&mut shell);
+    assert!(sent.iter().any(switch_read), "the view reads why: {sent:?}");
+    shell.arrive(idle_stopped_read());
+    assert_eq!(
+        starts_asked(&mut shell),
+        0,
+        "the stop holds until the owner acts"
+    );
+    let seen = render(&mut shell).join("\n");
+    assert!(seen.contains("The live master was turned off"), "{seen}");
+    assert!(seen.contains("s starts it again"), "{seen}");
+    assert!(seen.contains("Start again"), "{seen}");
+    assert!(!seen.contains("This agent has stopped"), "{seen}");
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 0, "one start for one stop");
+}
+
+/// A master that stopped for any other reason keeps today's words and s does nothing.
+#[test]
+fn a_master_stopped_for_another_reason_offers_no_start_again() {
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    requests(&mut shell);
+    shell.arrive(switch(
+        Some(false),
+        Some("The live master was turned off: its terminal ended. Start it again from the master view."),
+    ));
+    requests(&mut shell);
+    let seen = render(&mut shell).join("\n");
+    assert!(!seen.contains("Start again"), "{seen}");
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 0);
+}
+
+/// A master view with no terminal after an idle stop offers s too (DEC-117 Q4).
+#[test]
+fn a_master_idle_stopped_with_no_terminal_offers_s() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    assert_eq!(starts_asked(&mut shell), 1, "opening the view starts it");
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    shell.arrive(idle_stopped_read());
+    assert_eq!(starts_asked(&mut shell), 0, "once per open");
+    let seen = render(&mut shell).join("\n");
+    assert!(seen.contains("s starts it again"), "{seen}");
+    assert!(
+        !seen.contains("It starts again when you open this view"),
+        "{seen}"
+    );
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
 }
 
 #[test]

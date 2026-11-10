@@ -1475,6 +1475,85 @@ async fn the_ide_pushes_its_project_folder_through_the_engine_and_nothing_else()
     case.stop().await;
 }
 
+/// SECAUDIT-IDE-SERVER-INDEX: the shim's index call reaches the engine over the real frame
+/// and carries one command's staged change into the project's index, while a slot of any
+/// other shape and another project's folder are refused.
+#[tokio::test]
+async fn the_ide_carries_a_private_index_through_the_engine() {
+    use super::remote_git::tests::{Daemon, ok, owner_repository};
+    let mut case = Case::start().await;
+    let served = case.root.path().join("served");
+    std::fs::create_dir(&served).unwrap();
+    ok(
+        &served,
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    let daemon = Daemon::start(&served);
+    let folder = case.root.path().join("projects").join("alpha");
+    owner_repository(&folder, &daemon.url("remote.git"));
+    let project = ProjectId::new("alpha").unwrap();
+    let capability = issue(&case.runtime, &project).unwrap();
+    let socket = case.socket(&capability);
+    let ide = packet(MAGIC, 0, &session(&socket, &capability).await);
+    let call = |args: &[&str], folder: &Path| {
+        request(
+            "alpha",
+            json!({ "name": "ide.git", "args": { "args": args, "folder": folder } }),
+        )
+    };
+    let private = case
+        .root
+        .path()
+        .join("ide")
+        .join("alpha")
+        .join("server-data")
+        .join("git-index");
+    std::fs::create_dir_all(&private).unwrap();
+    let index = folder.join(".git").join("index");
+    std::fs::copy(&index, private.join("77.base")).unwrap();
+    std::fs::write(folder.join("notes.md"), "Planting notes.\n").unwrap();
+    ok(&folder, &["add", "notes.md"]);
+    std::fs::copy(&index, private.join("77.work")).unwrap();
+    ok(&folder, &["reset", "-q"]);
+
+    let carried = exchange(&socket, ide, &call(&["crazyagent-index", "77"], &folder)).await;
+    let Some(IdeReply::Ok { data }) = carried else {
+        panic!("{carried:?}");
+    };
+    assert_eq!(data["code"], json!(0), "{data}");
+    assert_eq!(
+        ok(&folder, &["diff", "--cached", "--name-only"]),
+        "notes.md"
+    );
+
+    let beta = case.root.path().join("projects").join("beta");
+    for (args, folder, code) in [
+        (
+            ["crazyagent-index", "../77"].as_slice(),
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["crazyagent-index", "77", "extra"],
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["crazyagent-index", "77"],
+            beta.as_path(),
+            "ide_git_folder_refused",
+        ),
+    ] {
+        assert_eq!(
+            exchange(&socket, ide, &call(args, folder)).await,
+            rejected(code),
+            "{args:?}"
+        );
+    }
+    drop(daemon);
+    case.stop().await;
+}
+
 /// While git waits on a remote that never answers, each `ide.git` call keeps its place: a
 /// project's call past `PROJECT_GIT_CALLS_MAX` and any call past `GIT_CALLS_MAX` in all are
 /// refused at once, and once the remote lets go the places are given back.

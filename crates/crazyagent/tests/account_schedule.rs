@@ -245,20 +245,17 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
         version: 4,
     };
     assert_eq!(controller.account_schedule().await.unwrap(), expected);
-    let next = |connection: &str, use_last: bool| RankedAccount {
+    let not_signed_in = |connection: &str| RankedAccount {
         connection: reference(connection),
-        standing: Standing::Next {
-            weekly_resets_ms: None,
-            weekly_left_percent: None,
-            use_last,
-        },
+        standing: Standing::NotSignedIn,
     };
     assert_eq!(
         controller.account_ranking().await.unwrap(),
         [PoolRanking {
             pool: reference("pool-claude"),
             strategy: Strategy::Balanced,
-            accounts: vec![next("claude-a", false), next("claude-b", true)],
+            accounts: vec![not_signed_in("claude-a"), not_signed_in("claude-b")],
+            own_order_projects: 0,
         }]
     );
     drop(controller);

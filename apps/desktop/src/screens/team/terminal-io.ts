@@ -6,8 +6,8 @@ export const SIZE_MIN = 2;
 export const SIZE_MAX = 1000;
 export const QUEUED_CHUNKS_MAX = 256;
 
-/** Where the owner types to a live master: straight into its terminal, only in the message
- * box under it, or in both. */
+/** Where the owner types to a master or an agent: straight into its terminal, only in the
+ * message box under it, or in both. */
 export type InputChoice = "terminal" | "box" | "both";
 export const INPUT_DEFAULT: InputChoice = "terminal";
 export const INPUT_CHOICES: { value: InputChoice; label: string }[] = [
@@ -16,8 +16,8 @@ export const INPUT_CHOICES: { value: InputChoice; label: string }[] = [
   { value: "both", label: "Both" },
 ];
 
-/** Reads a stored master input choice. Input: the stored text, if any. Output: the choice,
- * or `INPUT_DEFAULT` for anything else. */
+/** Reads the stored Terminal input choice, which every terminal follows. Input: the stored
+ * text, if any. Output: the choice, or `INPUT_DEFAULT` for anything else. */
 export function inputChoice(stored: string | null): InputChoice {
   const known = INPUT_CHOICES.find((choice) => choice.value === stored);
   return known ? known.value : INPUT_DEFAULT;

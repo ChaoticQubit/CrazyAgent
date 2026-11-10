@@ -104,9 +104,9 @@ enum Asker {
 }
 
 /// Starts the resolve work the engine hands an agent at its turn end, which never starts
-/// an agent the owner stopped: see `hand_over`. Inputs: the store and the change set.
+/// a stopped agent: see `hand_over`. Inputs: the store and the change set.
 /// Output: Ok once started or left to the owner runtime, or a plain refusal,
-/// `team_agent_owner_stopped` for an agent the owner stopped.
+/// `team_agent_owner_stopped` for a stopped agent.
 pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     hand_over(db, id, Asker::Engine)
 }
@@ -137,8 +137,9 @@ fn hand_over(db: &Connection, id: &ChangeSetId, asker: Asker) -> Result<(), Engi
 
 /// Admits a team agent's resolve task in the caller's transaction. For the engine, an
 /// agent the owner stopped is refused before `team::admit_resolve`, which would clear
-/// that stop as the owner's own Update does (AW-1). Inputs: the transaction, the project,
-/// the agent, the prompt and who asks. Output: Ok, or the plain refusal code.
+/// that stop as the owner's own Update does (AW-1), and a paused team's worktrees are left
+/// alone. Inputs: the transaction, the project, the agent, the prompt and who asks.
+/// Output: Ok, or the plain refusal code.
 fn admit(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -146,8 +147,11 @@ fn admit(
     prompt: &str,
     asker: Asker,
 ) -> Result<Result<(), &'static str>, EngineError> {
-    if asker == Asker::Engine && crate::team::owner_stopped(tx, agent)? {
+    if asker == Asker::Engine && crate::team::stopped(tx, agent)? {
         return Ok(Err(crate::team::OWNER_STOPPED));
+    }
+    if asker == Asker::Engine && crate::team::paused(tx, project)? {
+        return Ok(Err(crate::team::TEAM_PAUSED));
     }
     crate::team::admit_resolve(tx, project, agent, prompt, crate::team::now_ms())
 }
@@ -186,7 +190,8 @@ pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineEr
 /// Checks, before any merge, that a team agent can take its resolve work: the admission
 /// `hand_over` makes for the same asker, run with a stand-in prompt in a transaction
 /// that is rolled back. For the owner a stopped agent passes, since its pinned resolve
-/// task starts it again; for the engine an agent the owner stopped is refused. Inputs:
+/// task starts it again; for the engine an agent the owner stopped or of a paused team is
+/// refused. Inputs:
 /// the store, the project, the change set and who asks. Output: Ok, or the plain refusal.
 fn resolve_ready(
     db: &Connection,

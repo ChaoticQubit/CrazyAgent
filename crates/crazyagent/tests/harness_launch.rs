@@ -1068,3 +1068,66 @@ fn live_tools_on_turn_completes_inside_the_project_sandbox() {
         session.stop().unwrap();
     }
 }
+
+/// SECAUDIT harness-interactive-codex-trusted-cwd-project-config: the trust setting a terminal
+/// launch gives its folder loads no MCP server the repository's own config names, with tools
+/// off or on. The trusted shape is the control: it shows Codex does read that file.
+#[test]
+fn the_launch_trust_setting_loads_no_mcp_server_from_the_repository() {
+    let codex = installed("codex");
+    let home = private_dir("ca-trust-home-");
+    let code_home = home.path().join(".codex");
+    std::fs::create_dir_all(&code_home).unwrap();
+    std::fs::write(code_home.join("config.toml"), "project_doc_max_bytes = 0\n").unwrap();
+    let repo = private_dir("ca-trust-repo-");
+    let root = std::fs::canonicalize(repo.path()).unwrap();
+    let git = crazyagent::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(git.status.success(), "{git:?}");
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    std::fs::write(
+        root.join(".codex/config.toml"),
+        "[mcp_servers.dummy]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    let trust = |level: &str| {
+        format!(
+            "projects={{\"{}\"={{trust_level=\"{level}\"}}}}",
+            root.display()
+        )
+    };
+    let list = |args: &[&str]| {
+        let output = crazyagent::spawn_gate::output(
+            std::process::Command::new(&codex)
+                .args(args)
+                .current_dir(&root)
+                .env_clear()
+                .env("HOME", home.path())
+                .env("CODEX_HOME", &code_home)
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let control = list(&["-c", &trust("trusted"), "mcp", "list"]);
+    assert!(control.contains("dummy"), "inconclusive: {control}");
+    let launch = trust("untrusted");
+    let off = list(&["-c", "mcp_servers={}", "-c", &launch, "mcp", "list"]);
+    let on = list(&["-c", &launch, "mcp", "list"]);
+    assert!(!off.contains("dummy"), "tools-off launch: {off}");
+    assert!(!on.contains("dummy"), "tools-on launch: {on}");
+}

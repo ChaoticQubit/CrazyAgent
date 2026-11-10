@@ -1,5 +1,6 @@
 import { UI_MS, lit } from "../trial-kit.mjs";
 import { limitsVerdict, orderVerdict, sameOrder } from "../trial4-usage.mjs";
+import { selectPool } from "../settings-steps.mjs";
 
 const PAGES_MAX = 5;
 
@@ -80,11 +81,12 @@ export const checks = [{
     await kit.inView(`//section[@aria-label=${lit(`${name} next accounts`)}]`);
     await kit.screen();
     await kit.go("#/settings/pools");
-    await kit.until(() => browser.execute((id) => document.getElementById(id)?.selectedOptions[0]?.textContent != null, `schedule-${pool.pool}`),
-      UI_MS, "Settings, Pools never showed the pool's account order");
-    const chosen = await browser.execute((id) => document.getElementById(id).selectedOptions[0].textContent, `schedule-${pool.pool}`);
+    await selectPool(name);
+    const picked = () => browser.execute(() => document.querySelector('[role="radiogroup"][aria-label="Account order"] [aria-checked="true"]')?.textContent ?? null);
+    await kit.until(async () => (await picked()) !== null, UI_MS, "Settings, Pools never showed the pool's account order");
+    const chosen = await picked();
     if (!chosen.includes("Use it or lose it")) throw new Error(`the pool's account order reads ${JSON.stringify(chosen)}, not Use it or lose it`);
-    await kit.inView(`//*[@id=${lit(`schedule-${pool.pool}`)}]`);
+    await kit.inView(`//*[@role="radiogroup" and @aria-label=${lit("Account order")}]`);
     await kit.screen();
     return `${limits}; ${order.detail}; its Next accounts list shows that order and its account order reads ${chosen}`;
   },

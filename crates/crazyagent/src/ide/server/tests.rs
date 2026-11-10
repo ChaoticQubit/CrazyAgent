@@ -514,11 +514,31 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     let on = fs::read_to_string(&shim).unwrap();
     assert_eq!(
         on,
-        crate::ide::git::shim_text(Some(&root), crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            Some(&root),
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     assert_ne!(
         on,
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     assert!(
         on.contains(&format!("if [ \"$(pwd -P)\" = '{}' ]", root.display())),
@@ -528,7 +548,17 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     servers.open(&project, &root, &build, false).await.unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     servers.stop_all().await;
 }
@@ -555,7 +585,17 @@ async fn open_looks_up_the_ides_git_off_the_async_thread() {
     let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     servers.stop_all().await;
 }
@@ -1118,10 +1158,13 @@ fn server_git(
                 .filter_map(|(name, value)| value.map(|value| (name, value))),
         )
         .env("HOME", owner)
+        .envs(crate::ide::bridge::engine_step::forwarder_env(
+            &folder.join(SERVER_DATA),
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::spawn_gate::output(&mut git).unwrap()
+    crate::ide::bridge::engine_step::output_with_engine(&mut git, &folder.join(SERVER_DATA), cwd)
 }
 
 /// An owner home holding git config files the IDE profile denies: `.gitconfig` with an
@@ -1736,6 +1779,32 @@ async fn a_projects_ide_stays_refused_until_its_last_delete_hold_ends() {
     assert_eq!(open().await.unwrap_err().0, "ide_project_deleting");
     drop(second);
     assert_eq!(open().await.unwrap_err().0, "ide_build_invalid");
+}
+
+/// A Delete everything counts its hold before its stop waits for the start lock, so an open
+/// that arrives while the stop waits is refused.
+#[tokio::test]
+async fn a_delete_hold_counts_before_its_stop_waits_for_the_start_lock() {
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("held-open");
+    let held = Arc::clone(&servers.slot(&id).unwrap().start)
+        .lock_owned()
+        .await;
+    let mut holding = std::pin::pin!(servers.hold_for_delete(&id));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut holding)
+            .await
+            .is_err(),
+        "the stop must wait for the start lock"
+    );
+    assert!(
+        servers.deleting(&id),
+        "an open arriving while the stop waits must be refused"
+    );
+    drop(held);
+    drop(holding.await);
+    assert!(!servers.deleting(&id));
 }
 
 /// A hold that lands while an open is still starting waits for that open and stops what it

@@ -40,6 +40,8 @@ pub const NEW_FOLDER_REFUSED: &str = "changes_new_folder_too_large";
 
 /// The most change sets one list reply carries, newest first.
 pub const LIST_MAX: usize = 32;
+/// The most bytes of conflicting file names one open set's line carries.
+const OPEN_SET_FILES_MAX: usize = 400;
 /// The most bytes an owner-edited Accept message may hold.
 pub const MESSAGE_BYTES_MAX: usize = 4096;
 
@@ -1001,7 +1003,7 @@ pub fn commit_deletions(
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
 /// waiting in the worktree settle on the change set the turn end leaves open; when they
 /// cannot, they keep waiting for the next turn end and the recorded set is still returned.
-/// A sub-agent's claims on its ended work then hold for that set, or are released when
+/// An agent's claims on its ended work then hold for that set, or are released when
 /// nothing is pending. Whether the set then goes back to its agent is the turn-end caller's,
 /// through [`conflicts_with_main`] (OS-8). Inputs: the store, the workspace and the turn end.
 /// Output: the change set the work now belongs to, None when nothing is pending.
@@ -1589,6 +1591,37 @@ pub fn change_set_name(set: &ChangeSetView) -> String {
         ),
         None => agent,
     }
+}
+
+/// One open change set as the owner's Changes view reads it: its name, its size, the
+/// view's state words and the files it conflicts on, so a master and the owner mean the
+/// same set (HB-S5-J). Names and paths come from agents, so the whole line stays one line
+/// with its control and hidden characters replaced. Input: the open change set. Output: the
+/// line.
+pub fn open_set_line(set: &ChangeSetView) -> String {
+    let state = match set.state {
+        ChangeState::Pending => "Ready to review",
+        ChangeState::Conflict => "Conflicts with the owner's branch",
+        ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => "Agent is fixing conflicts with main",
+        ChangeState::Updating => "Agent is updating",
+        ChangeState::Accepted | ChangeState::Discarded => {
+            unreachable!("only an open change set has a line")
+        }
+    };
+    let files = if set.conflicts.is_empty() {
+        String::new()
+    } else {
+        let joined = set.conflicts.join(", ");
+        format!(": {}", crate::team::bound_text(&joined, OPEN_SET_FILES_MAX))
+    };
+    let line = format!(
+        "{}, +{} -{}, {state}{files}",
+        change_set_name(set),
+        set.added,
+        set.removed
+    );
+    crate::memory::visible_text(&line.replace(char::is_control, "\u{fffd}"))
 }
 
 /// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7

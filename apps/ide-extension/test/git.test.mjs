@@ -13,6 +13,7 @@ import {
   GIT_FORWARD_ENV,
   GIT_NODE_ENV,
   GIT_SECRET_ENV,
+  GIT_SHIM_ENV,
   GIT_SOCKET_ENV,
   gitCall,
   gitFailure,
@@ -235,6 +236,29 @@ test("a project's hook under a pull's local step does not hold the relay's secre
       const pulled = await forward(["pull", "origin", "main"], project, { ...env, ...BARE_GIT });
       assert.equal(pulled.code, 0, pulled.stderr);
       assert.equal(readFileSync(seen, "utf8"), "absent");
+    } finally {
+      rmSync(upstream, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a pull's local step runs through the shim, the only child given the relay's secret", { timeout: 30_000 }, async () => {
+  await withRelay(async (server, env, project) => {
+    const upstream = folder();
+    try {
+      tracking(project, upstream);
+      fetchingEngine(server, project);
+      commit(upstream, "beds.md", "Six beds.\n");
+      const seen = join(upstream, "seen-by-shim");
+      const shim = join(upstream, "shim");
+      writeFileSync(
+        shim,
+        `#!/bin/sh\nprintf '%s %s' "$1" "\${${GIT_SECRET_ENV}-absent}" > '${seen}'\nunset ${GIT_SECRET_ENV}\nexec git "$@"\n`,
+        { mode: 0o755 },
+      );
+      const pulled = await forward(["pull", "origin", "main"], project, { ...env, ...BARE_GIT, [GIT_SHIM_ENV]: shim });
+      assert.equal(pulled.code, 0, pulled.stderr);
+      assert.equal(readFileSync(seen, "utf8"), `merge ${env[GIT_SECRET_ENV]}`);
     } finally {
       rmSync(upstream, { recursive: true, force: true });
     }

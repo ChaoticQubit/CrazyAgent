@@ -5,9 +5,9 @@ use crate::coord::{
     Transfer, Work,
 };
 use crate::engine::EngineError;
-use crate::protocol::{Outcome, ProjectId};
+use crate::protocol::ProjectId;
 use crate::team::tool::{self, Handover, Update};
-use crate::team::{AgentStatus, TeamAction, bound_text, now_ms};
+use crate::team::{AgentStatus, StoppedBy, bound_text, now_ms};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -27,6 +27,7 @@ const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
 pub(crate) const WAKE_TASK: &str = "A message from your team woke you. It is at the end of this task, under Messages for you. Act on it.";
+pub(crate) const WAKE_DELIVERED: &str = "The message that woke you was already delivered, so none comes with this task. Finish what it asked if that is still unfinished, and otherwise end your turn.";
 
 const _: () = assert!(MESSAGES_SHOWN_MAX <= coord::PENDING_MAX);
 const _: () = assert!(SENT_SHOWN_MAX <= coord::PENDING_MAX);
@@ -119,8 +120,28 @@ pub(super) fn start_work(
                 ""
             }
         ));
+    }
+    let mut noted = std::collections::BTreeSet::new();
+    for overlap in &overlaps {
+        if noted.len() == OVERLAPS_SHOWN_MAX {
+            break;
+        }
+        if !noted.insert(overlap.theirs.agent) {
+            continue;
+        }
+        let reasons = overlap.reasons.join(", ");
+        let more = overlaps
+            .iter()
+            .filter(|other| other.theirs.agent == overlap.theirs.agent)
+            .count()
+            - 1;
+        let more = if more == 0 {
+            String::new()
+        } else {
+            format!(", and {more} more between this work and yours")
+        };
         let note = format!(
-            "{me} started work #{work} \"{}\" claiming {}, which overlaps your claim {} on work #{}: {reasons}. This note takes no reply; agree who does what with update_work (kind note, to {agent}) before you edit it.",
+            "{me} started work #{work} \"{}\" claiming {}, which overlaps your claim {} on work #{}: {reasons}{more}. This note takes no reply; agree who does what with update_work (kind note, to {agent}) before you edit it.",
             bound_text(title, TITLE_SHOWN_MAX),
             overlap.mine.pattern,
             overlap.theirs.pattern,
@@ -334,7 +355,13 @@ pub(super) fn update_work(
             .reply_to
             .expect("the tool requires reply_to for a reply");
         return Ok(match coord::reply(connection, from, earlier, text, now) {
-            Ok(id) => (format!("Sent reply #{id} to message #{earlier}."), false),
+            Ok(id) => {
+                let waits = waits_for(connection, project, coord::message(connection, id)?.to)?;
+                (
+                    format!("Sent reply #{id} to message #{earlier}.{waits}"),
+                    false,
+                )
+            }
             Err(problem) => refused("Not sent", problem)?,
         });
     }
@@ -359,7 +386,8 @@ pub(super) fn update_work(
         };
         let sent = coord::message(connection, id)?;
         let reached = who(connection, project, sent.to)?;
-        let mut said = format!("Asked #{id}; it went to {reached}.");
+        let waits = waits_for(connection, project, sent.to)?;
+        let mut said = format!("Asked #{id}; it went to {reached}.{waits}");
         if sent.to == Party::Owner && severity == Severity::High {
             said.push_str(
                 " The owner gets an urgent alert. Wait for their answer and do not decide this yourself.",
@@ -383,8 +411,9 @@ pub(super) fn update_work(
             true,
         ));
     };
+    let stopped = !running(&tx, project, target)?;
     let wakes = sending.kind == Update::Message
-        && !running(&tx, project, target)?
+        && stopped
         && (master || super::is_worker(&tx, project, agent, target)?);
     let message = NewMessage {
         project: project.clone(),
@@ -408,9 +437,14 @@ pub(super) fn update_work(
     let label = who(&tx, project, Party::Agent(target))?;
     if !wakes {
         tx.commit().map_err(state)?;
+        let reach = if stopped {
+            waits_until_woken(&label)
+        } else {
+            format!("It reaches {label} at its next turn or once it is idle")
+        };
         return Ok((
             format!(
-                "Sent #{id} to {label}. It reaches {label} at its next turn or once it is idle; {}() shows when it is read.",
+                "Sent #{id} to {label}. {reach}; {}() shows when it is read.",
                 tool::INSPECT_WORK_TOOL
             ),
             false,
@@ -425,6 +459,7 @@ pub(super) fn update_work(
             &shown,
             WAKE_TASK,
             true,
+            StoppedBy::Master,
         )?
     } else {
         super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
@@ -436,18 +471,44 @@ pub(super) fn update_work(
     Ok((format!("Sent #{id}. {said}"), false))
 }
 
+/// Says that a message waits for an agent that has stopped or failed, which keeps it for
+/// its next session (HB-S5-E). Takes the agent's label. Returns the clause.
+fn waits_until_woken(label: &str) -> String {
+    format!("{label} has stopped, so it waits until {label} is woken")
+}
+
+/// The sentence a sender's answer adds when its message went to an agent that has stopped.
+/// Takes the database, the project and whom it went to. Returns the sentence with a leading
+/// space, or nothing for a running agent, the owner or the engine.
+fn waits_for(
+    connection: &Connection,
+    project: &ProjectId,
+    to: Party,
+) -> Result<String, EngineError> {
+    let Party::Agent(agent) = to else {
+        return Ok(String::new());
+    };
+    if running(connection, project, agent)? {
+        return Ok(String::new());
+    }
+    let label = who(connection, project, to)?;
+    Ok(format!(" {}.", waits_until_woken(&label)))
+}
+
 /// Words a refused wake as the refused message it is, since `update_work` then stores
 /// nothing and the caller must not wait for it (review N2). Takes the wake's refusal, which
-/// starts "Not woken: " or names the owner's stop. Returns it starting "Not sent: ".
+/// starts "Not woken: " or names whose stop holds the agent. Returns it starting "Not sent: ".
 fn not_sent(refusal: &str) -> String {
+    let lowered = |start: &str, word: &str| {
+        refusal
+            .strip_prefix(start)
+            .map(|rest| format!("{word}{rest}"))
+    };
     let reason = refusal
         .strip_prefix("Not woken: ")
         .map(str::to_owned)
-        .or_else(|| {
-            refusal
-                .strip_prefix("The owner ")
-                .map(|rest| format!("the owner {rest}"))
-        })
+        .or_else(|| lowered("The owner ", "the owner "))
+        .or_else(|| lowered("The master ", "the master "))
         .unwrap_or_else(|| refusal.to_owned());
     format!("Not sent: {reason}")
 }
@@ -788,10 +849,11 @@ fn unmerged_for_finish(
     Ok(unmerged)
 }
 
-/// Stops an agent for the `stop` tool through the owner's own stop (S4), so only the owner
-/// wakes it again: the master may stop any sub-agent, a lead only its own workers, and no
-/// agent itself. Takes the database, what the answers need, the caller, whether it is the
-/// master and the name. Returns the sentence and whether it is a refusal.
+/// Stops an agent for the `stop` tool, recording who stopped it (HB-S5-B): the master may
+/// stop any sub-agent, a lead only its own workers, and no agent itself. Its unfinished
+/// tasks fail, and its maker or anyone above can wake it. Takes the database, what the
+/// answers need, the caller, whether it is the master and the name. Returns the sentence
+/// and whether it is a refusal.
 pub(super) fn stop(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -826,28 +888,35 @@ pub(super) fn stop(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
-    let outcome = crate::team::execute(
-        &tx,
-        answering.access,
-        &TeamAction::StopAgent {
-            project_id: project.clone(),
-            agent: target,
+    let by = if master {
+        StoppedBy::Master
+    } else {
+        StoppedBy::Lead
+    };
+    Ok(
+        match crate::team::agent_stop(&tx, project, target, by, now_ms())? {
+            Ok(()) => {
+                let said = match crate::team::stop_of(&tx, target)?.map(|stop| stop.0) {
+                    Some(StoppedBy::Owner) => {
+                        format!("The owner stopped {label} already. Only the owner can wake it.")
+                    }
+                    Some(StoppedBy::Master) if by == StoppedBy::Lead => format!(
+                        "The master stopped {label} already. Only the master or the owner can wake it."
+                    ),
+                    _ => format!(
+                        "Stopping {label}. Its unfinished tasks fail, and you can wake it again."
+                    ),
+                };
+                tx.commit().map_err(state)?;
+                (said, false)
+            }
+            Err("team_stop_master") => (
+                "Not stopped: the master stops only when the owner stops it.".to_owned(),
+                true,
+            ),
+            Err(_) => (format!("Not stopped: {label} could not be stopped."), true),
         },
-    )?;
-    Ok(match outcome {
-        Outcome::Applied => {
-            tx.commit().map_err(state)?;
-            (
-                format!("Stopping {label}. Only the owner can wake it again."),
-                false,
-            )
-        }
-        Outcome::Rejected { code } if code == "team_stop_master" => (
-            "Not stopped: the master stops only when the owner stops it.".to_owned(),
-            true,
-        ),
-        _ => (format!("Not stopped: {label} could not be stopped."), true),
-    })
+    )
 }
 
 /// Merges one of a lead's own workers for the `merge` tool (N2, DEC-104 K5b): in the
@@ -1045,6 +1114,7 @@ fn refused(what: &str, problem: EngineError) -> Result<(String, bool), EngineErr
         "coord_work_stale" => format!("the work changed meanwhile; read {}() for its version and try again", tool::INSPECT_WORK_TOOL),
         "coord_transfer_invalid" => "that does not apply to work in its state".to_owned(),
         "coord_transfer_refused" => "only the work's owner, its lead, the master or the owner may do that".to_owned(),
+        "coord_work_review_ready" => "that work already waits for review; it can only be completed or closed now".to_owned(),
         "coord_message_self" => "that would reach you yourself".to_owned(),
         "coord_recipient_invalid" => "that recipient takes no messages".to_owned(),
         "coord_message_unknown" => "no message of this project has that number".to_owned(),

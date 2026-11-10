@@ -64,6 +64,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 8,
         run: nest_team_agents,
     },
+    Step {
+        to: 9,
+        run: widen_trash_for_account_files,
+    },
 ];
 
 /// Says whether a table of that name exists. Inputs: the open transaction and the name.
@@ -103,6 +107,17 @@ fn widen_file_trash_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
 /// the lead that started them.
 fn nest_team_agents(tx: &Transaction<'_>) -> Result<(), EngineError> {
     crate::team::add_parent_columns(tx)
+}
+
+/// Step 9: a removed account's sign-in files and generated SDK home go through the file
+/// trash, so `file_trash` must take their two kinds. An existing table is rebuilt with the
+/// current check, keeping its rows; a missing one gets the current schema when the engine
+/// opens it. Input: the transaction. Output: any SQLite failure.
+fn widen_trash_for_account_files(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if has_table(tx, "file_trash")? {
+        tx.execute_batch(super::trash::WIDEN).map_err(error)?;
+    }
+    Ok(())
 }
 
 /// Step 7 (H2): hooks are plugin items, and their stored folder copies go through the file

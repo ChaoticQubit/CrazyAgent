@@ -305,6 +305,25 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("source-control");
       });
 
+      await t.test("Source Control stages and unstages through the engine into the project's real index", async () => {
+        const staged = () => git(repo, "diff", "--cached", "--name-only");
+        const through = async (command, reached, what) => {
+          await ide.run(command);
+          for (const deadline = Date.now() + STEP_MS; !reached(staged()); await pause(POLL_MS)) {
+            const picker = await page.evaluate(ide.rows);
+            if (picker && picker.some((label) => label.includes(REPO))) await ide.pick(REPO);
+            assert.ok(Date.now() < deadline, `${what}: the real index shows ${JSON.stringify(staged())}`);
+          }
+        };
+        const holdsNotes = (list) => list.split("\n").includes("notes.md");
+        assert.equal(staged(), "", "nothing is staged before the IDE stages");
+        await through("Git: Stage All Changes", holdsNotes, "the IDE's stage");
+        await ide.until("the staged group in Source Control", `(document.querySelector(".scm-view")?.textContent ?? "").includes("Staged Changes")`);
+        await me.capture("staged");
+        await through("Git: Unstage All Changes", (list) => list === "", "the IDE's unstage");
+        await through("Git: Stage All Changes", holdsNotes, "the IDE's second stage");
+      });
+
       await t.test("the commit box takes typed input and arrow keys, and the IDE commits the owner's edit", async () => {
         const before = head();
         const box = await ide.until("the project's commit box", ide.commitBox, WORKBENCH_MS);

@@ -1610,3 +1610,255 @@ fn probing_a_live_server_out_of_descriptors() {
     drop(held);
     std::fs::write(home.join("answer"), format!("{answer:?}")).unwrap();
 }
+
+/// A tmux program answering as the stand-in server a lead swapped in for its own would: its
+/// session lists `agent` and every pane it reports has `pid` as its first process. Takes the
+/// folder it goes in, the agent and the pid. Returns the program.
+#[cfg(target_os = "macos")]
+fn forging_tmux(folder: &Path, agent: &AgentId, pid: impl std::fmt::Display) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let program = folder.join("forging-tmux");
+    let script = format!(
+        r#"#!/bin/sh
+printf '%%begin 1 0 1\n%%end 1 0 1\n'
+number=1
+while IFS= read -r line; do
+  printf '%%begin 1 %s 1\n' "$number"
+  case "$line" in
+    *'#{{version}}'*) printf '3.5 end\n' ;;
+    *list-windows*) printf '{agent} end\n' ;;
+    *list-panes*) printf '%%1 {pid} 0 end\n' ;;
+    *new-window*) printf '%%2 {pid} end\n' ;;
+  esac
+  printf '%%end 1 %s 1\n' "$number"
+  number=$((number + 1))
+done
+"#
+    );
+    std::fs::write(&program, script).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    program
+}
+
+/// A host whose socket has a listener in this test process and whose tmux program forges
+/// every reply: the swap a native lead can make at its own socket path.
+#[cfg(target_os = "macos")]
+struct StandIn {
+    home: tempfile::TempDir,
+    _listener: std::os::unix::net::UnixListener,
+    address: PathBuf,
+    agent: AgentId,
+    host: Tmux,
+}
+
+#[cfg(target_os = "macos")]
+impl StandIn {
+    /// Opens the host and binds the stand-in listener. Takes the pid its replies name.
+    /// Returns the stand-in, which this process listens for.
+    fn naming(pid: impl std::fmt::Display) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("terminal");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let agent = AgentId::team(1).unwrap();
+        let host = Tmux::open(Some(forging_tmux(home.path(), &agent, pid)), &folder);
+        let address = host.address().unwrap();
+        let listener = crate::spawn_gate::bind_unix_std(&address).unwrap();
+        Self {
+            home,
+            _listener: listener,
+            address,
+            agent,
+            host,
+        }
+    }
+}
+
+/// Starts a process leading its own group under a shell that stays, so neither this test nor
+/// a stand-in listening in it is its parent. Returns the shell and the group, killed when
+/// dropped.
+#[cfg(target_os = "macos")]
+fn foreign_group() -> (Child, Group) {
+    let mut shell = crate::spawn_gate::spawn(
+        Command::new("/bin/sh")
+            .args([
+                "-c",
+                "/usr/bin/perl -e 'setpgrp(0, 0); sleep 120' & echo $!; wait",
+            ])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(shell.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let leader = pgid_support::pane_group(line.trim().parse().unwrap());
+    (shell, Group(leader, std::cell::Cell::new(false)))
+}
+
+/// Starts a process of this test leading its own group, so a stand-in listening in this test
+/// process is its parent. Returns the process and the group, killed when dropped.
+#[cfg(target_os = "macos")]
+fn listeners_group() -> (Child, Group) {
+    use std::os::unix::process::CommandExt;
+    let child = crate::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("120")
+            .process_group(0)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let leader = pgid_support::pane_group(child.id());
+    (child, Group(leader, std::cell::Cell::new(false)))
+}
+
+#[cfg(target_os = "macos")]
+fn answers(group: &Group) -> bool {
+    rustix::process::test_kill_process_group(group.0).is_ok()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kill_leaves_alone_a_process_a_stand_in_listener_names_but_did_not_start() {
+    let (mut shell, group) = foreign_group();
+    let stand_in = StandIn::naming(group.0.as_raw_nonzero());
+
+    stand_in.host.kill(&stand_in.agent).unwrap();
+    stand_in.host.join_reapers();
+
+    assert!(
+        answers(&group),
+        "the engine killed a group the stand-in only named"
+    );
+    drop(group);
+    let _ = shell.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_left_pane_cleanup_leaves_alone_a_process_a_stand_in_listener_names_but_did_not_start() {
+    let (mut shell, group) = foreign_group();
+    let stand_in = StandIn::naming(group.0.as_raw_nonzero());
+
+    let ended =
+        crate::harnesses::terminal_session::end_left_pane(&stand_in.host, &stand_in.agent, "test")
+            .map_err(|problem| problem.0);
+
+    assert!(
+        answers(&group),
+        "the cleanup signalled a process the stand-in only named"
+    );
+    assert_eq!(
+        ended,
+        Ok(false),
+        "a pane no server vouched for stays uncertain"
+    );
+    drop(group);
+    let _ = shell.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_spawn_refuses_a_first_process_the_listener_did_not_start() {
+    let (mut shell, group) = foreign_group();
+    let stand_in = StandIn::naming(group.0.as_raw_nonzero());
+    let command = hangup_ignored_agent(stand_in.home.path(), &stand_in.home.path().join("unused"));
+
+    let spawned = stand_in
+        .host
+        .spawn(&AgentId::team(2).unwrap(), &command)
+        .map(|pane| pane.pid)
+        .map_err(|problem| problem.0);
+
+    assert_eq!(spawned, Err("terminal_command_failed".to_owned()));
+    drop(group);
+    let _ = shell.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_reply_naming_a_pid_no_process_can_have_names_none() {
+    let stand_in = StandIn::naming(u32::MAX);
+
+    assert_eq!(
+        stand_in
+            .host
+            .pane_pid(&stand_in.agent)
+            .map_err(|problem| problem.0),
+        Ok(None)
+    );
+    assert_eq!(
+        crate::harnesses::terminal_session::end_left_pane(&stand_in.host, &stand_in.agent, "test",)
+            .map_err(|problem| problem.0),
+        Ok(false)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_first_process_the_listener_started_is_named() {
+    let (mut child, group) = listeners_group();
+    let stand_in = StandIn::naming(group.0.as_raw_nonzero());
+
+    assert_eq!(
+        stand_in
+            .host
+            .pane_pid(&stand_in.agent)
+            .map_err(|problem| problem.0),
+        Ok(Some(child.id()))
+    );
+    drop(group);
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_first_process_is_not_named_once_the_listener_is_gone() {
+    let (mut child, group) = listeners_group();
+    let stand_in = StandIn::naming(group.0.as_raw_nonzero());
+    assert_eq!(
+        stand_in
+            .host
+            .pane_pid(&stand_in.agent)
+            .map_err(|problem| problem.0),
+        Ok(Some(child.id()))
+    );
+
+    drop(stand_in._listener);
+
+    assert_eq!(
+        stand_in
+            .host
+            .pane_pid(&stand_in.agent)
+            .map_err(|problem| problem.0),
+        Ok(None),
+        "a socket nothing listens at vouched for a process"
+    );
+    drop(group);
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_server_pid_comes_only_from_a_listener_bound_at_the_socket_itself() {
+    let stand_in = StandIn::naming(2);
+    assert_eq!(stand_in.host.server_pid(), Some(std::process::id()));
+    let other = stand_in.home.path().join("other.sock");
+    let _other = crate::spawn_gate::bind_unix_std(&other).unwrap();
+
+    std::fs::remove_file(&stand_in.address).unwrap();
+    std::os::unix::fs::symlink(&other, &stand_in.address).unwrap();
+
+    assert_eq!(
+        stand_in.host.server_pid(),
+        None,
+        "a link at the socket path redirected the probe to another listener"
+    );
+}

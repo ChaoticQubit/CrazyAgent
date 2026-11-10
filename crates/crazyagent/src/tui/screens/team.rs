@@ -60,6 +60,7 @@ pub(in crate::tui) const MASTER_NO_SESSION: &str =
 const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
     "It starts again when you open this view again or press n for a new session.";
+const MASTER_START_AGAIN: &str = "s starts it again, on the same conversation.";
 const MASTER_HEAD_ROWS: u16 = 1;
 const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
 const MASTER_PAUSED_START: &str =
@@ -71,6 +72,11 @@ const MASTER_HELD_REST: &str =
     "What you typed so far goes in once it opens; the rest was not kept.";
 const MASTER_HELD_DROPPED: &str = "What you typed for the master was not sent.";
 const MASTER_HELD_AGAIN: &str = "Its terminal did not open. Type it again once it is open.";
+/// What the owner reads when the master view closes because Live terminal is Off.
+const LIVE_TERMINAL_OFF: &str = "Live terminal is off for this project.";
+/// Where that master's conversation is and how to change the setting.
+const LIVE_TERMINAL_HOW: &str =
+    "Its conversation is the console. V in the team settings turns it on.";
 /// The most keys kept while the master's terminal starts. Keys, not bytes: a key's bytes
 /// depend on the modes of the terminal, known once it opens; a kept key is at most 6
 /// bytes, so all of them come to at most 24 KiB, sent in `INPUT_BYTES_MAX` chunks.
@@ -97,6 +103,7 @@ enum Body {
     Detail {
         account: Option<String>,
         branch: Option<String>,
+        live: Option<String>,
     },
     Note(String),
     Heading(&'static str),
@@ -117,6 +124,7 @@ struct TreeRow {
 struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
+    idle: bool,
     switched: Option<String>,
     saved: Option<String>,
     running: Option<String>,
@@ -161,6 +169,7 @@ pub struct Team {
     checked: bool,
     switch: Option<LiveSwitch>,
     master_agent: Option<Option<i64>>,
+    master_live: Option<bool>,
     want: Option<bool>,
     refused: Option<String>,
     paused: bool,
@@ -192,6 +201,7 @@ impl Team {
             checked: false,
             switch: None,
             master_agent: None,
+            master_live: None,
             want: None,
             refused: None,
             paused: false,
@@ -341,6 +351,14 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
+    /// Whether an idle stop ended the live master, the one stop that offers s to start it
+    /// again from this view. Input: none. Output: the answer.
+    fn idle_stopped(&self) -> bool {
+        self.master
+            && self.live_on() == Some(false)
+            && self.switch.as_ref().is_some_and(|switch| switch.idle)
+    }
+
     fn start_live(&mut self, ctx: &mut Ctx) {
         self.asked = true;
         self.want = Some(true);
@@ -380,7 +398,8 @@ impl Team {
 
     /// Takes a team status read, a live switch change or a session check of this master
     /// view: a good read replaces the switch, and the first one of this open turns a switch
-    /// that is not on on, or checks the session of a running team's switch already on; a
+    /// that is not on on, or checks the session of a running team's switch already on, and a
+    /// switch seen on stays stopped after its next stop until the owner acts; a
     /// failed read changes nothing but ends a start waiting to be retried; an accepted change
     /// is the switch until the next read, which is read at once, and an accepted Start all
     /// checks the session too; a change refused as stale reads the switch again, and the first
@@ -409,6 +428,7 @@ impl Team {
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
+                    idle: status.live_idle_stopped,
                     switched: status.live_switch.as_ref().map(switched_words),
                     saved: status
                         .harnesses
@@ -432,6 +452,7 @@ impl Team {
                 } else if !off && !self.paused && !self.asked && !self.checked {
                     self.check_session(ctx);
                 }
+                self.asked |= !off && !self.paused;
             }
             SetupQuery::TeamChange {
                 action:
@@ -470,6 +491,7 @@ impl Team {
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
+                        idle: false,
                         switched,
                         saved,
                         running,
@@ -512,6 +534,23 @@ impl Team {
             },
             generation,
         }));
+    }
+
+    /// Reads the team again when the graph shows the master stopped after showing it running,
+    /// so the open master view says why it stopped. Input: the context. Output: none; a team
+    /// read may be queued.
+    fn note_master_stopped(&mut self, ctx: &mut Ctx) {
+        let live = self.graph.ready().and_then(|graph| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == NodeKind::Master)
+                .map(|node| node.status.is_none_or(|status| status.live()))
+        });
+        let last = std::mem::replace(&mut self.master_live, live);
+        if self.master && last == Some(true) && live == Some(false) {
+            self.read_switch(ctx);
+        }
     }
 
     /// Reads the team again when the graph shows another master agent than it showed last,
@@ -573,6 +612,7 @@ impl Team {
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
             Key::Char('S') if self.paused => self.start_team(ctx),
+            Key::Char('s') if self.idle_stopped() => self.start_live(ctx),
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -717,6 +757,15 @@ impl Team {
             closed: None,
         });
         self.focus = Focus::Terminal;
+    }
+
+    /// Whether a team read says this project's "Live terminal" setting is Off, which closes
+    /// the master view, since that master's conversation is the console (DEC-117 Q4).
+    /// Input: the setup event. Output: true for a good team read of this project showing Off.
+    fn live_terminal_off(&self, event: &crate::tui::client::SetupEvent) -> bool {
+        self.master
+            && matches!(&event.query, SetupQuery::Team { project } if *project == self.project)
+            && matches!(&event.result, Ok(SetupView::Team(status)) if !status.master_live_terminal)
     }
 
     fn detach(&mut self, ctx: &mut Ctx) {
@@ -943,7 +992,8 @@ impl Team {
     /// master view, any other key goes to the open terminal. While the master's terminal
     /// starts, keys wait for it and Esc goes back; a master view with no terminal coming
     /// gives the keys to the view. A terminal that closed keeps the keys and drops them
-    /// until Ctrl-], so keys typed as it closed never act on the view.
+    /// until Ctrl-], so keys typed as it closed never act on the view, but for s after an
+    /// idle stop, which starts the master again.
     /// Inputs: the key and the context. Output: the flow.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
@@ -973,6 +1023,9 @@ impl Team {
             return Flow::Handled;
         };
         if attached.closed.is_some() {
+            if *key == Key::Char('s') && self.idle_stopped() {
+                self.start_live(ctx);
+            }
             return Flow::Handled;
         }
         for chunk in attached.pane.encode(key).chunks(INPUT_BYTES_MAX) {
@@ -1055,8 +1108,9 @@ impl Team {
             .skip(self.offset)
             .take(height)
             .map(|(index, row)| {
+                let room = limit.saturating_sub(2).saturating_sub(width(&row.prefix));
                 list_row(
-                    join([Line::raw(row.prefix.clone()), body(row, graph, ctx)]),
+                    join([Line::raw(row.prefix.clone()), body(row, graph, ctx, room)]),
                     limit,
                     row.item.is_some() && index == selected,
                     focused,
@@ -1244,13 +1298,28 @@ impl Team {
                 .map(Line::raw)
                 .collect();
             lines.extend(
-                wrap(MASTER_RESTART, limit)
-                    .into_iter()
-                    .map(|text| styled(text, Role::Muted, theme)),
+                wrap(
+                    if self.idle_stopped() {
+                        MASTER_START_AGAIN
+                    } else {
+                        MASTER_RESTART
+                    },
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
             );
             boxed(frame, area, "Master", false, lines, ctx);
             return None;
         }
+        let idle_line = self
+            .idle_stopped()
+            .then(|| {
+                self.switch
+                    .as_ref()
+                    .and_then(|switch| switch.problem.clone())
+            })
+            .flatten();
         let Some(attached) = self.attached.as_mut() else {
             let waiting = if self.master {
                 self.switch
@@ -1282,8 +1351,11 @@ impl Team {
             return None;
         }
         if let Some(code) = &attached.closed {
-            let (lead, rest) = closed_words(code);
-            let mut lines = vec![Line::raw(lead)];
+            let (lead, rest) = idle_line
+                .as_deref()
+                .map_or(closed_words(code), |line| (line, MASTER_START_AGAIN));
+            let mut lines: Vec<Line<'static>> =
+                wrap(lead, limit).into_iter().map(Line::raw).collect();
             lines.extend(
                 wrap(rest, limit)
                     .into_iter()
@@ -1325,6 +1397,9 @@ impl Screen for Team {
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.terminal_keys() && self.master {
             let mut hints = vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+            if self.idle_stopped() {
+                hints.insert(0, hint("s", "Start again"));
+            }
             if self.starting() {
                 hints.push(hint("Esc", "Back"));
             }
@@ -1343,6 +1418,9 @@ impl Screen for Team {
             let mut hints = Vec::new();
             if self.paused {
                 hints.push(hint("S", "Start all"));
+            }
+            if self.idle_stopped() {
+                hints.push(hint("s", "Start again"));
             }
             if self
                 .attached
@@ -1542,6 +1620,7 @@ impl Screen for Team {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
                 self.note_master_agent(ctx);
+                self.note_master_stopped(ctx);
                 self.follow_master(ctx);
                 if !self.master {
                     questions::Questions::read(&self.project, ctx);
@@ -1551,6 +1630,11 @@ impl Screen for Team {
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
                 OwnerEvent::Setup(event) => {
+                    if self.live_terminal_off(event) {
+                        self.detach(ctx);
+                        ctx.say(Message::warning(LIVE_TERMINAL_OFF, LIVE_TERMINAL_HOW));
+                        return Flow::Back;
+                    }
                     self.took_setup(&event.query, &event.result, ctx);
                     if let Some(view) = self.settings.as_mut() {
                         view.apply(&event.query, event.result.clone());
@@ -1697,6 +1781,7 @@ fn tree(graph: &TeamGraph, glyphs: &Glyphs, width: usize) -> Vec<TreeRow> {
             &graph.nodes[*master],
             stem(glyphs, kids.is_empty()),
             width,
+            None,
         );
         lead_rows(graph, glyphs, &kids, "", width, &mut seen, &mut out);
     }
@@ -1776,9 +1861,12 @@ fn lead_rows(
             continue;
         }
         let last = index + 1 == members.len();
+        let prefix = format!("{indent}{}", branch_glyph(glyphs, last));
+        let room = width.saturating_sub(crate::tui::text::width(&prefix));
+        let moved = moved_action(graph, &graph.nodes[*member], glyphs, room);
         out.push(TreeRow {
             item: Some(Item::Node(*member)),
-            prefix: format!("{indent}{}", branch_glyph(glyphs, last)),
+            prefix,
             body: Body::Agent(*member),
         });
         let base = format!("{indent}{}", stem(glyphs, last));
@@ -1791,7 +1879,7 @@ fn lead_rows(
         } else {
             format!("{base}{}", stem(glyphs, false))
         };
-        detail_row(out, &graph.nodes[*member], detail, width);
+        detail_row(out, &graph.nodes[*member], detail, width, moved);
         lead_rows(graph, glyphs, &kids, &base, width, seen, out);
     }
 }
@@ -1810,12 +1898,74 @@ fn relation_of(graph: &TeamGraph, node: &GraphNode) -> Option<usize> {
         .position(|edge| edge.from == parent && edge.to == node.id)
 }
 
+/// The cells an agent's line takes around its relation words: its status glyph and label,
+/// then two spaces and its status word. Inputs: the node and the glyphs. Output: the two
+/// widths; the second is 0 for a node with no status word.
+fn line_cells(node: &GraphNode, glyphs: &Glyphs) -> (usize, usize) {
+    let glyph = node
+        .status
+        .map_or(0, |status| width(glyphs.status(agent_status(status))) + 1);
+    let word = node
+        .status_label
+        .as_deref()
+        .or(node.status.map(|status| status.label()));
+    (
+        glyph + width(&node.label),
+        word.map_or(0, |word| 2 + width(word)),
+    )
+}
+
+/// Says whether a live action stays on its agent's own line: the status word keeps its place
+/// and at least the action's first word shows, or all of it for a wait on the owner, whose
+/// last words say who it waits on. Inputs: the node, its edge, the action's words, the glyphs
+/// and the cells left after the row's prefix. Output: true to show it there, cut to fit.
+fn live_fits(
+    node: &GraphNode,
+    edge: &RelationEdge,
+    label: &str,
+    glyphs: &Glyphs,
+    room: usize,
+) -> bool {
+    let (head, word) = line_cells(node, glyphs);
+    let lead = 3 + width(glyphs.dot);
+    let first = label.split(' ').next().unwrap_or(label);
+    let least = if matches!(edge.live, Some(LiveAction::WaitingOn { owner: true })) {
+        width(label)
+    } else {
+        width(label).min(width(first) + width(glyphs.ellipsis))
+    };
+    head + word + lead + least <= room
+}
+
+/// The live action an agent's detail row shows because it did not fit on the agent's own
+/// line. Inputs: the graph, the node, the glyphs and the cells left after the agent row's
+/// prefix. Output: the action's words, or None when there is none to move.
+fn moved_action(
+    graph: &TeamGraph,
+    node: &GraphNode,
+    glyphs: &Glyphs,
+    room: usize,
+) -> Option<String> {
+    let edge = &graph.relations[relation_of(graph, node)?];
+    edge.live.as_ref()?;
+    let label = edge_label(edge);
+    (!live_fits(node, edge, &label, glyphs, room)).then_some(label)
+}
+
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
 /// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
 /// when the Delivery setting leaves it no way to get messages, each wrapped to the width
-/// left after the prefix so the words are never cut. Inputs: the rows, the node, the
-/// prefix and the row width. Output: none; rows are appended.
-fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
+/// left after the prefix so the words are never cut. A live action that did not fit on the
+/// agent's own line goes first on the account row, or as the first note with no account row.
+/// Inputs: the rows, the node, the prefix, the row width and that action. Output: none; rows
+/// are appended.
+fn detail_row(
+    out: &mut Vec<TreeRow>,
+    node: &GraphNode,
+    prefix: String,
+    width: usize,
+    mut live: Option<String>,
+) {
     if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
             item: None,
@@ -1823,6 +1973,7 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
             body: Body::Detail {
                 account: node.account.clone(),
                 branch: node.branch.clone(),
+                live: live.take(),
             },
         });
     }
@@ -1832,8 +1983,9 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
     let hookless = node
         .hookless
         .then(|| format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS));
-    for words in hookless
+    for words in live
         .into_iter()
+        .chain(hookless)
         .chain(node.message_note.as_deref().map(plain))
     {
         out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
@@ -1846,25 +1998,42 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
 
 /// One tree row's text after its prefix: a master or agent row's status glyph and label, the
 /// live action on the line from its lead, its status word and that line's standing relation;
-/// a task row's status glyph, the agent it went to and its title. Cut from the right with an
-/// ellipsis, so the glyph always shows. Inputs: the row, the graph and the context. Output:
-/// the line.
-fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
+/// a task row's status glyph, the agent it went to and its title. An agent row keeps its
+/// status word: the live action is cut to the cells left or moves to the detail row, and a
+/// standing relation shows whole or not at all. Anything else is cut from the right with an
+/// ellipsis, so the glyph always shows. Inputs: the row, the graph, the context and the cells
+/// left after the prefix. Output: the line.
+fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx, room: usize) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
     match &row.body {
         Body::Master(node) | Body::Agent(node) => {
             let node = &graph.nodes[*node];
             let edge = relation_of(graph, node).map(|pair| &graph.relations[pair]);
-            let live = edge.filter(|edge| edge.live.is_some()).map(|edge| {
-                Span::styled(
-                    format!("  {} {}", glyphs.dot, edge_label(edge)),
-                    theme.style(Role::Accent),
-                )
-            });
+            let (head, word) = line_cells(node, glyphs);
+            let live = edge
+                .filter(|edge| edge.live.is_some())
+                .map(|edge| (edge, edge_label(edge)))
+                .filter(|(edge, label)| live_fits(node, edge, label, glyphs, room))
+                .map(|(_, label)| {
+                    assert!(
+                        head + word < room,
+                        "a live action needs cells beside the status"
+                    );
+                    Span::styled(
+                        cut(
+                            &format!("  {} {label}", glyphs.dot),
+                            room - head - word,
+                            glyphs.ellipsis,
+                        ),
+                        theme.style(Role::Accent),
+                    )
+                });
             let standing = edge
                 .filter(|edge| edge.live.is_none())
-                .map(|edge| Span::styled(format!("  {}", edge_label(edge)), theme.muted));
+                .map(edge_label)
+                .filter(|label| head + word + 2 + width(label) <= room)
+                .map(|label| Span::styled(format!("  {label}"), theme.muted));
             let mut spans = Vec::new();
             match node.status {
                 Some(status) => {
@@ -1891,22 +2060,29 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             spans.extend(standing);
             Line::from(spans)
         }
-        Body::Detail { account, branch } => {
+        Body::Detail {
+            account,
+            branch,
+            live,
+        } => {
             let account = account.as_ref().map(|account| {
                 account_name(
                     Some(account),
                     ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
                 )
             });
-            styled(
-                account
-                    .into_iter()
-                    .chain(branch.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join("  "),
-                Role::Muted,
-                theme,
-            )
+            let rest = account
+                .into_iter()
+                .chain(branch.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("  ");
+            let Some(live) = live else {
+                return styled(rest, Role::Muted, theme);
+            };
+            Line::from(vec![
+                Span::styled(format!("{} {live}", glyphs.dot), theme.style(Role::Accent)),
+                Span::styled(format!("  {rest}"), theme.muted),
+            ])
         }
         Body::Note(text) => styled(text.clone(), Role::Muted, theme),
         Body::Heading(text) => styled(*text, Role::Muted, theme),

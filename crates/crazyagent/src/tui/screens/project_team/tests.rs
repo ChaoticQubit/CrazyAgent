@@ -161,6 +161,8 @@ fn team() -> TeamStatus {
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -169,6 +171,7 @@ fn team() -> TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
+        live_idle_stopped: false,
         settings_version: 7,
         min_agents: 1,
         max_agents: 4,
@@ -388,6 +391,33 @@ fn a_short_window_keeps_the_plan_line_while_a_harness_cannot_run() {
     assert_eq!(
         rows.iter()
             .filter(|row| row.contains("Claude Code (can't run yet) x2"))
+            .count(),
+        1,
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows.iter().all(|row| row.chars().count() <= 80));
+}
+
+#[test]
+fn a_short_window_keeps_the_line_saying_there_is_no_master() {
+    use crate::team::events::WaitingAgent;
+    let mut status = team();
+    status
+        .harnesses
+        .retain(|harness| harness.role != AgentRole::Master);
+    status.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed?".into(),
+    }];
+    status.events.paused = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 80, 24);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("No master yet."))
             .count(),
         1,
         "{}",
@@ -2641,6 +2671,148 @@ fn g_turns_ask_before_merge_on_and_off() {
             "The master now merges a finished harness without asking."
         ))
     );
+}
+
+/// I moves "Stop the master when idle after" through 15 min, 1 h and Off and back, each
+/// with its plain notice (DEC-117 Q4).
+#[test]
+fn capital_i_moves_the_master_idle_stop_through_its_choices() {
+    use crate::team::MasterIdleStop::{FifteenMinutes, Off, OneHour};
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('I'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(
+        view.help()
+            .contains(&("I", "Stop the master when idle after"))
+    );
+    assert!(shows(&view, "Master idle stop  15 min"));
+    let steps = [
+        (
+            FifteenMinutes,
+            OneHour,
+            "An idle master now stops after 1 h.",
+        ),
+        (
+            OneHour,
+            Off,
+            "An idle master now keeps running until the team stops.",
+        ),
+        (
+            Off,
+            FifteenMinutes,
+            "An idle master now stops after 15 min.",
+        ),
+    ];
+    for (at, next, words) in steps {
+        let line = format!("Master idle stop  {}", at.label());
+        assert!(shows(&view, &line), "{line}");
+        let reply = view.key(press(KeyCode::Char('I')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterIdleStop {
+                project_id: project(),
+                choice: next,
+            })
+        );
+        applied(&mut view, reply);
+        assert_eq!(view.notice, Some(Notice::plain(words)));
+        let mut shown = team();
+        shown.master_idle_stop = next;
+        reread(&mut view, shown, NOW + 10);
+    }
+}
+
+/// The idle limit's notice says what the master's own choice does (DEC-117 Q4).
+#[test]
+fn the_idle_limit_notice_says_what_the_masters_own_choice_does() {
+    use crate::team::MasterIdleStop::{Off, OneHour};
+    let steps = [
+        (Off, "An idle master keeps running until the team stops."),
+        (OneHour, "An idle master stops 1 h after its work is done."),
+    ];
+    for (choice, words) in steps {
+        let mut chosen = team();
+        chosen.master_idle_stop = choice;
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(chosen))));
+        let reply = view.key(press(KeyCode::Char('i')));
+        applied(&mut view, reply);
+        let notice = format!("{:?}", view.notice);
+        assert!(notice.contains(words), "{notice}");
+    }
+}
+
+/// V turns "Live terminal" off and on, each way with its plain notice (DEC-117 Q4).
+#[test]
+fn capital_v_turns_live_terminal_off_and_on() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('V'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("V", "Live terminal")));
+    let steps = [
+        (
+            "On",
+            false,
+            "Live terminal is off: the master ends at its next stop and its conversation is the console.",
+        ),
+        (
+            "Off",
+            true,
+            "Live terminal is on: the master runs in a terminal you see and type into.",
+        ),
+    ];
+    for (at, next, words) in steps {
+        let line = format!("Live terminal  {at}");
+        assert!(shows(&view, &line), "{line}");
+        let reply = view.key(press(KeyCode::Char('V')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterLiveTerminal {
+                project_id: project(),
+                on: next,
+            })
+        );
+        applied(&mut view, reply);
+        assert_eq!(view.notice, Some(Notice::plain(words)));
+        let mut shown = team();
+        shown.master_live_terminal = next;
+        reread(&mut view, shown, NOW + 10);
+    }
+}
+
+/// A master with no live terminal (RCLI) has nothing for "Live terminal" to turn on or off: V
+/// says so and changes nothing, and neither the settings strip nor the help offers it
+/// (OWNER-Q4-2-L3).
+#[test]
+fn capital_v_says_why_for_a_master_with_no_live_terminal() {
+    let mut shown = team();
+    let master = shown
+        .harnesses
+        .iter_mut()
+        .find(|harness| harness.role == crate::team::AgentRole::Master)
+        .expect("the fixture lists a master harness");
+    master.harness = "rcli".into();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(shown))));
+    assert_eq!(view.key(press(KeyCode::Char('V'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "This master has no live terminal: its conversation is the console."
+        ))
+    );
+    assert!(!shows(&view, "Live terminal"), "the strip leaves it out");
+    assert!(!view.help().contains(&("V", "Live terminal")));
 }
 
 /// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
