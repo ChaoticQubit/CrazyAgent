@@ -1297,3 +1297,292 @@ fn a_web_search_that_arrives_on_a_repeat_is_still_charged() {
     );
     assert_eq!(spent(&db), first + searches);
 }
+
+const PAST_REPLAY: &str = "2026-11-09T03:02:00.000Z";
+
+fn user(text: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "user", "timestamp": "2026-11-09T02:00:00.000Z", "message": {"content": text}})
+    )
+}
+
+fn calls(id: &str, stop: Option<&str>, tools: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-11-09T02:00:01.000Z",
+            "message": {
+                "id": id, "model": MODEL, "stop_reason": stop,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "content": tools
+            }
+        })
+    )
+}
+
+fn edit(file: &str) -> serde_json::Value {
+    serde_json::json!([{"type": "tool_use", "name": "Edit", "input": {"file_path": file}}])
+}
+
+fn shell(command: &str) -> serde_json::Value {
+    serde_json::json!([{"type": "tool_use", "name": "Bash", "input": {"command": command}}])
+}
+
+fn activity_rows(db: &Connection) -> Vec<(String, i64, i64, i64)> {
+    db.prepare(
+        "SELECT activity,turns,edit_turns,first_try_turns FROM usage_activity ORDER BY activity",
+    )
+    .unwrap()
+    .query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+fn names(db: &Connection, sql: &str) -> Vec<String> {
+    db.prepare(sql)
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn an_edit_verified_and_edited_again_is_not_first_try() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &user("add a page"));
+    append(&file, &calls("m1", None, edit("/repo/a.rs")));
+    append(&file, &calls("m2", None, shell("cargo test")));
+    append(&file, &calls("m3", Some("end_turn"), edit("/repo/a.rs")));
+    append(&file, &user("fix the crash"));
+    append(&file, &calls("m4", Some("end_turn"), edit("/repo/b.rs")));
+    scan_it(&db, root.path());
+    assert_eq!(
+        activity_rows(&db),
+        vec![
+            ("debugging".to_owned(), 1, 1, 1),
+            ("feature".to_owned(), 1, 1, 0),
+        ]
+    );
+}
+
+#[test]
+fn a_lookup_between_two_edits_is_still_first_try() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &user("add a page"));
+    append(&file, &calls("m1", None, edit("/repo/a.rs")));
+    append(&file, &calls("m2", None, shell("git status")));
+    append(&file, &calls("m3", Some("end_turn"), edit("/repo/a.rs")));
+    scan_it(&db, root.path());
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 1, 1, 1)]);
+}
+
+#[test]
+fn a_tool_result_or_a_meta_line_does_not_start_a_turn() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &user("add a page"));
+    append(&file, &calls("m1", None, edit("/repo/a.rs")));
+    let result = serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}});
+    let note = serde_json::json!({"type": "user", "isMeta": true, "message": {"content": "fix the crash"}});
+    append(&file, &format!("{result}\n{note}\n"));
+    append(&file, &calls("m2", Some("end_turn"), edit("/repo/b.rs")));
+    scan_it(&db, root.path());
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 1, 1, 1)]);
+}
+
+#[test]
+fn a_turn_split_across_two_scans_counts_once() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &user("add a page"));
+    append(&file, &calls("m1", None, edit("/repo/a.rs")));
+    scan_it(&db, root.path());
+    assert_eq!(activity_rows(&db), vec![]);
+    append(&file, &calls("m2", Some("end_turn"), edit("/repo/b.rs")));
+    scan_it(&db, root.path());
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 1, 1, 1)]);
+}
+
+#[test]
+fn a_saved_turn_holds_no_message_or_path() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &user("add the-secret-words"));
+    append(&file, &calls("m1", None, edit("/repo/secret-file.rs")));
+    scan_it(&db, root.path());
+    let progress: String = db
+        .query_row("SELECT progress FROM usage_files", [], |row| row.get(0))
+        .unwrap();
+    assert!(progress.contains("\"started\":true"), "{progress}");
+    assert!(!progress.contains("the-secret-words"), "{progress}");
+    assert!(!progress.contains("secret-file"), "{progress}");
+}
+
+fn tools_read(db: &Connection, file: &Path) -> usize {
+    let mut progress = Progress::default();
+    let mut tools = Vec::new();
+    let mut seen = Seen::new(db, "usage_messages");
+    read_record_with(
+        file,
+        Format::Claude,
+        &mut progress,
+        NOW,
+        Some(&mut tools),
+        Some(&mut seen),
+    );
+    tools.len()
+}
+
+#[test]
+fn a_resumed_copy_files_its_turns_and_tools_once() {
+    let (root, db) = store();
+    let first = transcript(root.path(), "s1");
+    append(&first, &user("add a page"));
+    append(&first, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
+    scan_it(&db, root.path());
+    let copy = transcript(root.path(), "s2");
+    append(&copy, &user("add a page"));
+    append(&copy, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
+    assert_eq!(
+        tools_read(&db, &copy),
+        0,
+        "a copied turn's tools are not new calls"
+    );
+    append(&copy, &user("fix the crash"));
+    append(&copy, &calls("m2", Some("end_turn"), edit("/repo/b.rs")));
+    assert_eq!(tools_read(&db, &copy), 1, "the new turn's call is");
+    scan_it(&db, root.path());
+    assert_eq!(
+        activity_rows(&db),
+        vec![
+            ("debugging".to_owned(), 1, 1, 1),
+            ("feature".to_owned(), 1, 1, 1)
+        ]
+    );
+}
+
+#[test]
+fn an_original_and_its_copy_in_one_scan_file_one_turn() {
+    let (root, db) = store();
+    for name in ["s1", "s2"] {
+        let file = transcript(root.path(), name);
+        append(&file, &user("add a page"));
+        append(&file, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
+    }
+    scan_it(&db, root.path());
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 1, 1, 1)]);
+}
+
+fn codex_user(at: &str, text: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "event_msg", "payload": {"type": "user_message", "message": text}})
+    )
+}
+
+fn codex_call(at: &str, name: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "response_item", "payload": {"type": "function_call", "name": name, "arguments": "{}"}})
+    )
+}
+
+fn codex_done(at: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "event_msg", "payload": {"type": "task_complete"}})
+    )
+}
+
+#[test]
+fn a_forks_replayed_turn_files_nothing() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "fork");
+    append(
+        &file,
+        &meta(
+            LATER,
+            "fork",
+            serde_json::json!({"forked_from_id": "parent"}),
+        ),
+    );
+    append(&file, &codex_user(T0_1, "add a page"));
+    append(&file, &codex_call(T0_1, "apply_patch"));
+    append(&file, &codex_done(T0_1));
+    append(&file, &codex_user(PAST_REPLAY, "fix the crash"));
+    append(&file, &codex_call(PAST_REPLAY, "apply_patch"));
+    append(&file, &codex_done(PAST_REPLAY));
+    scan_codex(&db, root.path());
+    assert_eq!(activity_rows(&db), vec![("debugging".to_owned(), 1, 1, 1)]);
+}
+
+#[test]
+fn a_codex_turn_files_under_its_model() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "one");
+    append(&file, &meta(T0, "one", serde_json::json!({})));
+    append(&file, &codex_user(T0_1, "add a page"));
+    append(&file, &context(T0_1));
+    append(&file, &codex_call(T0_2, "apply_patch"));
+    append(&file, &codex_done(T0_2));
+    scan_codex(&db, root.path());
+    assert_eq!(
+        names(&db, "SELECT model FROM usage_activity"),
+        vec![CODEX.to_owned()]
+    );
+}
+
+#[test]
+fn past_its_caps_a_turn_is_left_out_of_the_chart_only() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &user("add a page"));
+    append(&file, &calls("m1", Some("end_turn"), edit("/repo/a.rs")));
+    assert_eq!(scan_it(&db, root.path()), expected(1, 1));
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 1, 1, 1)]);
+    at_cap(&db, "usage_activity");
+    append(&file, &user("fix the crash"));
+    append(&file, &calls("m2", Some("end_turn"), edit("/repo/b.rs")));
+    assert_eq!(scan_it(&db, root.path()), expected(1, 1));
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 1, 1, 1)]);
+}
+
+#[test]
+fn past_sixteen_models_in_an_hour_a_turn_files_under_no_model() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    for index in 0..17 {
+        append(&file, &user("add a page"));
+        let turn = calls(&format!("m{index}"), Some("end_turn"), edit("/repo/a.rs"));
+        append(&file, &turn.replace(MODEL, &format!("model-{index}")));
+    }
+    scan_it(&db, root.path());
+    let models = names(&db, "SELECT model FROM usage_activity ORDER BY model");
+    assert_eq!(models.len(), 17, "{models:?}");
+    assert_eq!(models[0], "", "{models:?}");
+}
+
+#[test]
+fn a_forgotten_projects_turns_stay_in_the_chart_under_removed_projects() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    for id in ["m1", "m2"] {
+        append(&file, &user("add a page"));
+        append(&file, &calls(id, Some("end_turn"), edit("/repo/a.rs")));
+        scan_it(&db, root.path());
+        super::super::forget_project(&db, "alpha").unwrap();
+    }
+    assert_eq!(
+        names(&db, "SELECT project FROM usage_activity"),
+        vec![super::super::REMOVED_PROJECTS.to_owned()]
+    );
+    assert_eq!(activity_rows(&db), vec![("feature".to_owned(), 2, 2, 2)]);
+}

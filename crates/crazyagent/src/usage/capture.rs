@@ -271,6 +271,18 @@ impl Reading {
     }
 }
 
+/// What one scan can tell about a turn's first counted record.
+pub(super) struct Seen<'a> {
+    db: &'a Connection,
+    table: &'static str,
+}
+
+impl<'a> Seen<'a> {
+    pub(super) fn new(db: &'a Connection, table: &'static str) -> Self {
+        Self { db, table }
+    }
+}
+
 /// One limit window a rollout line reports. The agent writes its own rollout, so a window
 /// counts only when it resets within its own length from now. Inputs: the window and the
 /// time. Output: its length in minutes and the window, or None.
@@ -702,19 +714,13 @@ fn read_record_with(
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-    tools: &mut Vec<String>,
+    tools: Option<&mut Vec<String>>,
+    _seen: Option<&mut Seen<'_>>,
 ) -> (Vec<Usage>, Option<Observation>) {
     let Some(opened) = open_record(path) else {
         return (Vec::new(), None);
     };
-    read_opened_with(
-        opened,
-        format,
-        progress,
-        now_ms,
-        Some(tools),
-        &session_name(path),
-    )
+    read_opened_with(opened, format, progress, now_ms, tools, &session_name(path))
 }
 
 fn read_opened(
@@ -896,7 +902,9 @@ fn scan(
         let mut progress = before.clone();
         let mut tools = Vec::new();
         let (usages, observed) = match counting {
-            Some(_) => read_record_with(&path, format, &mut progress, now_ms, &mut tools),
+            Some(_) => {
+                read_record_with(&path, format, &mut progress, now_ms, Some(&mut tools), None)
+            }
             None => read_record(&path, format, &mut progress, now_ms),
         };
         budget = budget.saturating_sub(usages.len());

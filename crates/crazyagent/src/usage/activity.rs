@@ -441,3 +441,20 @@ pub fn classify(words: &Words, tools: &Tools) -> Activity {
         None => conversation(words),
     }
 }
+
+pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_activity (
+    hour_ms INTEGER NOT NULL,
+    project TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    model TEXT NOT NULL,
+    activity TEXT NOT NULL,
+    turns INTEGER NOT NULL,
+    edit_turns INTEGER NOT NULL,
+    first_try_turns INTEGER NOT NULL,
+    PRIMARY KEY (hour_ms, project, agent, model, activity)
+);";
+
+/// Says whether a shell command only looks things up. Input: the command. Output: the answer.
+pub(super) fn read_shaped(_command: &str) -> bool {
+    false
+}
