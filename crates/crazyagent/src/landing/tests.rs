@@ -10262,6 +10262,39 @@ fn an_undo_an_engine_stop_cut_short_is_finished_or_dropped_by_the_next_owner_act
     }
 }
 
+/// LAND-16-L1: the Undone row names the set as its Accept row does, by its agent's title and
+/// its message through change_set_message, so a message stored with hidden characters reads
+/// as escapes, and never by the raw prompt.
+#[test]
+fn an_undone_row_names_the_set_as_its_accept_row_does() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    keeps_activity(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET message = ?1",
+            ["Stored before.\u{e0041}\u{feff}"],
+        )
+        .unwrap();
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let AcceptOutcome::Landed { .. } = undo_landing(&case.db, &case.home, &id).unwrap() else {
+        panic!("the undo conflicted");
+    };
+    let texts: Vec<String> = activity_of(&case, &id)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .map(|row| row.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["Undid the changes of Agent 1: Stored before.\\u{e0041}\\ufeff".to_owned()]
+    );
+}
+
 #[test]
 fn undoing_a_master_merge_names_and_marks_the_sets_it_closed() {
     use crate::activity::ActivityKind;
@@ -10889,6 +10922,84 @@ fn a_fast_forward_across_owner_commits_the_change_checks_refuse_opens_no_set() {
             "{owner_change}"
         );
     }
+}
+
+/// Starts team agent 3, has the owner commit a plain file on main and the agent fast-forward
+/// onto it, as a turn that only took main in leaves the agent. Input: the case. Output: the
+/// agent's workspace.
+fn fast_forwarded_agent(case: &Case) -> Workspace {
+    case.start();
+    let agent = numbered_agent(case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    case.owner_commit("LATER", "later\n", "Owner adds a file");
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    agent
+}
+
+/// Commits everything in an agent's worktree as the agent. Inputs: the case, the agent's
+/// workspace and the message.
+fn commit_as_agent(case: &Case, agent: &Workspace, message: &str) {
+    git_in(&case.home, &agent.worktree, &["add", "-A"]);
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
+/// rv-secreview land-17 L2: the fast-forward skip covers only a head already on the landing
+/// tip, so a link out of the tree that the agent commits after a fast-forward is still
+/// refused at its turn end.
+#[test]
+fn an_agent_link_out_of_the_tree_committed_after_a_fast_forward_is_refused() {
+    let case = Case::new();
+    let agent = fast_forwarded_agent(&case);
+    std::os::unix::fs::symlink("/etc", agent.worktree.join("outside")).unwrap();
+    commit_as_agent(&case, &agent, "Agent links out");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &agent, &merge_turn())),
+        "changes_link_outside"
+    );
+}
+
+/// rv-secreview land-17 L2: the same link left uncommitted after a fast-forward is refused by
+/// the commit that takes the worktree's files in.
+#[test]
+fn an_agent_link_out_of_the_tree_left_uncommitted_after_a_fast_forward_is_refused() {
+    let case = Case::new();
+    let agent = fast_forwarded_agent(&case);
+    std::os::unix::fs::symlink("/etc", agent.worktree.join("outside")).unwrap();
+    assert_eq!(
+        refused(record_turn_end(&case.db, &agent, &merge_turn())),
+        "changes_link_outside"
+    );
+}
+
+/// rv-code land-17: a plain commit the agent makes after a fast-forward opens a set.
+#[test]
+fn a_plain_agent_commit_after_a_fast_forward_opens_a_set() {
+    let case = Case::new();
+    let agent = fast_forwarded_agent(&case);
+    write(&agent.worktree.join("own.txt"), "own\n");
+    commit_as_agent(&case, &agent, "Agent adds a file");
+    assert!(
+        record_turn_end(&case.db, &agent, &merge_turn())
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// T3-R2-S4: an ordinary Accept's stored intent keeps the shape an older engine reads, and a
