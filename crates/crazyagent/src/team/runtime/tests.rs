@@ -15869,7 +15869,7 @@ fn a_stop_that_leaves_a_command_running_says_so_and_the_agent_reads_stopped() {
     leader.kill().unwrap();
     leader.wait().unwrap();
     let (reports, reported) = channel();
-    let ended = settle_end(lineage.settle(), None, None, &reports);
+    let ended = settle_end(lineage.settle().map(|()| None), None, None, &reports);
     if let Some(pid) = rustix::process::Pid::from_raw(child) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
