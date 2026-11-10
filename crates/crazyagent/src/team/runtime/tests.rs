@@ -26500,6 +26500,26 @@ fn a_left_native_lead_s_end_ends_a_process_it_started_on_its_own_and_is_confirme
     assert_eq!(ended, Ok(true));
 }
 
+/// Keeper r1 F1, after a restart (KEEPER (b) bail-out a): a native lead's pane on an own
+/// server with no keeper, as one an earlier engine started, ended with no session, is not
+/// confirmed gone while a process the lead started in a session of its own still runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_left_native_lead_on_a_server_with_no_keeper_is_not_confirmed_while_its_process_runs() {
+    let (ended, running) = ended_native_lead(LEAVING_CLAUDE, true, |session, host, lead| {
+        let AgentSession::Terminal(session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        session.leave();
+        crate::harnesses::terminal_session::end_left_pane(host.as_ref(), lead, "test")
+    });
+    assert!(
+        running,
+        "the lead's own process outlived the end: {ended:?}"
+    );
+    assert_eq!(ended, Ok(false));
+}
+
 /// SECAUDIT-SETSID-LEFTOVER, KEEPER (b): a native lead whose server ends before its stop,
 /// as when it is killed, has that server's keeper end a process the lead started in a
 /// session of its own, whose parent the pane's end took with it, and its stop confirmed.
@@ -26532,6 +26552,45 @@ fn a_native_lead_whose_pane_ended_first_has_a_process_it_started_on_its_own_ende
         "the lead's own process ended with its server: {stopped:?}"
     );
     assert!(matches!(stopped, Ok(None)), "{stopped:?}");
+}
+
+/// SECAUDIT-SETSID-LEFTOVER, after a restart (KEEPER (b) bail-out a): a native lead on an own
+/// server with no keeper whose pane ends before its stop, as when it is killed, still has its
+/// stop name a process the lead started in a session of its own while the pane ran, whose
+/// parent the pane's end took with it, since the session followed the pane's processes while
+/// the pane lived.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_on_a_server_with_no_keeper_whose_pane_ended_first_still_names_its_process() {
+    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, true, |session, host, lead| {
+        let AgentSession::Terminal(mut session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        let followed = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < followed {
+            session.next_event(Duration::from_millis(200)).unwrap();
+        }
+        host.kill(lead).unwrap();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match session.next_event(Duration::from_millis(200)) {
+                Ok(Some(LaunchEvent::Exited { .. })) | Err(_) => break,
+                Ok(_) => assert!(
+                    Instant::now() < deadline,
+                    "the session never saw its pane end"
+                ),
+            }
+        }
+        session.stop()
+    });
+    assert!(
+        running,
+        "the lead's own process outlived its pane: {stopped:?}"
+    );
+    assert!(
+        matches!(&stopped, Err(Unstopped::Left(left)) if left.code() == "harness_sandbox_left"),
+        "{stopped:?}"
+    );
 }
 
 /// T23-R1-F2: the status column a project's delete waits on is written after the lead's stop
