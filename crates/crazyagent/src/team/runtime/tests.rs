@@ -17652,7 +17652,13 @@ fn a_linked_teammate_with_an_open_worker_set_waits_and_its_lead_is_told_once() {
         "greet's work waits for its worker"
     );
     assert_eq!(held().len(), 1, "the lead is told once: {:?}", held());
-    crate::landing::discard(&db, &worker.id, &worker.head, now_ms()).unwrap();
+    crate::landing::discard(
+        &db,
+        &worker.id,
+        &worker.head,
+        u64::try_from(now_ms()).unwrap(),
+    )
+    .unwrap();
 
     team.land_teammates(&linked.project, linked.lead).unwrap();
 
