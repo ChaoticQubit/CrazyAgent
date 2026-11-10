@@ -644,6 +644,175 @@ fn the_ide_git_never_prunes_an_agent_worktree_it_sees_as_missing() {
     assert!(admin.join("agent-5").join("gitdir").is_file());
 }
 
+/// IN1-FN1 after git's own leading options: `worktree prune` and `worktree remove` stay
+/// refused when `-c`, `-C`, `--git-dir` or another option comes before the verb, through the
+/// shim's head alone (a Full access server, or any folder) and through the project folder's
+/// private index flow with a forwarder, so no agent worktree loses its unsaved work.
+#[test]
+fn the_ide_git_refuses_worktree_prune_and_remove_after_a_leading_option() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let private = base.join("private");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(&private).unwrap();
+    ok(&project, &["init", "-q"]);
+    ok(&project, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let agent = project
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("agent-6");
+    let place = agent.to_str().unwrap();
+    ok(&project, &["worktree", "add", "-q", "-b", "agent-6", place]);
+    let unsaved = agent.join("unsaved.txt");
+    std::fs::write(&unsaved, "agent work\n").unwrap();
+    let folder = project.to_str().unwrap();
+    let forwarder = [
+        ("CRAZYAGENT_IDE_GIT_NODE", "/usr/bin/true"),
+        ("CRAZYAGENT_IDE_GIT_FORWARD", "/dev/null"),
+        ("CRAZYAGENT_IDE_GIT_SECRET", "synthetic"),
+    ];
+    let head = base.join("head-git");
+    let composed = base.join("composed-git");
+    let flow = shim_text(None, Path::new("/usr/bin/git"), Some((&project, &private))).unwrap();
+    for (shim, text) in [(&head, SHIM_TEXT), (&composed, flow.as_str())] {
+        std::fs::write(shim, text).unwrap();
+        std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let ide = |shim: &Path, args: &[&str]| {
+        let output = crate::spawn_gate::output(
+            Command::new(shim)
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .envs(forwarder)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success(), said)
+    };
+
+    let remove = ["worktree", "remove", "--force", "--force", place];
+    for (shim, options) in [
+        (&head, &["-c", "color.ui=never"][..]),
+        (&head, &["-C", folder][..]),
+        (&head, &["--git-dir", ".git"][..]),
+        (&head, &["--git-dir=.git", "--literal-pathspecs"][..]),
+        (&head, &["--work-tree", folder][..]),
+        (&head, &["--namespace", "seed"][..]),
+        (&head, &["--config-env", "color.ui=HOME"][..]),
+        (&head, &["--attr-source", "HEAD"][..]),
+        (&head, &["--shallow-file", "none"][..]),
+        (&composed, &["-c", "color.ui=never"][..]),
+        (&composed, &["-C", folder][..]),
+        (&composed, &["--work-tree", folder][..]),
+        (&composed, &["--namespace", "seed"][..]),
+        (&composed, &["--config-env", "color.ui=HOME"][..]),
+        (&composed, &["--attr-source", "HEAD"][..]),
+        (&composed, &["--shallow-file", "none"][..]),
+    ] {
+        for verb in [&remove[..], &["worktree", "prune", "-v", "--expire=now"]] {
+            let args = [options, verb].concat();
+            let (ran, said) = ide(shim, &args);
+            assert!(!ran, "{shim:?} {args:?}: {said}");
+            assert!(
+                said.contains("the IDE does not run git worktree"),
+                "{shim:?} {args:?}: {said}"
+            );
+            assert!(unsaved.is_file(), "{shim:?} {args:?}");
+        }
+    }
+    assert!(agent.join(".git").is_file());
+    assert!(project.join(".git/worktrees/agent-6/gitdir").is_file());
+    let (listed, said) = ide(&head, &["-c", "color.ui=never", "worktree", "list"]);
+    assert!(listed, "{said}");
+    assert!(said.contains(place), "{said}");
+}
+
+/// shim-wtremove r1 L1: a network command after git's own leading options never runs the
+/// IDE's own git, which would fetch outside the engine at Full access, nor the forwarder,
+/// which takes its words as given: the shim stops it with the plain line, in the head and
+/// in the project folder's flow, while the same command with no option still goes to the
+/// forwarder.
+#[test]
+fn a_network_command_after_a_leading_option_from_the_ide_stops_with_the_plain_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let private = base.join("private");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(&private).unwrap();
+    ok(&project, &["init", "-q"]);
+    let folder = project.to_str().unwrap();
+    let head = base.join("head-git");
+    let composed = base.join("composed-git");
+    let flow = shim_text(None, Path::new("/usr/bin/git"), Some((&project, &private))).unwrap();
+    for (shim, text) in [(&head, SHIM_TEXT), (&composed, flow.as_str())] {
+        std::fs::write(shim, text).unwrap();
+        std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let ide = |shim: &Path, args: &[&str]| {
+        let output = crate::spawn_gate::output(
+            Command::new(shim)
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .env("CRAZYAGENT_IDE_GIT_NODE", "/usr/bin/true")
+                .env("CRAZYAGENT_IDE_GIT_FORWARD", "/dev/null")
+                .env("CRAZYAGENT_IDE_GIT_SECRET", "synthetic")
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success(), said)
+    };
+
+    for shim in [&head, &composed] {
+        for verb in ["push", "pull", "fetch", "ls-remote"] {
+            let (forwarded, said) = ide(shim, &[verb]);
+            assert!(forwarded, "{shim:?} {verb}: {said}");
+            assert!(said.is_empty(), "{shim:?} {verb}: {said}");
+            for options in [
+                &["-c", "color.ui=never"][..],
+                &["-C", folder][..],
+                &["--git-dir", ".git"][..],
+                &["--no-pager"][..],
+            ] {
+                let args = [options, &[verb][..]].concat();
+                let (ran, said) = ide(shim, &args);
+                assert!(!ran, "{shim:?} {args:?}: {said}");
+                assert!(
+                    said.contains(&format!("CrazyAgent runs git {verb} in its engine")),
+                    "{shim:?} {args:?}: {said}"
+                );
+            }
+        }
+    }
+}
+
 /// INT1-3: in a project that signs every commit and tag, git under the IDE's configuration
 /// still commits and tags, unsigned and without running the signing program, as the hooks
 /// setting's line says; git without it tries to sign and fails.

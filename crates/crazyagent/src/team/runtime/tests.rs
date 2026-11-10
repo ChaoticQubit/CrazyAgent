@@ -3533,7 +3533,8 @@ done
 
 /// A live master whose turn hits its account's usage limit stops, and the same master row
 /// starts again in its own worktree on another pool account while the limited one rests,
-/// with the live switch still on.
+/// with the live switch still on. The limit comes from the transcript the agent can write,
+/// so the account rests for this project only (SECAUDIT-RATELIMIT-FORGE).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
@@ -3583,7 +3584,7 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         [master],
         "the same master row"
     );
-    let rested: Vec<String> = fixture
+    let everywhere: Vec<String> = fixture
         .connection
         .prepare("SELECT connection FROM team_paused_accounts")
         .unwrap()
@@ -3591,7 +3592,20 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(rested, [first]);
+    assert_eq!(
+        everywhere,
+        Vec::<String>::new(),
+        "a limit read from the agent's own transcript never rests the account for other projects"
+    );
+    let rested: Vec<(String, String)> = fixture
+        .connection
+        .prepare("SELECT project,connection FROM team_project_pauses")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rested, [(project.as_str().to_owned(), first)]);
     assert!(super::super::master::live(&fixture.connection, &project).unwrap());
     assert!(
         !fixture
@@ -15865,7 +15879,7 @@ fn a_stop_that_leaves_a_command_running_says_so_and_the_agent_reads_stopped() {
         assert!(Instant::now() < deadline, "the stand-in never started");
         std::thread::sleep(Duration::from_millis(10));
     };
-    let lineage = Lineage::of(leader.id()).unwrap();
+    let lineage = Lineage::of(leader.id(), None).unwrap();
     leader.kill().unwrap();
     leader.wait().unwrap();
     let (reports, reported) = channel();
@@ -25060,7 +25074,7 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
         .stored(&fixture.setup.project_id)
         .unwrap()
         .expect("the project is set up");
-    let paused = team.paused().unwrap();
+    let paused = team.paused(&fixture.setup.project_id).unwrap();
     team.dispatch(&stored, &fixture.access, &paused).unwrap();
     team.keep_warm(&stored, &fixture.access, &paused).unwrap();
     let restart = HostedRestart {
@@ -25850,6 +25864,153 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
             "a teammate's {attempt} write in its lead's config home succeeded: {attempts}"
         );
     }
+}
+
+/// Starts one Claude Code lead with native teammates on a managed account, as the native
+/// teammate rows do, in `layout`, adopting the worktree already there when `adopt` is set.
+/// Inputs: the fixture, the layout and whether to adopt. Output: the runtime, the lead and
+/// its plan.
+#[cfg(target_os = "macos")]
+fn native_lead_in(fixture: &Fixture, layout: Layout, adopt: bool) -> (TeamRuntime, i64, Plan) {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(fixture).with_terminal(host).unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            adopt,
+            layout,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    (runtime, id, plan)
+}
+
+/// Saves Own branch access for the fixture's project, which a lead in its own clone needs.
+/// Input: the fixture. Output: none.
+#[cfg(target_os = "macos")]
+fn own_branch_access(fixture: &Fixture) {
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::OwnBranch,
+            ..crate::sandbox::policy::AgentPolicy::default()
+        },
+    )
+    .unwrap();
+}
+
+/// AGENT-REF-ALLOW-NARROW r1 L1: the runtime hands both teammate ref rules the lead's branch
+/// as the engine records it. A native lead in its own clone has its claimed task branch
+/// named in its teammates' profile, and the setup git for a linked lead's teammates names
+/// that lead's branch; neither profile keeps the old any-task teammate pattern.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_teammate_ref_rules_name_the_lead_s_recorded_branch() {
+    let fixture = Fixture::new(1);
+    own_branch_access(&fixture);
+    let (runtime, id, plan) = native_lead_in(&fixture, Layout::Clone, false);
+    let branch = crate::landing::agent_branch(
+        &fixture.connection,
+        &plan.working_dir,
+        &crate::agent_git::git_dir(&plan.working_dir),
+    )
+    .unwrap()
+    .expect("the clone lead's task branch is recorded");
+    assert!(
+        crate::agent_git::is_agent_branch(&branch) && branch.starts_with("crazyagent/"),
+        "{branch}"
+    );
+    let teammates = std::fs::read_to_string(agent_teammates_profile(&runtime.state, id)).unwrap();
+    assert!(
+        teammates.contains(&format!("refs/heads/{branch}--[a-z0-9-]+(\\.lock)?$")),
+        "the teammates' profile names {branch}"
+    );
+    assert!(!teammates.contains("refs/heads/crazyagent/[a-z0-9-]+--"));
+
+    let fixture = Fixture::new(1);
+    let (runtime, id, plan) = native_lead_in(&fixture, Layout::Linked, false);
+    let link = std::fs::read_to_string(plan.working_dir.join(".git")).unwrap();
+    let git_dir = PathBuf::from(link.trim().strip_prefix("gitdir: ").unwrap());
+    let branch = crate::landing::agent_branch(&fixture.connection, &plan.working_dir, &git_dir)
+        .unwrap()
+        .expect("the linked lead's branch is named");
+    assert!(crate::agent_git::is_agent_branch(&branch), "{branch}");
+    let repository = fixture.base.join("project").canonicalize().unwrap();
+    let (_, profile) = runtime
+        .teammates_git(&repository, &plan.working_dir, &git_dir, id)
+        .unwrap();
+    assert_eq!(profile, agent_teammates_setup_profile(&runtime.state, id));
+    let setup = std::fs::read_to_string(&profile).unwrap();
+    assert!(
+        setup.contains(&format!(
+            "refs/heads/(crazyagent|{branch}--[a-z0-9-]+(\\.lock)?)$"
+        )),
+        "the setup profile names {branch}"
+    );
+    assert!(!setup.contains("refs/heads/crazyagent(/[a-z0-9-]+--"));
+}
+
+/// AGENT-REF-ALLOW-NARROW r1 L1: a native lead adopted in its own clone with no recorded
+/// agent branch, as a clone made before task branches were on `agent/<folder>`, leaves its
+/// teammates no ref write at all: their profile has no teammate ref exemption.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_clone_lead_with_no_recorded_agent_branch_gives_its_teammates_no_ref_write() {
+    let fixture = Fixture::new(1);
+    own_branch_access(&fixture);
+    let root = fixture.base.join("project").canonicalize().unwrap();
+    let worktrees = crate::projects_home::state_folder(&root).join("worktrees");
+    std::fs::create_dir_all(&worktrees).unwrap();
+    crate::landing::add_agent_clone(&root, &worktrees.join("agent-1")).unwrap();
+    let (runtime, id, plan) = native_lead_in(&fixture, Layout::Clone, true);
+    assert_eq!(id, 1);
+    assert_eq!(
+        crate::landing::agent_branch(
+            &fixture.connection,
+            &plan.working_dir,
+            &crate::agent_git::git_dir(&plan.working_dir),
+        )
+        .unwrap()
+        .as_deref(),
+        Some("agent/agent-1")
+    );
+    let teammates = std::fs::read_to_string(agent_teammates_profile(&runtime.state, id)).unwrap();
+    assert!(
+        !teammates.contains("refs/heads/"),
+        "a teammate of a lead with no agent branch is exempted for a ref"
+    );
 }
 
 /// CTX-M1: in the profiles the engine starts a native lead and its teammates in, the lead
@@ -27119,5 +27280,49 @@ fn a_coordination_message_forges_no_owner_line_at_the_live_master() {
                 .starts_with("[owner]")
         }),
         "{typed}"
+    );
+}
+
+/// A project's hold rests an account for that project only (SECAUDIT-RATELIMIT-FORGE, design
+/// row 1): the runtime's paused set for the holding project has it until the hold ends, another
+/// project's set does not, and an account-wide pause is in both.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
+    let fixture = Fixture::new(1);
+    let team = stand_in_runtime(&fixture);
+    let now = crate::team::now_ms();
+    for (project, connection, until_ms) in [
+        (PROJECT, "claude-a", now + 600_000),
+        (PROJECT, "claude-b", now - 1),
+        ("project-other", "claude-c", now + 600_000),
+    ] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_project_pauses(project,connection,until_ms) VALUES (?1,?2,?3)",
+                params![project, connection, until_ms],
+            )
+            .unwrap();
+    }
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('claude-d',?1)",
+            [now + 600_000],
+        )
+        .unwrap();
+    let paused = |project: &str| {
+        team.paused(&ProjectId::new(project).unwrap())
+            .unwrap()
+            .iter()
+            .map(|connection| connection.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paused(PROJECT), ["claude-a", "claude-d"]);
+    assert_eq!(
+        paused("project-other"),
+        ["claude-c", "claude-d"],
+        "another project still picks the held account"
     );
 }

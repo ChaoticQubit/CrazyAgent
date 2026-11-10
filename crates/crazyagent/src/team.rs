@@ -1545,6 +1545,12 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 connection TEXT PRIMARY KEY,
                 until_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_project_pauses (
+                project TEXT NOT NULL,
+                connection TEXT NOT NULL,
+                until_ms INTEGER NOT NULL,
+                PRIMARY KEY(project, connection)
+            );
             CREATE TABLE IF NOT EXISTS team_paused_projects (
                 project TEXT PRIMARY KEY,
                 since_ms INTEGER NOT NULL
@@ -4570,41 +4576,55 @@ pub fn token_words(tokens: u64) -> String {
     }
 }
 
-/// Pauses a pool account that hit a rate or usage limit for as long as a team agent's
-/// account pauses, in the pause every master, team and research turn honours. Takes a
-/// connection and the account's connection. Returns when the pause ends, in ms since the
-/// epoch; a longer pause already set is kept.
-pub(crate) fn pause_account(
+/// Holds a pool account for one project for `pause` after an agent of that project reported a
+/// rate or usage limit. The report comes from what the agent's harness wrote, which the agent
+/// can write too, so only that project's team and research picks skip the account
+/// (SECAUDIT-RATELIMIT-FORGE). The usage service is asked to poll, so a full window the
+/// provider itself reports holds the account for every project. Takes a connection, the
+/// project, the account's connection and the pause. Returns when the hold ends, in ms since
+/// the epoch; a longer hold already set is kept.
+pub(crate) fn hold_for_project(
     connection: &Connection,
+    project: &str,
     account: &CredentialRef,
+    pause: std::time::Duration,
 ) -> rusqlite::Result<i64> {
-    let pause = runtime::TeamLimits::default().rate_limit_pause;
-    let until = now_ms().saturating_add(i64::try_from(pause.as_millis()).unwrap_or(i64::MAX));
+    assert!(!project.is_empty());
+    assert!(!pause.is_zero());
+    let now = now_ms();
+    let until = now.saturating_add(i64::try_from(pause.as_millis()).unwrap_or(i64::MAX));
+    assert!(until > now);
+    connection.execute("DELETE FROM team_project_pauses WHERE until_ms<=?1", [now])?;
     let stored: i64 = connection.query_row(
-        "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
-         ON CONFLICT(connection) DO UPDATE SET until_ms=MAX(until_ms,excluded.until_ms)
+        "INSERT INTO team_project_pauses(project,connection,until_ms) VALUES (?1,?2,?3)
+         ON CONFLICT(project,connection) DO UPDATE SET until_ms=MAX(until_ms,excluded.until_ms)
          RETURNING until_ms",
-        params![account.as_str(), until],
+        params![project, account.as_str(), until],
         |row| row.get(0),
     )?;
     assert!(stored >= until);
+    crate::usage::service::request_confirm(connection, now)?;
     Ok(stored)
 }
 
-/// Tells until when a pool account stays paused after a limit. Takes a connection and the
-/// account's connection. Returns the end of its pause in ms since the epoch, or `None`
-/// when it is not paused now.
-pub(crate) fn paused_until(
+/// Tells until when a pool account stays held for one project: the later of its pause for
+/// every project and the project's own hold after a limit its agents reported. Takes a
+/// connection, the project and the account's connection. Returns the end in ms since the
+/// epoch, or `None` when neither holds it now.
+pub(crate) fn held_until(
     connection: &Connection,
+    project: &str,
     account: &CredentialRef,
 ) -> rusqlite::Result<Option<i64>> {
-    connection
-        .query_row(
-            "SELECT until_ms FROM team_paused_accounts WHERE connection=?1 AND until_ms>?2",
-            params![account.as_str(), now_ms()],
-            |row| row.get(0),
-        )
-        .optional()
+    connection.query_row(
+        "SELECT MAX(until_ms) FROM (
+             SELECT until_ms FROM team_paused_accounts WHERE connection=?1 AND until_ms>?3
+             UNION ALL
+             SELECT until_ms FROM team_project_pauses
+             WHERE project=?2 AND connection=?1 AND until_ms>?3)",
+        params![account.as_str(), project, now_ms()],
+        |row| row.get(0),
+    )
 }
 
 /// The project's team status as the owner reads it: `status` with each agent's

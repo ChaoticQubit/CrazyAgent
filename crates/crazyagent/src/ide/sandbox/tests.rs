@@ -2188,11 +2188,12 @@ fn an_apply_with_a_prefix_of_intent_to_add_from_the_ide_stops_with_a_plain_line(
 fn an_intent_to_add_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
     let s = server();
     fs::write(s.root.join("new.txt"), "eight by").unwrap();
-    let spellings: [&[&str]; 4] = [
+    let spellings: [&[&str]; 5] = [
         &["-c", "color.ui=never", "add", "-N", "new.txt"],
         &["-C", ".", "add", "-N", "new.txt"],
         &["--literal-pathspecs", "add", "-N", "new.txt"],
         &["--git-dir", ".git", "add", "-N", "new.txt"],
+        &["--work-tree", ".", "add", "-N", "new.txt"],
     ];
     for args in spellings {
         let (ran, said) = s.git(args);

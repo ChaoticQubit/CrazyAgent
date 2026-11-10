@@ -1409,18 +1409,20 @@ fn fail_before_running(
     Ok(())
 }
 
-/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause
-/// and the provider's rejection of its earlier credential, so its next turn may run at once.
-/// Inputs: the transaction and the account's connection. Output: both holds are gone.
+/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause,
+/// every project's hold on it and the provider's rejection of its earlier credential, so its
+/// next turn may run at once. Inputs: the transaction and the account's connection. Output:
+/// every hold is gone.
 pub(super) fn lift_account_holds(
     tx: &Transaction<'_>,
     connection: &ModelConnection,
 ) -> Result<(), EngineError> {
-    tx.execute(
+    for sql in [
         "DELETE FROM team_paused_accounts WHERE connection=?1",
-        [connection.id.as_str()],
-    )
-    .map_err(error)?;
+        "DELETE FROM team_project_pauses WHERE connection=?1",
+    ] {
+        tx.execute(sql, [connection.id.as_str()]).map_err(error)?;
+    }
     model_gateway::sign_in_renewed(tx, connection, now_ms()?)
 }
 

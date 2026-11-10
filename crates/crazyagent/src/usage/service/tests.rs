@@ -425,3 +425,44 @@ fn a_team_table_that_cannot_be_read_does_not_start_the_recount() {
     assert!(usage.recount(&no_access(), NOW).is_err());
     assert!(!recount::started(&db).unwrap());
 }
+
+/// A limit an agent reports asks for one confirm poll (SECAUDIT-RATELIMIT-FORGE, design row
+/// 3): the next step polls every account although ten minutes have not passed, an ask within
+/// the minute after it adds no poll, and an ask a minute later polls again.
+#[test]
+fn a_confirm_ask_makes_the_next_step_poll_and_asks_within_the_minute_add_none() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let mut usage = Usage::open(
+        &root.join("engine.db"),
+        &root.join("team"),
+        Box::new(|| None),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    usage.step(NOW).unwrap();
+    assert_eq!(usage.polled_ms, Some(NOW));
+    usage.step(NOW + 5_000).unwrap();
+    assert_eq!(
+        usage.polled_ms,
+        Some(NOW),
+        "no ask, no poll inside ten minutes"
+    );
+    assert!(request_confirm(&usage.db, NOW + 6_000).unwrap());
+    usage.step(NOW + 10_000).unwrap();
+    assert_eq!(
+        usage.polled_ms,
+        Some(NOW + 10_000),
+        "the ask makes the next step poll"
+    );
+    assert!(!request_confirm(&usage.db, NOW + 20_000).unwrap());
+    usage.step(NOW + 25_000).unwrap();
+    assert_eq!(
+        usage.polled_ms,
+        Some(NOW + 10_000),
+        "an ask within the minute adds no poll"
+    );
+    assert!(request_confirm(&usage.db, NOW + 6_000 + CONFIRM_EVERY_MS).unwrap());
+    usage.step(NOW + 70_000).unwrap();
+    assert_eq!(usage.polled_ms, Some(NOW + 70_000));
+}

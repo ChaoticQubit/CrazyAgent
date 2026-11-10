@@ -319,7 +319,9 @@ impl SettingsResolver {
             |connection| {
                 database
                     .as_ref()
-                    .and_then(|database| crate::team::paused_until(database, connection).ok())
+                    .and_then(|database| {
+                        crate::team::held_until(database, project, connection).ok()
+                    })
                     .flatten()
             },
             &choice,
@@ -328,14 +330,20 @@ impl SettingsResolver {
     }
 
     /// The account an agent outside the research queue, such as onboarding's
-    /// mapping agent, runs on for `pool`: the pool's first member the first of
-    /// `harnesses` can use, else the next harness's, with the same sign-in
-    /// check and account pauses as [`Self::resolve`]. `harnesses` are the
-    /// installed ones, Codex first. Rereads the settings on every call. Returns
-    /// [`AccountPick::NeedsPool`] for an unknown pool or unreadable settings,
-    /// [`AccountPick::Paused`] with the earliest end when only paused members
-    /// fit, else [`AccountPick::NoUsableAccount`] when none fits.
-    pub fn pool_pick(&self, pool: &CredentialRef, harnesses: &[ResearchHarness]) -> AccountPick {
+    /// mapping agent, runs on for `project` from `pool`: the pool's first member
+    /// the first of `harnesses` can use, else the next harness's, with the same
+    /// sign-in check, account pauses and project holds as [`Self::resolve`].
+    /// `harnesses` are the installed ones, Codex first. Rereads the settings on
+    /// every call. Returns [`AccountPick::NeedsPool`] for an unknown pool or
+    /// unreadable settings, [`AccountPick::Paused`] with the earliest end when
+    /// only paused or held members fit, else [`AccountPick::NoUsableAccount`]
+    /// when none fits.
+    pub fn pool_pick(
+        &self,
+        project: &str,
+        pool: &CredentialRef,
+        harnesses: &[ResearchHarness],
+    ) -> AccountPick {
         let Ok(config) = crate::config::resolve_config(&self.global, &self.project) else {
             return AccountPick::NeedsPool;
         };
@@ -364,7 +372,7 @@ impl SettingsResolver {
         let paused_until = |connection: &CredentialRef| {
             database
                 .as_ref()
-                .and_then(|database| crate::team::paused_until(database, connection).ok())
+                .and_then(|database| crate::team::held_until(database, project, connection).ok())
                 .flatten()
         };
         let mut waiting = AccountPick::NoUsableAccount;
