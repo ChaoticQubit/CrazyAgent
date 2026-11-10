@@ -537,6 +537,12 @@ impl Engine {
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
+    /// The engine's two settings files, global then project, for what reads them itself at
+    /// each launch. Output: the paths, or none for an engine opened without them.
+    pub(crate) fn settings_files(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        self.settings_files.clone()
+    }
+
     /// The loopback ports of the owner's configured local model endpoints, read from the
     /// engine's settings files at each call, for a sandbox the engine starts to keep free
     /// of the listeners of what it runs. Output: the ports; none when the engine has no

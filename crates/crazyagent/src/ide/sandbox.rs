@@ -54,9 +54,15 @@ pub fn qualified() -> bool {
 /// Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
 /// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
-/// Inputs: the grants, the server port and the network. Output: the profile text, or
-/// `ide_sandbox_invalid` for an unsafe place.
-pub fn profile(grants: &Grants, port: u16, network: SandboxNetwork) -> Result<String, EngineError> {
+/// On the open network it never binds or listens on `kept_ports`, the owner's local model
+/// ports. Inputs: the grants, the server port, the network and the ports kept. Output: the
+/// profile text, or `ide_sandbox_invalid` for an unsafe place.
+pub fn profile(
+    grants: &Grants,
+    port: u16,
+    network: SandboxNetwork,
+    kept_ports: &[u16],
+) -> Result<String, EngineError> {
     let invalid = |_| failure("ide_sandbox_invalid");
     let data = grants.data;
     let writes: Vec<&Path> = std::iter::once(grants.home)
@@ -97,6 +103,7 @@ pub fn profile(grants: &Grants, port: u16, network: SandboxNetwork) -> Result<St
     let homes = ToolHomes::owner().map_err(invalid)?;
     let closed = matches!(&network, SandboxNetwork::Only(remotes) if remotes.is_empty());
     let sandbox = ProjectSandbox::new(grants.root, grants.home, grants.tmp, network)
+        .and_then(|sandbox| sandbox.keep_ports(kept_ports))
         .and_then(|sandbox| sandbox.allow_read(grants.build))
         .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
         .map_err(invalid)?;
@@ -158,15 +165,16 @@ pub fn profile(grants: &Grants, port: u16, network: SandboxNetwork) -> Result<St
 /// Writes an IDE server's profile to `<folder>/server.sb` with mode 0600, never through a
 /// link, replacing the last launch's. The folder is the engine's private IDE folder of the
 /// project, which no grant lets the server write. Inputs: the folder and the grants with the
-/// port and the network. Output: the profile path, or `ide_sandbox_invalid` or
-/// `ide_state_unavailable`.
+/// port, the network and the ports kept. Output: the profile path, or `ide_sandbox_invalid`
+/// or `ide_state_unavailable`.
 pub fn install(
     folder: &Path,
     grants: &Grants,
     port: u16,
     network: SandboxNetwork,
+    kept_ports: &[u16],
 ) -> Result<PathBuf, EngineError> {
-    let text = profile(grants, port, network)?;
+    let text = profile(grants, port, network, kept_ports)?;
     let path = folder.join(PROFILE);
     if grants
         .writable

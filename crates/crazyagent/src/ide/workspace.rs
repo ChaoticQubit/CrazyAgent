@@ -163,6 +163,22 @@ impl IdePolicy {
     }
 }
 
+/// The loopback ports of the owner's configured local model endpoints, read from the engine's
+/// settings files at each launch, for a sandbox to keep free of the listeners of what it runs.
+/// Input: the two settings files, or none for an engine that has none. Output: the ports, or
+/// `ide_settings_unavailable` for files that do not read, so a refused read stops the launch.
+pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, EngineError> {
+    let Some((global, project)) = settings else {
+        return Ok(Vec::new());
+    };
+    let config = crate::config::resolve_config(global, project)
+        .map_err(|_| failure("ide_settings_unavailable"))?;
+    Ok(config
+        .settings
+        .model_access
+        .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)))
+}
+
 /// A project's [`IdePolicy`]; the default, Sandboxed with hooks off and the Open network no
 /// Sandboxed IDE reads, when none is saved. Inputs: the engine root and the project. Output:
 /// the policy, or `ide_workspace_unavailable` for one that cannot be read, so a tampered one

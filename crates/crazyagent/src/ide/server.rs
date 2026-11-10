@@ -88,6 +88,7 @@ pub struct Servers {
     start: Duration,
     grants: Arc<bridge::Grants>,
     socket: PathBuf,
+    settings_files: Option<(PathBuf, PathBuf)>,
     slots: Mutex<HashMap<ProjectId, Arc<Slot>>>,
     launches: AtomicU64,
     closed: AtomicBool,
@@ -167,7 +168,8 @@ impl Servers {
     /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched
     /// and how long a launch may take to listen, [`IDLE_LIMIT`] and [`START_LIMIT`] outside
     /// tests, the owner server's IDE capability grants and its owner socket,
-    /// `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach. Output: the
+    /// `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach, and the
+    /// engine's two settings files, none for an engine opened without them. Output: the
     /// register.
     pub(crate) fn new(
         data: &Path,
@@ -175,6 +177,7 @@ impl Servers {
         start: Duration,
         grants: Arc<bridge::Grants>,
         socket: PathBuf,
+        settings_files: Option<(PathBuf, PathBuf)>,
     ) -> Self {
         assert!(!idle.is_zero());
         assert!(!start.is_zero());
@@ -186,11 +189,18 @@ impl Servers {
             start,
             grants,
             socket,
+            settings_files,
             slots: Mutex::default(),
             launches: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             deleting: Mutex::default(),
         }
+    }
+
+    /// The engine's two settings files, for a terminal that reads them as it starts. Output:
+    /// the paths, or none for an engine opened without them.
+    pub(crate) fn settings_files(&self) -> Option<(PathBuf, PathBuf)> {
+        self.settings_files.clone()
     }
 
     /// Ends every server a previous engine recorded and left running, across the project
@@ -246,8 +256,9 @@ impl Servers {
     /// once the server listens on 127.0.0.1 and no other process holds its port. The server
     /// runs at the project's saved access level ([`super::workspace::ide_policy`]), under its
     /// Seatbelt profile from [`sandbox::profile`] below Full access; one left running under a
-    /// level or network the owner has since changed is stopped first. Where no sandbox is
-    /// qualified it never starts. The idle watch starts with the launch, so a launch whose
+    /// level or network the owner has since changed is stopped first. A start reads the
+    /// owner's local model ports for that profile to keep ([`super::workspace::kept_ports`]),
+    /// and settings that do not read stop it. Where no sandbox is qualified it never starts. The idle watch starts with the launch, so a launch whose
     /// open is cut while it starts is still stopped once it exits, idles or misses its start
     /// limit, and is never handed back to a later open. Inputs: the project, its canonical
     /// folder and the canonical root of a verified build. Output: where the IDE is reached,
@@ -277,6 +288,11 @@ impl Servers {
         if let Some(info) = reuse(&slot, policy).await {
             return Ok(info);
         }
+        let kept_ports = holding_start(&mut start, {
+            let settings = self.settings_files.clone();
+            move || super::workspace::kept_ports(settings.as_ref())
+        })
+        .await??;
         if self.running() >= SERVERS_MAX {
             return Err(failure("ide_servers_full"));
         }
@@ -322,6 +338,7 @@ impl Servers {
                 root,
                 socket: &self.socket,
                 policy,
+                kept_ports: &kept_ports,
             };
             let mut command = command_off_thread(launch, &info, output, &mut start).await?;
             self.prepare_extensions(&build, &folder).await?;
@@ -802,7 +819,8 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Where one IDE server launch runs: its project, the verified build, its state folder,
-/// the project root and the owner socket its built-in extension connects to.
+/// the project root, the owner socket its built-in extension connects to, the saved policy
+/// it runs at and the owner's local model ports its profile keeps.
 struct Launch<'a> {
     project: &'a ProjectId,
     build: &'a Path,
@@ -810,6 +828,7 @@ struct Launch<'a> {
     root: &'a Path,
     socket: &'a Path,
     policy: IdePolicy,
+    kept_ports: &'a [u16],
 }
 
 /// The folders and files of one server launch: the engine data root, the launch's server
@@ -836,6 +855,7 @@ async fn command_off_thread(
     start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Command, EngineError> {
     let (project, policy) = (launch.project.clone(), launch.policy);
+    let kept_ports = launch.kept_ports.to_vec();
     let (build, folder, root, socket) = (
         launch.build.to_path_buf(),
         launch.folder.to_path_buf(),
@@ -851,6 +871,7 @@ async fn command_off_thread(
             root: &root,
             socket: &socket,
             policy,
+            kept_ports: &kept_ports,
         };
         command(launch, &info, output)
     })
@@ -903,7 +924,7 @@ fn command(
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
     let hooks = (confined && policy.hooks).then_some(launch.root);
-    let written = settings::write(folder, &home, data, hooks)?;
+    let written = settings::write(folder, &home, data, hooks, policy.access)?;
     let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
     let places = Places {
         data,
@@ -1002,7 +1023,13 @@ fn launcher_command(
         locked: &[machine.as_path()],
     };
     let network = crate::sandbox::policy::ide_network(level, launch.policy.network);
-    let profile = sandbox::install(launch.folder, &grants, info.server_port, network)?;
+    let profile = sandbox::install(
+        launch.folder,
+        &grants,
+        info.server_port,
+        network,
+        launch.kept_ports,
+    )?;
     Ok(sandbox::command(&profile, &launcher))
 }
 

@@ -1,4 +1,5 @@
 use super::SandboxError;
+use super::policy::{AgentAccess, AgentNetwork};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::protocol::ProjectId;
 use std::ffi::{OsStr, OsString};
@@ -6,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// What a Sandboxed IDE terminal shows on a system with no qualified sandbox for it,
-/// naming the IDE's own shell profile the owner can choose instead.
-pub const UNAVAILABLE: &str = "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. \"IDE shell\" in the terminal menu runs inside the IDE's own sandbox instead.";
+/// What a Sandboxed IDE terminal shows on a system with no qualified sandbox for it.
+pub const UNAVAILABLE: &str =
+    "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it.";
 
 /// The variables a Sandboxed IDE terminal takes from the engine's own environment. One the
 /// engine does not have is removed, and every other variable is dropped, so the IDE
@@ -46,17 +47,21 @@ const SHELLS: &str = "/etc/shells";
 #[cfg(target_os = "macos")]
 const SHELLS_BYTES_MAX: u64 = 16 * 1024;
 
-/// Where a project lives for its IDE terminal: its canonical folder and the extra
-/// read-only folders the owner saved for its agents.
+/// Where a project lives for its IDE terminal: its canonical folder, the extra read-only
+/// folders the owner saved for its agents, and the level and network choice it saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub folder: PathBuf,
     pub extra_reads: Vec<PathBuf>,
+    pub access: AgentAccess,
+    pub network: AgentNetwork,
 }
 
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
-/// terminal variables the engine passes and the project's extra read-only folders.
+/// terminal variables the engine passes, the project's extra read-only folders, the level
+/// the terminal runs at, the project's network choice and the owner's local model ports the
+/// terminal keeps free.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -67,10 +72,14 @@ pub struct Launch<'a> {
     pub arguments: &'a [OsString],
     pub incoming: &'a [(OsString, OsString)],
     pub extra_reads: &'a [PathBuf],
+    pub level: AgentAccess,
+    pub network: AgentNetwork,
+    pub kept_ports: &'a [u16],
 }
 
-/// Reads the project's folder and its extra read-only folders from the engine database,
-/// opened read-only so a terminal launch never writes engine state. Inputs: the engine
+/// Reads the project's folder, its extra read-only folders and the level and network it
+/// saved from the engine database, opened read-only so a terminal launch never writes engine
+/// state; a saved policy that cannot be read is an error, so no level is guessed. Inputs: the engine
 /// data root and the project. Output: the place, or an error naming what is missing.
 pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> {
     use rusqlite::OpenFlags;
@@ -96,28 +105,37 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
         .map_err(|_| "the project folder is missing".to_owned())?;
     let extra_reads = super::extra_paths::load(&db, project.as_str())
         .map_err(|_| "the project's read-only folders could not be read".to_owned())?;
+    let policy = super::policy::load(&db, project.as_str())
+        .map_err(|_| "the project's saved access could not be read".to_owned())?;
     assert!(folder.is_absolute());
     Ok(Place {
         folder,
         extra_reads,
+        access: policy.access,
+        network: policy.network,
     })
 }
 
-/// Builds the Sandboxed terminal's command: the shell under the project's agent sandbox
-/// with open network, the engine runtime guarded (its IDE folder with each capability and
+/// Builds an engine-hosted terminal's command: the shell under the project's agent sandbox
+/// with the network its level allows, the engine runtime guarded (its IDE folder with each capability and
 /// server token lies outside every allowed root), the project's toolchains and extra
 /// folders readable, its own home and temp folders, and only the
 /// [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
 /// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
+/// Its listeners stay off the owner's local model ports.
 /// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
-/// outside the project folder or an unsafe root.
+/// outside the project folder, an unsafe root or Full access, which only the IDE server's own
+/// shell runs.
 #[cfg(target_os = "macos")]
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use super::toolchains::{self, ToolHomes, Toolchains};
     use super::{
-        ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, agent_env, agent_variable_allowed, borrowed,
-        canonical, clean_absolute, invalid,
+        ProjectSandbox, SANDBOX_EXEC, agent_env, agent_variable_allowed, borrowed, canonical,
+        clean_absolute, invalid,
     };
+    if launch.level == AgentAccess::Full {
+        return Err(invalid("a Full access terminal runs in the IDE server"));
+    }
     if launch.project.as_str() == "." {
         return Err(invalid("the project id is not a folder name"));
     }
@@ -142,8 +160,10 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
     toolchains::prepare_cargo_home(&home, &homes)?;
-    let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, SandboxNetwork::Open)?
+    let network = super::policy::ide_network(launch.level, launch.network);
+    let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, network)?
         .guard_engine(&root)?
+        .keep_ports(launch.kept_ports)?
         .allow_tools(&Toolchains::detect(launch.folder, &homes))?
         .allow_scratch(&scratch)?
         .allow_extra_reads(launch.extra_reads)?;
