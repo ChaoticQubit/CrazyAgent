@@ -163,7 +163,7 @@ export async function mount(css, view, status, section) {
     page: [team.TeamControls, { projectId: "alpha", status, reload() {}, navigate() {}, data }],
     drawer: [conversation.MasterSettings, { data }],
     agents: [agents.AgentsTab, { data, section: section ?? undefined }],
-    button: [conversation.MasterSettingsButton, { data }],
+    button: [conversation.MasterSettingsDrawer, { data, children: createElement(conversation.MasterSettingsButton) }],
   };
   const [component, props] = views[view];
   if (typeof component !== "function") return false;

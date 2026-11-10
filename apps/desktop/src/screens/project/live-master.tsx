@@ -10,7 +10,7 @@ import { entry } from "../new-project/wizard";
 import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
-import { ConversationTab, MasterSettingsButton } from "./conversation";
+import { ConversationTab, MasterSettingsButton, MasterSettingsDrawer } from "./conversation";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
@@ -181,8 +181,10 @@ export function MasterArea({ data }: { data: ProjectData }) {
   if (data.setup === undefined || data.harnesses === undefined) return <p className="pj-small pj-muted" role="status">Loading the master...</p>;
   const stored = valueOf(data.setup)?.team.master;
   const harness = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored)?.id ?? stored;
-  if (harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)) return <ConversationTab data={data} />;
-  return <LiveMaster key={data.id} data={data} harness={harness} />;
+  const area = harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)
+    ? <ConversationTab data={data} />
+    : <LiveMaster key={data.id} data={data} harness={harness} />;
+  return <MasterSettingsDrawer data={data}>{area}</MasterSettingsDrawer>;
 }
 
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
@@ -394,7 +396,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
       {account && <span className="pj-console-detail">{displayText(account)}</span>}
       {head.waits && <span className="pj-console-detail" data-testid="master-switch-waits">{displayText(head.waits)}</span>}
-      <span className="pj-console-actions"><MasterSettingsButton data={data} /></span>
+      <span className="pj-console-actions"><MasterSettingsButton /></span>
     </div>
     {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={live.kind === "running" ? live.node?.status ?? null : null} onSwitched={async () => {
       await sessions.reread();

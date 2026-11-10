@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { invoke, newProject, openMasterSettings, prepareWindow } from "./master-settings-window.mjs";
-import { click, shown } from "./settings-steps.mjs";
+import { click } from "./settings-steps.mjs";
 import { reopen, run, until } from "./trial-kit.mjs";
 
 const UI_MS = 30000;
@@ -19,10 +19,9 @@ async function kept(on) {
   await until(async () => (await invoke("desktop_team_status", { id: run.project })).master_live_terminal === on, UI_MS, `the engine never kept ${on}`);
 }
 
-/** Sets the switch as the owner does, opening the drawer again when the area changed under
- * it. Input: the value. Output: none. */
+/** Sets the switch as the owner does, in the drawer that stays open when the area changes
+ * under it. Input: the value. Output: none. */
 async function set(on) {
-  if (!(await shown(field()))) await openMasterSettings(field());
   if ((await checked()) !== String(on)) await click(field());
 }
 
