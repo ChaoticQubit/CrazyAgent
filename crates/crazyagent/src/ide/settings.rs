@@ -57,14 +57,16 @@ pub struct Written {
 /// server's profile locks the whole Remote settings folder
 /// ([`machine_folder`]), so the server can never write, add, remove or move anything there.
 /// Inputs: the project's IDE folder, the server data folder inside it, the engine's data
-/// folder above both and, when the owner lets the IDE run the project's hooks, the project
-/// folder. Output: the written files, or a plain refusal.
+/// folder above both, the project folder when the owner lets the IDE run the project's hooks
+/// and the project folder when the server's git works on a private index. Output: the
+/// written files, or a plain refusal.
 #[cfg(unix)]
 pub fn write(
     folder: &Path,
     server_data: &Path,
     data: &Path,
     project_hooks: Option<&Path>,
+    index_project: Option<&Path>,
 ) -> Result<Written, EngineError> {
     if !folder.is_absolute()
         || !folder.starts_with(data)
@@ -82,12 +84,21 @@ pub fn write(
     for path in [folder, server_data, user_data.as_path(), machine.as_path()] {
         super::bridge::private_folder(path)?;
     }
+    let private_index = server_data.join(super::git::PRIVATE_INDEX);
+    if index_project.is_some() {
+        reset_private_index(&private_index)?;
+    }
     let shim = machine.join(super::git::SHIM);
     replace(
         folder,
         SHIM_TEMPORARY,
         &shim,
-        super::git::shim_text(project_hooks, crate::research::runner::sandboxed_git())?.as_bytes(),
+        super::git::shim_text(
+            project_hooks,
+            crate::research::runner::sandboxed_git(),
+            index_project.map(|project| (project, private_index.as_path())),
+        )?
+        .as_bytes(),
         0o700,
     )?;
     let target = machine.join(SETTINGS);
@@ -325,6 +336,20 @@ pub(super) fn replace(
     file.write_all(bytes).map_err(unwritable)?;
     file.sync_all().map_err(unwritable)?;
     std::fs::rename(&temporary, target).map_err(unwritable)
+}
+
+/// Empties the server's private index folder at launch, so what a killed command left is
+/// never read again. A link there is removed, never followed. Input: the folder. Output: Ok,
+/// or a plain refusal.
+#[cfg(unix)]
+fn reset_private_index(folder: &Path) -> Result<(), EngineError> {
+    match std::fs::symlink_metadata(folder) {
+        Ok(found) if found.is_dir() => std::fs::remove_dir_all(folder).map_err(unwritable)?,
+        Ok(_) => std::fs::remove_file(folder).map_err(unwritable)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(unwritable(error)),
+    }
+    super::bridge::private_folder(folder)
 }
 
 #[cfg(unix)]

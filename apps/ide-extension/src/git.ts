@@ -14,6 +14,9 @@ export const GIT_NODE_ENV = "CRAZYAGENT_IDE_GIT_NODE";
 /** Variable naming the forwarder script the engine's `git.path` shim runs. */
 export const GIT_FORWARD_ENV = "CRAZYAGENT_IDE_GIT_FORWARD";
 
+/** Variable naming the engine's `git.path` shim, which runs a pull's local step. */
+export const GIT_SHIM_ENV = "CRAZYAGENT_IDE_GIT_SHIM";
+
 /** Variable holding the secret of one relay start, which every forwarded command carries. */
 export const GIT_SECRET_ENV = "CRAZYAGENT_IDE_GIT_SECRET";
 

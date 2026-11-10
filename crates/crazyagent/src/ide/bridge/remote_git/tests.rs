@@ -938,6 +938,40 @@ fn a_git_command_past_its_limit_is_killed_and_its_outcome_unknown() {
     drop(silent);
 }
 
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: every later git the engine runs
+/// names the project's git folder as its common folder, so a `commondir` planted after the
+/// check redirects none of them.
+#[test]
+fn a_commondir_planted_after_the_check_redirects_no_later_git() {
+    let project = Project::new();
+    let store = project.root.join("store");
+    for name in ["objects", "refs"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    std::fs::write(
+        store.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n[probe]\n\tvalue = planted\n",
+    )
+    .unwrap();
+    ok(&project.folder, &["config", "probe.value", "project"]);
+    std::fs::write(
+        project.folder.join(".git").join("commondir"),
+        format!("{}\n", store.display()),
+    )
+    .unwrap();
+    let done = ran(
+        git(
+            &project.folder,
+            &project.env(),
+            &["config", "--get", "probe.value"],
+        ),
+        4096,
+        LIMIT,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&done.stdout).trim(), "project");
+}
+
 /// SECAUDIT ide-git-commondir-case-variant-config-redirect: a `commondir` planted in the
 /// project's `.git`, in any spelling the volume folds together, cannot send the engine's git
 /// to another folder's config and run a command from it.
