@@ -617,6 +617,34 @@ fn a_finished_turn_counts_its_records_past_one_reads_bound() {
         expected(USAGES_PER_READ_MAX as u64 + 3, 0)
     );
     assert_eq!(files_kept(&db), 0);
+    assert_eq!(cut_marks(&db, root.path()), 0);
+}
+
+fn cut_marks(db: &Connection, home: &Path) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM usage_cut WHERE home=?1",
+        [home.to_string_lossy()],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// COUNT-3-L1: a finished turn's home still moving after `TURN_SCANS_MAX` scans stops there
+/// and is marked cut, so the usage page reads as partial instead of the rest passing unseen.
+#[test]
+fn a_finished_turn_past_its_scan_bound_reads_as_partial() {
+    let (root, db) = store();
+    let counted = TURN_SCANS_MAX * USAGES_PER_READ_MAX;
+    let lines: String = (0..counted + 1)
+        .map(|index| line(&format!("msg_{index}"), 1, 0))
+        .collect();
+    append(&transcript(root.path(), "s1"), &lines);
+    assert_eq!(
+        count_finished(&db, root.path()),
+        expected(counted as u64, 0)
+    );
+    assert_eq!(files_kept(&db), 0);
+    assert_eq!(cut_marks(&db, root.path()), 1);
 }
 
 fn token_count(at: &str, info: serde_json::Value) -> String {
