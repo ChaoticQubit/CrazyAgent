@@ -1075,6 +1075,38 @@ fn a_fast_message_charges_the_fast_rate() {
 }
 
 #[test]
+fn a_codex_write_with_no_published_rate_costs_the_calls_input_rate() {
+    let cost_of = |input: u64, write: u64, output: u64| {
+        let (root, db) = store();
+        let file = rollout(root.path(), "unpublished");
+        append(
+            &file,
+            &meta(T0, "unpublished", serde_json::json!({"model": "gpt-5.4"})),
+        );
+        let call = serde_json::json!({
+            "input_tokens": input,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": write,
+            "output_tokens": output,
+            "total_tokens": input + output
+        });
+        append(
+            &file,
+            &token_count(
+                T0_1,
+                serde_json::json!({"total_token_usage": call, "last_token_usage": call}),
+            ),
+        );
+        scan_codex(&db, root.path());
+        spent(&db)
+    };
+    assert_eq!(
+        [cost_of(1_000, 100, 10), cost_of(300_000, 10_000, 1_000)],
+        [2_650_000, 1_522_500_000]
+    );
+}
+
+#[test]
 fn the_whole_calls_prompt_picks_the_tier() {
     let priced = |tokens: Tokens, prompt_tokens: u64| {
         estimate(
