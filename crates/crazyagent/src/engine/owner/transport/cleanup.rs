@@ -270,7 +270,7 @@ pub(super) async fn sweep(authority: std::sync::Weak<Authority>, mut stop: onesh
                 let db = open(&root)?;
                 crate::cleanup_settings::initialize(&db)?;
                 let settings = crate::cleanup_settings::load(&db)?;
-                cleanup::sweep(&db, &settings, after, crate::team::now_ms())
+                cleanup::sweep(&db, &root, &settings, after, crate::team::now_ms())
             })
             .await
             .unwrap_or_else(|_| Err(failure("cleanup_unavailable"))),
@@ -384,7 +384,7 @@ async fn remove(
         tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            Ok(match cleanup::remove(&db, &project, &agents, now)? {
+            Ok(match cleanup::remove(&db, &root, &project, &agents, now)? {
                 Removal {
                     agents,
                     kept: Some(code),

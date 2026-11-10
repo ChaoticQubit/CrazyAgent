@@ -3,9 +3,9 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, StoredSetup } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
-import { AccessLevels, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { AccessLevels, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -519,6 +519,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [view, setView] = useState<PolicyView | null>(null);
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
   const [network, setNetwork] = useState<AgentNetwork>("open");
+  const [toolCache, setToolCache] = useState<ToolCacheScope>("shared");
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [ideGitHooks, setIdeGitHooks] = useState(false);
   const [ideAgentFiles, setIdeAgentFiles] = useState<IdeAgentFiles>("allow_all");
@@ -530,6 +531,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     setView(next);
     setAccess(next.access);
     setNetwork(next.network);
+    setToolCache(next.tool_cache);
     setAllowed(next.toolchains.map((row) => row.allowed));
     setIdeGitHooks(next.ide_git_hooks);
     setIdeAgentFiles(next.ide_agent_files);
@@ -548,14 +550,14 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles));
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache));
     setBusy(false);
     if (saved.fresh) seed(saved.fresh);
     setNote(saved.note);
     if (saved.note === "") data.notify(accessSaved(access));
   }
 
-  const changed = view !== null && (access !== view.access || network !== view.network || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
@@ -564,6 +566,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <p className="pj-help">{POLICY_RESTARTS_IDE}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
+    {view && <ToolCacheChoices name="ps-tool-cache" value={toolCache} access={access} onChange={setToolCache} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}

@@ -168,20 +168,26 @@ export type IdeAgentFiles = "allow_all" | "no_delete_or_rename" | "read_only";
 /** A toolchain family the engine detects in the owner's home folder and the project. */
 export type Toolchain = "rust" | "node" | "python";
 
+/** Who shares the uv cache and pnpm store a project's sandboxed agents write (T8): shared is
+ * one per access level and kind of folder, per_agent one per agent. */
+export type ToolCacheScope = "shared" | "per_agent";
+
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
  * that differ from the project's own use, whether git in the IDE runs the project's own
- * hooks, and what the IDE may change in agent folders. */
+ * hooks, what the IDE may change in agent folders, and who shares the agents' tool cache,
+ * shared when it is left out. */
 export interface AgentPolicy {
   access: AgentAccess;
   network: AgentNetwork;
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
   ide_git_hooks: boolean;
+  tool_cache?: ToolCacheScope;
   ide_agent_files: IdeAgentFiles;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
  * with the reason one can't run, the network choices, every detected toolchain, the IDE
- * hooks switch and the IDE agent folders choice. */
+ * hooks switch, the IDE agent folders choice and the tool cache choice with every choice. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
@@ -189,6 +195,8 @@ export interface PolicyView {
   networks: { network: AgentNetwork; label: string }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;
+  tool_cache: ToolCacheScope;
+  tool_caches: { scope: ToolCacheScope; label: string }[];
   ide_agent_files: IdeAgentFiles;
   version: number;
 }
