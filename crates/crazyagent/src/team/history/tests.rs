@@ -612,6 +612,57 @@ fn one_agent_tree_over_the_budgets_leaves_the_other_agents_their_share() {
     }
 }
 
+/// OP25-S5 r1 M1: the newest agent, whose work people search most, gets every part of the
+/// budgets its older agents leave. Many quiet older agents hold one record each and the
+/// newest busy agent holds `RECORDS_MAX` records: every quiet record is found, and so is
+/// the busy agent's oldest record that still fits the record budget after them.
+#[test]
+fn the_newest_busy_agent_keeps_what_the_quiet_older_agents_leave_of_the_budgets() {
+    const QUIET: usize = 9;
+    let fixture = Fixture::new();
+    let mut quiet = Vec::new();
+    for _ in 0..QUIET {
+        let (agent, home) = fixture.agent("claude-code");
+        let path = home.join("projects").join("p").join("quiet.jsonl");
+        record(&path, &[claude("user", "The okapi plan")]);
+        quiet.push(format!("- agent-{agent}/quiet #"));
+    }
+    let (busy, busy_home) = fixture.agent("claude-code");
+    let folder = busy_home.join("projects").join("p");
+    let last = RECORDS_MAX - QUIET;
+    for rank in 1..=RECORDS_MAX {
+        let path = folder.join(format!("{rank}.jsonl"));
+        if rank == last {
+            record(&path, &[claude("user", "The zebra plan")]);
+        } else {
+            record(&path, &[]);
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(2_000_000 - rank as u64))
+            .unwrap();
+    }
+
+    let okapi = fixture.sessions("okapi");
+    let zebra = fixture.sessions("zebra");
+
+    let mut found: Vec<&str> = hit_lines(&okapi)
+        .into_iter()
+        .map(|hit| &hit[..hit.find('#').unwrap() + 1])
+        .collect();
+    found.sort_unstable();
+    quiet.sort_unstable();
+    assert_eq!(found, quiet, "{okapi}");
+    let hits = hit_lines(&zebra);
+    assert_eq!(hits.len(), 1, "{zebra}");
+    assert!(
+        hits[0].starts_with(&format!("- agent-{busy}/{last} #")),
+        "{zebra}"
+    );
+}
+
 /// S1: a conversation id is plain: letters, digits, `-`, `_`, `.` and `/`, no `..`, at most
 /// `ID_BYTES_MAX` bytes.
 #[test]
