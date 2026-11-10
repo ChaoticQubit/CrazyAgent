@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { closedPort } from "./e2e-harness.mjs";
-import { checked, click, finishWelcome, menu, observeModelAccess, pick, says, settingsTab, shot, shown, texts, toasts, type, until } from "./settings-steps.mjs";
+import { click, finishWelcome, menu, observeModelAccess, pick, says, selectPool, settingsTab, shot, shown, texts, toasts, type, until } from "./settings-steps.mjs";
 
 const LOCAL = "Local closed";
 const RENAMED = "Local renamed";
@@ -17,9 +17,12 @@ async function listed(names, count) {
 }
 
 async function pools(rows) {
-  await until(async () => !(await shown("#pool-name")) &&
-    same([await texts("main .set-row .set-label"), (await texts("main .set-row .set-help")).map((help) => help.match(/\d+ of 15/)?.[0])], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
-  30000, `the pool list did not show exactly ${JSON.stringify(rows)}`);
+  await until(async () => same([await texts("main .pool-item-label"), await texts("main .pool-item-count")], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
+    30000, `the pool list did not show exactly ${JSON.stringify(rows)}`);
+}
+
+async function addToPool(name) {
+  await click(`button[aria-label=${JSON.stringify(`Add ${name}`)}]`);
 }
 
 async function toast(message) {
@@ -100,11 +103,9 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await settingsTab("Pools");
     await click("button=New pool");
     await type("#pool-name", POOL);
-    await click(`label=${RENAMED}`);
-    await click(`label=${COMPATIBLE}`);
-    assert.deepEqual([await checked(`label=${RENAMED}`), await checked(`label=${COMPATIBLE}`)], [true, true]);
-    await click("button=Save pool");
-    await toast(`${POOL} saved.`);
+    await addToPool(RENAMED);
+    await pools([[POOL, "1 of 15"]]);
+    await addToPool(COMPATIBLE);
     await pools([[POOL, "2 of 15"]]);
     await shot("pool-saved");
     const [pool, ...others] = (await observeModelAccess()).pools;
@@ -117,13 +118,11 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
   });
 
   it("edits the pool: renames it and takes one account out", async () => {
-    await click(`button[aria-label=${JSON.stringify(`Edit pool ${POOL}`)}]`);
-    await until(() => shown("#pool-name"), 15000, "the pool editor did not open");
+    await selectPool(POOL);
     await type("#pool-name", POOL_RENAMED);
-    await click(`label=${COMPATIBLE}`);
-    assert.deepEqual([await checked(`label=${RENAMED}`), await checked(`label=${COMPATIBLE}`)], [true, false]);
-    await click("button=Save pool");
-    await toast(`${POOL_RENAMED} saved.`);
+    await browser.keys("\uE007");
+    await pools([[POOL_RENAMED, "2 of 15"]]);
+    await click(`button[aria-label=${JSON.stringify(`Remove ${COMPATIBLE}`)}]`);
     await pools([[POOL_RENAMED, "1 of 15"]]);
     const [pool] = (await observeModelAccess()).pools;
     assert.equal(pool.id, ids.pool);
@@ -152,10 +151,9 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
   it("deletes a pool from its row, keeping its account, then the last account, leaving the engine empty", async () => {
     await click("button=New pool");
     await type("#pool-name", POOL);
-    await click(`label=${COMPATIBLE}`);
-    await click("button=Save pool");
-    await toast(`${POOL} saved.`);
+    await addToPool(COMPATIBLE);
     await pools([[POOL, "1 of 15"]]);
+    await selectPool(POOL);
     await click(`button[aria-label=${JSON.stringify(`Delete pool ${POOL}`)}]`);
     await until(() => says("dialog[open] p", "Its accounts stay in your list. Only the pool goes away."), 15000, "the pool delete question did not open");
     await click('//dialog[@open]//button[normalize-space(.)="Delete pool"]');

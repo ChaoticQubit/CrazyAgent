@@ -190,10 +190,11 @@ pub const PRIVATE_INDEX: &str = "git-index";
 /// The shim's text. The IDE sandbox has no network, so `push`, `pull`, `fetch` and
 /// `ls-remote` go to the built-in extension's forwarder, which the extension names in
 /// `CRAZYAGENT_IDE_GIT_NODE` and `CRAZYAGENT_IDE_GIT_FORWARD` and which hands them to the
-/// engine as `ide.git` (DEC-098 addendum 13); before the extension starts they fail with a
-/// plain message. The forwarder is told the shim's own path, so a pull's local step comes
-/// back through it. `worktree prune` and `worktree remove` are refused, since the IDE sees
-/// an agent worktree as missing and would drop it (IN1-FN1). Every other command runs the
+/// engine as `ide.git` (DEC-098 addendum 13); before the extension starts, and in a terminal,
+/// which never has the forwarder, they fail with a plain message. The forwarder is told the
+/// shim's own path, so a pull's local step comes back through it. `worktree prune` and
+/// `worktree remove` are refused, since the IDE sees an agent worktree as missing and would
+/// drop it (IN1-FN1). Every other command runs the
 /// `git` on the server's PATH, as stock VS Code does, where the engine resolved no real git
 /// ([`shim_text`]), without the relay's secret in its environment, so a project's hook under
 /// it does not hold it; the shim keeps the secret in an unexported variable for the index
@@ -206,7 +207,7 @@ CRAZYAGENT_IDE_GIT_SHIM=\"$0\"\n    \
 export CRAZYAGENT_IDE_GIT_SHIM\n    \
 exec \"$CRAZYAGENT_IDE_GIT_NODE\" \"$CRAZYAGENT_IDE_GIT_FORWARD\" \"$@\"\n  \
 fi\n  \
-echo \"fatal: CrazyAgent runs git $1 in its engine, and the IDE has not connected to it yet\" >&2\n  \
+echo \"fatal: CrazyAgent runs git $1 in its engine. Use Source Control in the IDE once it has connected\" >&2\n  \
 exit 128\n  \
 ;;\n\
 worktree)\n  \

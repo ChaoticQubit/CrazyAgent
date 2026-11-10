@@ -20,12 +20,10 @@ function offers(door, name, saved) {
   return { boxes, sends: boxes, messages: door === "master" ? null : boxes, onPage: boxes * TERMINALS_ON_PAGE[door], note };
 }
 
-/** Runs a check on a 1200x800 page holding the fixture, with the DevTools Runtime domain on:
- * with it off, DevTools answers "Promise was collected" for a door whose wait takes real time,
- * though the page goes on working. Input: the check. Output: what it returns. */
+/** Runs a check on a 1200x800 page holding the fixture. Input: the check. Output: what it
+ * returns. */
 function inDoorPage(check) {
   return withPage(async (page) => {
-    await page.send("Runtime.enable");
     await page.send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await page.evaluate(fixture);
     return check(page);

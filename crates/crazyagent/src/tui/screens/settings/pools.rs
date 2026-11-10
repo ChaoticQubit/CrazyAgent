@@ -1163,10 +1163,12 @@ mod tests {
                             weekly_resets_ms: None,
                             weekly_left_percent: Some(40),
                             use_last: false,
+                            why: crate::scheduling::OrderWhy::NoReading,
                         },
                     ),
                     ranked("member-9", Standing::NeverUse),
                 ],
+                own_order_projects: 0,
             }]))),
             &mut ctx,
         );
@@ -1192,7 +1194,7 @@ mod tests {
     #[test]
     fn a_standing_reads_as_one_short_reason_in_local_time() {
         use super::super::account_choice::{at_text, standing_line};
-        use crate::scheduling::Standing;
+        use crate::scheduling::{OrderWhy, Standing};
         const HOUR: i64 = 3_600_000;
         assert_eq!(at_text(14 * HOUR + 1_800_000, 0, 0), "14:30");
         assert_eq!(at_text(4 * 24 * HOUR + 9 * HOUR, 0, 0), "Mon 09:00");
@@ -1203,6 +1205,7 @@ mod tests {
                 weekly_resets_ms: Some(4 * 24 * HOUR + 9 * HOUR),
                 weekly_left_percent: Some(40),
                 use_last: false,
+                why: OrderWhy::LeastUsed,
             }),
             "resets Mon 09:00, 40% left"
         );
@@ -1211,9 +1214,12 @@ mod tests {
                 weekly_resets_ms: None,
                 weekly_left_percent: None,
                 use_last: true,
+                why: OrderWhy::UseLast,
             }),
             "no usage read yet, used last"
         );
+        assert_eq!(line(Standing::NotSignedIn), "not signed in");
+        assert_eq!(line(Standing::SignInUnconfirmed), "sign-in needs a check");
         assert_eq!(
             line(Standing::ReserveReached {
                 reserve_percent: 20,

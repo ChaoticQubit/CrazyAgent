@@ -25,6 +25,8 @@ WORK_FILE = re.compile(r"\b[\w-]{2,}(?:/[\w.-]+)*\.(?:py|rs|md|js|mjs|ts|tsx|jso
 LINES_PER_FILE_MAX = 200_000
 BACKGROUND_PER_AGENT_MAX = 256
 LISTED_MAX = 8
+WAKE_PROMPTS = ("A message from your team woke you.", "The message that woke you was already delivered")
+DETACHED_MS_MAX = 5_000
 
 
 def stamp_ms(value):
@@ -105,16 +107,24 @@ def scan(t, agent_id):
     return found
 
 
-def worker_end(worker, tasks, scans):
-    """When a worker's work ended: its last task's end, or its last reply for a teammate
-    with no task. Inputs: the worker, tasks by agent and scans. Output: ms, "open" while a
-    task of it has no end, or None when nothing tells."""
-    own = tasks.get(worker["id"], [])
-    if own:
-        if any(row[3] is None for row in own):
-            return "open"
-        return max(row[3] for row in own)
-    return scans[worker["id"]]["last"]
+def late_wake(row, lead_end):
+    """Tells an engine wake that began after the lead ended, which the lead could not have
+    waited on. Inputs: the task row and the lead's end in ms. Output: the answer."""
+    return (row[5] or "").startswith(WAKE_PROMPTS) and (row[2] is None or row[2] > lead_end)
+
+
+def worker_end(worker, tasks, scans, lead_end):
+    """When a worker's work ended: its last task's end, leaving out wakes begun after the
+    lead ended, or its last reply for a teammate with no task. Inputs: the worker, tasks by
+    agent, scans and the lead's end. Output: ms, "open" while a task of it has no end, or
+    None when nothing tells."""
+    every = tasks.get(worker["id"], [])
+    if not every:
+        return scans[worker["id"]]["last"]
+    own = [row for row in every if not late_wake(row, lead_end)]
+    if any(row[3] is None for row in own):
+        return "open"
+    return max((row[3] for row in own), default=None)
 
 
 def lead_findings(t, tasks, scans):
@@ -127,7 +137,7 @@ def lead_findings(t, tasks, scans):
         if not done or not workers:
             continue
         last = max(done, key=lambda row: row[3])
-        ends = [(worker, worker_end(worker, tasks, scans)) for worker in workers]
+        ends = [(worker, worker_end(worker, tasks, scans, last[3])) for worker in workers]
         if all(end is None for _, end in ends):
             continue
         compared += 1
@@ -150,9 +160,10 @@ def lead_findings(t, tasks, scans):
 
 def background_findings(t, tasks, scans):
     """Finds tasks that ended while a command their agent started in the background still
-    ran. Inputs: the trial, tasks by agent and scans. Output: tasks held by role, early
-    ends and the lost-command notices."""
-    held, early = Counter(), []
+    ran. A command that ended within DETACHED_MS_MAX of its start, as `nohup ... &` does,
+    never needed its turn held. Inputs: the trial, tasks by agent and scans. Output: tasks
+    held by role, detached commands, early ends and the lost-command notices."""
+    held, detached, early = Counter(), 0, []
     for agent_id, found in scans.items():
         role = "master" if agent_id in t.master_ids else "lead" if agent_id in t.lead_ids else "sub-agent"
         for command, at in found["started"]:
@@ -168,9 +179,11 @@ def background_findings(t, tasks, scans):
                 early.append(f"{name} ended before its background command {command} ended ({ended[0] - own[3]} ms later)")
             elif ended[1] == "killed":
                 early.append(f"{name}: its background command {command} was killed")
+            elif ended[0] - at < DETACHED_MS_MAX:
+                detached += 1
             else:
                 held[role] += 1
-    return held, early, sum(found["lost"] for found in scans.values())
+    return held, detached, early, sum(found["lost"] for found in scans.values())
 
 
 def check(t):
@@ -189,8 +202,9 @@ def check(t):
     failed = early + unnamed
     exercised = True
     if mode == "wait":
-        held, cut, lost = background_findings(t, tasks, scans)
+        held, detached, cut, lost = background_findings(t, tasks, scans)
         detail += f"; mode=wait; lead background commands held={held['lead']}; sub-agent held={held['sub-agent']}"
+        detail += f"; detached={detached}" if detached else ""
         detail += f"; lost in a later session={lost}" if lost else ""
         failed += cut + ([f"{lost} background commands lost with their session"] if lost else [])
         exercised = held["lead"] > 0

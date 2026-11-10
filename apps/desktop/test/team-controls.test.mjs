@@ -165,9 +165,36 @@ test("a team view the engine shortened to fit says older history is hidden", () 
   assert.match(partial, /<p class="pj-note" role="status">Older team history is hidden so the team fits in one view\. Queued and running work stays listed\.<\/p>/);
 });
 
-test("the idle stop says when an idle master stops, which no setting changes", () => {
-  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
-  assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
+test("the idle stop says when an idle master stops, which the master's own setting chooses (DEC-117 Q4)", () => {
+  const html = (master_idle_stop) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ master_idle_stop }), reload() {} }));
+  assert.match(html(undefined), /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
+  assert.match(html("fifteen_minutes"), /An idle master stops 15 min after its work is done/);
+  assert.match(html("one_hour"), /An idle master stops 1 h after its work is done and is never stopped while that work is still going\./);
+  assert.match(html("off"), /An idle master keeps running until the team stops\./);
+  assert.doesNotMatch(html("off"), /An idle master stops/);
+});
+
+test("Live terminal is a switch that shows the engine's setting and says what it does (DEC-117 Q4)", () => {
+  assert.equal(typeof controls.LiveTerminalSetting, "function", "the setting exists");
+  const row = (master_live_terminal) => renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", status: status({ master_live_terminal }), reload() {} }));
+  const on = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="true"/;
+  const off = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="false"/;
+  assert.match(row(undefined), on, "on with nothing saved");
+  assert.match(row(true), on);
+  assert.match(row(false), off);
+  assert.match(row(true), /You see and type into the master(?:'|&#x27;)s own terminal\./);
+});
+
+test("Stop the master when idle after offers Off, 15 min and 1 h and shows the engine's choice (DEC-117 Q4)", () => {
+  assert.equal(typeof controls.MasterIdleSetting, "function", "the setting exists");
+  assert.deepEqual(controls.MASTER_IDLE_OPTIONS.map((option) => [option.value, option.label]), [["off", "Off"], ["fifteen_minutes", "15 min"], ["one_hour", "1 h"]]);
+  const row = (master_idle_stop) => renderToStaticMarkup(createElement(controls.MasterIdleSetting, { projectId: "chores", status: status({ master_idle_stop }), reload() {} }));
+  assert.match(row(undefined), /<label for="tg-master-idle-chores">Stop the master when idle after<\/label>/);
+  assert.match(row(undefined), /<option value="fifteen_minutes" selected="">15 min<\/option>/);
+  assert.match(row("fifteen_minutes"), /<option value="fifteen_minutes" selected="">15 min<\/option>/);
+  assert.match(row("one_hour"), /<option value="one_hour" selected="">1 h<\/option>/);
+  assert.match(row("off"), /<option value="off" selected="">Off<\/option>/);
+  assert.match(row("off"), /A master in a live terminal stops too, once no turn is open and you have no unsent line\./);
 });
 
 test("two saves from one view both name the version that view read, so the second is refused instead of undoing the first", () => {

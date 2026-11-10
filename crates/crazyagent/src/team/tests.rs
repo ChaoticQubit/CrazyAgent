@@ -5917,6 +5917,185 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
     );
 }
 
+/// Each "Stop the master when idle after" choice gives its own time against the engine's
+/// bound, and with no choice each kind of master keeps what it did (DEC-117 Q4).
+#[test]
+fn master_idle_stop_choices_give_their_own_time() {
+    let bound = std::time::Duration::from_secs(MASTER_IDLE_STOP_SECS.into());
+    assert_eq!(
+        MasterIdleStop::FifteenMinutes.after(bound),
+        Some(std::time::Duration::from_secs(900))
+    );
+    assert_eq!(
+        MasterIdleStop::OneHour.after(bound),
+        Some(std::time::Duration::from_secs(3600))
+    );
+    assert_eq!(MasterIdleStop::Off.after(bound), None);
+    assert_eq!(
+        MasterIdleStop::effective(None, false),
+        MasterIdleStop::FifteenMinutes,
+        "a master that is not live stops as it always did"
+    );
+    assert_eq!(
+        MasterIdleStop::effective(None, true),
+        MasterIdleStop::Off,
+        "a live master was never stopped as idle"
+    );
+    for choice in [
+        MasterIdleStop::Off,
+        MasterIdleStop::FifteenMinutes,
+        MasterIdleStop::OneHour,
+    ] {
+        assert_eq!(MasterIdleStop::named(choice.name()), Some(choice));
+        assert_eq!(MasterIdleStop::effective(Some(choice), false), choice);
+        assert_eq!(MasterIdleStop::effective(Some(choice), true), choice);
+    }
+    assert_eq!(MasterIdleStop::named("soon"), None);
+}
+
+/// The team status says what stops a master with no choice saved, by whether it is live,
+/// then keeps each of the owner's choices whatever the master runs as, and the choice is
+/// per project (DEC-117 Q4).
+#[test]
+fn master_idle_stop_shows_each_kind_until_the_owner_chooses() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-idle-stop",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-idle-stop", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "no choice and no live master"
+    );
+    master::set_live(&connection, &project, true).unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::Off,
+        "no choice and a live master"
+    );
+    for choice in [
+        MasterIdleStop::OneHour,
+        MasterIdleStop::Off,
+        MasterIdleStop::FifteenMinutes,
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterIdleStop {
+                    project_id: project.clone(),
+                    choice,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_idle_stop,
+            choice
+        );
+    }
+    master::set_live(&connection, &project, false).unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "the owner's choice stays when the live master ends"
+    );
+    assert_eq!(
+        master_idle_stop(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        None,
+        "the choice is per project"
+    );
+}
+
+/// "Live terminal" is on until the owner turns it off and is per project. Off makes a master
+/// count as not live whatever its run flag says, the run flag stays as it was, and with no
+/// idle stop choice saved that master then stops as any other does (DEC-117 Q4).
+#[test]
+fn live_terminal_is_on_until_the_owner_turns_it_off_and_off_means_not_live() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-live-terminal",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-live-terminal", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().master_live_terminal,
+        "on with nothing saved"
+    );
+    master::set_live(&connection, &project, true).unwrap();
+    assert!(master::live(&connection, &project).unwrap());
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterLiveTerminal {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_live_terminal,
+            on
+        );
+        assert_eq!(master::live(&connection, &project).unwrap(), on);
+    }
+    assert_eq!(
+        master::switch(&connection, &project).unwrap().0,
+        Some(true),
+        "the run flag stays as it was"
+    );
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_idle_stop,
+        MasterIdleStop::FifteenMinutes,
+        "a master that is not live stops as any other does"
+    );
+    let elsewhere = ProjectId::new("team-elsewhere").unwrap();
+    master::set_live(&connection, &elsewhere, true).unwrap();
+    assert!(
+        master::live(&connection, &elsewhere).unwrap(),
+        "the setting is per project"
+    );
+}
+
 /// "Catch up with main" is On for a project with no choice saved and for a store with no
 /// team tables, reads the owner's Off and On again, and the choice is per project (OS-8).
 #[test]

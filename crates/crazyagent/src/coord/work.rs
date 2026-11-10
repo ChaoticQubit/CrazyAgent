@@ -213,9 +213,11 @@ pub fn finish(
     let owns = row.owner == Some(by);
     let allowed = match row.state {
         WorkState::Accepted | WorkState::Active => owns,
+        WorkState::ReviewReady if outcome == Finish::ReviewReady => {
+            return Err(failure("coord_work_review_ready"));
+        }
         WorkState::ReviewReady => {
-            outcome != Finish::ReviewReady
-                && (owns || supervisor(tx, &row.project, Party::Agent(by), row.owner)?)
+            owns || supervisor(tx, &row.project, Party::Agent(by), row.owner)?
         }
         _ => return Err(failure("coord_transfer_invalid")),
     };

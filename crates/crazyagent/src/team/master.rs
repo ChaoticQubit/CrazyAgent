@@ -113,6 +113,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 draft INTEGER NOT NULL DEFAULT 0,
                 problem TEXT
             );
+            CREATE TABLE IF NOT EXISTS team_master_live_terminal (
+                project TEXT PRIMARY KEY,
+                terminal INTEGER NOT NULL CHECK(terminal IN (0,1))
+            );
             CREATE TABLE IF NOT EXISTS team_master_turns (
                 agent INTEGER NOT NULL,
                 turn INTEGER NOT NULL,
@@ -268,18 +272,53 @@ pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Resul
     Ok(())
 }
 
-/// Reads whether a project's live master is switched on. Takes the engine database and the
-/// project. Returns the switch, off when never set.
+/// Reads whether a project's master runs live: its run flag is on and the owner's "Live
+/// terminal" setting is not Off (DEC-117 Q4). Takes the engine database and the project.
+/// Returns the answer, no when the flag was never set.
 pub fn live(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT live FROM team_live_masters WHERE project=?1",
+            "SELECT live FROM team_live_masters WHERE project=?1
+             AND NOT EXISTS(SELECT 1 FROM team_master_live_terminal WHERE project=?1 AND terminal=0)",
             [project.as_str()],
             |row| row.get(0),
         )
         .optional()
         .map(|on| on.unwrap_or(false))
         .map_err(state)
+}
+
+/// Reads a project's "Live terminal" setting (DEC-117 Q4): whether its master may run as its
+/// own app in a live terminal. Takes the engine database and the project. Returns the
+/// setting, on when the owner never saved one.
+pub fn live_terminal(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT terminal FROM team_master_live_terminal WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|on| on.unwrap_or(true))
+        .map_err(state)
+}
+
+/// Saves a project's "Live terminal" setting, replacing any earlier one. Off ends a running
+/// live master at its next stop, through `live`. Takes the owner transaction, the project and
+/// the setting. Returns any SQLite failure.
+pub fn set_live_terminal(
+    connection: &Connection,
+    project: &ProjectId,
+    on: bool,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_master_live_terminal(project,terminal) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET terminal=excluded.terminal",
+            params![project.as_str(), on],
+        )
+        .map_err(state)?;
+    Ok(())
 }
 
 /// Reads a project's live master switch as the owner sees it, with why it last could not start.
@@ -571,6 +610,28 @@ pub(crate) fn typable(text: &str) -> bool {
         && !text
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+/// How every line about a live master that was turned off starts.
+pub(crate) const LIVE_STOPPED: &str = "The live master was turned off";
+/// What follows `LIVE_STOPPED` on the line a live master stopped as idle leaves.
+const IDLE_WHY: &str = ": it was idle for ";
+
+/// The line a live master stopped as idle leaves. It names no place to go, since the owner
+/// can already be on the master view, and says a new start continues the conversation.
+/// Input: the idle choice's label. Output: the line.
+pub(crate) fn idle_stopped_line(label: &str) -> String {
+    format!(
+        "{LIVE_STOPPED}{IDLE_WHY}{label}. It continues the same conversation when you start it again."
+    )
+}
+
+/// Whether a problem line is the one `idle_stopped_line` leaves. Input: the line. Output:
+/// the answer.
+pub(crate) fn idle_stopped(problem: &str) -> bool {
+    problem
+        .strip_prefix(LIVE_STOPPED)
+        .is_some_and(|rest| rest.starts_with(IDLE_WHY))
 }
 
 /// Whether a project's live master is quiet now: it runs, no turn is open, the engine's last

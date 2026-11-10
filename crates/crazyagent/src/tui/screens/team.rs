@@ -60,6 +60,7 @@ pub(in crate::tui) const MASTER_NO_SESSION: &str =
 const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
     "It starts again when you open this view again or press n for a new session.";
+const MASTER_START_AGAIN: &str = "s starts it again, on the same conversation.";
 const MASTER_HEAD_ROWS: u16 = 1;
 const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
 const MASTER_PAUSED_START: &str =
@@ -71,6 +72,11 @@ const MASTER_HELD_REST: &str =
     "What you typed so far goes in once it opens; the rest was not kept.";
 const MASTER_HELD_DROPPED: &str = "What you typed for the master was not sent.";
 const MASTER_HELD_AGAIN: &str = "Its terminal did not open. Type it again once it is open.";
+/// What the owner reads when the master view closes because Live terminal is Off.
+const LIVE_TERMINAL_OFF: &str = "Live terminal is off for this project.";
+/// Where that master's conversation is and how to change the setting.
+const LIVE_TERMINAL_HOW: &str =
+    "Its conversation is the console. V in the team settings turns it on.";
 /// The most keys kept while the master's terminal starts. Keys, not bytes: a key's bytes
 /// depend on the modes of the terminal, known once it opens; a kept key is at most 6
 /// bytes, so all of them come to at most 24 KiB, sent in `INPUT_BYTES_MAX` chunks.
@@ -117,6 +123,7 @@ struct TreeRow {
 struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
+    idle: bool,
     switched: Option<String>,
     saved: Option<String>,
     running: Option<String>,
@@ -161,6 +168,7 @@ pub struct Team {
     checked: bool,
     switch: Option<LiveSwitch>,
     master_agent: Option<Option<i64>>,
+    master_live: Option<bool>,
     want: Option<bool>,
     refused: Option<String>,
     paused: bool,
@@ -192,6 +200,7 @@ impl Team {
             checked: false,
             switch: None,
             master_agent: None,
+            master_live: None,
             want: None,
             refused: None,
             paused: false,
@@ -341,6 +350,14 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
+    /// Whether an idle stop ended the live master, the one stop that offers s to start it
+    /// again from this view. Input: none. Output: the answer.
+    fn idle_stopped(&self) -> bool {
+        self.master
+            && self.live_on() == Some(false)
+            && self.switch.as_ref().is_some_and(|switch| switch.idle)
+    }
+
     fn start_live(&mut self, ctx: &mut Ctx) {
         self.asked = true;
         self.want = Some(true);
@@ -380,7 +397,8 @@ impl Team {
 
     /// Takes a team status read, a live switch change or a session check of this master
     /// view: a good read replaces the switch, and the first one of this open turns a switch
-    /// that is not on on, or checks the session of a running team's switch already on; a
+    /// that is not on on, or checks the session of a running team's switch already on, and a
+    /// switch seen on stays stopped after its next stop until the owner acts; a
     /// failed read changes nothing but ends a start waiting to be retried; an accepted change
     /// is the switch until the next read, which is read at once, and an accepted Start all
     /// checks the session too; a change refused as stale reads the switch again, and the first
@@ -409,6 +427,7 @@ impl Team {
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
+                    idle: status.live_idle_stopped,
                     switched: status.live_switch.as_ref().map(switched_words),
                     saved: status
                         .harnesses
@@ -432,6 +451,7 @@ impl Team {
                 } else if !off && !self.paused && !self.asked && !self.checked {
                     self.check_session(ctx);
                 }
+                self.asked |= !off && !self.paused;
             }
             SetupQuery::TeamChange {
                 action:
@@ -470,6 +490,7 @@ impl Team {
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
+                        idle: false,
                         switched,
                         saved,
                         running,
@@ -512,6 +533,23 @@ impl Team {
             },
             generation,
         }));
+    }
+
+    /// Reads the team again when the graph shows the master stopped after showing it running,
+    /// so the open master view says why it stopped. Input: the context. Output: none; a team
+    /// read may be queued.
+    fn note_master_stopped(&mut self, ctx: &mut Ctx) {
+        let live = self.graph.ready().and_then(|graph| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == NodeKind::Master)
+                .map(|node| node.status.is_none_or(|status| status.live()))
+        });
+        let last = std::mem::replace(&mut self.master_live, live);
+        if self.master && last == Some(true) && live == Some(false) {
+            self.read_switch(ctx);
+        }
     }
 
     /// Reads the team again when the graph shows another master agent than it showed last,
@@ -573,6 +611,7 @@ impl Team {
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
             Key::Char('S') if self.paused => self.start_team(ctx),
+            Key::Char('s') if self.idle_stopped() => self.start_live(ctx),
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -717,6 +756,15 @@ impl Team {
             closed: None,
         });
         self.focus = Focus::Terminal;
+    }
+
+    /// Whether a team read says this project's "Live terminal" setting is Off, which closes
+    /// the master view, since that master's conversation is the console (DEC-117 Q4).
+    /// Input: the setup event. Output: true for a good team read of this project showing Off.
+    fn live_terminal_off(&self, event: &crate::tui::client::SetupEvent) -> bool {
+        self.master
+            && matches!(&event.query, SetupQuery::Team { project } if *project == self.project)
+            && matches!(&event.result, Ok(SetupView::Team(status)) if !status.master_live_terminal)
     }
 
     fn detach(&mut self, ctx: &mut Ctx) {
@@ -943,7 +991,8 @@ impl Team {
     /// master view, any other key goes to the open terminal. While the master's terminal
     /// starts, keys wait for it and Esc goes back; a master view with no terminal coming
     /// gives the keys to the view. A terminal that closed keeps the keys and drops them
-    /// until Ctrl-], so keys typed as it closed never act on the view.
+    /// until Ctrl-], so keys typed as it closed never act on the view, but for s after an
+    /// idle stop, which starts the master again.
     /// Inputs: the key and the context. Output: the flow.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
@@ -973,6 +1022,9 @@ impl Team {
             return Flow::Handled;
         };
         if attached.closed.is_some() {
+            if *key == Key::Char('s') && self.idle_stopped() {
+                self.start_live(ctx);
+            }
             return Flow::Handled;
         }
         for chunk in attached.pane.encode(key).chunks(INPUT_BYTES_MAX) {
@@ -1244,13 +1296,28 @@ impl Team {
                 .map(Line::raw)
                 .collect();
             lines.extend(
-                wrap(MASTER_RESTART, limit)
-                    .into_iter()
-                    .map(|text| styled(text, Role::Muted, theme)),
+                wrap(
+                    if self.idle_stopped() {
+                        MASTER_START_AGAIN
+                    } else {
+                        MASTER_RESTART
+                    },
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
             );
             boxed(frame, area, "Master", false, lines, ctx);
             return None;
         }
+        let idle_line = self
+            .idle_stopped()
+            .then(|| {
+                self.switch
+                    .as_ref()
+                    .and_then(|switch| switch.problem.clone())
+            })
+            .flatten();
         let Some(attached) = self.attached.as_mut() else {
             let waiting = if self.master {
                 self.switch
@@ -1282,8 +1349,11 @@ impl Team {
             return None;
         }
         if let Some(code) = &attached.closed {
-            let (lead, rest) = closed_words(code);
-            let mut lines = vec![Line::raw(lead)];
+            let (lead, rest) = idle_line
+                .as_deref()
+                .map_or(closed_words(code), |line| (line, MASTER_START_AGAIN));
+            let mut lines: Vec<Line<'static>> =
+                wrap(lead, limit).into_iter().map(Line::raw).collect();
             lines.extend(
                 wrap(rest, limit)
                     .into_iter()
@@ -1325,6 +1395,9 @@ impl Screen for Team {
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.terminal_keys() && self.master {
             let mut hints = vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+            if self.idle_stopped() {
+                hints.insert(0, hint("s", "Start again"));
+            }
             if self.starting() {
                 hints.push(hint("Esc", "Back"));
             }
@@ -1343,6 +1416,9 @@ impl Screen for Team {
             let mut hints = Vec::new();
             if self.paused {
                 hints.push(hint("S", "Start all"));
+            }
+            if self.idle_stopped() {
+                hints.push(hint("s", "Start again"));
             }
             if self
                 .attached
@@ -1542,6 +1618,7 @@ impl Screen for Team {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
                 self.note_master_agent(ctx);
+                self.note_master_stopped(ctx);
                 self.follow_master(ctx);
                 if !self.master {
                     questions::Questions::read(&self.project, ctx);
@@ -1551,6 +1628,11 @@ impl Screen for Team {
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
                 OwnerEvent::Setup(event) => {
+                    if self.live_terminal_off(event) {
+                        self.detach(ctx);
+                        ctx.say(Message::warning(LIVE_TERMINAL_OFF, LIVE_TERMINAL_HOW));
+                        return Flow::Back;
+                    }
                     self.took_setup(&event.query, &event.result, ctx);
                     if let Some(view) = self.settings.as_mut() {
                         view.apply(&event.query, event.result.clone());

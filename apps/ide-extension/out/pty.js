@@ -1,8 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SandboxedPty = exports.BUSY = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
+exports.gitFirstOnPath = gitFirstOnPath;
 exports.clampSize = clampSize;
 exports.stopped = stopped;
+const node_path_1 = require("node:path");
 const engine_js_1 = require("./engine.js");
 exports.SIZE_MIN = 2;
 exports.SIZE_MAX = 1000;
@@ -11,6 +13,14 @@ exports.UNAVAILABLE = "The Sandboxed terminal is unavailable: this system has no
 exports.BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
 const SIZE_DEFAULT = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
+function gitFirstOnPath(collection, gitPath) {
+    if (typeof gitPath !== "string" || !(0, node_path_1.isAbsolute)(gitPath))
+        return;
+    const folder = (0, node_path_1.dirname)(gitPath);
+    if (folder.includes(":"))
+        return;
+    collection.prepend("PATH", `${folder}:`);
+}
 class Signal {
     #listeners = new Set();
     event = (listener) => {

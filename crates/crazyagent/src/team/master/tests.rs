@@ -1823,6 +1823,200 @@ fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_of
     );
 }
 
+/// A message for an agent that has stopped waits for its next session, so its sender is
+/// told that, not that it arrives at a next turn (HB-S5-E). A note, a message, a reply and
+/// a question that went to a stopped lead all say so.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sender_is_told_its_message_waits_for_an_agent_that_stopped() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let stopped = named_sub(&fixture, "api", "stopped");
+    let failed = named_sub(&fixture, "docs", "failed");
+    let peer = named_sub(&fixture, "peer", "working");
+    let waits = |fixture: &Fixture, agent: i64| {
+        let label = super::super::events::label(&fixture.connection, agent).unwrap();
+        format!("{label} has stopped, so it waits until {label} is woken")
+    };
+    for (target, sent) in [
+        (
+            stopped,
+            json!({"kind": "note", "to": stopped.to_string(), "text": "The schema moved."}),
+        ),
+        (
+            failed,
+            json!({"kind": "note", "to": failed.to_string(), "text": "The schema moved."}),
+        ),
+        (
+            stopped,
+            json!({"to": stopped.to_string(), "text": "Use the v2 schema."}),
+        ),
+    ] {
+        let (said, refused) = as_sub(&mut fixture, peer, tool::UPDATE_WORK_TOOL, sent);
+        assert!(!refused, "{said}");
+        assert!(said.contains(&waits(&fixture, target)), "{said}");
+        assert!(!said.contains("at its next turn"), "{said}");
+    }
+    let asker = named_sub(&fixture, "asker", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        asker,
+        tool::UPDATE_WORK_TOOL,
+        json!({"to": peer.to_string(), "text": "Which schema?"}),
+    );
+    assert!(!refused, "{said}");
+    let asked: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE from_agent=?1 AND to_agent=?2",
+            [asker, peer],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [asker],
+        )
+        .unwrap();
+    let (said, refused) = as_sub(
+        &mut fixture,
+        peer,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": asked, "text": "The v2 schema."}),
+    );
+    assert!(!refused, "{said}");
+    assert!(said.contains(&waits(&fixture, asker)), "{said}");
+    let lead = named_sub(&fixture, "lead-gone", "stopped");
+    let worker = named_sub(&fixture, "worker", "working");
+    lead_of(&fixture, lead, worker);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        worker,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "lead", "severity": "normal", "text": "Which way?"}),
+    );
+    assert!(!refused, "{said}");
+    assert!(said.contains(&waits(&fixture, lead)), "{said}");
+    let present = named_sub(&fixture, "lead-here", "working");
+    let helper = named_sub(&fixture, "helper", "working");
+    lead_of(&fixture, present, helper);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        helper,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "lead", "severity": "normal", "text": "Which way?"}),
+    );
+    assert!(!refused, "{said}");
+    assert!(!said.contains("has stopped"), "{said}");
+}
+
+/// Finishing work that already waits for review says so, not a rule about who may finish
+/// it (HB-S5-F).
+#[cfg(target_os = "macos")]
+#[test]
+fn finishing_work_already_waiting_for_review_says_so() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let sub = named_sub(&fixture, "api", "working");
+    no_worktree(&fixture, sub);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        sub,
+        tool::START_WORK_TOOL,
+        json!({"title": "API", "claims": ["API.md"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "API");
+    let review = |version: i64| json!({"work": work, "version": version, "outcome": "review_ready", "evidence": "cargo test passed"});
+    let (said, refused) = as_sub(&mut fixture, sub, tool::FINISH_WORK_TOOL, review(1));
+    assert!(!refused, "{said}");
+    assert_eq!(
+        as_sub(&mut fixture, sub, tool::FINISH_WORK_TOOL, review(2)),
+        (
+            "Not finished: that work already waits for review; it can only be completed or closed now.".to_owned(),
+            true
+        )
+    );
+}
+
+/// One start overlapping many claims of one agent writes that agent one note saying how
+/// many more there are, not one note per claim (HB-S5-G, ten notes from one start), and an
+/// agent past the first ten overlaps still gets its note.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_start_writes_one_overlap_note_to_each_agent() {
+    let mut fixture = Fixture::new();
+    let busy = named_sub(&fixture, "add-fn", "working");
+    let other = named_sub(&fixture, "mul-fn", "working");
+    let starter = named_sub(&fixture, "sub-fn", "working");
+    let many: Vec<String> = (0..12).map(|index| format!("f{index}.py")).collect();
+    let mut all = many.clone();
+    all.push("last.py".to_owned());
+    for (agent, title, claims) in [
+        (busy, "Many", many),
+        (other, "One", vec!["last.py".to_owned()]),
+        (starter, "All", all),
+    ] {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": title, "claims": claims}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let notes =
+        "SELECT body FROM coord_messages WHERE to_agent=?1 AND kind='note' AND from_kind='engine'";
+    let to_busy = bodies(&fixture, notes, busy);
+    assert_eq!(to_busy.len(), 1, "{to_busy:?}");
+    assert!(
+        to_busy[0].contains(", and 11 more between this work and yours. This note takes no reply"),
+        "{}",
+        to_busy[0]
+    );
+    let to_other = bodies(&fixture, notes, other);
+    assert_eq!(to_other.len(), 1, "{to_other:?}");
+    assert!(!to_other[0].contains(" more between "), "{}", to_other[0]);
+}
+
+/// One start tells at most ten agents of an overlap, however many it overlaps.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_start_notes_at_most_ten_agents() {
+    let mut fixture = Fixture::new();
+    let holders: Vec<i64> = (0..11)
+        .map(|index| named_sub(&fixture, &format!("holder-{index}"), "working"))
+        .collect();
+    let starter = named_sub(&fixture, "starter", "working");
+    for agent in holders {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": format!("Holder {agent}"), "claims": ["same.py"]}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let (said, refused) = as_sub(
+        &mut fixture,
+        starter,
+        tool::START_WORK_TOOL,
+        json!({"title": "Last start", "claims": ["same.py"]}),
+    );
+    assert!(!refused, "{said}");
+    let noted: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE from_kind='engine' AND kind='note' AND body LIKE '%\"Last start\"%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(noted, 10);
+}
+
 /// Adds `count` claims `more/<i>.rs` to one unit of work, as a long backlog would. Takes the
 /// fixture, the work and the count.
 #[cfg(target_os = "macos")]

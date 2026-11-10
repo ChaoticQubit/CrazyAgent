@@ -116,6 +116,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true });
   assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
   assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
+  assert.doesNotMatch(access.IDE_GIT_HOOKS_LINE, /Sandboxed terminal/);
   assert.match(access.IDE_GIT_HOOKS_LINE, /Applies when the IDE next starts\.$/);
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));

@@ -11470,8 +11470,12 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
 fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_end() {
     let mut case = Case::new();
     cargo_workspace(&mut case);
-    let (id, _) =
+    let (id, landed) =
         lockfile_clash_at_turn_end(&case, "zzz-never-fetched = \"1\"", "zzz-never-fetched");
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone()))
+    );
     let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
         set.state == ChangeState::Updating
     });
@@ -11640,7 +11644,7 @@ fn a_tool_that_also_rewrites_a_manifest_falls_back_to_the_agent_update() {
 
 /// A Cargo.lock-only clash of an agent the owner or the master stopped, or of a project
 /// whose team the owner paused, is not regenerated and its agent gets no note; the stopped
-/// agent's set keeps its head for the owner (OS-8, HB-S5-B).
+/// set keeps its head and waits for the owner (OS-8, HB-S5-B, T8-R2-S3).
 #[test]
 fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
     for stop in ["owner stop", "master stop", "paused team"] {
@@ -11675,13 +11679,175 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
                 .all(|note| !note.contains("regenerated")),
             "{stop}: the agent got a regeneration note"
         );
-        if stop != "paused team" {
-            assert_eq!(
-                set.head, head,
-                "{stop}: the stopped agent's set keeps its head"
-            );
-        }
+        assert_eq!(set.head, head, "{stop}: the set keeps its head");
+        assert_eq!(
+            set.state,
+            ChangeState::Pending,
+            "{stop}: the set waits for the owner"
+        );
     }
+}
+
+/// Starts a Cargo.lock-only clash whose stand-in tool is still running when the turn end
+/// returns, then runs `during`. Inputs: the case and what happens while the tool runs.
+/// Output: the set, its head before the regeneration and what `during` returned.
+fn clash_during_a_slow_tool<T>(
+    case: &mut Case,
+    during: impl FnOnce(&Case) -> T,
+) -> (ChangeSetId, String, T) {
+    cargo_workspace(case);
+    stand_in_cargo(
+        case,
+        "",
+        ": > .tool-started\nsleep 8\nrm -f .tool-started",
+        Duration::from_secs(60),
+    );
+    let (id, _) = lockfile_clash_at_turn_end(case, "b = { path = \"../b\" }", "b");
+    let head = case.view(&id).head;
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(".tool-started");
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the tool never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let done = during(case);
+    (id, head, done)
+}
+
+/// Waits until a set's regeneration has ended. Input: the set. Output: none.
+fn regeneration_ended(id: &ChangeSetId) {
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while lockfiles::is_running(id) {
+        assert!(Instant::now() < deadline, "the regeneration never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// T8-R2-S2: the owner's stop while the tool runs lands nothing, keeps the set for the owner
+/// and sends the agent no note.
+#[test]
+fn an_owner_stop_while_the_lockfile_tool_runs_lands_nothing() {
+    let mut case = Case::new();
+    let (id, head, ()) = clash_during_a_slow_tool(&mut case, |case| {
+        case.db
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+                rusqlite::params![CLONE_AGENT, case.workspace.project.as_str()],
+            )
+            .unwrap();
+    });
+    regeneration_ended(&id);
+    let set = case.view(&id);
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        (set.head.as_str(), set.state),
+        (head.as_str(), ChangeState::Pending)
+    );
+    assert!(
+        engine_notes(&case)
+            .iter()
+            .all(|note| !note.contains("regenerated")),
+        "the stopped agent got a regeneration note"
+    );
+}
+
+/// T8-R2-S2 and S3: a pause while the tool runs lands nothing, and the engine's update waits
+/// too, so the paused team's worktree is left alone.
+#[test]
+fn a_pause_while_the_lockfile_tool_runs_lands_nothing_and_starts_no_update() {
+    let mut case = Case::new();
+    let (id, head, ()) = clash_during_a_slow_tool(&mut case, |case| {
+        case.db
+            .execute(
+                "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,1)",
+                [case.workspace.project.as_str()],
+            )
+            .unwrap();
+    });
+    regeneration_ended(&id);
+    let set = set_within(&case, &id, Duration::from_secs(5), |set| {
+        set.state != ChangeState::Pending
+    });
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        (set.head.as_str(), set.state),
+        (head.as_str(), ChangeState::Pending)
+    );
+}
+
+/// T8-R2-S2: main moving while the tool runs throws that run away and regenerates on the new
+/// main.
+#[test]
+fn main_moving_while_the_lockfile_tool_runs_regenerates_on_the_new_main() {
+    let mut case = Case::new();
+    let (id, _, moved) = clash_during_a_slow_tool(&mut case, |case| {
+        case.owner_commit("LATER", "later\n", "Owner moves main")
+    });
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set) && is_ancestor(&case, &moved, &set.head)
+    });
+    assert!(regenerated(&case, &set), "the set was never regenerated");
+    assert!(
+        is_ancestor(&case, &moved, &set.head),
+        "it ran on the old main"
+    );
+    assert_eq!(set.state, ChangeState::Pending);
+}
+
+/// T8-R2-S2: an edit the agent makes while the tool runs stops the regeneration from landing
+/// and survives, on a file the regeneration would not change.
+#[test]
+fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
+    let mut case = Case::new();
+    let (id, _, ()) =
+        clash_during_a_slow_tool(&mut case, |case| case.edit("README", "edited mid-run\n"));
+    regeneration_ended(&id);
+    let set = case.view(&id);
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "edited mid-run\n"
+    );
+}
+
+/// T8-R2-S4: past the most regenerations one repository runs at once, a clash goes straight
+/// to Task 7's update.
+#[test]
+fn a_third_lockfile_regeneration_in_one_repository_goes_to_the_agent_update() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let word = token(&case);
+    let _busy = [
+        lockfiles::occupy(&case.repo, &format!("{word}-1")),
+        lockfiles::occupy(&case.repo, &format!("{word}-2")),
+    ];
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || regenerated(&case, set)
+    });
+    assert!(!regenerated(&case, &set), "a third regeneration ran");
+    assert_eq!(set.state, ChangeState::Updating);
+}
+
+/// T8-R2-S4: under that limit a regeneration still runs.
+#[test]
+fn a_second_lockfile_regeneration_in_one_repository_still_runs() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let _busy = lockfiles::occupy(&case.repo, &format!("{}-1", token(&case)));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert!(
+        regenerated(&case, &set),
+        "the second regeneration never ran"
+    );
 }
 
 /// The engine's start removes the temporary worktree, its admin folder and the engine's

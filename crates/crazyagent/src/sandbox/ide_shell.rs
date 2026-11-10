@@ -27,6 +27,20 @@ pub const TERMINAL_VARIABLES: [&str; 7] = [
 const SHELL_ARGUMENTS_MAX: usize = 16;
 #[cfg(target_os = "macos")]
 const FOLDER: &str = "ide-shell";
+const NO_STAGING: &str =
+    "This terminal can't stage or commit. Use Source Control, or a Full access terminal.";
+/// The words a pane puts in front of the owner's login shell: a plain shell prints
+/// [`NO_STAGING`] and becomes that login shell. The pane host repaints the terminal as it
+/// attaches, so a line written from outside the pane would be wiped.
+const SAYS_THEN_SHELL: [&str; 5] = [
+    "/bin/sh",
+    "-c",
+    "printf '%s\\n' \"$1\"; shift; exec \"$@\"",
+    "sh",
+    NO_STAGING,
+];
+/// Where a pane's argument list names the shell: after `sandbox-exec -f <profile>`.
+const SHELL_ARGUMENT: usize = 3;
 #[cfg(target_os = "macos")]
 const SHELLS: &str = "/etc/shells";
 #[cfg(target_os = "macos")]
@@ -177,9 +191,10 @@ pub fn command(_launch: &Launch<'_>) -> Result<Command, SandboxError> {
 }
 
 /// Builds the Sandboxed terminal as the engine's terminal host runs it in a pane: the same
-/// argument list, working folder and environment as [`command`], as text. Input: the
-/// launch. Output: the pane command, or [`command`]'s refusal, or `Invalid` for a part
-/// that is not UTF-8.
+/// argument list, working folder and environment as [`command`], as text, with a login shell
+/// started through [`SAYS_THEN_SHELL`] so the owner reads that this terminal cannot stage or
+/// commit. Input: the launch. Output: the pane command, or [`command`]'s refusal, or
+/// `Invalid` for a part that is not UTF-8.
 pub fn interactive(launch: &Launch<'_>) -> Result<InteractiveCommand, SandboxError> {
     let command = command(launch)?;
     let text = |value: &OsStr| {
@@ -204,6 +219,13 @@ pub fn interactive(launch: &Launch<'_>) -> Result<InteractiveCommand, SandboxErr
         .to_path_buf();
     assert_eq!(argv.len(), command.get_args().count() + 1);
     assert_eq!(env.len(), command.get_envs().count());
+    if launch.arguments.is_empty() {
+        assert_eq!(OsStr::new(&argv[SHELL_ARGUMENT]), launch.shell.as_os_str());
+        argv.splice(
+            SHELL_ARGUMENT..SHELL_ARGUMENT,
+            SAYS_THEN_SHELL.map(str::to_owned),
+        );
+    }
     Ok(InteractiveCommand {
         argv,
         cwd,

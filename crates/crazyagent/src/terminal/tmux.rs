@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -286,6 +287,43 @@ impl Tmux {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(_) => Err(failure("terminal_unavailable")),
         }
+    }
+
+    /// The process the kernel names as the listener bound at this host's socket, read from a
+    /// raw connection, never a tmux client, so no reply of the server decides it. A link
+    /// swapped in at the path reaches a listener bound under another name, so the name the
+    /// kernel gives the peer must be the socket's own. tmux binds the whole address, so that
+    /// name is padded with zero bytes after its end. Output: its pid, or none when nothing
+    /// there answers or the listener is bound elsewhere.
+    fn server_pid(&self) -> Option<u32> {
+        let socket = self.address().ok()?;
+        let stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
+        let peer = stream.peer_addr().ok()?;
+        let named = peer.as_pathname()?.as_os_str().as_bytes();
+        if named.split(|byte| *byte == 0).next()? != socket.as_os_str().as_bytes() {
+            return None;
+        }
+        crate::team::caller::peer_pid(&stream).filter(|pid| *pid > 1)
+    }
+
+    /// Keeps the panes whose first process the kernel reports as a child of the listener at
+    /// this host's socket. tmux forks each pane's first process from its server, while a pane
+    /// listing is only what the server says, and a native lead can swap in a listener of its
+    /// own at that socket, so a stand-in can name no process outside the server bound at
+    /// this address. Takes the panes. Returns those kept, none when the listener or the
+    /// process table cannot be read.
+    fn served(&self, panes: &[PaneInfo]) -> Vec<PaneInfo> {
+        assert!(panes.len() <= PANES_LISTED_MAX);
+        let (Some(server), Some(parents)) =
+            (self.server_pid(), crate::team::caller::process_parents())
+        else {
+            return Vec::new();
+        };
+        panes
+            .iter()
+            .filter(|pane| parents.get(&pane.pid) == Some(&server))
+            .cloned()
+            .collect()
     }
 
     /// Gives the control connection the host already holds while it still reads.
@@ -1236,7 +1274,7 @@ impl Tmux {
         panes: &[PaneInfo],
         line: &str,
     ) -> Result<(), HostError> {
-        let groups = pane_groups(panes);
+        let groups = pane_groups(&self.served(panes));
         let closed = control.run(line).map(drop);
         self.reap(groups);
         closed
@@ -1824,6 +1862,15 @@ impl Tmux {
             .ok()
             .filter(|pid| *pid > 1 && pane.starts_with('%'))
             .ok_or_else(|| failure("terminal_command_failed"))?;
+        let first = PaneInfo {
+            id: pane.to_owned(),
+            pid,
+            dead: false,
+        };
+        if self.served(&[first]).is_empty() {
+            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+            return Err(failure("terminal_command_failed"));
+        }
         if self.confined.is_some() {
             let tagged = pane_id_valid(pane)
                 && control
@@ -2018,7 +2065,11 @@ impl Host for Tmux {
                 .ok_or_else(|| failure("terminal_command_failed"))?
         };
         (pane.pid > 1)
-            .then_some(Some(pane.pid))
+            .then(|| {
+                self.served(std::slice::from_ref(&pane))
+                    .first()
+                    .map(|pane| pane.pid)
+            })
             .ok_or_else(|| failure("terminal_command_failed"))
     }
 

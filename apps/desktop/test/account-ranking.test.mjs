@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { AccountChoiceView, NextAccountsPanel, atText, standingLine } = await import("../src/screens/settings/account-choice.tsx");
+const { NextAccountsPanel, atText, standingLine } = await import("../src/screens/settings/account-choice.tsx");
 const { MetricsPage } = await import("../src/screens/metrics/view.tsx");
 
 const monday = new Date(2026, 9, 26, 8, 0).getTime();
@@ -39,24 +39,18 @@ test("each standing reads as one short reason", () => {
   assert.equal(standingLine({ kind: "five_hour_cap", until_ms: at }, monday), "5-hour cap until 14:30");
   assert.equal(standingLine({ kind: "five_hour_cap", until_ms: null }, monday), "5-hour cap reached");
   assert.equal(standingLine({ kind: "never_use" }, monday), "never use");
+  assert.equal(standingLine({ kind: "sign_in_unconfirmed" }, monday), "sign-in needs a check");
   assert.equal(standingLine({ kind: "paused", until_ms: at }, monday), "paused until 14:30");
 });
 
-test("Settings, Pools shows each pool's next accounts in order with why the rest wait", () => {
-  const schedule = { strategy: "use_it_or_lose_it", pools: [], projects: [], accounts: [], version: 0 };
-  const html = renderToStaticMarkup(createElement(AccountChoiceView, {
-    schedule: { kind: "ok", value: schedule }, pools: { kind: "ok", value: [pool] }, names,
-    ranking: { kind: "ok", value: ranking }, nowMs: monday, onChange: forbidden, onRetry: forbidden,
-  }));
+test("the next accounts panel shows each pool's next accounts in order with why the rest wait", () => {
+  const html = renderToStaticMarkup(createElement(NextAccountsPanel, { ranking: { kind: "ok", value: ranking }, pools: { kind: "ok", value: [pool] }, names, nowMs: monday }));
   assert.match(html, /Next accounts/);
   assert.match(html, /<li[^>]*>.*Home Claude.*resets Mon 09:00, 40% left/);
   assert.ok(html.indexOf("Home Claude</span><span class=\"small secondary\">resets") < html.indexOf("reserve reached (20%)"), html);
   assert.match(html, /Work Claude.*reserve reached \(20%\)/);
   assert.match(html, /Spare Claude.*5-hour cap until 14:30/);
-  const failed = renderToStaticMarkup(createElement(AccountChoiceView, {
-    schedule: { kind: "ok", value: schedule }, pools: { kind: "ok", value: [pool] }, names,
-    ranking: { kind: "error", code: "owner_read_failed", message: "x" }, nowMs: monday, onChange: forbidden, onRetry: forbidden,
-  }));
+  const failed = renderToStaticMarkup(createElement(NextAccountsPanel, { ranking: { kind: "error", code: "owner_read_failed", message: "x" }, pools: { kind: "ok", value: [pool] }, names, nowMs: monday }));
   assert.match(failed, /Couldn&#x27;t read the next accounts\./);
 });
 

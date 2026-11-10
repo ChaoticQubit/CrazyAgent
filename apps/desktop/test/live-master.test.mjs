@@ -40,7 +40,8 @@ test("the project page mounts the master area on one line, where the team activi
 });
 
 const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
-const GONE_BUTTONS = ["Earlier conversation", "Stop live master", "Start live master"];
+const GONE_BUTTONS = ["Earlier conversation", "Stop live master", "Start live master", "Start again"];
+const IDLE_LINE = "The live master was turned off: it was idle for 15 min. It continues the same conversation when you start it again.";
 const SESSION_BUTTONS = ["New session", "Sessions"];
 
 async function inPage(check) {
@@ -135,7 +136,7 @@ test("a started live master that waits for its account's profile shows the engin
   assert.ok(!seen.briefed.text.includes(wait), seen.briefed.text);
 });
 
-test("a stopped live master says why it stopped, or that opening the tab or a new session starts it, with no Start button", async () => {
+test("a stopped live master says why it stopped, or that opening the tab or a new session starts it, with no Start button unless an idle stop ended it", async () => {
   const why = "The live master could not start: no signed-in account.";
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate(`Fixture.mountView("stopped", ${JSON.stringify(why)})`);
@@ -186,6 +187,45 @@ test("opening the master area starts a stopped or never-set live master once and
   assert.match(seen.again.text, /The master terminal couldn't start\./);
 });
 
+test("a live master idle-stopped while its area is open stays stopped, says why and offers Start again, the start of coming back (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountArea("codex", true)');
+    await evaluate("Fixture.settle()");
+    await evaluate(`Fixture.readSwitch("codex", false, ${JSON.stringify({ live_problem: IDLE_LINE, live_idle_stopped: true })})`);
+    const view = await evaluate("Fixture.settle()");
+    const before = await evaluate("Fixture.teamReloads()");
+    if (view.buttons.includes("Start again")) await evaluate('Fixture.click("Start again")');
+    await evaluate("Fixture.settle()");
+    return { view, before, after: await evaluate("Fixture.teamReloads()") };
+  });
+  assert.equal(seen.before, 0, "the open area did not turn the stopped master on again");
+  assert.equal(seen.view.state, "Stopped");
+  assert.ok(seen.view.text.includes(IDLE_LINE), seen.view.text);
+  assert.doesNotMatch(seen.view.text, /master view|open this tab/, "the line sends the owner nowhere they already are");
+  assert.ok(seen.view.buttons.includes("Start again"), seen.view.buttons.join(", "));
+  assert.equal(seen.after, 1, "Start again ran the start");
+});
+
+test("Start again calls the same start the area was given", async () => {
+  const starts = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("idle-stopped", ${JSON.stringify(IDLE_LINE)})`);
+    const view = await evaluate("Fixture.shown()");
+    if (view.buttons.includes("Start again")) await evaluate('Fixture.click("Start again")');
+    return evaluate("Fixture.startsAsked()");
+  });
+  assert.equal(starts, 1);
+});
+
+test("only an idle stop in this project's read offers Start again", async () => {
+  const { idleStopped } = await import("../src/screens/project/live-master.tsx");
+  const status = (patch) => ({ kind: "ok", value: teamStatus(patch) });
+  assert.equal(idleStopped(undefined, "alpha"), false, "not read yet");
+  assert.equal(idleStopped(status({ live_master: false, live_idle_stopped: true }), "alpha"), true);
+  assert.equal(idleStopped(status({ live_master: false, live_problem: "No account." }), "alpha"), false, "another stop");
+  assert.equal(idleStopped(status({ live_master: false, live_idle_stopped: true }), "beta"), false, "another project's read");
+  assert.equal(idleStopped({ kind: "not_ready" }, "alpha"), false);
+});
+
 test("the live master switch is read from the team status, and a switch never set reads as null", async () => {
   const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
   const status = (patch) => ({ kind: "ok", value: teamStatus(patch) });
@@ -205,6 +245,55 @@ test("the owner's switch change holds until a team read after the engine accepte
   assert.equal(live.wantSettled({ on: true, after: Infinity }, 5_000), false, "a change still waiting holds");
   assert.equal(live.wantSettled({ on: true, after: 4_000 }, 3_999), false, "a read from before the acceptance holds");
   assert.equal(live.wantSettled({ on: true, after: 4_000 }, 4_001), true, "the next read decides, even when the engine already turned it off");
+});
+
+test("with Live terminal off the area shows the conversation and starts nothing, whatever the run flag says (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const views = {};
+    for (const on of [null, false, true]) {
+      await evaluate(`Fixture.mountAreaOff("codex", ${JSON.stringify(on)})`);
+      views[String(on)] = await evaluate("Fixture.settle()");
+    }
+    return { views, starts: await evaluate("Fixture.teamReloads()") };
+  });
+  for (const [on, view] of Object.entries(seen.views)) {
+    assert.equal(view.live, false, `${on}: no live master area: ${view.text}`);
+    assert.equal(view.terminal, false, `${on}: no terminal`);
+    assert.equal(view.conversation, true, `${on}: the conversation view`);
+  }
+  assert.equal(seen.starts, 0, "nothing turned the master on");
+});
+
+test("flipping Live terminal leaves the Master settings drawer open with focus on the switch, both ways, and closing it returns to the button of the view now shown, opened by keyboard or by mouse (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const flips = [];
+    await evaluate('Fixture.mountArea("codex", true)');
+    await evaluate("Fixture.settle()");
+    for (const [terminal, keyboard] of [[false, true], [true, true], [false, false], [true, false]]) {
+      await evaluate(keyboard ? 'Fixture.focusButton("Master settings")' : "Fixture.leaveFocus()");
+      await evaluate('Fixture.click("Master settings")');
+      await evaluate("Fixture.settle()");
+      const focused = await evaluate("Fixture.focusSwitch()");
+      await evaluate(`Fixture.readSwitch("codex", true, { master_live_terminal: ${terminal} })`);
+      const view = await evaluate("Fixture.settle()");
+      const flipped = await evaluate("Fixture.focusState()");
+      await evaluate("Fixture.closeDrawer()");
+      await evaluate("Fixture.settle()");
+      flips.push({ terminal, keyboard, focused, live: view.live, conversation: view.conversation, flipped, closed: await evaluate("Fixture.focusState()") });
+    }
+    return flips;
+  });
+  assert.equal(seen.length, 4);
+  for (const flip of seen) {
+    const way = `${flip.terminal ? "On" : "Off"}, ${flip.keyboard ? "keyboard" : "mouse"}`;
+    assert.equal(flip.focused, true, `${way}: the switch took focus`);
+    assert.equal(flip.live, flip.terminal, `${way}: the area swapped`);
+    assert.equal(flip.conversation, !flip.terminal, `${way}: the area swapped`);
+    assert.equal(flip.flipped.drawer, true, `${way}: the drawer stays open`);
+    assert.equal(flip.flipped.id, "tg-live-terminal-alpha", `${way}: focus stays on the switch`);
+    assert.equal(flip.closed.drawer, false, `${way}: Close shuts the drawer`);
+    assert.equal(flip.closed.text, "Master settings", `${way}: focus returns to the new view's button`);
+  }
 });
 
 test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {
