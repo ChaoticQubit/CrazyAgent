@@ -438,13 +438,17 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     assert!(!root_commit.status.success());
 }
 
-/// DEC-123 rv-secreview L2: Seatbelt sees a rename's last name as the caller typed it, so
-/// each move deny on the project, its worktrees folders, a checkout and a checkout's `.git`
-/// file holds in any letter case on the case-insensitive disk, and a different-case rename
-/// never carries one aside for a link to take its place before the engine removes it.
+/// One different-case rename: its name, the script that runs it and the path it must leave.
+type CaseRename = (&'static str, &'static str, fn(&Case) -> PathBuf);
+
+/// DEC-123 rv-secreview L2: on the case-insensitive disk a name may be typed in any letter
+/// case, so each move deny on the project, its worktrees folders, a checkout and a checkout's
+/// `.git` file holds whatever case a rename uses, and a different-case rename never carries
+/// one aside for a link to take its place before the engine removes it. A plain folder's
+/// different-case rename still goes, so each refusal is the sandbox's.
 #[test]
 fn a_different_case_rename_never_moves_the_worktrees_folders_or_a_checkout() {
-    let attacks: [(&str, &str, fn(&Case) -> PathBuf); 9] = [
+    let attacks: [CaseRename; 9] = [
         ("WORKTREES", "mv WORKTREES w", |case| {
             case.project.join("worktrees")
         }),
