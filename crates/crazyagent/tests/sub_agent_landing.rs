@@ -1549,6 +1549,73 @@ fn a_lead_removed_outside_the_app_leaves_its_workers_sets_open_and_listed() {
     }
 }
 
+/// A worker set the owner restored stays on the owner's list under Lands = Lead after its
+/// lead opens a newer set, since the lead's closes leave a restored set alone and only the
+/// owner can close it (TEAM-3-F3).
+#[test]
+fn a_restored_worker_set_stays_listed_after_its_lead_opens_a_newer_set() {
+    let team = Team::new();
+    team.lands("lead");
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    landing::discard(&team.db, &lead_set, &team.view_head(&lead_set), now_ms()).unwrap();
+    let closed = landing::change_set(&team.db, &worker_set)
+        .unwrap()
+        .unwrap()
+        .1;
+    landing::restore(
+        &team.db,
+        &worker_set,
+        closed.restorable_until_ms.unwrap() - 1,
+    )
+    .unwrap();
+    assert_eq!(team.state(&worker_set).0, "pending");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    team.commit(&team.lead, "more.txt", "more\n", "More lead work");
+    let newer = team.turn_end(&team.lead);
+    assert_eq!(team.state(&newer).0, "pending");
+    for _ in 0..2 {
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+    }
+    assert_eq!(team.state(&worker_set).0, "pending");
+    assert!(team.owner_listed().contains(&worker_set));
+    landing::discard(&team.db, &newer, &team.view_head(&newer), now_ms()).unwrap();
+    assert_eq!(team.state(&worker_set).0, "pending");
+    assert!(team.owner_listed().contains(&worker_set));
+}
+
+/// A lead's worker set stays off the owner's list under Lands = Lead while its lead has a
+/// copy, and is listed once the lead's copy is gone, removed outside the app or no longer
+/// recorded, also for a lead that never had a set of its own, since no lead will land it
+/// (TEAM-3-F3).
+#[test]
+fn a_worker_set_whose_lead_copy_is_gone_is_listed_though_the_lead_had_no_set() {
+    for gone in ["removed", "unrecorded"] {
+        let team = Team::new();
+        team.lands("lead");
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert!(!team.owner_listed().contains(&worker_set), "{gone}");
+        if gone == "removed" {
+            fs::remove_dir_all(&team.lead.worktree).unwrap();
+        } else {
+            team.db
+                .execute("DELETE FROM team_worktrees WHERE agent=1", [])
+                .unwrap();
+        }
+        for _ in 0..2 {
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+        }
+        assert_eq!(team.state(&worker_set).0, "pending", "{gone}");
+        assert!(team.owner_listed().contains(&worker_set), "{gone}");
+    }
+}
+
 /// A land the owner did not press is refused while a worker below the set's agent holds
 /// an open set, for the master and for the engine alike: nothing lands, nothing closes,
 /// and a refusal leaves both sets as they were (HB-S4-LANDED r2).

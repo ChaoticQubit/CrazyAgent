@@ -1901,10 +1901,12 @@ impl TeamRuntime {
     }
 
     /// Ends one sub-agent no worker runs, a native teammate, through the terminal host as any
-    /// left pane ends. That end can wait seconds on a pane that ignores terminate, so it runs
-    /// on a thread of its own and the tick goes on (S4B-B1-L1); [`Self::unmanaged_ended`] marks
-    /// the row once it finished. With no terminal host the row is marked at once. Takes the
-    /// agent, the reason and who is told once it is marked. Returns how it was taken.
+    /// left pane ends, looking again while the host calls it unknown and its lead's teammates'
+    /// socket stays ([`end_teammate`], SEC2-R2). That end can wait seconds on a pane that
+    /// ignores terminate, so it runs on a thread of its own and the tick goes on (S4B-B1-L1);
+    /// [`Self::unmanaged_ended`] marks the row once it finished. With no terminal host the row
+    /// is marked at once. Takes the agent, the reason and who is told once it is marked.
+    /// Returns how it was taken, or a SQLite failure.
     fn end_unmanaged(
         &mut self,
         id: i64,
@@ -1920,11 +1922,14 @@ impl TeamRuntime {
             });
         };
         let name = AgentId::team(id).map_err(EngineError::from)?;
+        let mates = self.teammates_socket_of(id)?;
         let sender = self.unmanaged_ends.0.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("team-end-{id}"))
             .spawn(move || {
-                end_reported(id, sender, || end_left_pane(host.as_ref(), &name, "team"));
+                end_reported(id, sender, || {
+                    end_teammate(host.as_ref(), &name, mates.as_deref())
+                });
             });
         if spawned.is_err() {
             return Ok(UnmanagedEnd::Untouched);
@@ -1934,9 +1939,36 @@ impl TeamRuntime {
         Ok(UnmanagedEnd::Handed)
     }
 
+    /// The socket of the teammates' server the lead of a native teammate last named, read
+    /// from the store and the engine's own record, so the teammate's end can tell one
+    /// refused connect from an ended server (SEC2-R2). Takes the teammate. Returns the path,
+    /// None for a teammate with no lead or a lead with no such record, or a SQLite failure.
+    fn teammates_socket_of(&self, id: i64) -> Result<Option<PathBuf>, EngineError> {
+        let lead: Option<i64> = self
+            .connection
+            .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?
+            .flatten();
+        let Some(lead) = lead.filter(|lead| *lead != id) else {
+            return Ok(None);
+        };
+        #[cfg(unix)]
+        return Ok(self
+            .state
+            .parent()
+            .zip(AgentId::team(lead).ok())
+            .and_then(|(root, lead)| crate::terminal::teammates_socket(root, &lead).ok()));
+        #[cfg(not(unix))]
+        Ok(None)
+    }
+
     /// Marks stopped each native teammate whose end a thread finished since the last call,
     /// with the uncertain cleanup code when the end was not proven (S4B-B1); an unknown pane
-    /// counts as gone, any other host failure leaves the row to a later tick. Only rows it
+    /// counts as gone, as [`end_teammate`] answers it only once its lead's teammates' socket
+    /// is gone, and any other host failure leaves the row to a later tick. Only rows it
     /// marked are told: their owner's side stops are returned, and each over-cap lead gets one
     /// note naming its ended teammates. Returns those stops, or a SQLite or store failure.
     fn unmanaged_ended(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
@@ -5685,9 +5717,10 @@ impl TeamRuntime {
     }
 
     /// What fails a pinned task that a stop by the master or a lead left unfinished: one
-    /// created before the stop (HB-S5-B). A task pinned after it is a wake, which starts the
-    /// agent. Takes the agent and the task. Returns the reason, None when no such stop holds
-    /// the task, or any SQLite failure.
+    /// created before the stop (HB-S5-B), named by who made the latest stop, whose time fails
+    /// it, though a higher maker holds the row (HB-S5-B-L2). A task pinned after it is a wake,
+    /// which starts the agent. Takes the agent and the task. Returns the reason, None when no
+    /// such stop holds the task, or any SQLite failure.
     fn stop_failure(&self, agent: i64, task: i64) -> Result<Option<&'static str>, EngineError> {
         let Some((by, stopped_ms)) = super::stop_of(&self.connection, agent)? else {
             return Ok(None);
@@ -5703,7 +5736,8 @@ impl TeamRuntime {
         if created_ms > stopped_ms {
             return Ok(None);
         }
-        Ok(Some(match by {
+        let last = super::last_stopper(&self.connection, agent)?.unwrap_or(by);
+        Ok(Some(match last {
             StoppedBy::Lead => LEAD_STOPPED_TASK,
             StoppedBy::Master => MASTER_STOPPED_TASK,
             StoppedBy::Owner => OWNER_STOPPED_TASK,
@@ -6781,9 +6815,10 @@ impl TeamRuntime {
     /// its files, each quoted on its own line (OP9B-C2), once for each teammate head and lead
     /// tip. A set refused because a worker below the teammate holds open work stays too: the
     /// lead is told once for each teammate head and lead tip, and the land is tried again
-    /// only once that head, that tip or the project's open change sets moved
-    /// (TEAM-3-R2-LOWS). Takes the project and the lead. Returns Ok, or a SQLite or
-    /// coordination failure.
+    /// only once that head, that tip, the project's open change sets or the lead of an open
+    /// set's agent moved, so a worker re-parented or removed while its set stays open no
+    /// longer holds it (TEAM-3-R2-LOWS, TEST-ROWS-B-R1-L1). Takes the project and the lead.
+    /// Returns Ok, or a SQLite or coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
             self.teammate_conflicts_told.remove(&lead);
@@ -6856,19 +6891,23 @@ impl TeamRuntime {
                 return Ok(None);
             }
         };
-        let open = sets
-            .iter()
-            .filter(|set| {
-                matches!(
-                    set.state,
-                    crate::landing::ChangeState::Pending
-                        | crate::landing::ChangeState::Conflict
-                        | crate::landing::ChangeState::Updating
-                )
-            })
-            .map(|set| set.id.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let mut open = Vec::new();
+        for set in sets.iter().filter(|set| {
+            matches!(
+                set.state,
+                crate::landing::ChangeState::Pending
+                    | crate::landing::ChangeState::Conflict
+                    | crate::landing::ChangeState::Updating
+            )
+        }) {
+            let lead_of = match set.agent.id.parse::<i64>() {
+                Ok(agent) => teammates::parent(&self.connection, agent)?,
+                Err(_) => None,
+            };
+            let lead_of = lead_of.map_or_else(|| "-".to_owned(), |lead_of| lead_of.to_string());
+            open.push(format!("{}<{lead_of}", set.id.as_str()));
+        }
+        let open = open.join(" ");
         let mut landed = Vec::new();
         for teammate in resting {
             let id = teammate.to_string();
@@ -10165,6 +10204,12 @@ const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
+/// The looks a native teammate's end takes while the host calls it unknown but the socket
+/// of its lead's teammates' server stays and refuses a connect, since one refused connect
+/// proves no end (SEC2-R2).
+const UNKNOWN_LOOKS_MAX: u32 = 5;
+/// The pause between two of those looks.
+const UNKNOWN_LOOK_PAUSE: Duration = Duration::from_millis(200);
 
 /// One native teammate's end that ran on a thread of its own: the agent and the host's
 /// answer, whether its pane was proven gone, or the host's failure.
@@ -10205,6 +10250,47 @@ fn over_cap_note(cap: u8, ended: &[String]) -> String {
         "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
         ended.join(", ")
     )
+}
+
+/// Ends a native teammate's left pane as [`end_left_pane`] does, looking again while the
+/// host calls it unknown but the socket of its lead's teammates' server is still there and
+/// refuses a connect, since one refused connect proves no end (SEC2-R2). Once
+/// `UNKNOWN_LOOKS_MAX` looks ran out its row says the cleanup is uncertain. Takes the host,
+/// the teammate and that socket, if any. Returns whether the end was proven, or the failure.
+fn end_teammate(
+    host: &dyn Host,
+    agent: &AgentId,
+    mates: Option<&Path>,
+) -> Result<bool, crate::terminal::HostError> {
+    let stays = || mates.is_some_and(socket_refuses);
+    for look in 1..=UNKNOWN_LOOKS_MAX {
+        match end_left_pane(host, agent, "team") {
+            Err(problem) if problem.0 == "terminal_agent_unknown" && stays() => {
+                if look < UNKNOWN_LOOKS_MAX {
+                    std::thread::sleep(UNKNOWN_LOOK_PAUSE);
+                }
+            }
+            done => return done,
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a path names a socket now, read without following a link, that refuses a connect
+/// through the spawn gate, as a server that stopped answering does (TEAM-LOWS r1 L1). Takes
+/// the path. Returns the answer, false where sockets are not files.
+#[cfg(unix)]
+fn socket_refuses(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_socket())
+        && crate::spawn_gate::connect_unix_std(path).is_err()
+}
+
+/// Whether a path names a socket that refuses a connect, never on this platform. Takes the
+/// path. Returns false.
+#[cfg(not(unix))]
+fn socket_refuses(_: &Path) -> bool {
+    false
 }
 
 /// Runs one native teammate's end on its thread and sends what it found, also when the end

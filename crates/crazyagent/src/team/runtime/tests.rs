@@ -18082,6 +18082,65 @@ fn a_linked_teammate_with_an_open_worker_set_waits_and_its_lead_is_told_once() {
     assert_eq!(held().len(), 1, "{:?}", held());
 }
 
+/// TEST-ROWS-B-R1-L1: a teammate's land held for its worker's open change set is tried
+/// again at the first pass after that worker stops being below it, re-parented or its row
+/// removed while its set stays open, though neither the teammate's head nor the lead's tip
+/// moved.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_held_teammate_lands_once_its_open_worker_is_no_longer_below_it() {
+    for shape in ["reparented", "removed"] {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let linked = LinkedTeam::new(&fixture, &mut team);
+        let start = linked.tip(&linked.branch);
+        std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+        std::fs::write(linked.teammate("check").join("check.txt"), "Checked.\n").unwrap();
+        let (greet, check) = (linked.id(&fixture, "greet"), linked.id(&fixture, "check"));
+        linked.mark(&fixture, greet, "idle");
+        linked.mark(&fixture, check, "idle");
+        team.record_teammate_turns(&linked.project, linked.lead)
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?1, status='working' WHERE id=?2",
+                params![greet, check],
+            )
+            .unwrap();
+        linked.mark(&fixture, linked.lead, "idle");
+        team.land_teammates(&linked.project, linked.lead).unwrap();
+        assert_eq!(
+            linked.tip(&linked.branch),
+            start,
+            "{shape}: greet's work waits for its worker"
+        );
+        if shape == "reparented" {
+            fixture
+                .connection
+                .execute(
+                    "UPDATE team_agents SET parent=?1 WHERE id=?2",
+                    params![linked.lead, check],
+                )
+                .unwrap();
+        } else {
+            fixture
+                .connection
+                .execute("DELETE FROM team_agents WHERE id=?1", [check])
+                .unwrap();
+        }
+
+        team.land_teammates(&linked.project, linked.lead).unwrap();
+
+        let landed = linked.tip(&linked.branch);
+        assert_ne!(
+            landed, start,
+            "{shape}: greet's work lands once check is no longer below it"
+        );
+        assert_eq!(linked.files(&start, &landed), "hello.txt", "{shape}");
+    }
+}
+
 /// A Claude Code lead in native mode in a linked worktree of the project repository, as
 /// the Sandboxed default gives it, on the task branch the engine named for it, with the
 /// start the engine records for a new worktree and its private home, temp and profiles
@@ -24149,6 +24208,116 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
     team.shutdown().unwrap();
 }
 
+/// SEC2-R2: a stopped native teammate the terminal host calls unknown while the socket of
+/// its lead's teammates' server is still there and refuses a connect is not taken as gone at
+/// the first look, since one refused connect proves no end: its end looks again off the
+/// tick, and once the looks run out its row says the cleanup is uncertain. A teammate whose
+/// lead's teammates' server accepts a connect (TEAM-LOWS r1 L1), or whose socket is gone, is
+/// still marked stopped as gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncertain() {
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let state = fixture.base.join("team");
+    let mut scratches = Vec::new();
+    let mut mates = Vec::new();
+    let mut live = Vec::new();
+    for shape in ["refuses", "accepts", "gone"] {
+        let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+        let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?2 WHERE id=?1",
+                params![mate, lead],
+            )
+            .unwrap();
+        let home = agent_home(&state, lead);
+        std::fs::create_dir_all(crate::sandbox::toolchains::tmp_path(&home)).unwrap();
+        scratches.push(Scratch(home));
+        std::fs::create_dir_all(agent_teammates_socket_name(&state, lead).parent().unwrap())
+            .unwrap();
+        let socket =
+            crate::terminal::renew_teammates_socket(&fixture.base, &AgentId::team(lead).unwrap())
+                .unwrap();
+        match shape {
+            "refuses" => {
+                drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+                assert_eq!(
+                    crate::spawn_gate::connect_unix_std(&socket)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::ConnectionRefused,
+                    "the socket stays and refuses a connect"
+                );
+            }
+            "accepts" => {
+                live.push(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+                assert!(
+                    crate::spawn_gate::connect_unix_std(&socket).is_ok(),
+                    "the socket stays and accepts a connect"
+                );
+            }
+            _ => {}
+        }
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+                params![mate, PROJECT],
+            )
+            .unwrap();
+        mates.push(mate);
+    }
+
+    let mut stopped = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    while stopped.len() < 3 && Instant::now() < deadline {
+        let started = Instant::now();
+        stopped.extend(team.stop_unmanaged().unwrap());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the tick took {:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(stopped.len(), 3, "{stopped:?}");
+    let error = |mate: i64| -> Option<String> {
+        fixture
+            .connection
+            .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        error(mates[0]).as_deref(),
+        Some("The owner stopped this teammate. (harness_cleanup_uncertain)"),
+        "unknown while its teammates' socket stays and refuses is not proven gone"
+    );
+    assert_eq!(
+        error(mates[1]).as_deref(),
+        Some("The owner stopped this teammate."),
+        "unknown from a teammates' server that accepts a connect is gone"
+    );
+    assert_eq!(
+        error(mates[2]).as_deref(),
+        Some("The owner stopped this teammate."),
+        "unknown with its teammates' socket gone is gone"
+    );
+    drop(live);
+    team.shutdown().unwrap();
+}
+
 #[test]
 #[should_panic(expected = "the owner wakes through WakeAgent")]
 fn the_owner_never_wakes_through_admit_wake() {
@@ -24167,7 +24336,8 @@ fn the_owner_never_wakes_through_admit_wake() {
 }
 
 /// A wake admitted after one stop and still queued dies at a later stop, whoever makes it:
-/// the task fails, the agent stays stopped and the stop stands at its new time (HB-S5-B).
+/// the task fails with the later stop's maker as its cause, the agent stays stopped and the
+/// stop stands at its new time with the higher maker's standing (HB-S5-B, HB-S5-B-L2).
 #[test]
 fn a_later_stop_fails_a_wake_still_queued_behind_a_full_team() {
     use crate::team::StoppedBy::{Lead, Master};
@@ -24180,7 +24350,7 @@ fn a_later_stop_fails_a_wake_still_queued_behind_a_full_team() {
     for (first, second, held, reason) in [
         (Lead, Lead, Lead, super::LEAD_STOPPED_TASK),
         (Lead, Master, Master, super::MASTER_STOPPED_TASK),
-        (Master, Lead, Master, super::MASTER_STOPPED_TASK),
+        (Master, Lead, Master, super::LEAD_STOPPED_TASK),
         (Master, Master, Master, super::MASTER_STOPPED_TASK),
     ] {
         let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
