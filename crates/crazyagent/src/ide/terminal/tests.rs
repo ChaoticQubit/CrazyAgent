@@ -3,7 +3,9 @@ use super::*;
 use crate::protocol::ProjectId;
 #[cfg(unix)]
 use crate::sandbox::ide_shell;
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
+use crate::sandbox::policy::{
+    AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
+};
 use serde_json::json;
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -106,7 +108,7 @@ fn in_terminal_at(
     level: AgentAccess,
     network: AgentNetwork,
 ) -> std::process::Output {
-    in_terminal_keeping(case, script, level, network, &[])
+    in_terminal_holding(case, script, level, network, &[], AgentFilesRule::default())
 }
 
 /// Runs a script in a terminal of the project that keeps `kept_ports`, through the real launch
@@ -119,6 +121,29 @@ fn in_terminal_keeping(
     level: AgentAccess,
     network: AgentNetwork,
     kept_ports: &[u16],
+) -> std::process::Output {
+    in_terminal_holding(
+        case,
+        script,
+        level,
+        network,
+        kept_ports,
+        AgentFilesRule::default(),
+    )
+}
+
+/// Runs a script in a terminal of the project that keeps `kept_ports` and holds an agent
+/// folders rule, through the real launch and the real `sandbox-exec`. Inputs: the case, the
+/// script, the level, the network choice, the ports and the rule. Output: the finished
+/// process.
+#[cfg(target_os = "macos")]
+fn in_terminal_holding(
+    case: &Case,
+    script: &str,
+    level: AgentAccess,
+    network: AgentNetwork,
+    kept_ports: &[u16],
+    agent_files: AgentFilesRule,
 ) -> std::process::Output {
     let project = ProjectId::new(PROJECT).unwrap();
     let shell_arguments = arguments(&["-c", script]);
@@ -134,6 +159,7 @@ fn in_terminal_keeping(
         level,
         network,
         kept_ports,
+        agent_files,
     };
     let mut command = ide_shell::command(&launch).unwrap();
     command
@@ -273,6 +299,7 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
         level: AgentAccess::Full,
         network: AgentNetwork::Open,
         kept_ports: &[],
+        agent_files: Default::default(),
     };
     let refused = ide_shell::command(&launch).unwrap_err();
     assert!(
@@ -280,6 +307,108 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
         "{refused:?}"
     );
     assert!(!case.root.join("ide-shell").exists());
+}
+
+/// DEC-124: an engine-run IDE terminal keeps to the project's agent folders choice at
+/// Sandboxed and Own branch, like the IDE server: Allow all changes deletes, No delete or
+/// rename keeps an agent file and folder but lets an edit land, Read only refuses the edit
+/// too. The owner's own files stay changeable.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_keeps_to_the_agent_folders_choice() {
+    let case = Case::new();
+    let agent = case
+        .folder
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("agent-1");
+    let teammate = agent.join(crate::agent_git::TEAMMATES_FOLDER).join("t1");
+    for (index, (choice, level, deletes, edits)) in [
+        (IdeAgentFiles::AllowAll, AgentAccess::Sandboxed, true, true),
+        (
+            IdeAgentFiles::NoDeleteOrRename,
+            AgentAccess::Sandboxed,
+            false,
+            true,
+        ),
+        (
+            IdeAgentFiles::NoDeleteOrRename,
+            AgentAccess::OwnBranch,
+            false,
+            true,
+        ),
+        (
+            IdeAgentFiles::ReadOnly,
+            AgentAccess::Sandboxed,
+            false,
+            false,
+        ),
+        (
+            IdeAgentFiles::ReadOnly,
+            AgentAccess::OwnBranch,
+            false,
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        std::fs::create_dir_all(&teammate).unwrap();
+        let file = teammate.join(format!("a{index}.txt"));
+        std::fs::write(&file, "agent\n").unwrap();
+        let own = case.folder.join(format!("own{index}.txt"));
+        std::fs::write(&own, "owner\n").unwrap();
+        let rule = AgentFilesRule {
+            choice,
+            older_agents: false,
+        };
+        let edit = in_terminal_holding(
+            &case,
+            &format!("printf edited > {}", quoted(&file)),
+            level,
+            AgentNetwork::Open,
+            &[],
+            rule,
+        );
+        assert_eq!(edit.status.success(), edits, "{choice:?} {level:?}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap() == "edited",
+            edits,
+            "{choice:?} {level:?}"
+        );
+        let delete = in_terminal_holding(
+            &case,
+            &format!(
+                "rm -f {} && mv {} {}-aside",
+                quoted(&file),
+                quoted(&agent),
+                quoted(&agent)
+            ),
+            level,
+            AgentNetwork::Open,
+            &[],
+            rule,
+        );
+        assert_eq!(delete.status.success(), deletes, "{choice:?} {level:?}");
+        assert_eq!(file.exists(), !deletes, "{choice:?} {level:?}");
+        if deletes {
+            std::fs::rename(agent.with_file_name("agent-1-aside"), &agent).unwrap();
+        }
+        let owner = in_terminal_holding(
+            &case,
+            &format!(
+                "printf changed > {} && rm -f {}",
+                quoted(&own),
+                quoted(&own)
+            ),
+            level,
+            AgentNetwork::Open,
+            &[],
+            rule,
+        );
+        assert!(owner.status.success(), "{choice:?} {level:?}");
+        assert!(!own.exists());
+    }
 }
 
 /// A Sandboxed terminal is refused a new file in the project's git hooks.
@@ -447,6 +576,7 @@ fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
             level,
             network: AgentNetwork::Open,
             kept_ports: &[],
+            agent_files: Default::default(),
         },
         project_access,
     )
@@ -591,6 +721,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         level: AgentAccess::Sandboxed,
         network: AgentNetwork::Open,
         kept_ports: &[],
+        agent_files: Default::default(),
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -685,6 +816,7 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         level: AgentAccess::Sandboxed,
         network: AgentNetwork::Open,
         kept_ports: &[],
+        agent_files: Default::default(),
     };
     match ide_shell::command(&launch) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {

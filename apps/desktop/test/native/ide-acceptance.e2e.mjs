@@ -118,8 +118,8 @@ test("the owner edits, reviews an agent change in Source Control, accepts, commi
   const repo = join(root, "repos", REPO);
   const served = join(root, "served");
   const remote = join(served, "remote.git");
-  const worktree = join(root, "agents", AGENT);
-  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo, remote, join(root, "agents")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const worktree = join(repo, ".crazyagent", "worktrees", AGENT);
+  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo, remote]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000

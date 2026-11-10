@@ -26,17 +26,19 @@ const view = {
     { toolchain: "node", label: "Node", installed: true, used: false, allowed: false },
   ],
   ide_git_hooks: false,
+  ide_agent_files: "allow_all",
 };
 
 test("Save sends the level, the network choice and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false });
-  assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true], false), {
+  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true], false, "allow_all"), {
     access: "sandboxed",
     network: "https",
     toolchains: [{ toolchain: "rust", allowed: false }, { toolchain: "node", allowed: true }],
     ide_git_hooks: false,
+    ide_agent_files: "allow_all",
   });
-  assert.throws(() => access.policyOf(view, "full", "none", [true], false), /one switch per toolchain/);
+  assert.throws(() => access.policyOf(view, "full", "none", [true], false, "allow_all"), /one switch per toolchain/);
 });
 
 test("Full access asks for the plain warning first, and the project page names the level and toolchains", () => {
@@ -89,7 +91,7 @@ test("Settings says beside the level choice that lowering it stops agents runnin
 });
 
 test("every Save of agent access says a saved change restarts the project's IDE, in both UIs", () => {
-  assert.equal(access.POLICY_RESTARTS_IDE, "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.");
+  assert.equal(access.POLICY_RESTARTS_IDE, "Changing the level, the IDE hooks switch or the agent folders choice below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.");
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /{view && <p className="pj-help">{LOWERING_STOPS_AGENTS}<\/p>}\n\s*{view && <p className="pj-help">{POLICY_RESTARTS_IDE}<\/p>}/);
   const team = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
@@ -107,23 +109,23 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(shared, /fresh\.kind === "ok" \? \{ note: ACCESS_STALE, fresh: fresh\.value \}/);
   assert.ok(shared.indexOf("savedStale(result)") >= 0 && shared.indexOf("savedStale(result)") < shared.indexOf("failureCopy(result)"), "before the plain refusal copy");
   const save = page.slice(page.indexOf("  async function save() {\n    if (!view) return;"));
-  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks\)\)/);
+  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles\)\)/);
   assert.match(save, /if \(saved\.fresh\) seed\(saved\.fresh\);\n    setNote\(saved\.note\);/);
   const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
-  assert.match(rows, /saveAccess\(projectId, view, policyOf\(view, access, view\.network, view\.toolchains\.map\(\(row\) => row\.allowed\), view\.ide_git_hooks\)\)/,
+  assert.match(rows, /saveAccess\(projectId, view, policyOf\(view, access, view\.network, view\.toolchains\.map\(\(row\) => row\.allowed\), view\.ide_git_hooks, view\.ide_agent_files\)\)/,
     "Agent settings saves access through the same save, keeping the saved network and toolchains");
   const client = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
   assert.match(client, /export interface PolicyView \{[\s\S]*?\n  version: number;\n\}/);
   assert.match(client, /call<IntentReceipt>\("desktop_set_project_agent_policy", \{ id, version, policy, generation \}\)/);
   const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, \{ access, network: "open", toolchains: \[\], ide_git_hooks: false \}, read\.value\.version, nextGeneration\(\)\) : read;/,
+  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, \{ access, network: "open", toolchains: \[\], ide_git_hooks: false, ide_agent_files: "allow_all" \}, read\.value\.version, nextGeneration\(\)\) : read;/,
     "a new project's chosen access is saved at the version the engine holds");
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(lib, /async fn desktop_set_project_agent_policy\([^)]*version: u64/);
 });
 
 test("the IDE hooks switch is saved with the policy and reads the same in both UIs, Off for a new project", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, ide_agent_files: "allow_all" });
   assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
   assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
   assert.doesNotMatch(access.IDE_GIT_HOOKS_LINE, /Sandboxed terminal/);
@@ -132,14 +134,44 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS_LINE}"`));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks)"));
+  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles)"));
   assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
   const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.ok(created.includes('{ access, network: "open", toolchains: [], ide_git_hooks: false }'));
+  assert.ok(created.includes('{ access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }'));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);
+});
+
+test("the IDE agent folders choice is saved with the policy, restarts the IDE and reads the same in both UIs, Allow all changes by default", () => {
+  for (const choice of ["allow_all", "no_delete_or_rename", "read_only"]) {
+    assert.equal(access.policyOf(view, "own_branch", "open", [true, false], false, choice).ide_agent_files, choice);
+  }
+  assert.deepEqual(access.IDE_AGENT_FILES_CHOICES.map((choice) => [choice.choice, choice.label]), [
+    ["allow_all", "Allow all changes"],
+    ["no_delete_or_rename", "No delete or rename"],
+    ["read_only", "Read only"],
+  ]);
+  assert.match(access.IDE_AGENT_FILES_CHOICES[1].help, /Edit anyway included, but not deleted or renamed/);
+  assert.match(access.IDE_AGENT_FILES_CHOICES[2].help, /Edit anyway included\.$/);
+  assert.equal(access.AGENT_FILES_IGNORED_UNDER_FULL, "Full access runs the IDE without a sandbox, so this choice does not apply.");
+  assert.match(access.POLICY_RESTARTS_IDE, /the agent folders choice below Full access/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${access.IDE_AGENT_FILES}"`));
+  assert.ok(tui.includes(`"${access.AGENT_FILES_IGNORED_UNDER_FULL}"`));
+  for (const choice of access.IDE_AGENT_FILES_CHOICES) {
+    assert.ok(tui.includes(`"${choice.help}"`), choice.choice);
+    assert.ok(engine.includes(`=> "${choice.label}"`), choice.choice);
+  }
+  assert.match(engine, /#\[serde\(default\)\]\n    pub ide_agent_files: IdeAgentFiles,/);
+  const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
+  assert.match(card, /access === "full"[^\n]*AGENT_FILES_IGNORED_UNDER_FULL/);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("ideAgentFiles !== view.ide_agent_files"));
+  assert.ok(page.includes("setIdeAgentFiles(next.ide_agent_files)"));
+  assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>}\n\s*{view && <IdeAgentFilesChoices name="ps-agent-files" value={ideAgentFiles} access={access} onChange={setIdeAgentFiles} \/>}/);
 });
 
 test("None says it limits agents to their model's own hosts through the proxy or the local model's port, and Full access annotates the network choice as moot", () => {

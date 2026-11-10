@@ -181,7 +181,7 @@ export function AgentAccessSetting({ projectId, notify, reload }: { projectId: s
     if (!view) return;
     setAsked(false);
     setBusy(true);
-    const saved = await saveAccess(projectId, view, policyOf(view, access, view.network, view.toolchains.map((row) => row.allowed), view.ide_git_hooks));
+    const saved = await saveAccess(projectId, view, policyOf(view, access, view.network, view.toolchains.map((row) => row.allowed), view.ide_git_hooks, view.ide_agent_files));
     setBusy(false);
     if (saved.fresh) setView(saved.fresh);
     else if (saved.note === "") setView({ ...view, access });

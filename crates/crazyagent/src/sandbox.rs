@@ -95,6 +95,10 @@ pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
 
+/// Why a sandbox that protects agent folders does not start on Linux or Windows: only
+/// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
+pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -798,6 +802,7 @@ pub struct ProjectSandbox {
     setup: Option<TeammatesSetup>,
     lead_branch: Option<String>,
     adds_worktrees: bool,
+    agent_files: Option<policy::AgentFilesRule>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -874,6 +879,7 @@ impl ProjectSandbox {
             setup: None,
             lead_branch: None,
             adds_worktrees: false,
+            agent_files: None,
         })
     }
 
@@ -1377,6 +1383,15 @@ impl ProjectSandbox {
         }
         self.hidden.push(folder.to_path_buf());
         Ok(self)
+    }
+
+    /// Holds the project's agent folders choice in this sandbox (DEC-124): a Sandboxed IDE
+    /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
+    /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
+    /// changes. Input: the rule. Output: the sandbox.
+    pub fn protect_agent_files(mut self, rule: policy::AgentFilesRule) -> Self {
+        self.agent_files = Some(rule);
+        self
     }
 
     /// Keeps one file or folder inside a granted root out of the agent's reach, read and
@@ -1943,6 +1958,11 @@ impl ProjectSandbox {
         text.push_str(&teammates);
         let answers = self.answers_denies();
         text.push_str(&answers);
+        let agent_files = self
+            .agent_files
+            .map(|rule| rule.seatbelt(&self.project_root))
+            .unwrap_or_default();
+        text.push_str(&agent_files);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1965,6 +1985,9 @@ impl ProjectSandbox {
         }
         if !answers.is_empty() {
             last.push(answers);
+        }
+        if !agent_files.is_empty() {
+            last.push(agent_files);
         }
         assert!(
             denies_follow_write_allows(&text, &last),
@@ -2446,6 +2469,13 @@ impl InstalledSandbox {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if sandbox
+            .agent_files
+            .is_some_and(|rule| rule.choice != policy::IdeAgentFiles::AllowAll)
+        {
+            return Err(SandboxError::Unavailable(AGENT_FILES_NEED_SEATBELT.into()));
         }
         #[cfg(target_os = "windows")]
         {

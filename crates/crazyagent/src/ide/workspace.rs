@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
-use crate::sandbox::policy::{AgentAccess, AgentNetwork};
+use crate::sandbox::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use crate::team::AgentRole;
 use crate::team::names::{self, AgentName};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -142,24 +142,27 @@ pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> 
 }
 
 /// What a project's IDE server starts from, as the owner saved it in the project's agent
-/// policy: the access level, the network choice an Own branch IDE follows and whether git
-/// in the IDE runs the project's own hooks in its Project section.
+/// policy: the access level, the network choice an Own branch IDE follows, whether git
+/// in the IDE runs the project's own hooks in its Project section and what the IDE may do to
+/// agent files (DEC-124).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdePolicy {
     pub access: AgentAccess,
     pub network: AgentNetwork,
     pub hooks: bool,
+    pub agent_files: IdeAgentFiles,
 }
 
 impl IdePolicy {
     /// Tells whether a server launched under this policy still honours the saved one: the
     /// same level, at Own branch the same network choice, which no other level reads, and
-    /// below Full access the same hooks switch, which has no effect at Full. Input: the
-    /// saved policy. Output: true when the server may keep running.
+    /// below Full access the same hooks switch and agent folders choice, which have no effect
+    /// at Full. Input: the saved policy. Output: true when the server may keep running.
     pub fn holds(self, saved: Self) -> bool {
         self.access == saved.access
             && (saved.access != AgentAccess::OwnBranch || self.network == saved.network)
-            && (saved.access == AgentAccess::Full || self.hooks == saved.hooks)
+            && (saved.access == AgentAccess::Full
+                || (self.hooks == saved.hooks && self.agent_files == saved.agent_files))
     }
 }
 
@@ -190,8 +193,37 @@ pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineE
             access: policy.access,
             network: policy.network,
             hooks: policy.ide_git_hooks,
+            agent_files: policy.ide_agent_files,
         })
         .map_err(unavailable)
+}
+
+/// The agent folders rule a sandboxed IDE server or terminal of the project holds (DEC-124):
+/// the saved choice below Full access and Allow all changes at Full access, where no profile
+/// runs. When the choice protects anything it names the older agents root `<folder>/worktrees`
+/// for a project with no `.crazyagent` folder, where the engine puts every agent it starts
+/// later, and otherwise while engine-made worktrees stay there ([`older_agents`]). Inputs:
+/// the engine root, the project, its folder, its level and its saved choice. Output: the
+/// rule, or the refusal of [`older_agents`].
+pub fn agent_files_rule(
+    root: &Path,
+    project: &ProjectId,
+    folder: &Path,
+    access: AgentAccess,
+    choice: IdeAgentFiles,
+) -> Result<AgentFilesRule, EngineError> {
+    let choice = if access == AgentAccess::Full {
+        IdeAgentFiles::AllowAll
+    } else {
+        choice
+    };
+    let older_agents = choice != IdeAgentFiles::AllowAll
+        && (crate::projects_home::state_folder(folder) == folder
+            || older_agents(root, project, folder)?);
+    Ok(AgentFilesRule {
+        choice,
+        older_agents,
+    })
 }
 
 /// Whether an engine-made worktree of the project is inside the older agents root
