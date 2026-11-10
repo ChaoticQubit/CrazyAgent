@@ -424,8 +424,9 @@ pub(super) fn holds_changes_since(
 }
 
 /// Lists the files a commit holds whole under another name than a set's head does: git's
-/// exact renames from the head to the commit. Past the output bound it lists none, so the
-/// set waits. Inputs: the owner repository, the head and the commit. Output: each moved
+/// exact renames from the head to the commit, never pairing two empty files, since any new
+/// empty file would otherwise stand for a worker's empty one. Past the output bound it lists
+/// none, so the set waits. Inputs: the owner repository, the head and the commit. Output: each moved
 /// file's path in the head and its blob.
 fn moved_whole(
     owner: &Repo,
@@ -441,6 +442,7 @@ fn moved_whole(
             "--raw",
             "--no-abbrev",
             "--find-renames=100%",
+            "--no-rename-empty",
             "--diff-filter=R",
             head,
             commit,

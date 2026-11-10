@@ -685,6 +685,33 @@ fn lead_accept_leaves_open_a_worker_set_whose_file_the_lead_has_only_a_like_one_
     assert!(team.owner_listed().contains(&worker_set));
 }
 
+/// An empty file a worker added is not held by an unrelated new empty file on the lead's
+/// line, though git would pair any two empty files as a rename: the worker's set stays open
+/// and offered after the owner's Accept of the lead (LAND-PROTO r1 L1).
+#[test]
+fn an_unrelated_empty_file_on_the_lead_line_does_not_hold_a_worker_s_empty_file() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "empty.txt", "", "Add a marker");
+    let worker_set = team.turn_end(&fix);
+    merge_keeping_nothing(&team, &fix, true);
+    team.commit(&team.lead, "__init__.py", "", "Own empty file");
+    let lead_set = team.turn_end(&team.lead);
+    landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &team.view_head(&lead_set),
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
+    assert_eq!(team.state(&lead_set).0, "accepted");
+    assert_eq!(team.state(&worker_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&worker_set));
+}
+
 /// While Lands is Lead, the owner's Changes list leaves out a lead's workers' sets, since
 /// the lead merges them; with Lands set to Owner it shows them (fix/hand-merged-set
 /// 8f98740a).
