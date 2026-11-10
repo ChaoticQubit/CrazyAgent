@@ -25,6 +25,11 @@ pub const LINEAGE_VARIABLE: &str = "CRAZYAGENT_LINEAGE";
 /// How often a lineage that follows a running agent reads the process table, through one
 /// read shared by every lineage of the engine.
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_secs(2);
+/// The longest time between two tables a lineage takes, or the last and its stop's own read,
+/// with nothing missed: shared reads up to [`FOLLOW_EVERY`] old, taken up to that far apart
+/// (SECAUDIT-SETSID-LEFTOVER r2 L2).
+#[cfg(unix)]
+const FOLLOW_GAP: Duration = FOLLOW_EVERY.saturating_mul(2);
 const TOKEN_BYTES: usize = 16;
 /// The most bytes of an environment listing a stop reads, line by line, keeping of each line
 /// that holds its token only the first `KEPT_FIELDS` fields.
@@ -232,8 +237,8 @@ struct Process {
 /// miss processes; `pending` is a listing still held up past its bound, which a later read
 /// waits out instead of starting another; `sandboxed` tells the agent ran in a sandbox no
 /// warden empties, not at Full access; `leader_started` is the leader's start at the first
-/// read; `failing` is when the current run of failed follows began and `missed` tells such a
-/// run lasted longer than [`FOLLOW_EVERY`].
+/// read; `applied` is when the last table it took was read and `missed` tells two of them, or
+/// the last and the stop's own read, lay more than [`FOLLOW_GAP`] apart.
 #[derive(Debug)]
 pub(crate) struct Lineage {
     #[cfg(unix)]
@@ -250,7 +255,7 @@ pub(crate) struct Lineage {
     #[cfg(unix)]
     leader_started: Option<String>,
     #[cfg(unix)]
-    failing: Option<Instant>,
+    applied: Instant,
     #[cfg(unix)]
     missed: bool,
 }
@@ -263,11 +268,15 @@ type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
 #[cfg(unix)]
 type Row = (Process, i32, Option<i32>);
 
+/// One shared read of the process table: when it was read, and its rows.
+#[cfg(unix)]
+type Table = (Instant, Arc<Vec<Row>>);
+
 /// The process table every following lineage reads from: the last read with when it was
 /// taken, whether a caller reads a new one now, and a listing still held up past its bound.
 #[cfg(unix)]
 struct Shared {
-    read: Option<(Instant, Arc<Vec<Row>>)>,
+    read: Option<Table>,
     reading: bool,
     pending: Option<Listing>,
 }
@@ -416,25 +425,23 @@ impl Lineage {
         #[cfg(unix)]
         if let Some(read) = shared_rows() {
             self.noted(
-                read.as_deref().map(Vec::as_slice).map_err(|_| ()),
-                Instant::now(),
+                read.as_ref()
+                    .map(|(at, rows)| (*at, rows.as_slice()))
+                    .map_err(|_| ()),
             );
         }
     }
 
     /// Reads the process table itself just before the stop kills the agent's group. The
-    /// lineage is unchecked when that read fails or followed reads failed for longer than
-    /// [`FOLLOW_EVERY`] in a row, since a process could start and leave unseen in that time
-    /// (SECAUDIT-SETSID-LEFTOVER r1 L2). Input: the lineage. Output: none.
+    /// lineage is unchecked when that read fails, the tables it took lay more than
+    /// [`FOLLOW_GAP`] apart, since a process could start and leave unseen in that time
+    /// (SECAUDIT-SETSID-LEFTOVER r2 L2), or the leader's start is unknown, so its session
+    /// was never followed; an earlier unchecked mark stays (r2 L1). Input: the lineage.
     #[cfg(unix)]
     pub(crate) fn before_stop(&mut self) {
         let read = self.refresh();
-        let now = Instant::now();
-        self.missed |= self
-            .failing
-            .take()
-            .is_some_and(|since| now.saturating_duration_since(since) > FOLLOW_EVERY);
-        self.unchecked = read.is_err() || self.missed;
+        self.missed |= Instant::now().saturating_duration_since(self.applied) > FOLLOW_GAP;
+        self.unchecked |= read.is_err() || self.missed || self.leader_started.is_none();
     }
 
     /// Marks the lineage unchecked where no process table is read. Input: the lineage.
@@ -444,22 +451,15 @@ impl Lineage {
         self.unchecked = true;
     }
 
-    /// Takes one followed read at `at`: applies a table it got, and records a run of failed
-    /// reads longer than [`FOLLOW_EVERY`] once a read works again. Inputs: the lineage, the
-    /// read and when it was taken. Output: none.
+    /// Takes one followed read: applies a table it got, and marks the lineage missed when that
+    /// table was read more than [`FOLLOW_GAP`] after the last one it took. A failed read keeps
+    /// what was known. Inputs: the lineage and the read with when its table was read.
     #[cfg(unix)]
-    fn noted(&mut self, read: Result<&[Row], ()>, at: Instant) {
-        match read {
-            Ok(rows) => {
-                self.missed |= self
-                    .failing
-                    .take()
-                    .is_some_and(|since| at.saturating_duration_since(since) > FOLLOW_EVERY);
-                self.apply(rows);
-            }
-            Err(()) => {
-                self.failing.get_or_insert(at);
-            }
+    fn noted(&mut self, read: Result<(Instant, &[Row]), ()>) {
+        if let Ok((at, rows)) = read {
+            self.missed |= at.saturating_duration_since(self.applied) > FOLLOW_GAP;
+            self.applied = self.applied.max(at);
+            self.apply(rows);
         }
     }
 
@@ -485,7 +485,7 @@ impl Lineage {
             sandboxed: false,
             token,
             leader_started: None,
-            failing: None,
+            applied: Instant::now(),
             missed: false,
         };
         match rows(table, &mut lineage.pending) {
@@ -640,32 +640,48 @@ fn rows(
 
 /// The table every following lineage shares: the last read while it is younger than
 /// [`FOLLOW_EVERY`], else a new one, which one caller reads while the others skip.
-/// Output: the rows, a failed read, or none while another caller reads.
+/// Output: the rows with when they were read, a failed read, or none while another reads.
 #[cfg(unix)]
-fn shared_rows() -> Option<Result<Arc<Vec<Row>>, Unstopped>> {
+fn shared_rows() -> Option<Result<Table, Unstopped>> {
     let locked = || SHARED.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut pending = {
+    let (_reading, mut pending) = {
         let mut shared = locked();
         if let Some((at, rows)) = &shared.read
             && at.elapsed() < FOLLOW_EVERY
         {
-            return Some(Ok(Arc::clone(rows)));
+            return Some(Ok((*at, Arc::clone(rows))));
         }
         if shared.reading {
             return None;
         }
         shared.reading = true;
-        shared.pending.take()
+        (Reading, shared.pending.take())
     };
-    let read = rows(PS_TABLE, &mut pending).map(Arc::new);
+    let read = rows(PS_TABLE, &mut pending).map(|rows| (Instant::now(), Arc::new(rows)));
     let mut shared = locked();
     assert!(shared.reading);
-    shared.reading = false;
     shared.pending = pending;
-    if let Ok(rows) = &read {
-        shared.read = Some((Instant::now(), Arc::clone(rows)));
+    if let Ok((at, rows)) = &read {
+        shared.read = Some((*at, Arc::clone(rows)));
     }
+    drop(shared);
     Some(read)
+}
+
+/// Held by the caller that reads the shared table; dropping it, after the read or while a
+/// panic unwinds out of it, lets the next follow read again, so following never stops for
+/// the whole engine (SECAUDIT-SETSID-LEFTOVER r2 L3).
+#[cfg(unix)]
+struct Reading;
+
+#[cfg(unix)]
+impl Drop for Reading {
+    fn drop(&mut self) {
+        SHARED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reading = false;
+    }
 }
 
 /// Finds this user's running processes, other than the engine, whose environment holds the
@@ -951,7 +967,7 @@ mod tests {
             sandboxed: false,
             token: None,
             leader_started: None,
-            failing: None,
+            applied: Instant::now(),
             missed: false,
         }))
         .plain();
@@ -1085,7 +1101,7 @@ mod tests {
             sandboxed: false,
             token: None,
             leader_started: None,
-            failing: None,
+            applied: Instant::now(),
             missed: false,
         }))
         .plain();
@@ -1192,7 +1208,7 @@ mod tests {
             sandboxed: false,
             token: None,
             leader_started: started.map(str::to_owned),
-            failing: None,
+            applied: Instant::now(),
             missed: false,
         }
     }
@@ -1228,16 +1244,24 @@ mod tests {
         let rows = [row(500, 1, 500, FIRST)];
         let start = Instant::now();
         let mut short = bare(500, Some(FIRST));
-        short.noted(Err(()), start);
-        short.noted(Ok(&rows[..]), start + FOLLOW_EVERY / 2);
+        short.applied = start;
+        short.noted(Err(()));
+        short.noted(Ok((start + FOLLOW_GAP, &rows[..])));
         assert!(!short.missed);
         assert_eq!(short.known.len(), 1);
 
         let mut long = bare(500, Some(FIRST));
-        long.noted(Err(()), start);
-        long.noted(Err(()), start + FOLLOW_EVERY / 2);
-        long.noted(Ok(&rows[..]), start + FOLLOW_EVERY * 2);
-        assert!(long.missed);
+        long.applied = start;
+        long.noted(Ok((start + FOLLOW_EVERY, &rows[..])));
+        long.noted(Err(()));
+        long.noted(Ok((
+            start + FOLLOW_EVERY + FOLLOW_GAP + Duration::from_millis(1),
+            &rows[..],
+        )));
+        assert!(
+            long.missed,
+            "two tables more than two follows apart, a failed one between, read as followed"
+        );
         long.before_stop();
         assert!(
             long.unchecked,
@@ -1245,9 +1269,34 @@ mod tests {
         );
 
         let mut unended = bare(500, Some(FIRST));
-        unended.failing = Some(start.checked_sub(FOLLOW_EVERY * 2).unwrap());
+        unended.applied = start.checked_sub(FOLLOW_GAP * 2).unwrap();
         unended.before_stop();
         assert!(unended.missed && unended.unchecked);
+    }
+
+    #[test]
+    fn a_lineage_that_never_read_its_leader_reports_its_stop_unchecked() {
+        let rows = [row(500, 1, 500, FIRST)];
+        let mut unread = bare(500, None);
+        unread.unchecked = true;
+        unread.noted(Ok((Instant::now(), &rows[..])));
+        unread.before_stop();
+        assert!(
+            unread.unchecked,
+            "a stop whose first read failed read as checked once a later read worked"
+        );
+        let mut leaderless = bare(500, None);
+        leaderless.before_stop();
+        assert!(
+            leaderless.unchecked,
+            "a stop that never knew its leader's start read as checked"
+        );
+        for lineage in [unread, leaderless] {
+            match lineage.settle() {
+                Err(Unstopped::Left(left)) => assert_eq!(left.code(), UNCHECKED),
+                other => panic!("a stop with no known leader was reported {other:?}"),
+            }
+        }
     }
 
     #[test]
