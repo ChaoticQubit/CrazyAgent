@@ -258,7 +258,7 @@ test("an Other row holds the dollars a capped list leaves out", () => {
 test("a chart of under a cent repeats no axis figure", () => {
   const shown = render({
     usage: { kind: "ok", value: usage({ money: bundled() }) },
-    metrics: { kind: "ok", value: metrics({ series: metrics().series.map((bar) => ({ ...bar, cost_nanos: 5_000_000 })) }) },
+    metrics: { kind: "ok", value: metrics({ series: metrics().series.map((bar) => ({ ...bar, cost_nanos: 1_000_000 })) }) },
   });
   const figures = [...shown.matchAll(/class="ax"[^>]*>([^<]*)</gu)].map((found) => found[1]).filter((figure) => figure.includes("$"));
   assert.deepEqual(figures, ["&lt;$0.01"]);
