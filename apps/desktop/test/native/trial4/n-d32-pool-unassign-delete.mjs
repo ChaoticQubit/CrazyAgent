@@ -58,6 +58,7 @@ export const checks = [{
   title: "Unassign a pool, delete it, then delete its account",
   why: "owner: \"I cannot unassign a pool from a project ... it's a dead loop\"",
   after: "end",
+  only: "fixture",
   run: async (kit) => {
     const account = await scratchAccount("pool");
     const pool = scratchName("pool", Date.now());

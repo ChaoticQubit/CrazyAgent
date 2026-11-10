@@ -10,6 +10,7 @@ export const checks = [{
   title: "Rename and delete an account that is not signed in",
   why: "owner: \"I cannot even delete those, I cannot cancel those processes, nothing like that\"",
   after: "end",
+  only: "fixture",
   run: async (kit) => {
     const account = await scratchAccount("rename");
     return tidy(async () => {
