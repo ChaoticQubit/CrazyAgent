@@ -558,12 +558,15 @@ impl TerminalSession {
     /// left in the pane's process group is killed, as a dev server started in the background.
     /// A Full access pane has no Seatbelt and so no keeper, whose warden only arms inside a
     /// sandbox, so the processes found in its lineage while the pane ran, and those carrying
-    /// its launch's token, are checked after it. A pane its host runs without the keeper, as
-    /// a native lead's own server does, has no warden either: its lineage is checked the same
-    /// way. Output: none, since a pane reports no exit code, [`Unstopped::Uncertain`] when the
-    /// keeper did not confirm in time, or the group outlived the wait or was found by an id no
-    /// longer proven to be this pane's, or [`Unstopped::Left`] naming what a Full access pane,
-    /// or one run without the keeper, left running.
+    /// its launch's token, are checked after it. A native lead's own server this engine
+    /// started runs under a keeper of its own, which ends the whole server first (KEEPER (b)),
+    /// even once the lead exited on its own. A pane its host runs without the keeper, as such
+    /// a server an earlier engine started does, has no warden either: its lineage is checked
+    /// the same way. Output: none, since a pane reports no exit code,
+    /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
+    /// the wait or was found by an id no longer proven to be this pane's, or
+    /// [`Unstopped::Left`] naming what a Full access pane, or one run without the keeper, left
+    /// running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
         let lineage = self.lineage.take().map(|lineage| {
             lineage.map(|mut lineage| {
@@ -840,9 +843,13 @@ impl TerminalSession {
                     .is_ok_and(|alive| alive.contains(&self.agent)));
         let held = self.hold(seen);
         #[cfg(target_os = "macos")]
-        if seen && !self.unconfined {
-            let ended = stop_keeper(self.host.as_ref(), &self.agent, self.pid);
-            self.uncertain |= !ended && !self.unkept;
+        {
+            let pane = (seen && !self.unconfined)
+                .then(|| stop_keeper(self.host.as_ref(), &self.agent, self.pid));
+            match self.host.end_kept_server(&self.agent) {
+                Some(ended) => self.uncertain |= !ended,
+                None => self.uncertain |= pane == Some(false) && !self.unkept,
+            }
         }
         let _ = self.host.kill(&self.agent);
         self.end_group(seen, held);
@@ -915,9 +922,10 @@ impl Drop for TerminalSession {
 /// harness started: on macOS its keeper first empties the run's sandbox, then the window ends
 /// and every process left in the pane's process group is killed, found by the first process
 /// the host names while the pane runs, held from before the window ends so the host's close
-/// leaves that group to this cleanup (CB-2 one signal). A pane its host runs without the
-/// keeper is confirmed only by a listing of its processes showing none left. A cleanup not
-/// confirmed is reported on stderr.
+/// leaves that group to this cleanup (CB-2 one signal). A native lead's own server this
+/// engine started ends whole through its keeper, which then confirms (KEEPER (b)). A pane
+/// its host runs without the keeper is confirmed only by a listing of its processes showing
+/// none left. A cleanup not confirmed is reported on stderr.
 /// Inputs: the host, the pane and the owner's label, such as `research`. Output: whether
 /// every process was confirmed gone, or the host's failure, such as
 /// `terminal_agent_unknown` for a pane already gone.
@@ -929,7 +937,10 @@ pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bo
         .filter(|_| unkept)
         .map(|pid| Lineage::of_sandboxed(pid, None));
     #[cfg(target_os = "macos")]
-    let kept = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
+    let kept = {
+        let pane = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
+        host.end_kept_server(agent).unwrap_or(pane)
+    };
     #[cfg(not(target_os = "macos"))]
     let kept = true;
     match host.kill(agent) {

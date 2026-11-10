@@ -359,12 +359,23 @@ pub trait Host: Send + Sync {
         Ok(None)
     }
 
-    /// Whether this host runs an agent's pane without the engine's pane keeper, as a native
-    /// lead's own server does, which already runs inside the lead's sandbox: no warden then
-    /// ends what the pane's agent started, so its stop is judged by the processes still found.
-    /// Takes the name. Returns the answer; false for a host that runs each pane as given.
+    /// Whether this host runs an agent's pane without a keeper, as a native lead's own server
+    /// does that runs inside the lead's sandbox with no server keeper, such as one an earlier
+    /// engine started: no warden then ends what the pane's agent started, so its stop is
+    /// judged by the processes still found. Takes the name. Returns the answer; false for a
+    /// host that runs each pane as given or knows the keeper of the agent's server.
     fn unkept(&self, _agent: &AgentId) -> bool {
         false
+    }
+
+    /// Ends an agent's own server through the keeper this host started it under, as a native
+    /// lead's own server runs (KEEPER (b)): the keeper's warden kills every process in the
+    /// agent's sandbox, the server and its panes included, and the keeper exits only once the
+    /// warden confirmed that. Takes the name. Returns whether the keeper confirmed in time,
+    /// or none when the host knows no keeper for the agent, as for a server an earlier engine
+    /// started.
+    fn end_kept_server(&self, _agent: &AgentId) -> Option<bool> {
+        None
     }
 
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
@@ -462,6 +473,10 @@ impl Host for OwnServer {
 
     fn unkept(&self, agent: &AgentId) -> bool {
         self.0.unkept(agent)
+    }
+
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        self.0.end_kept_server(agent)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
