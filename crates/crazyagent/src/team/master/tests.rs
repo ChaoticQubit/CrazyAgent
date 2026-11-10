@@ -4130,6 +4130,7 @@ impl Clones {
             .unwrap_or_else(|| panic!("no work id in {answer}"))
     }
 
+    #[cfg(target_os = "macos")]
     fn worker_set(&self) -> crate::landing::ChangeSetId {
         let db = crate::landing::open(&self.fixture.base).unwrap();
         crate::landing::record_turn_end(
@@ -4155,6 +4156,7 @@ impl Clones {
         .expect("the worker's commit is work for review")
     }
 
+    #[cfg(target_os = "macos")]
     fn set_state(&self, set: &crate::landing::ChangeSetId) -> (String, Option<String>) {
         self.fixture
             .connection

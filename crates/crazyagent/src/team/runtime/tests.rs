@@ -23844,6 +23844,7 @@ fn a_lead_hears_who_stopped_its_sub_agent_and_nothing_of_a_stop_it_made() {
 
 /// Calls `stop_unmanaged` until it reports the stops whose ends it handed over, at most
 /// `WAIT`. Input: the runtime. Output: the first stops it reports, or none at the deadline.
+#[cfg(target_os = "macos")]
 fn stopped_unmanaged(team: &mut TeamRuntime) -> Vec<(i64, ProjectId, crate::team::StoppedBy)> {
     let deadline = Instant::now() + WAIT;
     loop {
