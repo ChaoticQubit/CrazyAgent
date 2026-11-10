@@ -292,6 +292,30 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
     );
 }
 
+/// SECAUDIT-13 F1: a tick that cannot use a Codex agent's bridge keeps the plain code, so
+/// the engine log names a refusal once; here the agent has a home but no pane to compare.
+#[test]
+fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
+    let fixture = Fixture::new();
+    let agent = fixture.agent("sub", "codex", "working", None);
+    std::fs::create_dir_all(crate::team::runtime::agent_home(&fixture.base, agent)).unwrap();
+    fixture.send(Party::Owner, agent, MessageKind::Prompt, "Ship it", 1);
+    let asleep = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            3,
+            &reach(None, None, &fixture.base, &asleep),
+        )
+        .unwrap();
+    assert_eq!(
+        deliveries.bridge_refused.get(&agent),
+        Some(&"codex_bridge_peer_unknown")
+    );
+}
+
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back
 /// to Sent on the next tick, so its next session gets them; a live agent's stay.
 #[test]

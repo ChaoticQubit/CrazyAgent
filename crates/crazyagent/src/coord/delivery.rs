@@ -68,6 +68,7 @@ pub struct Reach<'a> {
 pub struct Deliveries {
     retry: BTreeMap<AgentId, i64>,
     refused: BTreeMap<AgentId, &'static str>,
+    bridge_refused: BTreeMap<AgentId, &'static str>,
     failed: Option<String>,
 }
 

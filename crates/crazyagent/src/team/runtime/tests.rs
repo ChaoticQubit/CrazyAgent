@@ -19692,6 +19692,43 @@ fn a_proxied_agent_s_pane_launch_names_its_model_proxy() {
     }
 }
 
+/// SECAUDIT-10-L1: a team launch whose pane never shows Codex's folder access screen ends
+/// when its wait runs out, with the code that names it, and never reports input ready, so
+/// the team is not left waiting forever on an agent that cannot take a prompt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_launch_whose_folder_screen_never_shows_ends_instead_of_waiting() {
+    let mut pane = crate::harnesses::terminal_session::folder_screen_tests::start(
+        "team-folder",
+        "Working\r\n",
+        None,
+        true,
+    );
+    pane.spend_the_wait();
+    let (_orders, receive) = std::sync::mpsc::channel();
+    let (reports, reported) = std::sync::mpsc::channel();
+    let (cancel, leave) = (AtomicBool::new(false), AtomicBool::new(false));
+    let problem = live_serve(
+        pane.session,
+        &receive,
+        &reports,
+        &cancel,
+        &leave,
+        false,
+        None,
+    )
+    .expect("the launch ended with a problem");
+    assert!(
+        problem.contains("launch_folder_screen_missing"),
+        "{problem}"
+    );
+    assert!(
+        !reported
+            .try_iter()
+            .any(|report| matches!(report, Report::InputReady))
+    );
+}
+
 /// A proxied agent's pane record keeps its model proxy's port, so a later engine binds the
 /// port the running pane's profile names again (S4b).
 #[cfg(target_os = "macos")]
