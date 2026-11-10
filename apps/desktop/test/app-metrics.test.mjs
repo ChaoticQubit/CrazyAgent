@@ -409,6 +409,26 @@ test("an agent on one project keeps its Runs and Last used, and one that reporte
   assert.equal([...panel(markup, "By agent").matchAll(/class="mx-row"/gu)].length, 2);
 });
 
+test("a newer app on an older engine: an agent listed once keeps its Runs and Last used, a key in two projects shows neither, and an agent that reported nothing lists once (METRICS-RUNS-R1-L1)", () => {
+  const rows = [agentRow("alpha", "team-8", ALPHA), agentRow("alpha", "onboarding", ALPHA), agentRow("beta", "onboarding", BETA), agentRow("beta", "team-9", NOTHING)];
+  const used = [
+    usageRow("team-8", ALPHA, { runs: 5, last_ms: NOW - 3 * MINUTE }),
+    usageRow("onboarding", tokens(30, 0, 0, 0), { runs: 49, last_ms: NOW - 2 * MINUTE }),
+    usageRow("team-9", NOTHING, { runs: 2, last_ms: NOW - 4 * MINUTE, not_reported_by: "rcli" }),
+  ];
+  const part = panel(render(agentsRead(rows, used)), "By agent");
+  const lines = [...part.slice(part.indexOf("<table")).matchAll(/<tr[^>]*>.*?<\/tr>/gsu)].map((match) => text(match[0]));
+  const of = (words) => lines.filter((line) => line.includes(words));
+  assert.equal(of("Juniper").length, 1);
+  assert.match(of("Juniper")[0], / 5 3 min ago /, "an agent listed once keeps its runs and last use");
+  assert.equal(of("Onboarding").length, 2, "each project lists the key once");
+  for (const line of of("Onboarding")) assert.doesNotMatch(line, /49|2 min ago/, "a summed row is not split across projects");
+  assert.equal(of("Agent 9").length, 1, "an agent that reported nothing lists once");
+  assert.match(of("Agent 9")[0], / 2 4 min ago /);
+  assert.equal([...part.matchAll(/class="mx-row"/gu)].length, 4, "no extra row for any agent");
+  assert.match(text(part), /Agent 9 Beta Usage not reported by rcli/);
+});
+
 test("a usage row with no metrics row is listed only when its harness reported nothing (r1 L1)", () => {
   assert.doesNotMatch(text(panel(render(withUsage({ agents: [usageRow("team-44", ALPHA)] })), "By agent")), /Agent 44/);
 });
