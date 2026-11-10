@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { projectsUsing } from "../../api-projects";
-import { accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountPlan, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
+import { accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
 import { loadUsage, type AccountLimits } from "../../api-usage";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import {
@@ -141,14 +141,14 @@ function RowUsage({ limits, id, nowMs }: { limits: Loaded<AccountLimits[]>; id: 
 
 /** One account in the selected pool's order: where it stands, who it is, why it stands there, its
  * pin and Schedule panel and its usage. Inputs: the ranked account, its place (null for a held
- * one), what is known of it, its plan when read, the limits read, now, whether its panel is open,
- * the toggle, the queue of changes and the removal. Output: the row. */
-function OrderRow({ item, at, account, member, plan, limits, nowMs, open, onToggle, apply, onRemove }: {
+ * one), what is known of it, the schedule when read, the limits read, now, whether its panel is
+ * open, the toggle, the queue of changes and the removal. Output: the row. */
+function OrderRow({ item, at, account, member, schedule, limits, nowMs, open, onToggle, apply, onRemove }: {
   item: RankedAccount;
   at: number | null;
   account: AccountView | undefined;
   member: PoolMember | undefined;
-  plan: AccountPlan | undefined;
+  schedule: AccountSchedule | undefined;
   limits: Loaded<AccountLimits[]>;
   nowMs: number;
   open: boolean;
@@ -157,6 +157,7 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs, open, onTogg
   onRemove: (id: string, name: string) => void;
 }) {
   const id = item.connection;
+  const plan = schedule === undefined ? undefined : planFor(schedule, id);
   const name = account?.name ?? member?.provider ?? id;
   const harness = account?.provider_name ?? member?.provider ?? "";
   const status = account?.status_label ?? member?.status_label ?? "";
@@ -173,12 +174,12 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs, open, onTogg
     </div>
     <div className="pool-right">
       <div className="pool-ctl">
-        {plan && <RowControls id={id} name={name} plan={plan} open={open} onToggle={onToggle} apply={apply} />}
+        {schedule && plan && <RowControls id={id} name={name} plan={plan} read={schedule} open={open} onToggle={onToggle} apply={apply} />}
         <Button variant="quiet" size="small" icon="x" iconOnly={`Remove ${name}`} data-control={`remove:${id}`} onClick={() => onRemove(id, name)} />
       </div>
       <RowUsage limits={limits} id={id} nowMs={nowMs} />
     </div>
-    {plan && open && <SchedulePanel id={id} name={name} plan={plan} apply={apply} />}
+    {schedule && plan && open && <SchedulePanel id={id} name={name} plan={plan} read={schedule} apply={apply} />}
   </li>;
 }
 
@@ -207,7 +208,7 @@ function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry, 
   const byId = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account]) : []);
   const members = new Map(pool.members.map((member) => [member.id, member]));
   const row = (item: RankedAccount, at: number | null) => <OrderRow key={item.connection} item={item} at={at} account={byId.get(item.connection)} member={members.get(item.connection)}
-    plan={schedule.kind === "ok" ? planFor(schedule.value, item.connection) : undefined} limits={limits} nowMs={nowMs}
+    schedule={schedule.kind === "ok" ? schedule.value : undefined} limits={limits} nowMs={nowMs}
     open={open === item.connection} onToggle={() => setOpen(open === item.connection ? null : item.connection)} apply={apply} onRemove={onRemove} />;
   return <>
     {found && schedule.kind === "ok" && <div className="pool-order">
@@ -237,9 +238,10 @@ function PoolItem({ pool, on, onSelect }: { pool: PoolSummary; on: boolean; onSe
 }
 
 /** A saved pool's name, saved on Enter or on leaving the field; a name that fails its rule shows
- * it and sends nothing. Inputs: the pool, the queue and the rename. Output: the field. */
-function PoolNameField({ pool, apply, onRename }: { pool: PoolSummary; apply: ApplyChange; onRename: (pool: PoolSummary, name: string) => MadeChange }) {
-  const [shown, hold] = useHeld<string>(pool.name);
+ * it and sends nothing. Inputs: the pool, the pools read it came from, the queue and the rename.
+ * Output: the field. */
+function PoolNameField({ pool, read, apply, onRename }: { pool: PoolSummary; read: PoolSummary[]; apply: ApplyChange; onRename: (pool: PoolSummary, name: string) => MadeChange }) {
+  const [shown, hold] = useHeld<string>(pool.name, Object.is, read);
   const [typed, setTyped] = useState(shown);
   const [error, setError] = useState<string>();
   useEffect(() => {
@@ -307,10 +309,11 @@ function AddPanel({ pool, accounts, onAdd, onDone }: { pool: PoolSummary; accoun
 
 /** The selected pool on the right: its name, what it is used for, its actions, Add account and its
  * accounts in their real order. A pool that is not created yet has no order and no delete yet.
- * Inputs: the pool, whether it is a draft, the reads, now, the panel state, the pool being set up,
- * the saved line, the queue and the actions. Output: the pane. */
-function PoolDetail({ pool, isDraft, accounts, schedule, ranking, limits, nowMs, adding, preparing, saved, apply, onToggleAdd, onDoneAdd, onAdd, onRemove, onRename, onDraftName, onDelete, onRetryOrder, onPrepare }: {
+ * Inputs: the pool, the pools read, whether it is a draft, the other reads, now, the panel state,
+ * the pool being set up, the saved line, the queue and the actions. Output: the pane. */
+function PoolDetail({ pool, pools, isDraft, accounts, schedule, ranking, limits, nowMs, adding, preparing, saved, apply, onToggleAdd, onDoneAdd, onAdd, onRemove, onRename, onDraftName, onDelete, onRetryOrder, onPrepare }: {
   pool: PoolSummary;
+  pools: PoolSummary[];
   isDraft: boolean;
   accounts: Loaded<AccountView[]>;
   schedule: Loaded<AccountSchedule>;
@@ -334,7 +337,7 @@ function PoolDetail({ pool, isDraft, accounts, schedule, ranking, limits, nowMs,
   const note = notSignedInNote(pool.members.map((member) => member.id), new Map(pool.members.map((member) => [member.id, member.status])));
   const field = <div className="pool-name-edit">{isDraft
     ? <TextField id="pool-name" label="Pool name" labelOutside aria-label="Pool name" value={pool.name} onValue={onDraftName} />
-    : <PoolNameField key={pool.id} pool={pool} apply={apply} onRename={onRename} />}</div>;
+    : <PoolNameField key={pool.id} pool={pool} read={pools} apply={apply} onRename={onRename} />}</div>;
   const actions = isDraft ? undefined : <div className="pool-actions">
     {onPrepare && keyedMembers(pool).length > 0 && <Button icon="refresh-cw" aria-label={`Get ready for agents: ${pool.name}`} pending={preparing === pool.id} pendingLabel="Getting ready..." disabled={preparing !== null} onClick={() => onPrepare(pool)}>Get ready for agents</Button>}
     <Button variant="quiet" aria-label={`Delete pool ${pool.name}`} onClick={() => onDelete(pool)}>Delete pool</Button>
@@ -405,7 +408,7 @@ export function PoolsScreenView({ pools, accounts, schedule, ranking, limits, no
       </SettingSection>
       <AppOrder schedule={schedule} apply={apply} onRetry={onRetrySchedule} />
     </div>
-    <PoolDetail pool={pool} isDraft={draft !== null && draft.id === null} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} adding={adding} preparing={preparing} saved={saved} apply={apply}
+    <PoolDetail pool={pool} pools={pools.value} isDraft={draft !== null && draft.id === null} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} adding={adding} preparing={preparing} saved={saved} apply={apply}
       onToggleAdd={onToggleAdd} onDoneAdd={onDoneAdd} onAdd={onAdd} onRemove={onRemove} onRename={onRename} onDraftName={onDraftName} onDelete={onDelete} onRetryOrder={onRetryOrder} onPrepare={onPrepare} />
   </div>;
 }

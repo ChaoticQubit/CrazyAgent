@@ -252,7 +252,7 @@ export function AccountSetting({ data, id }: { data: TeamProject; id: string }) 
   const listed = valueOf(data.pools) ?? [];
   const pools = data.assigned && !listed.some((choice) => choice.pool.id === data.assigned?.pool.id) ? [data.assigned, ...listed] : listed;
   const current = data.assigned?.pool.id ?? "";
-  const [shown, hold] = useHeld(current);
+  const [shown, hold] = useHeld(current, Object.is, data.pools);
   const [asking, setAsking] = useState(false);
 
   async function save(value: string): Promise<string> {

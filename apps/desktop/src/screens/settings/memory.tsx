@@ -182,10 +182,12 @@ function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onAp
 
 /** Settings, Memory as a pure view: the title in every state, the Agent memory writes setting,
  * research suggestions to save (one click is the owner's approval), saved memory for the chosen
- * scope with search and older pages, and forms to add and import memory. Inputs: the reads,
- * filters, last failure and the actions. */
-export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
+ * scope with search and older pages, and forms to add and import memory. Inputs: the reads, the
+ * first page's read the writes setting came from (older pages merged in make a new object, which
+ * no read made), filters, last failure and the actions. */
+export function MemoryView({ saved, writesRead, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
   saved: Loaded<SavedMemoryPage>;
+  writesRead: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
   scope: string;
   projects: { id: string; name: string }[];
@@ -205,7 +207,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   onApprove?: (memory: SavedMemory) => void;
   onWrites?: (writes: AgentMemoryWrites) => Promise<string>;
 }) {
-  const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null, Object.is, saved);
+  const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null, Object.is, writesRead);
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const where = scope ? `${names.get(scope) ?? "this project"} only` : "app-wide";
   const filters = <span className="row">
@@ -277,7 +279,7 @@ export function MemorySettings() {
   };
 
   return <>
-    <MemoryView saved={saved} suggested={suggested} scope={scope} projects={projects} search={search} failure={failure} busy={busy}
+    <MemoryView saved={saved} writesRead={first} suggested={suggested} scope={scope} projects={projects} search={search} failure={failure} busy={busy}
       onSearch={setSearch} onScope={setScope} onRetry={reloadSaved} onMore={() => void more()} onDelete={setDeleting}
       onApprove={(memory) => void act(memory.id, () => approveMemory(memory.id), "Memory approved. Agents get it from their next launch.", reloadSaved)}
       onWrites={(writes) => act("agent-writes", () => setAgentMemoryWrites(writes), writes === "ask" ? "Agents now ask you before a memory is saved." : "Agents now save memories directly.", reloadSaved)}
