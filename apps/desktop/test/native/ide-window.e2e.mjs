@@ -314,6 +314,72 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await until(() => browser.execute(() => document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
   });
 
+  it("opens, leaves, returns, follows its panel, and goes away with its project", async () => {
+    const first = await newProject("ide-one");
+    const second = await newProject("ide-two");
+    await buildReady();
+    const page = (id, tab) => `#/projects/${encodeURIComponent(id)}/${tab}`;
+    await go(page(first, "overview"));
+    await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
+    await browser.saveScreenshot(join(evidence, "before-open.png"));
+    await startPlan([
+      [0, "go", page(first, "ide")],
+      [90, "note", "open"],
+      [95, "go", page(first, "overview")],
+      [105, "note", "left"],
+      [110, "go", page(first, "ide")],
+      [125, "note", "back"],
+      [130, "shift", PANEL_SHIFT],
+      [140, "note", "moved"],
+      [143, "shift", ""],
+      [155, "note", "resized"],
+      [160, "go", page(second, "overview")],
+      [170, "go", page(second, "ide")],
+      [215, "note", "second-open"],
+      [220, "go", "#/"],
+      [232, "note", "closed"],
+    ]);
+    const started = Date.now();
+    const at = (seconds) => pause(Math.max(0, started + seconds * 1000 - Date.now()));
+    const actions = [
+      [30, () => shot("open-30s")], [60, () => shot("open-60s")], [92, () => shot("open-92s")],
+      [107, () => shot("left")], [127, () => shot("back")], [142, () => shot("moved")],
+      [145, () => writeFileSync(join(evidence, "resize.json"), JSON.stringify(resize()))],
+      [157, () => shot("resized")], [217, () => shot("second-open")], [234, () => shot("closed")],
+    ];
+    for (const [seconds, action] of actions) {
+      await at(seconds);
+      action();
+    }
+    let log = null;
+    for (const deadline = Date.now() + BACK_MS; log === null; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the webdriver session never saw the main window again after the IDE closed");
+      log = await browser.execute(() => (window.__ideWindowLog?.some((row) => row.step === "closed") ? window.__ideWindowLog : null)).catch(() => null);
+    }
+    writeFileSync(join(evidence, "log.json"), JSON.stringify(log, null, 2));
+    for (const row of log) {
+      assert.equal(row.status, "ok", `${row.step}: the app page's commands answer while the IDE is loaded`);
+      assert.deepEqual(row.alerts, [], `${row.step}: no failed place or hide`);
+    }
+    const panel = (step) => log.find((row) => row.step === step).panel;
+    assert.equal(panel("left"), null, "the IDE panel is gone from the page when the tab is left");
+    assert.ok(panel("moved").y > panel("back").y, "the panel really moved");
+    assert.equal(panel("closed"), null, "the page left the project");
+    const refusal = ideRefusal();
+    assert.match(refusal.origin, /^http:\/\/127\.0\.0\.1:\d+$/, `the call came from the real IDE page: ${JSON.stringify(refusal)}`);
+    assert.match(refusal.answer ?? "", /^refused: .*not allowed/, `the real IDE page gets no native command: ${JSON.stringify(refusal)}`);
+    const backRow = log.find((row) => row.step === "back");
+    const leftImage = pixels("left");
+    const leftScale = leftImage.width / backRow.inner[0];
+    assert.equal(darkBox(leftImage, Math.round(backRow.panel.x * leftScale), Math.round((backRow.panel.x + backRow.panel.width) * leftScale)), null, "the IDE is not on screen once its tab is left");
+    const fits = FIT_STEPS.map(([step, picture]) => fit(log.find((row) => row.step === step), picture));
+    writeFileSync(join(evidence, "fit.json"), JSON.stringify(fits, null, 2));
+    for (const row of fits) {
+      assert.ok(row.off <= FIT_PX, `${row.step}: the IDE sits on its panel within ${FIT_PX} px: ${JSON.stringify(row)}`);
+      assert.ok(row.clear, `${row.step}: the IDE covers neither the tab row nor the side rail: ${JSON.stringify(row)}`);
+    }
+  });
+
   it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
     const first = await newProject("ide-own-one");
     const second = await newProject("ide-own-two");
@@ -384,75 +450,10 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
 
     await go(`#/projects/${encodeURIComponent(third)}/overview`);
     await moveOut(third);
+    await browser.deleteSession();
     await closeTitled("CrazyAgent");
     for (const deadline = Date.now() + OWN_WINDOW_MS; spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim() !== ""; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, `closing the main window left a window open: ${JSON.stringify(windowRows().at(-1))}`);
-    }
-  });
-
-  it("opens, leaves, returns, follows its panel, and goes away with its project", async () => {
-    const first = await newProject("ide-one");
-    const second = await newProject("ide-two");
-    await buildReady();
-    const page = (id, tab) => `#/projects/${encodeURIComponent(id)}/${tab}`;
-    await go(page(first, "overview"));
-    await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
-    await browser.saveScreenshot(join(evidence, "before-open.png"));
-    await startPlan([
-      [0, "go", page(first, "ide")],
-      [90, "note", "open"],
-      [95, "go", page(first, "overview")],
-      [105, "note", "left"],
-      [110, "go", page(first, "ide")],
-      [125, "note", "back"],
-      [130, "shift", PANEL_SHIFT],
-      [140, "note", "moved"],
-      [143, "shift", ""],
-      [155, "note", "resized"],
-      [160, "go", page(second, "overview")],
-      [170, "go", page(second, "ide")],
-      [215, "note", "second-open"],
-      [220, "go", "#/"],
-      [232, "note", "closed"],
-    ]);
-    const started = Date.now();
-    const at = (seconds) => pause(Math.max(0, started + seconds * 1000 - Date.now()));
-    const actions = [
-      [30, () => shot("open-30s")], [60, () => shot("open-60s")], [92, () => shot("open-92s")],
-      [107, () => shot("left")], [127, () => shot("back")], [142, () => shot("moved")],
-      [145, () => writeFileSync(join(evidence, "resize.json"), JSON.stringify(resize()))],
-      [157, () => shot("resized")], [217, () => shot("second-open")], [234, () => shot("closed")],
-    ];
-    for (const [seconds, action] of actions) {
-      await at(seconds);
-      action();
-    }
-    let log = null;
-    for (const deadline = Date.now() + BACK_MS; log === null; await pause(POLL_MS)) {
-      assert.ok(Date.now() < deadline, "the webdriver session never saw the main window again after the IDE closed");
-      log = await browser.execute(() => (window.__ideWindowLog?.some((row) => row.step === "closed") ? window.__ideWindowLog : null)).catch(() => null);
-    }
-    writeFileSync(join(evidence, "log.json"), JSON.stringify(log, null, 2));
-    for (const row of log) {
-      assert.equal(row.status, "ok", `${row.step}: the app page's commands answer while the IDE is loaded`);
-      assert.deepEqual(row.alerts, [], `${row.step}: no failed place or hide`);
-    }
-    const panel = (step) => log.find((row) => row.step === step).panel;
-    assert.equal(panel("left"), null, "the IDE panel is gone from the page when the tab is left");
-    assert.ok(panel("moved").y > panel("back").y, "the panel really moved");
-    assert.equal(panel("closed"), null, "the page left the project");
-    const refusal = ideRefusal();
-    assert.match(refusal.origin, /^http:\/\/127\.0\.0\.1:\d+$/, `the call came from the real IDE page: ${JSON.stringify(refusal)}`);
-    assert.match(refusal.answer ?? "", /^refused: .*not allowed/, `the real IDE page gets no native command: ${JSON.stringify(refusal)}`);
-    const backRow = log.find((row) => row.step === "back");
-    const leftImage = pixels("left");
-    const leftScale = leftImage.width / backRow.inner[0];
-    assert.equal(darkBox(leftImage, Math.round(backRow.panel.x * leftScale), Math.round((backRow.panel.x + backRow.panel.width) * leftScale)), null, "the IDE is not on screen once its tab is left");
-    const fits = FIT_STEPS.map(([step, picture]) => fit(log.find((row) => row.step === step), picture));
-    writeFileSync(join(evidence, "fit.json"), JSON.stringify(fits, null, 2));
-    for (const row of fits) {
-      assert.ok(row.off <= FIT_PX, `${row.step}: the IDE sits on its panel within ${FIT_PX} px: ${JSON.stringify(row)}`);
-      assert.ok(row.clear, `${row.step}: the IDE covers neither the tab row nor the side rail: ${JSON.stringify(row)}`);
     }
   });
 });
