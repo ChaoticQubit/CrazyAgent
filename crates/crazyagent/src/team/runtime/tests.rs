@@ -15536,6 +15536,141 @@ fn a_wake_task_with_its_message_already_delivered_says_so() {
     team.workers.clear();
 }
 
+/// A wake task whose turn never reached its agent before CrazyAgent closed, and whose run
+/// then gives up resuming after the owner's retry, is let go and handed out again as the
+/// same task: a fresh conversation gets the still unread message that woke it under
+/// "Messages for you", while a kept session is told it was already delivered and gets no
+/// text (HB-S5-C-RESIDUAL).
+#[test]
+fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only() {
+    use super::super::master::{WAKE_DELIVERED, WAKE_TASK};
+    for fresh in [true, false] {
+        let fixture = Fixture::new(2);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        crate::coord::ensure(&fixture.connection).unwrap();
+        let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+        let woken = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+        let file = fixture.base.join(format!("session-{woken}.jsonl"));
+        std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
+        let record = PaneRecord::new(
+            &Transcript::ClaudeSession { file },
+            &fixture.base,
+            SystemTime::now(),
+            std::process::id(),
+            None,
+        )
+        .unwrap();
+        fixture.keep(woken, &record);
+        team.workers
+            .insert(woken, between_turns(&project, AgentRole::Sub, true, true));
+        let message = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Agent(lead),
+                to: crate::coord::Party::Agent(woken),
+                kind: crate::coord::MessageKind::Prompt,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: "Merge your branch".into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        let asleep = team.asleep(&project);
+        team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+            .unwrap();
+        let (orders, turns) = channel();
+        team.workers.get_mut(&woken).unwrap().orders = orders;
+        team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+            .unwrap();
+        let Ok(Order::Turn(first, None, _)) = turns.try_recv() else {
+            panic!("the woken agent got no turn");
+        };
+        assert!(first.contains(WAKE_TASK), "{first}");
+        assert!(first.contains("Merge your branch"), "{first}");
+        let task: i64 = fixture
+            .connection
+            .query_row(
+                "SELECT task FROM team_task_pins WHERE agent=?1",
+                [woken],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        team.workers.clear();
+        drop(team);
+        let mut team = fixture.runtime();
+        crate::recovery::settle(&fixture.connection).unwrap();
+        let none = BTreeSet::new();
+        team.resume_interrupted(&fixture.setup, &fixture.access, &none)
+            .unwrap();
+        assert!(crate::recovery::retry(&fixture.base, woken).unwrap());
+        team.resume_interrupted(&fixture.setup, &fixture.access, &none)
+            .unwrap();
+        let run: (String, Option<i64>) = fixture
+            .connection
+            .query_row(
+                "SELECT state,task FROM recovery_runs WHERE agent=?1",
+                [woken],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            run,
+            ("failed".to_owned(), None),
+            "the run gave up and let go of its task"
+        );
+        let (status, receipt): (String, String) = fixture
+            .connection
+            .query_row(
+                "SELECT t.status,m.receipt FROM team_tasks t, coord_messages m WHERE t.id=?1 AND m.id=?2",
+                params![task, message],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), receipt.as_str()),
+            ("queued", "delivered"),
+            "the turn never reached the agent, so the same task waits again"
+        );
+
+        let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+        worker.fresh = fresh;
+        let (orders, turns) = channel();
+        worker.orders = orders;
+        team.workers.insert(woken, worker);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET status='idle', error=NULL WHERE id=?1",
+                [woken],
+            )
+            .unwrap();
+        team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+            .unwrap();
+        let Ok(Order::Turn(again, None, _)) = turns.try_recv() else {
+            panic!("the woken agent got no turn again");
+        };
+        let running: i64 = fixture
+            .connection
+            .query_row(
+                "SELECT id FROM team_tasks WHERE status='running' AND agent=?1",
+                [woken],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(running, task, "the re-run is the same task");
+        assert_eq!(again.contains("Merge your branch"), fresh, "{again}");
+        assert_eq!(again.contains(WAKE_TASK), fresh, "{again}");
+        assert_eq!(again.contains(WAKE_DELIVERED), !fresh, "{again}");
+        team.workers.clear();
+    }
+}
+
 /// The delivery intent of a wake task records the words its turn typed. With its message
 /// already delivered the turn says `WAKE_DELIVERED`, so that is the marker a restart looks
 /// for: a marker of the stored `WAKE_TASK` could never be found (rv-code L1).
