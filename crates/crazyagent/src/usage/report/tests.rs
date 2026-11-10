@@ -964,13 +964,56 @@ fn a_window_past_its_reset_reads_as_not_read_when_the_last_read_failed() {
     }
     record_failure(&db, &held[0], "usage_unreachable", MIDNIGHT).unwrap();
     record_failure(&db, &held[2], "usage_unreachable", MIDNIGHT).unwrap();
-    let shown = report(&db, None, None, 0, now, &held).unwrap().limits;
+    let at_now = LimitWindow {
+        used_percent: 30.0,
+        resets_at_ms: Some(now),
+    };
+    let edges: Vec<CredentialRef> = ["overridden", "boundary"]
+        .iter()
+        .map(|id| CredentialRef::new(*id).unwrap())
+        .collect();
+    for (account, five_hour) in edges.iter().zip([passed, at_now]) {
+        record_observation(
+            &db,
+            account,
+            &Observation {
+                plan: None,
+                five_hour: Some(five_hour),
+                weekly: Some(ahead),
+                provider: Some(crate::usage::poll::Provider::Claude),
+            },
+            LimitSource::Poll,
+            MIDNIGHT,
+        )
+        .unwrap();
+        record_failure(&db, account, "usage_unreachable", MIDNIGHT).unwrap();
+    }
+    crate::usage::set_reset_override(
+        &db,
+        &edges[0],
+        crate::usage::WindowKind::FiveHour,
+        Some(now + HOUR),
+    )
+    .unwrap();
+    let every: Vec<CredentialRef> = held.iter().chain(&edges).cloned().collect();
+    let shown = report(&db, None, None, 0, now, &every).unwrap().limits;
     let row = |id: &str| shown.iter().find(|row| row.account.as_str() == id).unwrap();
     assert_eq!(row("failed").five_hour, None);
     assert_eq!(row("failed").weekly, Some(ahead));
     assert_eq!(row("healthy").five_hour, Some(passed));
     assert_eq!(row("mixed").five_hour, Some(ahead));
     assert_eq!(row("mixed").weekly, None);
+    let overridden = row("overridden").five_hour;
+    assert_eq!(
+        overridden.map(|window| window.used_percent),
+        Some(40.0),
+        "a reset the owner set ahead keeps a failed account's window (PROTO-2-LOWS): {overridden:?}"
+    );
+    assert_eq!(
+        row("boundary").five_hour,
+        None,
+        "a reset at exactly now has passed"
+    );
 }
 
 fn priced_store() -> (tempfile::TempDir, Connection) {
