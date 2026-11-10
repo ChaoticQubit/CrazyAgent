@@ -3806,20 +3806,22 @@ pub fn master_lands(
 /// The owner's saved choice of what the master does with its own change set, as the team
 /// status offers it: None below Full access, where the master always waits, and None while
 /// the project's agent access cannot be read, so the rest of the status still reads and the
-/// agents are told why they stopped. Takes a connection and the project. Returns the choice.
+/// agents are told why they stopped; that case also says the access is unreadable, so the
+/// owner is not told the project is below Full access. Takes a connection and the project.
+/// Returns the choice and whether the access could not be read.
 fn offered_master_lands(
     connection: &Connection,
     project: &ProjectId,
-) -> Result<Option<MasterLands>, EngineError> {
+) -> Result<(Option<MasterLands>, bool), EngineError> {
     let access = match crate::sandbox::policy::load(connection, project.as_str()) {
         Ok(policy) => policy.access,
-        Err(rusqlite::Error::FromSqlConversionFailure(..)) => return Ok(None),
+        Err(rusqlite::Error::FromSqlConversionFailure(..)) => return Ok((None, true)),
         Err(failed) => return Err(error(failed)),
     };
     if access != crate::sandbox::policy::AgentAccess::Full {
-        return Ok(None);
+        return Ok((None, false));
     }
-    saved_master_lands(connection, project).map(Some)
+    saved_master_lands(connection, project).map(|lands| (Some(lands), false))
 }
 
 /// The owner's saved choice of what the master does with its own change set, Merges when
@@ -4821,6 +4823,7 @@ fn encoded_len<T: Serialize>(value: &T) -> Result<usize, EngineError> {
 /// Returns bounded lists in creation order.
 pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatus, EngineError> {
     let project = &stored.project_id;
+    let (master_lands, access_unreadable) = offered_master_lands(connection, project)?;
     let recent = |sql: &str, limit: i64| {
         format!("SELECT * FROM ({sql} ORDER BY id DESC LIMIT {limit}) ORDER BY id")
     };
@@ -4977,8 +4980,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
-        master_lands: offered_master_lands(connection, project)?,
-        access_unreadable: false,
+        master_lands,
+        access_unreadable,
         reask_empty_reply: reask_empty_reply(connection, project)?,
         master_idle_stop: MasterIdleStop::effective(
             master_idle_stop(connection, project)?,

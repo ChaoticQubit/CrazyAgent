@@ -2042,9 +2042,11 @@ impl TeamView {
             return TeamReply::Handled;
         };
         let Some(current) = status.master_lands else {
-            self.notice = Some(Notice::plain(
-                "The master's own change sets land by themselves only at Full access.",
-            ));
+            self.notice = Some(Notice::plain(if status.access_unreadable {
+                "This project's agent access can't be read, so the master's conflict fixes wait for your Accept."
+            } else {
+                "The master's own change sets land by themselves only at Full access."
+            }));
             return TeamReply::Handled;
         };
         let mode = match current {
