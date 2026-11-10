@@ -182,6 +182,11 @@ test("both Metrics views open on 7 days, as the mockup does", () => {
   }
 });
 
+test("one project on the app page is named in the singular", () => {
+  const markup = render({ projectId: null, filter: { projects: [{ id: "alpha", name: "Alpha" }], onProject: forbidden } });
+  assert.match(text(markup), /1 project · Updated/u);
+});
+
 const LABEL = "Estimated cost at API prices";
 const bundled = (patch = {}) => ({ settings: { main_number: "dollars", prices: "bundled" }, shown: "dollars", as_of: "2026-11-08", cost_nanos: 5_000_000_000, unpriced_tokens: 0, ...patch });
 const tokensLead = () => bundled({ settings: { main_number: "tokens", prices: "bundled" }, shown: "tokens" });
