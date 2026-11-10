@@ -778,10 +778,12 @@ fn local_model_access(case: &Case, port: u16) -> crazyagent::config::ModelAccess
 
 /// OWNER-PORTS-FAIL-OPEN: the owner's ports read from the settings files are the configured
 /// local model ports, none while no file exists, and a file that does not read, as broken
-/// TOML, bytes that are not UTF-8 or a folder, refuses instead of naming none.
+/// TOML, bytes that are not UTF-8, a file this user may not read or a folder, refuses
+/// instead of naming none.
 #[test]
 fn settings_owner_ports_fail_closed_on_a_file_that_does_not_read() {
     use crazyagent::sandbox::{OWNER_PORTS_UNREADABLE, settings_owner_ports};
+    use std::os::unix::fs::PermissionsExt;
     let case = case();
     let (global, project) = (
         case.root.join("global.toml"),
@@ -797,6 +799,14 @@ fn settings_owner_ports_fail_closed_on_a_file_that_does_not_read() {
             Err(OWNER_PORTS_UNREADABLE)
         );
     }
+    local_model_access(&case, 4321);
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        settings_owner_ports(&global, &project),
+        Err(OWNER_PORTS_UNREADABLE),
+        "a file this user may not read is not a missing one"
+    );
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
     fs::remove_file(&global).unwrap();
     fs::create_dir(&global).unwrap();
     assert_eq!(
