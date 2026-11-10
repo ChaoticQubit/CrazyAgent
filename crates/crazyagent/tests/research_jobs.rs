@@ -572,7 +572,7 @@ fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
         seen,
         vec![
             research(
-                ActivityKind::ResearchStopped,
+                ActivityKind::ResearchWaiting,
                 "Research waiting for a pool: Design research"
             ),
             research(
