@@ -13631,6 +13631,71 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     team.workers.clear();
 }
 
+/// An agent whose last turn ended well is stopped, not failed, when a command it started
+/// outlives it, and the reason stays for the owner (HB-S5-D). A failed or unfinished turn,
+/// a closed process and a listing that failed still fail it.
+#[test]
+fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it() {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT, UNCHECKED};
+    for (end, busy, code, expected) in [
+        (TurnEnd::Success, false, LEFT, AgentStatus::Stopped),
+        (TurnEnd::Success, false, SANDBOX_LEFT, AgentStatus::Stopped),
+        (TurnEnd::Success, false, UNCHECKED, AgentStatus::Failed),
+        (TurnEnd::Success, false, PROCESS_CLOSED, AgentStatus::Failed),
+        (TurnEnd::Failed, false, LEFT, AgentStatus::Failed),
+        (TurnEnd::Success, true, LEFT, AgentStatus::Failed),
+    ] {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        team.apply(
+            agent,
+            Report::Finished {
+                text: String::new(),
+                end,
+                cause: None,
+            },
+        )
+        .unwrap();
+        if busy {
+            fixture
+                .connection
+                .execute(
+                    "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms) VALUES (?1,'master','codex',0,'Go on.','running',?2,1)",
+                    params![PROJECT, agent],
+                )
+                .unwrap();
+            let task = fixture.connection.last_insert_rowid();
+            team.workers.get_mut(&agent).unwrap().busy = Some(Busy::Task(task));
+        }
+        let problem = format!("Still running: 7 make. ({code})");
+        team.apply(
+            agent,
+            Report::Ended {
+                problem: Some(problem.clone()),
+            },
+        )
+        .unwrap();
+        let shown: Option<String> = fixture
+            .connection
+            .query_row(
+                "SELECT error FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.agent_status(agent).0,
+            expected,
+            "{end:?} busy {busy} {code}"
+        );
+        assert_eq!(shown, Some(problem), "{end:?} busy {busy} {code}");
+    }
+}
+
 /// A lead with one worker for the 18.15.2 owner-action tests (run 5 task 73): the lead is
 /// idle between turns in a kept session with no task, so only a waking message gives it a
 /// turn. The runtime comes first so it drops before the fixture's folder goes.
