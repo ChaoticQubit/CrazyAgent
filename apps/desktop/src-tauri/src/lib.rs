@@ -4612,4 +4612,50 @@ mod tests {
         }
         assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
     }
+
+    /// UI-5-F3: the close command itself refuses a wall window of another project and closes
+    /// nothing for it, while the main window and the project's own wall may close its walls,
+    /// and another project's wall stays open.
+    #[test]
+    fn closing_a_project_s_walls_is_refused_to_another_project_s_wall() {
+        let app = mock_builder()
+            .manage(ide::IdeViews::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![
+                desktop_close_project_walls,
+            ]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let (one, other) = (
+            ProjectId::new("project-one").unwrap(),
+            ProjectId::new("project-other").unwrap(),
+        );
+        let main = page("main");
+        let (one_wall, other_wall) = (
+            bridge::terminal::wall_label(&one, 1),
+            bridge::terminal::wall_label(&other, 1),
+        );
+        let (one_page, other_page) = (page(&one_wall), page(&other_wall));
+        let close = |id: &ProjectId| json!({ "id": id.as_str() });
+        let refused = ask(other_page.as_ref(), "desktop_close_project_walls", close(&one))
+            .unwrap_err();
+        assert_eq!(refused["code"], "window_denied");
+        assert!(app.get_webview_window(&one_wall).is_some());
+        assert_eq!(
+            ask(one_page.as_ref(), "desktop_close_project_walls", close(&one)),
+            Ok(())
+        );
+        assert_eq!(
+            ask(main.as_ref(), "desktop_close_project_walls", close(&one)),
+            Ok(())
+        );
+        assert!(
+            app.get_webview_window(&other_wall).is_some(),
+            "another project's wall stays open"
+        );
+    }
 }
