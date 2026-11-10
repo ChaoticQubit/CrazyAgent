@@ -9,6 +9,7 @@ use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
 use crate::usage::health::{StepHealth, UsageStep};
+use crate::usage::metrics::{ActivityRow, ModelRow};
 use crate::usage::money::{MainNumber, MoneyView, PriceSource};
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
@@ -393,6 +394,19 @@ fn group(
         ));
     }
     lines
+}
+
+fn activity_lines(_rows: &[ActivityRow], _limit: usize, _theme: &Theme) -> Vec<Line<'static>> {
+    Vec::new()
+}
+
+fn model_lines(
+    _rows: &[ModelRow],
+    _money: &MoneyView,
+    _limit: usize,
+    _theme: &Theme,
+) -> Vec<Line<'static>> {
+    Vec::new()
 }
 
 /// The plain line a reading shows when a scan left records out. Input: how many agent homes

@@ -100,6 +100,8 @@ fn report() -> UsageReport {
         health: Vec::new(),
         partial_homes: 0,
         money: Default::default(),
+        activity: Vec::new(),
+        models: Vec::new(),
     }
 }
 
@@ -988,4 +990,185 @@ fn with_prices_off_the_main_number_key_is_not_offered_and_does_nothing() {
     assert!(keys.contains(&"p".to_owned()), "{keys:?}");
     assert!(matches!(page.key(&Key::Char('m'), &mut ctx), Flow::Ignored));
     assert!(ctx.next_screen_request().is_none());
+}
+
+fn activity_row(activity: &str, turns: u64, edit_turns: u64, first_try_turns: u64) -> ActivityRow {
+    ActivityRow {
+        activity: activity.to_owned(),
+        turns,
+        edit_turns,
+        first_try_turns,
+    }
+}
+
+fn model_row(model: &str, input: u64, cost_nanos: i64) -> ModelRow {
+    ModelRow {
+        model: model.to_owned(),
+        tokens: Tokens {
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        cost_nanos,
+    }
+}
+
+#[test]
+fn the_activity_lines_end_with_the_first_try_rate() {
+    let ctx = ctx(100, 40);
+    let rows = [activity_row("coding", 4, 4, 3)];
+    assert_eq!(
+        text(&activity_lines(&rows, 96, &ctx.theme)),
+        [
+            "  Coding         4 turns",
+            "75% of 4 editing turns worked first try"
+        ]
+    );
+}
+
+#[test]
+fn the_first_try_rate_rounds_to_the_nearest_percent_and_says_one_turn() {
+    let ctx = ctx(100, 40);
+    let rate = |rows: &[ActivityRow]| text(&activity_lines(rows, 96, &ctx.theme)).pop();
+    assert_eq!(
+        rate(&[activity_row("coding", 3, 3, 2)]).as_deref(),
+        Some("67% of 3 editing turns worked first try")
+    );
+    assert_eq!(
+        rate(&[activity_row("coding", 1, 1, 1)]).as_deref(),
+        Some("100% of 1 editing turn worked first try")
+    );
+}
+
+#[test]
+fn no_first_try_rate_shows_without_an_editing_turn() {
+    let ctx = ctx(100, 40);
+    assert_eq!(
+        text(&activity_lines(
+            &[activity_row("git", 1, 0, 0)],
+            96,
+            &ctx.theme
+        )),
+        ["  Git            1 turn"]
+    );
+}
+
+#[test]
+fn activities_past_the_cap_are_counted_and_stay_in_the_rate() {
+    let ctx = ctx(100, 40);
+    let rows: Vec<ActivityRow> = [
+        "build_deploy",
+        "coding",
+        "debugging",
+        "feature",
+        "testing",
+        "refactoring",
+        "exploration",
+    ]
+    .iter()
+    .map(|name| activity_row(name, 2, 2, 1))
+    .collect();
+    let shown = text(&activity_lines(&rows, 96, &ctx.theme));
+    assert_eq!(shown[0], "  Build/deploy   2 turns");
+    assert_eq!(shown.len(), 7, "{shown:?}");
+    assert_eq!(shown[5], "  and 2 more");
+    assert_eq!(shown[6], "50% of 14 editing turns worked first try");
+}
+
+#[test]
+fn model_lines_name_the_blank_model_show_dollars_and_stop_at_the_cap() {
+    let ctx = ctx(100, 40);
+    let mut rows = vec![model_row("gpt-5", 1200, 0), model_row("", 900, 0)];
+    rows.extend((0..5).map(|n| model_row(&format!("m{n}"), 10, 0)));
+    let shown = text(&model_lines(&rows, &MoneyView::default(), 96, &ctx.theme));
+    assert_eq!(shown[0], "  gpt-5  1.2K tokens");
+    assert_eq!(shown[1], "  Model not recorded  900 tokens");
+    assert_eq!(shown.len(), 6, "{shown:?}");
+    assert_eq!(shown[5], "  and 2 more");
+    let money = MoneyView {
+        shown: MainNumber::Dollars,
+        as_of: Some("2026-11-08".to_owned()),
+        ..MoneyView::default()
+    };
+    let priced = text(&model_lines(
+        &[model_row("gpt-5", 1200, 1_000_000_000)],
+        &money,
+        96,
+        &ctx.theme,
+    ));
+    assert_eq!(
+        priced,
+        ["  gpt-5  $1.00 (Estimated cost at API prices)  1.2K tokens"]
+    );
+}
+
+#[test]
+fn the_summary_lists_models_and_activities_after_the_accounts_only_when_there_are_any() {
+    let ctx = ctx(100, 40);
+    let bare = text(&summary(
+        &report(),
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    assert!(
+        !bare
+            .iter()
+            .any(|line| line == "By model" || line == "By activity"),
+        "{bare:?}"
+    );
+    let shown = text(&summary(
+        &UsageReport {
+            models: vec![model_row("gpt-5", 1200, 0)],
+            activity: vec![activity_row("coding", 4, 4, 3)],
+            ..report()
+        },
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    let place = |wanted: &str| {
+        shown
+            .iter()
+            .position(|line| line == wanted)
+            .unwrap_or_else(|| panic!("{wanted}: {shown:?}"))
+    };
+    assert!(place("By account") < place("By model"));
+    assert!(place("By model") < place("By activity"));
+    assert_eq!(place("  gpt-5  1.2K tokens"), place("By model") + 1);
+    assert_eq!(place("  Coding         4 turns"), place("By activity") + 1);
+    assert!(place("75% of 4 editing turns worked first try") > place("By activity"));
+}
+
+#[test]
+fn model_and_activity_lines_fit_a_narrow_screen() {
+    let ctx = ctx(30, 40);
+    let limit = 24;
+    let activity = text(&activity_lines(
+        &[activity_row("build_deploy", 2, 2, 1)],
+        limit,
+        &ctx.theme,
+    ));
+    let models = text(&model_lines(
+        &[model_row(
+            "a-very-long-model-name-that-will-not-fit",
+            1200,
+            0,
+        )],
+        &MoneyView::default(),
+        limit,
+        &ctx.theme,
+    ));
+    assert!(activity.len() > 1, "{activity:?}");
+    assert!(models.len() > 1, "{models:?}");
+    for line in activity.iter().chain(&models) {
+        assert!(line.chars().count() <= limit, "{line}");
+    }
 }

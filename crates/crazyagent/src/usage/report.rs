@@ -1,5 +1,6 @@
 use super::capture::{Attribution, Format, Tokens};
 use super::health::{StepHealth, health};
+use super::metrics::{ActivityRow, ModelRow};
 use super::money::{MoneyView, PriceSource};
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
@@ -111,6 +112,10 @@ pub struct UsageReport {
     pub partial_homes: u64,
     #[serde(default)]
     pub money: MoneyView,
+    #[serde(default)]
+    pub activity: Vec<ActivityRow>,
+    #[serde(default)]
+    pub models: Vec<ModelRow>,
 }
 
 /// Tells whether the engine counts a harness's usage: from its session records (Claude
@@ -574,6 +579,8 @@ pub fn report(
         health: health(db)?,
         partial_homes,
         money,
+        activity: Vec::new(),
+        models: Vec::new(),
     })?;
     if report.money.settings.prices == PriceSource::Off {
         report

@@ -3,6 +3,7 @@ import type { MoneyView, Tokens } from "../../api-usage";
 import { compactCount, headlineTokens } from "../settings/usage";
 
 export const COST_LABEL = "Estimated cost at API prices";
+export const ACTIVITY_NAMES: Record<string, string> = {};
 const NANOS = 1_000_000_000;
 const CENT_NANOS = NANOS / 100;
 
@@ -32,6 +33,10 @@ export function dollarsBeside(money: MoneyView): boolean {
 export function Figure({ tokens, costNanos, money }: { tokens: Tokens; costNanos: number; money: MoneyView }): ReactElement {
   const shown = figure(tokens, costNanos, money);
   return createElement("span", { className: "mx-figure", title: shown.title }, createElement("b", null, shown.main), shown.beside && createElement("small", null, ` ${shown.beside}`));
+}
+
+export function firstTryText(_rows: { edit_turns: number; first_try_turns: number }[]): string {
+  return "";
 }
 
 /** Says what has no price. Input: the view. Output: the sentence, empty when all is priced. */

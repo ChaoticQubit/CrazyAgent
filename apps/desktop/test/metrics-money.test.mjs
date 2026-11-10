@@ -42,3 +42,19 @@ test("tokens without a price are said, with the words that name them", () => {
   assert.equal(money.unpricedNote(view({ unpriced_tokens: 1200 })), "1.2K tokens have no price, so they are left out of the dollars.");
   assert.equal(money.unpricedNote(view()), "");
 });
+
+test("the first-try rate counts only turns that edited", () => {
+  assert.equal(money.firstTryText([{ activity: "coding", turns: 4, edit_turns: 4, first_try_turns: 3 }, { activity: "git", turns: 9, edit_turns: 0, first_try_turns: 0 }]), "75% of 4 editing turns worked first try");
+  assert.equal(money.firstTryText([{ activity: "git", turns: 9, edit_turns: 0, first_try_turns: 0 }]), "");
+});
+
+test("the first-try rate rounds to the nearest percent and says one turn", () => {
+  assert.equal(money.firstTryText([{ edit_turns: 3, first_try_turns: 2 }]), "67% of 3 editing turns worked first try");
+  assert.equal(money.firstTryText([{ edit_turns: 1, first_try_turns: 1 }]), "100% of 1 editing turn worked first try");
+});
+
+test("every activity the engine files has its name", () => {
+  assert.deepEqual(Object.keys(money.ACTIVITY_NAMES).sort(), ["brainstorming", "build_deploy", "coding", "conversation", "debugging", "delegation", "exploration", "feature", "general", "git", "planning", "refactoring", "testing"]);
+  assert.equal(money.ACTIVITY_NAMES.build_deploy, "Build/deploy");
+  assert.equal(money.ACTIVITY_NAMES.coding, "Coding");
+});

@@ -1031,3 +1031,94 @@ fn with_prices_off_no_report_row_carries_a_dollar() {
         (MainNumber::Tokens, None, 300)
     );
 }
+
+fn with_activity(db: &Connection) {
+    db.execute_batch(
+        "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns) VALUES
+            (3600000,'alpha','team-1','gpt-5','coding',3,3,2),
+            (3600000,'beta','team-2','gpt-5','git',9,0,0),
+            (0,'alpha','team-1','gpt-5','testing',7,1,1);",
+    )
+    .unwrap();
+}
+
+fn activity_names(report: &UsageReport) -> Vec<&str> {
+    report
+        .activity
+        .iter()
+        .map(|row| row.activity.as_str())
+        .collect()
+}
+
+#[test]
+fn the_report_lists_models_and_activities_for_its_project_and_range() {
+    let (_root, db) = priced_store();
+    with_activity(&db);
+    let whole = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(activity_names(&whole), ["git", "testing", "coding"]);
+    assert_eq!(
+        whole
+            .models
+            .iter()
+            .map(|row| (row.model.as_str(), row.tokens.input, row.cost_nanos))
+            .collect::<Vec<_>>(),
+        [("gpt-5", 300, 942)]
+    );
+    let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+    let scoped = report(&db, Some(&alpha), Some(1), 0, 7_200_000, &[]).unwrap();
+    assert_eq!(
+        scoped.activity,
+        vec![ActivityRow {
+            activity: "coding".to_owned(),
+            turns: 3,
+            edit_turns: 3,
+            first_try_turns: 2,
+        }]
+    );
+    assert_eq!(
+        scoped
+            .models
+            .iter()
+            .map(|row| (row.tokens.input, row.cost_nanos))
+            .collect::<Vec<_>>(),
+        [(100, 900)]
+    );
+}
+
+#[test]
+fn with_prices_off_no_model_row_carries_a_dollar() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let (_root, db) = priced_store();
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let off = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(
+        off.models
+            .iter()
+            .map(|row| (row.tokens.input, row.cost_nanos))
+            .collect::<Vec<_>>(),
+        [(300, 0)]
+    );
+}
+
+#[test]
+fn model_rows_shrink_with_the_rest_of_the_report_to_fit_one_reply() {
+    let (_root, db) = priced_store();
+    let mut whole = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    whole.models = vec![
+        ModelRow {
+            model: "m".repeat(REPORT_BYTES_MAX),
+            ..ModelRow::default()
+        };
+        2
+    ];
+    let fitted = fit(whole);
+    assert!(fitted.is_ok());
+    assert_eq!(fitted.unwrap().models.len(), 0);
+}

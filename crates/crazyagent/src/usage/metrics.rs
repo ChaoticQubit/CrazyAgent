@@ -106,6 +106,16 @@ pub struct ToolBucket {
     pub count: u64,
 }
 
+/// One activity's turns over the range.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityRow {
+    pub activity: String,
+    pub turns: u64,
+    pub edit_turns: u64,
+    pub first_try_turns: u64,
+}
+
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
 /// now, and done or failed in the range; the merges in the range, those into main and those
 /// undone; the tokens chart in bars of `bucket_ms`; the breakdown by run, project, agent,
@@ -137,6 +147,10 @@ pub struct Metrics {
     pub tools: Vec<ToolBucket>,
     #[serde(default)]
     pub tools_since_ms: Option<i64>,
+    #[serde(default)]
+    pub activity: Vec<ActivityRow>,
+    #[serde(default)]
+    pub activity_since_ms: Option<i64>,
 }
 
 /// The chart bar width for a range: two hours for up to a day, a day for up to eight days,
@@ -790,6 +804,8 @@ pub fn read(
         models: models(db, project, since_ms, prices)?,
         tools: tool_rows,
         tools_since_ms,
+        activity: Vec::new(),
+        activity_since_ms: None,
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
