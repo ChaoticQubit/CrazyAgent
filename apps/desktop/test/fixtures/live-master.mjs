@@ -80,6 +80,15 @@ export function mountArea(master, on, catalog = true) {
   flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
 }
 
+/** Mounts the project's master area with the Live terminal setting Off. Inputs: the master
+ * harness and the engine's run flag. Output: none. */
+export function mountAreaOff(master, on) {
+  const panel = page();
+  root = createRoot(panel);
+  const team = { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, master_live_terminal: false }) };
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, team, CATALOG) })));
+}
+
 /** Renders the mounted master area again with the engine's live switch read as `on`, as the
  * team read after an idle stop does. Inputs: the master harness, the switch and more fields
  * of the read. Output: none. */

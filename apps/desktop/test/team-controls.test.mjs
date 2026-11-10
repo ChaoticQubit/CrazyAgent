@@ -174,6 +174,17 @@ test("the idle stop says when an idle master stops, which the master's own setti
   assert.doesNotMatch(html("off"), /An idle master stops/);
 });
 
+test("Live terminal is a switch that shows the engine's setting and says what it does (DEC-117 Q4)", () => {
+  assert.equal(typeof controls.LiveTerminalSetting, "function", "the setting exists");
+  const row = (master_live_terminal) => renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", status: status({ master_live_terminal }), reload() {} }));
+  const on = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="true"/;
+  const off = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="false"/;
+  assert.match(row(undefined), on, "on with nothing saved");
+  assert.match(row(true), on);
+  assert.match(row(false), off);
+  assert.match(row(true), /You see and type into the master(?:'|&#x27;)s own terminal\./);
+});
+
 test("Stop the master when idle after offers Off, 15 min and 1 h and shows the engine's choice (DEC-117 Q4)", () => {
   assert.equal(typeof controls.MasterIdleSetting, "function", "the setting exists");
   assert.deepEqual(controls.MASTER_IDLE_OPTIONS.map((option) => [option.value, option.label]), [["off", "Off"], ["fifteen_minutes", "15 min"], ["one_hour", "1 h"]]);

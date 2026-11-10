@@ -246,6 +246,23 @@ test("the owner's switch change holds until a team read after the engine accepte
   assert.equal(live.wantSettled({ on: true, after: 4_000 }, 4_001), true, "the next read decides, even when the engine already turned it off");
 });
 
+test("with Live terminal off the area shows the conversation and starts nothing, whatever the run flag says (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const views = {};
+    for (const on of [null, false, true]) {
+      await evaluate(`Fixture.mountAreaOff("codex", ${JSON.stringify(on)})`);
+      views[String(on)] = await evaluate("Fixture.settle()");
+    }
+    return { views, starts: await evaluate("Fixture.teamReloads()") };
+  });
+  for (const [on, view] of Object.entries(seen.views)) {
+    assert.equal(view.live, false, `${on}: no live master area: ${view.text}`);
+    assert.equal(view.terminal, false, `${on}: no terminal`);
+    assert.equal(view.conversation, true, `${on}: the conversation view`);
+  }
+  assert.equal(seen.starts, 0, "nothing turned the master on");
+});
+
 test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountArea("rcli")');

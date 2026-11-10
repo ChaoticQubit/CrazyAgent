@@ -106,6 +106,25 @@ test("each Stop the master when idle after choice reaches the engine under its o
   assert.deepEqual([...new Set(seen.sent.args.map((call) => call.id))], ["alpha"], "the save names the project");
 });
 
+test("each Live terminal choice reaches the engine under its own value and stays on screen (DEC-117 Q4)", { timeout: 120000 }, async () => {
+  const selector = JSON.stringify('[data-setting="Live terminal"] [role="switch"]');
+  const seen = await onSettings(APPLIED, async (page) => {
+    const state = () => page.evaluate(`document.querySelector(${selector})?.getAttribute("aria-checked") ?? null`);
+    const before = await state();
+    const picks = [];
+    for (let turn = 0; turn < 2; turn += 1) {
+      await page.evaluate(`Fixture.click(${selector}, "")`);
+      await page.evaluate("Fixture.settle(240)");
+      picks.push(await state());
+    }
+    return { before, picks, sent: await page.evaluate(`Fixture.sentTo("desktop_team_master_live_terminal")`) };
+  }, "drawer");
+  assert.equal(seen.before, "true", "on with nothing saved");
+  assert.deepEqual(seen.picks, ["false", "true"], "each choice stays shown");
+  assert.deepEqual(seen.sent.args.map((call) => call.on), [false, true], "each choice is sent");
+  assert.deepEqual([...new Set(seen.sent.args.map((call) => call.id))], ["alpha"], "the save names the project");
+});
+
 const APP_SELECTS = [["schedule", "schedule-app", "balanced"], ["schedule", "schedule-pool-main", "manual_rank"], ["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];
 
 test("the app's own settings selects keep the pick while their reads run, and go back after a refused save", { timeout: 120_000 }, async () => {
