@@ -116,6 +116,7 @@ const STEP_WORDS: Record<StepHealth["step"], [string, string]> = {
   poll: ["Checking account limits", "limits shown may be out of date"],
   team: ["Counting agent tokens", "agent and research run token totals may be low"],
   runs: ["Counting research run tokens", "research token totals may be low"],
+  recount: ["Recounting history", "the comparison may arrive later"],
 };
 
 /** One plain sentence for a usage step kind that panicked since the engine started: what

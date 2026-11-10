@@ -493,7 +493,7 @@ pub(crate) fn records(home: &Path, format: Format) -> (Vec<PathBuf>, Vec<LeftOut
 /// A record the walk saw but left out: its path, its file identity and its length then. One
 /// scan holds fewer than `ENTRIES_PER_SCAN_MAX` of them.
 pub(crate) struct LeftOut {
-    path: PathBuf,
+    pub(super) path: PathBuf,
     identity: (u64, u64),
     length: u64,
 }
@@ -501,7 +501,7 @@ pub(crate) struct LeftOut {
 /// The identity a record's progress is kept under: its device and inode on unix, none
 /// elsewhere, as [`open_record`] reads it. Input: the metadata. Output: the identity.
 #[cfg(unix)]
-fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+pub(super) fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(), metadata.ino())
 }
@@ -509,7 +509,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
 /// The identity a record's progress is kept under: none on this platform, as
 /// [`open_record`] reads it. Input: the metadata. Output: the identity.
 #[cfg(not(unix))]
-fn file_identity(_: &std::fs::Metadata) -> (u64, u64) {
+pub(super) fn file_identity(_: &std::fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
 
@@ -662,7 +662,7 @@ pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     metadata.is_file().then_some((file, (0, 0), metadata.len()))
 }
 
-fn session_name(path: &Path) -> String {
+pub(super) fn session_name(path: &Path) -> String {
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -916,6 +916,7 @@ fn scan(
         return Ok(Tokens::default());
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    let tracking = super::recount::keeps_live_keys(&tx)?;
     let mut added = Tokens::default();
     let mut limits = None;
     for (key, session, before, progress, usages, observed, tools) in changed {
@@ -933,7 +934,14 @@ fn scan(
             params![key, serde_json::to_string(&progress).map_err(storage)?],
         )
         .map_err(storage)?;
-        for (model, growth) in count_usages(&tx, Messages::Live, &usages, now_ms)? {
+        for (model, growth) in count_usages(
+            &tx,
+            Messages::Live {
+                file: tracking.then_some(key.as_str()),
+            },
+            &usages,
+            now_ms,
+        )? {
             add_tokens(&tx, now_ms, attribution, &session, &model, growth)?;
             added = added.plus(growth.tokens);
         }
@@ -964,17 +972,99 @@ fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
 }
 
-/// Which table holds the keys already counted: the live store's or the recount's.
+/// What one bounded read of a record gave the recount: its records, the record's progress,
+/// the bytes consumed, whether the record is finished and whether it was read to its end.
+pub(super) struct RecountRead {
+    pub usages: Vec<Usage>,
+    pub progress: String,
+    pub read: u64,
+    pub done: bool,
+    pub complete: bool,
+}
+
+/// Reads one more chunk of a record for the recount, through the live scan's open and parser.
+/// A record that cannot be opened, is no longer the file that was listed or has shrunk is
+/// finished and not complete. Inputs: the record, its format, the stored progress (empty at
+/// the start), the identity it was listed with and the time. Output: the read.
+pub(super) fn recount_read(
+    path: &Path,
+    format: Format,
+    stored: &str,
+    listed: (u64, u64),
+    now_ms: i64,
+) -> RecountRead {
+    let mut progress: Progress = serde_json::from_str(stored).unwrap_or_default();
+    let before = progress.offset;
+    let stopped = RecountRead {
+        usages: Vec::new(),
+        progress: stored.to_owned(),
+        read: 1,
+        done: true,
+        complete: false,
+    };
+    let Some(opened) = open_record(path) else {
+        return stopped;
+    };
+    let (identity, length) = (opened.1, opened.2);
+    if !crate::file_identity::same_files(&[listed], &[identity]) || length < before {
+        return stopped;
+    }
+    let (usages, _) = read_opened_with(
+        opened,
+        format,
+        &mut progress,
+        now_ms,
+        None,
+        &session_name(path),
+    );
+    let whole = progress.offset >= length;
+    let done = whole || progress.offset == before;
+    let complete = whole || (done && only_an_unfinished_line(path, before, length));
+    let read = progress.offset.saturating_sub(before).max(1);
+    let progress = serde_json::to_string(&progress).expect("progress always serializes");
+    RecountRead {
+        usages,
+        progress,
+        read,
+        done,
+        complete,
+    }
+}
+
+/// Whether what is left of a record is one line still being written, which holds nothing to
+/// count yet. Inputs: the record, where the read stopped and the record's length. Output: the
+/// answer; a record that cannot be read has no such answer and gets false.
+fn only_an_unfinished_line(path: &Path, from: u64, length: u64) -> bool {
+    let Some((mut file, _, _)) = open_record(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    length - from < READ_BYTES_MAX as u64
+        && file.seek(SeekFrom::Start(from)).is_ok()
+        && file.take(length - from).read_to_end(&mut bytes).is_ok()
+        && !bytes.contains(&b'\n')
+}
+
+/// Lists every record of a home, the ones a live scan leaves out too. Inputs: the home and its
+/// format. Output: the records, and whether the walk was cut short.
+pub(super) fn all_records(home: &Path, format: Format) -> (Vec<PathBuf>, bool) {
+    let (mut paths, left, cut) = records(home, format);
+    paths.extend(left.into_iter().map(|record| record.path));
+    (paths, cut)
+}
+
+/// Which table holds the keys already counted: the live store's or the recount's. `file`
+/// names the record a live key came from while a recount is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Messages {
-    Live,
+pub(super) enum Messages<'a> {
+    Live { file: Option<&'a str> },
     Recount,
 }
 
-impl Messages {
+impl Messages<'_> {
     fn table(self) -> &'static str {
         match self {
-            Self::Live => "usage_messages",
+            Self::Live { .. } => "usage_messages",
             Self::Recount => "usage_recount_messages",
         }
     }
@@ -984,7 +1074,7 @@ impl Messages {
 /// the key table, the record and the time. Output: the tokens and web searches it adds.
 fn count_message(
     tx: &Connection,
-    table: Messages,
+    table: Messages<'_>,
     usage: &Usage,
     now_ms: i64,
 ) -> Result<(Tokens, u64), EngineError> {
@@ -1042,10 +1132,21 @@ fn count_message(
         ],
     )
     .map_err(storage)?;
+    let growth = usage.tokens.growth_over(before);
+    if let Messages::Live { file: Some(file) } = table
+        && (prior.is_none() || !growth.is_empty())
+        && has_room(tx, "usage_recount_live")?
+    {
+        tx.execute(
+            "INSERT OR IGNORE INTO usage_recount_live (id,path) VALUES (?1,?2)",
+            params![key, file],
+        )
+        .map_err(storage)?;
+    }
     if usage.exact && prior.is_some() {
         return Ok((Tokens::default(), 0));
     }
-    Ok((usage.tokens.growth_over(before), web - web_before))
+    Ok((growth, web - web_before))
 }
 
 /// Counts one read's records, each priced when it is counted, because the long-context tier
@@ -1055,7 +1156,7 @@ fn count_message(
 /// added.
 pub(super) fn count_usages(
     tx: &Connection,
-    table: Messages,
+    table: Messages<'_>,
     usages: &[Usage],
     now_ms: i64,
 ) -> Result<BTreeMap<String, Added>, EngineError> {
@@ -1100,7 +1201,13 @@ fn forget_old_messages(db: &Connection, now_ms: i64) -> Result<(), EngineError> 
 /// The most models one session keeps rows for in one hour; later models file under `''`.
 const MODELS_PER_HOUR_MAX: i64 = 16;
 /// The tables whose rows transcript lines create.
-const COUNTED_TABLES: &[&str] = &["usage_messages", "usage_tokens"];
+const COUNTED_TABLES: &[&str] = &[
+    "usage_messages",
+    "usage_tokens",
+    "usage_recount_messages",
+    "usage_recount_rows",
+    "usage_recount_live",
+];
 
 /// A usage row's key without its session and model.
 pub(super) type RowKey<'a> = (i64, &'a str, &'a str, &'a str, &'a str, &'a str, &'a str);
@@ -1407,6 +1514,40 @@ pub fn register_run(
     Ok(())
 }
 
+/// The format and attribution of a registered run. Inputs: its stored fields and the pool
+/// resolver. Output: both, None for a harness whose records the engine cannot read.
+pub(super) fn run_attribution(
+    kind: &str,
+    project: String,
+    account: String,
+    agent: String,
+    harness: String,
+    pool: &impl Fn(&str, &CredentialRef) -> Option<CredentialRef>,
+) -> Option<(Format, Attribution)> {
+    let kind = match kind {
+        "master" => RunKind::Master,
+        "agent" => RunKind::Agent,
+        _ => RunKind::Research,
+    };
+    let format = Format::of(&harness)?;
+    let project = ProjectId::new(project).ok();
+    let account = CredentialRef::new(account).ok();
+    Some((
+        format,
+        Attribution {
+            kind,
+            pool: match (&project, &account) {
+                (Some(project), Some(account)) => pool(project.as_str(), account),
+                _ => None,
+            },
+            project,
+            account,
+            agent,
+            harness,
+        },
+    ))
+}
+
 /// Counts what the records of every run registered in the last day gained, then forgets
 /// runs past that day whose home is gone, with their record progress.
 /// Inputs: the store, the pool lookup by project and account, and the time.
@@ -1443,26 +1584,10 @@ pub fn scan_runs(
     };
     let mut added = Tokens::default();
     for (home, kind, project, account, agent, harness) in rows {
-        let kind = match kind.as_str() {
-            "master" => RunKind::Master,
-            "agent" => RunKind::Agent,
-            _ => RunKind::Research,
-        };
-        let Some(format) = Format::of(&harness) else {
+        let Some((format, attribution)) =
+            run_attribution(&kind, project, account, agent, harness, &pool)
+        else {
             continue;
-        };
-        let project = ProjectId::new(project).ok();
-        let account = CredentialRef::new(account).ok();
-        let attribution = Attribution {
-            kind,
-            pool: match (&project, &account) {
-                (Some(project), Some(account)) => pool(project.as_str(), account),
-                _ => None,
-            },
-            project,
-            account,
-            agent,
-            harness,
         };
         added = added.plus(scan_home(
             db,
@@ -1527,7 +1652,7 @@ fn checked_attribution(attribution: &Attribution) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn clamp(count: u64) -> i64 {
+pub(super) fn clamp(count: u64) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX).min(ROW_TOKENS_MAX)
 }
 

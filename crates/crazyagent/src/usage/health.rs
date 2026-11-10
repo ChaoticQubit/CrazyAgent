@@ -4,14 +4,14 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_health (
-    step TEXT PRIMARY KEY CHECK(step IN ('poll','team','runs')),
+    step TEXT PRIMARY KEY CHECK(step IN ('poll','team','runs','recount')),
     panics INTEGER NOT NULL CHECK(panics >= 1),
     last_ms INTEGER NOT NULL,
     recovered_ms INTEGER CHECK(recovered_ms IS NULL OR recovered_ms >= last_ms)
 );";
 
 /// One part of a usage upkeep step: checking the accounts' limits, counting the team
-/// agents' records, or counting the research runs' records.
+/// agents' records, counting the research runs' records, or recounting history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageStep {
@@ -22,7 +22,7 @@ pub enum UsageStep {
 }
 
 impl UsageStep {
-    /// The stored name of the step. Output: `poll`, `team` or `runs`.
+    /// The stored name of the step. Output: `poll`, `team`, `runs` or `recount`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Poll => "poll",
@@ -49,6 +49,23 @@ pub struct StepHealth {
     pub panics: u64,
     pub last_ms: i64,
     pub recovered_ms: Option<i64>,
+}
+
+/// Drops a table an older build made, whose CHECK refuses the recount step. Its rows last one
+/// engine run, so nothing kept is lost. Input: the store. Output: done, or `usage_unavailable`.
+pub(super) fn upgrade(db: &Connection) -> Result<(), EngineError> {
+    let older: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='usage_health' AND sql NOT LIKE '%recount%')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if older {
+        db.execute_batch("DROP TABLE usage_health")
+            .map_err(storage)?;
+    }
+    Ok(())
 }
 
 /// Counts one panic of a usage step kind, which is then no longer recovered. Inputs: the
