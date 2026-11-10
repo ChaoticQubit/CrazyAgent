@@ -5581,20 +5581,97 @@ fn every_agent_status_change_is_logged_with_its_time() {
         assert_eq!(project, PROJECT);
         assert!((now_ms() - at_ms).abs() < 60_000, "{at_ms}");
     }
+    let task = running_task(&fixture, agent, "Write the changelog");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='idle', task=?2 WHERE id=?1",
+            params![agent, task],
+        )
+        .unwrap();
+    let noted: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT task FROM team_status_log WHERE agent=?1 ORDER BY id DESC LIMIT 1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(noted, Some(task), "the row names the agent's task");
 }
 
-/// The status log keeps only its newest 20000 rows: a new row drops every row that far
-/// behind it and keeps the next one (HB-S5-I).
+/// A task's first line is looked for after the lead its prompt types, so a short line that
+/// another typed turn happens to hold does not read as delivered, and the task is typed
+/// again (TEAM-9-L1).
+#[test]
+fn a_short_task_line_inside_another_typed_turn_does_not_read_as_delivered() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let prompt = "Fix it";
+    let task = running_task(&fixture, sub, prompt);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET task=?2 WHERE id=?1",
+            params![sub, task],
+        )
+        .unwrap();
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap());
+    std::thread::sleep(Duration::from_millis(5));
+    let file = fixture.base.join(format!("session-{sub}.jsonl"));
+    let typed = serde_json::json!({
+        "type": "user",
+        "message": {"content": "Your teammate said:\nFix it when the build is green, not before."}
+    });
+    std::fs::write(&file, format!("{typed}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+
+    drop(fixture.runtime());
+    let row: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        ("queued".to_owned(), None),
+        "the task waits to be typed"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{task}")),
+        [Some("failed".to_owned())]
+    );
+}
+
+/// The status log keeps only its newest 20000 rows, whichever project owns them: a new row
+/// drops every row that far behind it and keeps the next one (HB-S5-I, TEAM-11-L2).
 #[test]
 fn the_status_log_keeps_only_its_newest_rows() {
     let fixture = Fixture::new(1);
     let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    for id in [10_001, 10_002, 30_000] {
+    for (id, project) in [
+        (10_001, "another-project"),
+        (10_002, PROJECT),
+        (30_000, PROJECT),
+    ] {
         fixture
             .connection
             .execute(
                 "INSERT INTO team_status_log(id,project,agent,status,at_ms) VALUES (?1,?2,?3,'idle',1)",
-                params![id, PROJECT, agent],
+                params![id, project, agent],
             )
             .unwrap();
     }

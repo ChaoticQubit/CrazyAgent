@@ -15,6 +15,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// The most bytes of an item's first line kept to find it again in the agent's record.
 pub(super) const MARKER_BYTES_MAX: usize = 200;
+/// What a sub-agent's prompt types right before its task, so a task's first line is looked
+/// for after it and a short line another turn happens to hold does not match (TEAM-9-L1).
+pub(super) const TASK_LEAD: &str = "Your task: ";
 /// The most delivery intents of one kind kept pending with an unknown outcome until the
 /// owner dismisses them. A start closes older ones as unknown, their team notes kept, so
 /// undismissed ones never fill the ledger that every delivery and agent start shares.
@@ -73,6 +76,7 @@ pub(super) fn intend(
             Some(kept) => delivered(
                 &kept,
                 latest(connection, Some(kept.agent))?.get(&kept.agent),
+                kind,
             ),
             None => Resolution::Unknown,
         };
@@ -318,7 +322,7 @@ impl Check for Delivered {
     fn check(&self, action: &Action) -> Resolution {
         intent(action).map_or(Resolution::Unknown, |intent| {
             let pane = self.0.get(&intent.agent);
-            delivered(&intent, pane)
+            delivered(&intent, pane, action.kind)
         })
     }
 }
@@ -328,9 +332,10 @@ impl Check for Delivered {
 /// agent's latest session when it started at or after the intent, read from where that
 /// session's turns begin. An older session is never read for it, so a per-turn session left
 /// from an earlier turn cannot rule it out. An intent an earlier start found unknown stays
-/// unknown, read from no record. Inputs: the intent and the agent's latest session record.
+/// unknown, read from no record. A task is looked for after [`TASK_LEAD`], a message anywhere
+/// in a typed turn. Inputs: the intent, the agent's latest session record and the item's kind.
 /// Output: Done, NotStarted, or Unknown with no readable record.
-fn delivered(intent: &Intent, latest: Option<&PaneRecord>) -> Resolution {
+fn delivered(intent: &Intent, latest: Option<&PaneRecord>, kind: ActionKind) -> Resolution {
     if intent.unknown || intent.marker.is_empty() {
         return Resolution::Unknown;
     }
@@ -346,11 +351,14 @@ fn delivered(intent: &Intent, latest: Option<&PaneRecord>) -> Resolution {
     let Some((harness, record, offset)) = found else {
         return Resolution::Unknown;
     };
+    let wanted = if matches!(kind, ActionKind::Dispatch) {
+        format!("{TASK_LEAD}{}", intent.marker)
+    } else {
+        intent.marker.clone()
+    };
     match typed_after(&harness, &record, offset) {
         None => Resolution::Unknown,
-        Some(typed) if typed.iter().any(|text| flat(text).contains(&intent.marker)) => {
-            Resolution::Done
-        }
+        Some(typed) if typed.iter().any(|text| flat(text).contains(&wanted)) => Resolution::Done,
         Some(_) => Resolution::NotStarted,
     }
 }
