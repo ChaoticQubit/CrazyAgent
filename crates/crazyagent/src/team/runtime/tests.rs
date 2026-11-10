@@ -6679,6 +6679,45 @@ fn a_master_on_off_is_not_stopped_as_idle_until_the_owner_chooses_a_time() {
     team.shutdown().unwrap();
 }
 
+/// Runs the runtime's ticks for a span, 50 ms apart. Inputs: the runtime and the span.
+/// Output: none.
+#[cfg(target_os = "macos")]
+fn tick_for(team: &mut TeamRuntime, span: Duration) {
+    let until = Instant::now() + span;
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A time chosen after Off counts from the choice, so a master idle all along is not stopped
+/// at the next tick (OWNER-Q4-1-L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_time_chosen_after_off_counts_from_the_choice_not_from_the_last_turn() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bound = Duration::from_secs(3);
+    let (mut team, id) = idle_plain_master(
+        &fixture,
+        &host,
+        bound,
+        Some(crate::team::MasterIdleStop::Off),
+    );
+    tick_for(&mut team, bound + Duration::from_secs(1));
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::FifteenMinutes);
+    tick_for(&mut team, Duration::from_millis(250));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "a master idle since before the choice is still up right after it"
+    );
+    fixture.until(&mut team, "the chosen time passes from the choice", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    team.shutdown().unwrap();
+}
+
 /// A live master with no choice saved is not stopped as idle, as it never was (DEC-117 Q4).
 #[cfg(target_os = "macos")]
 #[test]
@@ -7051,6 +7090,35 @@ fn a_master_turn_cut_by_the_task_limit_names_the_limit_and_the_setting() {
     let said = "The master stopped before it replied: stopped by the 1 s task limit; change it in Team settings.";
     fixture.until(&mut team, "the cut master turn leaves its note", |f| {
         f.note(said)
+    });
+    team.shutdown().unwrap();
+}
+
+/// An idle stop set after Off counts from that change, so a sub-agent idle all along is not
+/// stopped at the next tick (OWNER-Q4-1-L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_idle_stop_set_after_off_counts_from_the_change_for_a_sub_agent() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    let id = idle_sub_agent(&fixture, &mut team);
+    tick_for(&mut team, Duration::from_secs(4));
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET idle_secs=3 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    tick_for(&mut team, Duration::from_millis(250));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "a sub-agent idle since before the change is still up right after it"
+    );
+    fixture.until(&mut team, "the 3 s idle stop ends the sub-agent", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
     });
     team.shutdown().unwrap();
 }

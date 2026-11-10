@@ -121,11 +121,17 @@ export async function readyAdded(previous: string[], members: string[], accounts
   return setupNote(await readyEach(setupTargets(previous, members, accounts), note));
 }
 
+/** The most accounts a usage report holds, the engine's LIMITS_MAX: past it an account with no
+ * row may still have a reading. */
+const LIMITS_MAX = 64;
+
 /** One account's usage on its row. Inputs: the limits read, the account id and now. Output: its
- * bars, the line for an account with no reading, or nothing while the limits are not read. */
+ * bars, the line for an account with no reading, or nothing while the limits are not read or
+ * when a full report may have cut this account off. */
 function RowUsage({ limits, id, nowMs }: { limits: Loaded<AccountLimits[]>; id: string; nowMs: number }) {
   if (limits.kind !== "ok") return null;
   const found = limits.value.find((row) => row.account === id);
+  if (!found && limits.value.length >= LIMITS_MAX) return null;
   const bars = found ? usageBars(found, nowMs) : [];
   if (bars.length === 0) return <div className="pool-limit-none">No usage read yet</div>;
   return <div className="pool-limits">{bars.map((bar) => <div key={bar.name} className={bar.tone === "ok" ? "pool-limit" : `pool-limit ${bar.tone}`}>
