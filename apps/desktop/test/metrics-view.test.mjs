@@ -331,3 +331,10 @@ test("the model table's head says what its number is", () => {
   assert.equal(head(view_("tokens", "bundled")), "Model Tokens Estimated cost at API prices");
   assert.equal(head(view_("tokens", "off")), "Model Tokens");
 });
+
+test("tools over time says a time shows at most its eight most-used tools", () => {
+  const note = "Each time shows at most its 8 most-used tools.";
+  const eight = Array.from({ length: 8 }, (_, n) => ({ start_ms: SINCE, tool: `T${n}`, count: 8 - n }));
+  assert.ok(text(panels({ tools: eight })).includes(note));
+  assert.ok(!text(panels()).includes(note));
+});
