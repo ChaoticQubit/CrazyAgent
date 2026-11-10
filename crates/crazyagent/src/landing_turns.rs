@@ -2,6 +2,7 @@ use crate::engine::EngineError;
 use crate::landing::{self, AgentKind, ChangeSetId, ChangeState, TurnEnd, Workspace};
 use crate::protocol::{ProjectId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
+use std::path::PathBuf;
 
 /// What one turn end did to its worktree's change set: nothing is pending, this turn
 /// added edits to the set, or a set waits that this turn added nothing to. Fields: the
@@ -20,19 +21,21 @@ pub enum Landed {
 /// to its agent through `catch_up` and is reported Waiting, since it waits on the agent,
 /// not the owner (OS-8); a catch-up that leaves it, or cannot run, leaves it to the owner
 /// as before, the cause logged by its plain code. Inputs: the change set store, the
-/// workspace and the turn end. Output: Nothing when no set is pending, Added or Waiting,
-/// or the refusal.
+/// workspace, the turn end and the owner's settings files, whose model ports a lockfile
+/// regeneration keeps. Output: Nothing when no set is pending, Added or Waiting, or the
+/// refusal.
 pub fn record(
     db: &Connection,
     workspace: &Workspace,
     end: &TurnEnd,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<Landed, EngineError> {
     let before =
         landing::open_change_set(db, &workspace.worktree)?.map(|set| (set.head, set.state));
     let Some(id) = landing::record_turn_end(db, workspace, end)? else {
         return Ok(Landed::Nothing);
     };
-    match catch_up(db, &id) {
+    match catch_up(db, &id, settings) {
         Ok(true) => return Ok(Landed::Waiting(id)),
         Ok(false) => {}
         Err(problem) => eprintln!(
@@ -54,19 +57,24 @@ pub fn record(
 /// task starts. Inputs: the store and the change set. Output: true once the set went back
 /// to its agent, false when it waits for the owner, or the plain refusal of a step before
 /// the merge, the set then waiting for the owner too.
-fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
-    catch_up_with(db, id, Some(after_regeneration))
+fn catch_up(
+    db: &Connection,
+    id: &ChangeSetId,
+    settings: Option<&(PathBuf, PathBuf)>,
+) -> Result<bool, EngineError> {
+    catch_up_with(db, id, Some(after_regeneration), settings)
 }
 
 /// Runs [`catch_up`], where a clash in lockfiles only may start a regeneration only with
-/// `after`. Inputs: the store, the change set and what runs after a regeneration that
-/// landed nothing. Output: as `catch_up`.
+/// `after`. Inputs: the store, the change set, what runs after a regeneration that landed
+/// nothing and the owner's settings files. Output: as `catch_up`.
 fn catch_up_with(
     db: &Connection,
     id: &ChangeSetId,
     after: Option<landing::AfterRegeneration>,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<bool, EngineError> {
-    if !landing::conflicts_with_main(db, id, after)? {
+    if !landing::conflicts_with_main(db, id, after, settings)? {
         return Ok(false);
     }
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
@@ -82,11 +90,16 @@ fn catch_up_with(
 /// refusal the clash goes to its agent as Task 7's update and the owner, told at the turn
 /// end that the edits wait in Changes, hears that they went back; after the set or main
 /// moved the check may start another regeneration; a step that cannot run is logged by its
-/// plain code and the set waits for the owner. Inputs: the store, the set and whether
-/// another regeneration may start.
-fn after_regeneration(db: &Connection, id: &ChangeSetId, again: bool) {
+/// plain code and the set waits for the owner. Inputs: the store, the set, whether
+/// another regeneration may start and the owner's settings files.
+fn after_regeneration(
+    db: &Connection,
+    id: &ChangeSetId,
+    again: bool,
+    settings: Option<&(PathBuf, PathBuf)>,
+) {
     let after = again.then_some(after_regeneration as landing::AfterRegeneration);
-    let told = catch_up_with(db, id, after).and_then(|back| match back {
+    let told = catch_up_with(db, id, after, settings).and_then(|back| match back {
         true => tell_owner_it_went_back(db, id),
         false => Ok(()),
     });

@@ -897,13 +897,7 @@ impl ResearchRunner {
         #[cfg(target_os = "macos")]
         toolchains::write_getconf(&home, false)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let kept = match (&self.settings, job.tools) {
-            (Some((global, local)), true) => crate::config::resolve_config(global, local)
-                .ok()
-                .and_then(|config| config.settings.model_access)
-                .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)),
-            _ => Vec::new(),
-        };
+        let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
@@ -1707,6 +1701,27 @@ fn read_folders(
     folders.sort();
     folders.dedup();
     Ok(folders)
+}
+
+/// The ports a research job never listens on beside `OWNER_PORTS`: the owner's configured
+/// local model ports for a tools-on job, none for a tools-off job or a runner with no
+/// settings files. Inputs: the runner's settings files and whether the job has tools.
+/// Output: the ports, or Invalid when the settings files do not read (OWNER-PORTS-FAIL-OPEN).
+fn job_kept_ports(
+    settings: Option<&(PathBuf, PathBuf)>,
+    tools: bool,
+) -> Result<Vec<u16>, RunError> {
+    match (settings, tools) {
+        (Some((global, local)), true) => crate::sandbox::settings_owner_ports(global, local)
+            .map_err(|_| {
+                RunError::Invalid(format!(
+                    "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the job",
+                    global.display(),
+                    local.display()
+                ))
+            }),
+        _ => Ok(Vec::new()),
+    }
 }
 
 /// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
@@ -3246,6 +3261,32 @@ mod tests {
         let none = profile(AgentNetwork::None, true);
         assert!(!none.contains("(remote ip \"*:"), "{none}");
         assert!(!none.contains("mDNSResponder"), "{none}");
+    }
+
+    /// OWNER-PORTS-FAIL-OPEN r1 L2: a tools-on job whose runner's settings files do not
+    /// read is refused as Invalid instead of starting with the owner's model ports unknown;
+    /// a tools-off job keeps no ports either way, as do settings files not made yet.
+    #[test]
+    fn a_tools_on_job_whose_settings_do_not_read_is_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let settings = (
+            folder.path().join("global.toml"),
+            folder.path().join("project.toml"),
+        );
+        assert_eq!(job_kept_ports(None, true).unwrap(), Vec::<u16>::new());
+        assert_eq!(
+            job_kept_ports(Some(&settings), true).unwrap(),
+            Vec::<u16>::new()
+        );
+        std::fs::write(&settings.0, "[[[\n").unwrap();
+        assert!(matches!(
+            job_kept_ports(Some(&settings), true),
+            Err(RunError::Invalid(reason)) if reason.contains("do not read")
+        ));
+        assert_eq!(
+            job_kept_ports(Some(&settings), false).unwrap(),
+            Vec::<u16>::new()
+        );
     }
 
     /// A research job's Claude Code pane gets the display the owner chose for the project's
