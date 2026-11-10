@@ -14510,6 +14510,7 @@ fn between_turns(
         input_ready: true,
         background_held: false,
         kept_session,
+        fresh: false,
         own_turn: None,
         own_rules: None,
         turn_started: None,

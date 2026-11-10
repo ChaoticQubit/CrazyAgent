@@ -534,6 +534,7 @@ struct Worker {
     input_ready: bool,
     background_held: bool,
     kept_session: bool,
+    fresh: bool,
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
@@ -6117,6 +6118,7 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
         };
         assert!(!(kept_session && live));
+        let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none());
         let (access, toolchains, network) = match &launch {
             Launch::Fresh(plan, _) => (plan.access, Some(plan.toolchains.clone()), plan.network),
             Launch::Adopt(adoption) => (
@@ -6177,6 +6179,7 @@ impl TeamRuntime {
                 input_ready: false,
                 background_held: false,
                 kept_session,
+                fresh,
                 own_turn: None,
                 own_rules: None,
                 turn_started: None,
