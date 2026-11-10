@@ -8882,7 +8882,13 @@ fn live_serve(
         drop(held);
         return None;
     }
-    settle_stop(session.stop(), held).or(problem)
+    ended_with(settle_stop(session.stop(), held), problem)
+}
+
+/// What a harness's end reports. Inputs: what its stop left to say, and the problem that
+/// ended it. Output: the one to report, if either.
+fn ended_with(stopped: Option<String>, problem: Option<String>) -> Option<String> {
+    stopped.or(problem)
 }
 
 /// The account's credential copy and lease an agent's harness holds while it runs.
@@ -9384,7 +9390,7 @@ fn serve(
         let _ = session.interrupt();
         session.leave();
     } else {
-        return settle_stop(session.stop(), held).or(problem);
+        return ended_with(settle_stop(session.stop(), held), problem);
     }
     drop(held);
     problem
@@ -9498,9 +9504,10 @@ fn per_turn(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = stopped.or_else(|| {
-            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
-        });
+        let closed = ended_with(
+            stopped,
+            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref())),
+        );
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }

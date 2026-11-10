@@ -13716,6 +13716,98 @@ fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it()
     }
 }
 
+/// A turn that starts after a good one and never ends leaves no good end to stand on, so a
+/// command outliving it still fails the agent (team-8 r1 M1).
+#[test]
+fn an_unfinished_turn_after_a_good_one_still_fails_the_agent_a_command_outlived() {
+    use crate::harnesses::leftovers::LEFT;
+    let own: fn() -> Report = || Report::Own {
+        end: None,
+        text: String::new(),
+    };
+    let turn: fn() -> Report = || Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+    for (at, started) in [own, turn].into_iter().enumerate() {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        team.apply(
+            agent,
+            Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Success,
+                cause: None,
+            },
+        )
+        .unwrap();
+        team.apply(agent, started()).unwrap();
+        let problem = with_code("Still running: 7 make", Some(LEFT));
+        team.apply(
+            agent,
+            Report::Ended {
+                problem: Some(problem),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.agent_status(agent).0,
+            AgentStatus::Failed,
+            "row {at}"
+        );
+    }
+}
+
+/// A harness that closed and left a command running reports both, the close last, so its
+/// agent fails for the close and the owner sees both (team-8 r1 M2). A leftover alone after
+/// good work stops the agent, a close alone fails it, and a clean end reports nothing.
+#[test]
+fn a_close_with_a_command_left_fails_the_agent_and_reports_both() {
+    use crate::harnesses::leftovers::LEFT;
+    let left = with_code("Still running: 7 make", Some(LEFT));
+    let closed = with_code(PROCESS_CLOSED, Some("session_gone"));
+    let both = format!("{left} {closed}");
+    let rows = [
+        (Some(&left), Some(&closed), AgentStatus::Failed, Some(&both)),
+        (Some(&left), None, AgentStatus::Stopped, Some(&left)),
+        (None, Some(&closed), AgentStatus::Failed, Some(&closed)),
+        (None, None, AgentStatus::Stopped, None),
+    ];
+    for (at, (stopped, problem, expected, reported)) in rows.into_iter().enumerate() {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        team.apply(
+            agent,
+            Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Success,
+                cause: None,
+            },
+        )
+        .unwrap();
+        let problem = ended_with(stopped.cloned(), problem.cloned());
+        team.apply(agent, Report::Ended { problem }).unwrap();
+        let shown: Option<String> = fixture
+            .connection
+            .query_row(
+                "SELECT error FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixture.agent_status(agent).0, expected, "row {at}");
+        assert_eq!(shown.as_ref(), reported, "row {at}");
+    }
+}
+
 /// A wake task whose message was read before the task ran, as when a restart runs it a
 /// second time, says the message was already delivered rather than pointing at one that
 /// is not there (HB-S5-C).
