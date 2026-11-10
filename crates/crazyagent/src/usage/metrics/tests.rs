@@ -1811,6 +1811,38 @@ fn every_breakdown_carries_its_dollars() {
 }
 
 #[test]
+fn with_prices_off_no_metric_carries_a_dollar() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','gpt-5',100,10,0,0,900)",
+    );
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        [
+            metrics.series[0].cost_nanos,
+            metrics.runs[0].cost_nanos,
+            metrics.projects[0].cost_nanos,
+            metrics.agents[0].cost_nanos,
+            metrics.accounts[0].cost_nanos,
+            metrics.harnesses[0].cost_nanos,
+            metrics.models[0].cost_nanos,
+        ],
+        [0; 7]
+    );
+    assert_eq!(metrics.models[0].tokens.input, 100);
+}
+
+#[test]
 fn models_sort_by_dollars_then_tokens_then_name() {
     let (_directory, db) = database();
     priced_rows(

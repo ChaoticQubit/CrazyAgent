@@ -1107,6 +1107,61 @@ fn a_codex_write_with_no_published_rate_costs_the_calls_input_rate() {
 }
 
 #[test]
+fn a_repeat_charges_the_one_hour_rate_only_on_one_hour_growth() {
+    let written = |total: u64, one_hour: u64| {
+        serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 1,
+            "cache_creation_input_tokens": total,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": one_hour,
+                "ephemeral_5m_input_tokens": total - one_hour
+            }
+        })
+    };
+    let repeated = |first: (u64, u64), second: (u64, u64)| {
+        let (root, db) = store();
+        let file = transcript(root.path(), "s1");
+        append(
+            &file,
+            &priced_line("msg_a", SONNET, written(first.0, first.1)),
+        );
+        scan_it(&db, root.path());
+        append(
+            &file,
+            &priced_line("msg_a", SONNET, written(second.0, second.1)),
+        );
+        scan_it(&db, root.path());
+        spent(&db)
+    };
+    let charge = |output: u64, cache_write: u64, one_hour: u64, prompt_tokens: u64| {
+        estimate(
+            SONNET,
+            super::super::prices::Charged {
+                tokens: Tokens {
+                    output,
+                    cache_write,
+                    ..Tokens::default()
+                },
+                prompt_tokens,
+                one_hour,
+                ..Default::default()
+            },
+        )
+    };
+    assert_eq!(
+        [
+            repeated((1000, 800), (1200, 800)),
+            repeated((1000, 1000), (2000, 2000)),
+        ],
+        [
+            charge(1, 1000, 800, 1000) + charge(0, 200, 0, 1200),
+            charge(1, 1000, 1000, 1000) + charge(0, 1000, 1000, 2000),
+        ]
+    );
+}
+
+#[test]
 fn the_whole_calls_prompt_picks_the_tier() {
     let priced = |tokens: Tokens, prompt_tokens: u64| {
         estimate(

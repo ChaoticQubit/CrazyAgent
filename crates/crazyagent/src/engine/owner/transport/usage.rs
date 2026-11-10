@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::metrics::Metrics;
+use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,9 @@ enum Action {
         account: CredentialRef,
         window: WindowKind,
         at_ms: Option<i64>,
+    },
+    SetMoney {
+        settings: MoneySettings,
     },
 }
 
@@ -146,6 +150,14 @@ impl OwnerClient {
         }
     }
 
+    /// Stores the owner's main number and price source. Input: the settings. Output: done.
+    pub async fn usage_set_money(&self, settings: MoneySettings) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetMoney { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
             let read = read_kind(&action);
@@ -205,6 +217,7 @@ enum Prepared {
 enum Change {
     Refresh,
     SetReset(CredentialRef, WindowKind, Option<i64>),
+    SetMoney(MoneySettings),
 }
 
 /// Serves one usage request. The report is built first; then, under the owner barrier, the
@@ -296,6 +309,7 @@ async fn prepare(
             window,
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
+        Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
     })
 }
 
@@ -346,6 +360,7 @@ async fn finish(
             Change::SetReset(account, window, at_ms) => {
                 usage::set_reset_override(&db, &account, window, at_ms)
             }
+            Change::SetMoney(settings) => usage::money::write(&db, settings),
         }
     })
     .await

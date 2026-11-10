@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::ProjectId;
+use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
 
 impl OwnerController {
@@ -27,5 +28,10 @@ impl OwnerController {
     /// Asks the engine to check every signed-in account's limits now.
     pub async fn usage_refresh(&self) -> Result<(), EngineError> {
         self.usage_client()?.usage_refresh().await
+    }
+
+    /// Stores the owner's main number and price source. Input: the settings. Output: done.
+    pub async fn usage_set_money(&self, settings: MoneySettings) -> Result<(), EngineError> {
+        self.usage_client()?.usage_set_money(settings).await
     }
 }

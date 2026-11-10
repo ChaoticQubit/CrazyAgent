@@ -972,3 +972,62 @@ fn a_window_past_its_reset_reads_as_not_read_when_the_last_read_failed() {
     assert_eq!(row("mixed").five_hour, Some(ahead));
     assert_eq!(row("mixed").weekly, None);
 }
+
+fn priced_store() -> (tempfile::TempDir, Connection) {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    db.execute_batch(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+         VALUES (3600000,'agent','alpha','main','a','team-1','codex','s1','gpt-5',100,10,0,0,900),
+                (3600000,'agent','beta','main','a','team-2','codex','s2','gpt-5',100,10,0,0,40),
+                (0,'agent','alpha','main','a','team-1','codex','s3','gpt-5',100,10,0,0,2)",
+    )
+    .unwrap();
+    (root, db)
+}
+
+fn dollars(report: &UsageReport) -> [i64; 5] {
+    [
+        report.projects[0].cost_nanos,
+        report.pools[0].cost_nanos,
+        report.accounts[0].cost_nanos,
+        report.agents[0].cost_nanos,
+        report.money.cost_nanos,
+    ]
+}
+
+#[test]
+fn every_report_row_carries_its_dollars_and_the_money_view() {
+    let (_root, db) = priced_store();
+    let whole = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(dollars(&whole), [902, 942, 942, 902, 942]);
+    assert_eq!(whole.money.shown, crate::usage::money::MainNumber::Dollars);
+}
+
+#[test]
+fn the_money_view_keeps_to_the_reports_project_and_range() {
+    let (_root, db) = priced_store();
+    let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+    let scoped = report(&db, Some(&alpha), Some(1), 0, 7_200_000, &[]).unwrap();
+    assert_eq!(dollars(&scoped), [900; 5]);
+}
+
+#[test]
+fn with_prices_off_no_report_row_carries_a_dollar() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let (_root, db) = priced_store();
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let off = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(dollars(&off), [0; 5]);
+    assert_eq!(
+        (off.money.shown, off.money.as_of.clone(), off.total.input),
+        (MainNumber::Tokens, None, 300)
+    );
+}

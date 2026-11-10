@@ -1,5 +1,6 @@
 use super::capture::{Attribution, Format, Tokens};
 use super::health::{StepHealth, health};
+use super::money::{MoneyView, PriceSource};
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -44,6 +45,8 @@ pub struct UsageRow {
     pub last_ms: i64,
     #[serde(default)]
     pub not_reported_by: Option<String>,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// Tokens counted on one local day, which starts at `day_ms`.
@@ -106,6 +109,8 @@ pub struct UsageReport {
     #[serde(default)]
     pub health: Vec<StepHealth>,
     pub partial_homes: u64,
+    #[serde(default)]
+    pub money: MoneyView,
 }
 
 /// Tells whether the engine counts a harness's usage: from its session records (Claude
@@ -212,6 +217,7 @@ fn flag_unreported(
                         runs: 0,
                         last_ms: *last_ms,
                         not_reported_by: None,
+                        cost_nanos: 0,
                     },
                 };
                 row.not_reported_by = Some(harness_name(harness));
@@ -300,7 +306,7 @@ fn rows(
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
-                COUNT(DISTINCT agent||'/'||session),MAX(hour_ms)
+                COUNT(DISTINCT agent||'/'||session),MAX(hour_ms),TOTAL(cost_nanos)
              FROM usage_tokens WHERE hour_ms>=?1 AND (?3 OR {column}<>'')
                 AND (?4 IS NULL OR project=?4) {only}
              GROUP BY {column}
@@ -323,6 +329,7 @@ fn rows(
                 runs: count(row.get(5)?),
                 last_ms: row.get(6)?,
                 not_reported_by: None,
+                cost_nanos: row.get::<_, f64>(7)? as i64,
             })
         })
         .map_err(storage)?
@@ -536,7 +543,8 @@ pub fn report(
     for row in &mut limits {
         row.forget_unread_windows(now_ms);
     }
-    let report = fit(UsageReport {
+    let money = super::money::view(db, project, since)?;
+    let mut report = fit(UsageReport {
         since_ms,
         total,
         runs,
@@ -565,7 +573,17 @@ pub fn report(
         not_reported_by: unreported_harnesses(db, project, since)?,
         health: health(db)?,
         partial_homes,
+        money,
     })?;
+    if report.money.settings.prices == PriceSource::Off {
+        report
+            .projects
+            .iter_mut()
+            .chain(report.pools.iter_mut())
+            .chain(report.accounts.iter_mut())
+            .chain(report.agents.iter_mut())
+            .for_each(|row| row.cost_nanos = 0);
+    }
     assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);
     assert!(report.not_reported_by.len() <= HARNESSES_MAX);

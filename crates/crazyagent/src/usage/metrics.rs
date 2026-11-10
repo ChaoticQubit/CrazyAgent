@@ -1,4 +1,5 @@
 use super::capture::Tokens;
+use super::money::PriceSource;
 use super::report::{REPORT_BYTES_MAX, ROWS_MAX, SHARES, count, has_table, tokens};
 use super::{failure, storage};
 use crate::engine::EngineError;
@@ -618,7 +619,7 @@ fn models(
 
 /// Totals the range's dollars and the headline tokens that have no price. Inputs: the
 /// store, the project and the range start. Output: nanodollars and tokens.
-pub fn money_totals(
+pub(super) fn money_totals(
     db: &Connection,
     project: Option<&str>,
     since_ms: i64,
@@ -678,7 +679,7 @@ pub fn read(
     let bucket_ms = bucket_for(span_ms);
     let mut projects = groups(db, "project", project, since_ms)?;
     project_merges(db, project, since_ms, &mut projects)?;
-    let metrics = fit(Metrics {
+    let mut metrics = fit(Metrics {
         running,
         tasks_waiting,
         tasks_done,
@@ -721,6 +722,18 @@ pub fn read(
             .as_ref()
             .is_none_or(|title| title.len() <= TITLE_BYTES_MAX)
     }));
+    if super::money::read(db)?.prices == PriceSource::Off {
+        metrics.series.iter_mut().for_each(|row| row.cost_nanos = 0);
+        metrics.runs.iter_mut().for_each(|row| row.cost_nanos = 0);
+        metrics
+            .projects
+            .iter_mut()
+            .chain(metrics.accounts.iter_mut())
+            .chain(metrics.harnesses.iter_mut())
+            .for_each(|row| row.cost_nanos = 0);
+        metrics.agents.iter_mut().for_each(|row| row.cost_nanos = 0);
+        metrics.models.iter_mut().for_each(|row| row.cost_nanos = 0);
+    }
     Ok(metrics)
 }
 

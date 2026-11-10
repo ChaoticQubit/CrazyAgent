@@ -9,6 +9,7 @@ pub mod activity;
 pub mod capture;
 pub mod health;
 pub mod metrics;
+pub mod money;
 pub mod poll;
 pub mod prices;
 pub mod report;
@@ -337,6 +338,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
     db.execute_batch(health::SCHEMA).map_err(storage)?;
     db.execute_batch(report::SCHEMA).map_err(storage)?;
+    db.execute_batch(money::SCHEMA).map_err(storage)?;
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
     capture::count_rows(db)
 }
