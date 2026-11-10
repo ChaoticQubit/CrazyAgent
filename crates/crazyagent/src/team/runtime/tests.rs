@@ -24209,10 +24209,11 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
 }
 
 /// SEC2-R2: a stopped native teammate the terminal host calls unknown while the socket of
-/// its lead's teammates' server is still there is not taken as gone at the first look, since
-/// one refused connect proves no end: its end looks again off the tick, and once the looks
-/// run out its row says the cleanup is uncertain. A teammate whose lead's teammates' socket
-/// is gone is still marked stopped as gone.
+/// its lead's teammates' server is still there and refuses a connect is not taken as gone at
+/// the first look, since one refused connect proves no end: its end looks again off the
+/// tick, and once the looks run out its row says the cleanup is uncertain. A teammate whose
+/// lead's teammates' server accepts a connect (TEAM-LOWS r1 L1), or whose socket is gone, is
+/// still marked stopped as gone.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncertain() {
@@ -24228,7 +24229,8 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
     let state = fixture.base.join("team");
     let mut scratches = Vec::new();
     let mut mates = Vec::new();
-    for socket_stays in [true, false] {
+    let mut live = Vec::new();
+    for shape in ["refuses", "accepts", "gone"] {
         let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
         let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
         fixture
@@ -24246,15 +24248,25 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
         let socket =
             crate::terminal::renew_teammates_socket(&fixture.base, &AgentId::team(lead).unwrap())
                 .unwrap();
-        if socket_stays {
-            drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
-            assert_eq!(
-                crate::spawn_gate::connect_unix_std(&socket)
-                    .unwrap_err()
-                    .kind(),
-                std::io::ErrorKind::ConnectionRefused,
-                "the socket stays and refuses a connect"
-            );
+        match shape {
+            "refuses" => {
+                drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+                assert_eq!(
+                    crate::spawn_gate::connect_unix_std(&socket)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::ConnectionRefused,
+                    "the socket stays and refuses a connect"
+                );
+            }
+            "accepts" => {
+                live.push(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+                assert!(
+                    crate::spawn_gate::connect_unix_std(&socket).is_ok(),
+                    "the socket stays and accepts a connect"
+                );
+            }
+            _ => {}
         }
         fixture
             .connection
@@ -24268,7 +24280,7 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
 
     let mut stopped = Vec::new();
     let deadline = Instant::now() + WAIT;
-    while stopped.len() < 2 && Instant::now() < deadline {
+    while stopped.len() < 3 && Instant::now() < deadline {
         let started = Instant::now();
         stopped.extend(team.stop_unmanaged().unwrap());
         assert!(
@@ -24278,7 +24290,7 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(stopped.len(), 2, "{stopped:?}");
+    assert_eq!(stopped.len(), 3, "{stopped:?}");
     let error = |mate: i64| -> Option<String> {
         fixture
             .connection
@@ -24290,13 +24302,19 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
     assert_eq!(
         error(mates[0]).as_deref(),
         Some("The owner stopped this teammate. (harness_cleanup_uncertain)"),
-        "unknown while its teammates' socket stays is not proven gone"
+        "unknown while its teammates' socket stays and refuses is not proven gone"
     );
     assert_eq!(
         error(mates[1]).as_deref(),
         Some("The owner stopped this teammate."),
+        "unknown from a teammates' server that accepts a connect is gone"
+    );
+    assert_eq!(
+        error(mates[2]).as_deref(),
+        Some("The owner stopped this teammate."),
         "unknown with its teammates' socket gone is gone"
     );
+    drop(live);
     team.shutdown().unwrap();
 }
 
