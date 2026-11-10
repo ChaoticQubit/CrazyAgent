@@ -1137,7 +1137,7 @@ impl TeamRuntime {
                     Ok(hosts) => hosts,
                     Err(problem) => return Ok(Err(problem)),
                 };
-                match ModelProxy::bind(id, hosts, Some(port)) {
+                match ModelProxy::bind(id, hosts, Some(port), &[]) {
                     Ok(proxy) => Some(Arc::new(proxy)),
                     Err(_) => return Ok(Err(format!("its model proxy port {port} is taken"))),
                 }
@@ -7208,12 +7208,29 @@ impl TeamRuntime {
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
+        let kept = match (tools, &self.settings) {
+            (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
+                .map_err(|code| {
+                    with_code(
+                        &format!(
+                            "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the agent",
+                            global.display(),
+                            project.display()
+                        ),
+                        Some(code),
+                    )
+                })?,
+            (true, None) => {
+                (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+            }
+            (false, _) => Vec::new(),
+        };
         let proxy = if tools
             && policy.network == AgentNetwork::None
             && !matches!(remote, SandboxRemote::Loopback(_))
         {
             let hosts = model_hosts(launch, &account.reach)?;
-            let proxy = ModelProxy::bind(id, hosts, None).map_err(|e| {
+            let proxy = ModelProxy::bind(id, hosts, None, &kept).map_err(|e| {
                 with_code("the agent's model proxy could not start", Some(io_code(&e)))
             })?;
             Some(Arc::new(proxy))
@@ -7250,23 +7267,6 @@ impl TeamRuntime {
         }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let kept = match (tools, &self.settings) {
-            (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
-                .map_err(|code| {
-                    with_code(
-                        &format!(
-                            "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the agent",
-                            global.display(),
-                            project.display()
-                        ),
-                        Some(code),
-                    )
-                })?,
-            (true, None) => {
-                (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
-            }
-            (false, _) => Vec::new(),
-        };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;
