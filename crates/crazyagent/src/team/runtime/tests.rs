@@ -12848,9 +12848,15 @@ fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
         before.stdout,
         "nothing lands before Accept"
     );
-    let crate::landing::AcceptOutcome::Landed { commit, .. } =
-        crate::landing::accept(&landing, &home, &sets[0].id, &sets[0].head, None).unwrap()
-    else {
+    let crate::landing::AcceptOutcome::Landed { commit, .. } = crate::landing::accept(
+        &landing,
+        &home,
+        &sets[0].id,
+        &sets[0].head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
         panic!("Accept lands the agent's commit");
     };
     let shown = level_git(&project, &home, &["show", &format!("{commit}:page.md")]);
@@ -16483,9 +16489,15 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
                     .unwrap()
                     .expect("the lead's change set reads")
                     .1;
-                let accepted =
-                    crate::landing::accept(&db, &linked.git_home, &set.id, &set.head, None)
-                        .unwrap();
+                let accepted = crate::landing::accept(
+                    &db,
+                    &linked.git_home,
+                    &set.id,
+                    &set.head,
+                    None,
+                    crate::activity::AcceptPlace::Changes,
+                )
+                .unwrap();
                 assert!(
                     matches!(accepted, crate::landing::AcceptOutcome::Landed { .. }),
                     "the owner lands the lead's .gitignore"

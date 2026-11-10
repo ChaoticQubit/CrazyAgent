@@ -165,7 +165,16 @@ impl Project {
     }
 
     fn accept(&self, set: &ChangeSetId) -> AcceptOutcome {
-        landing::accept_into(&self.db, &self.home, set, &self.head(set), None, "main").unwrap()
+        landing::accept_into(
+            &self.db,
+            &self.home,
+            set,
+            &self.head(set),
+            None,
+            "main",
+            crazyagent::activity::AcceptPlace::Changes,
+        )
+        .unwrap()
     }
 
     fn event(&self, kind: EventKind, text: &str) {

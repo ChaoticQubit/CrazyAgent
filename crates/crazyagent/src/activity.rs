@@ -167,6 +167,32 @@ impl ActivityKind {
     }
 }
 
+/// Where the owner pressed Accept, as an accepted row names it: a Changes page, the
+/// desktop's or the terminal's, or the IDE's Source Control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptPlace {
+    Changes,
+    Ide,
+}
+
+impl AcceptPlace {
+    /// The place's stored name. Output: `changes` or `ide`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Changes => "changes",
+            Self::Ide => "ide",
+        }
+    }
+
+    /// Reads a stored name. Input: the name. Output: the place, or None for any other word.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Changes, Self::Ide]
+            .into_iter()
+            .find(|place| place.name() == name)
+    }
+}
+
 /// One thing that happened in a project, as the Overview shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityItem {
@@ -182,6 +208,10 @@ pub struct ActivityItem {
     /// read from the stored set rather than the row's words; None for any other row.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Where the owner pressed Accept on an accepted row, read from the stored set; None for
+    /// any other row, an Accept by someone else, or one recorded before places were kept.
+    #[serde(default)]
+    pub place: Option<AcceptPlace>,
 }
 
 /// One event a writer records. `agent` is the team agent whose work the event is about:
@@ -730,6 +760,12 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
+    let accepted_in = if has_column(db, "landing_change_sets", "accepted_in")? {
+        "CASE WHEN kind='accepted' THEN \
+         (SELECT accepted_in FROM landing_change_sets WHERE id=project_activity.change_set) END"
+    } else {
+        "NULL"
+    };
     let landed_on = if has_table(db, "landing_change_sets")? {
         "CASE WHEN kind='merged_into_main' THEN \
          (SELECT landed_on FROM landing_change_sets WHERE id=project_activity.change_set) END"
@@ -738,7 +774,7 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     };
     let mut statement = db
         .prepare(&format!(
-            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on} \
+            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on},{accepted_in} \
              FROM project_activity WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2"
         ))
         .map_err(state)?;
@@ -760,6 +796,10 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
                         branch: row.get::<_, Option<String>>(8)?.and_then(|reference| {
                             reference.strip_prefix("refs/heads/").map(str::to_owned)
                         }),
+                        place: row
+                            .get::<_, Option<String>>(9)?
+                            .as_deref()
+                            .and_then(AcceptPlace::parse),
                     },
                 ))
             },
@@ -910,6 +950,18 @@ pub fn backfill(db: &Connection, project: &ProjectId) -> Result<usize, EngineErr
     tx.commit().map_err(state)?;
     assert!(added <= found.len());
     Ok(added)
+}
+
+/// Tells whether a table has a column, false when the table is missing too. Inputs: the
+/// store, the table and the column. Output: the answer.
+fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+        params![table, column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(state)
 }
 
 fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
