@@ -50,6 +50,7 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   }
   assert.equal(client.openFailure("ide_platform_unqualified"), "The IDE is unavailable on this platform.");
   assert.equal(client.openFailure("ide_build_not_ready"), "The IDE isn't ready yet. Wait for the download to finish.");
+  assert.equal(client.openFailure("ide_settings_unavailable"), "CrazyAgent's settings couldn't be read, so the IDE didn't start. Fix them, then try again.");
   for (const code of ["ide_extension_install_failed", "ide_extension_list_invalid", "ide_extension_hash_mismatch", "ide_extensions_unavailable"]) {
     assert.equal(client.openFailure(code), "The IDE's extensions couldn't be installed, so the IDE didn't start. Try again.", code);
   }

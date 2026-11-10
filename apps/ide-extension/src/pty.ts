@@ -13,13 +13,19 @@ export const INPUT_BYTES_MAX = 4096;
 
 /** What the terminal shows where the engine has no qualified sandbox for it. */
 export const UNAVAILABLE =
-  "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. \"IDE shell\" in the terminal menu runs inside the IDE's own sandbox instead.";
+  "This terminal is unavailable: this system has no qualified sandbox for it.";
 
-/** What the terminal shows when the engine already runs its most Sandboxed terminals. */
-export const BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
+/** What the terminal shows when the engine already runs its most confined terminals. */
+export const BUSY = "This terminal can't start: too many are open. Close one, then open a new terminal.";
+
+/** What the terminal shows when its level is above the project's access. */
+export const ABOVE_PROJECT = "Raise project access to use this";
 
 const SIZE_DEFAULT: Size = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
+
+/** The level a terminal asks the engine for; the engine decides whether the project allows it. */
+export type Level = "sandboxed" | "own_branch";
 
 /** A terminal size in cells, as VS Code reports it. */
 export interface Size {
@@ -82,13 +88,14 @@ export function clampSize(size: Size | undefined): Size {
 }
 
 /**
- * Explains why a Sandboxed terminal stopped, for the terminal itself. Input: the engine's
+ * Explains why a confined terminal stopped, for the terminal itself. Input: the engine's
  * plain code. Output: one line; a code that is not plain text is not repeated.
  */
 export function stopped(code: string): string {
   if (code === "ide_terminal_unavailable") return UNAVAILABLE;
   if (code === "ide_terminals_busy") return BUSY;
-  return `The Sandboxed terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
+  if (code === "ide_terminal_above_project") return ABOVE_PROJECT;
+  return `This terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
 }
 
 /**
@@ -105,20 +112,22 @@ export class SandboxedPty {
   readonly onDidWrite = this.#wrote.event;
   readonly onDidClose = this.#closed.event;
   readonly #open: Open;
+  readonly #level: Level;
   readonly #text = new TextDecoder("utf-8");
   #socket: Socket | undefined;
   #size: Size = SIZE_DEFAULT;
   #attached = false;
   #ended = false;
 
-  constructor(open: Open) {
+  constructor(open: Open, level: Level) {
     this.#open = open;
+    this.#level = level;
   }
 
   open(initial: Size | undefined): void {
     const opened = clampSize(initial);
     this.#size = opened;
-    this.#open("ide.terminal", { cols: opened.columns, rows: opened.rows }).then(
+    this.#open("ide.terminal", { cols: opened.columns, rows: opened.rows, level: this.#level }).then(
       (socket) => this.#attach(socket, opened),
       (error: unknown) => this.#stop(error instanceof Error ? error.message : "unknown"),
     );

@@ -1,9 +1,12 @@
 use super::ports::{self, Ports};
+use super::workspace::IdePolicy;
 use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use crate::sandbox::policy::AgentAccess;
 use rustix::process::{Pid, Signal};
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{PipeWriter, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -85,6 +88,7 @@ pub struct Servers {
     start: Duration,
     grants: Arc<bridge::Grants>,
     socket: PathBuf,
+    settings_files: Option<(PathBuf, PathBuf)>,
     slots: Mutex<HashMap<ProjectId, Arc<Slot>>>,
     launches: AtomicU64,
     closed: AtomicBool,
@@ -126,6 +130,9 @@ struct Running {
     group: Pid,
     info: ServerInfo,
     folder: PathBuf,
+    /// The saved policy this launch started under; [`reuse`] hands it back only while that
+    /// still [`IdePolicy::holds`].
+    policy: IdePolicy,
     touched: Instant,
     started: Instant,
     /// Whether the launch passed [`ready`]: it listens on 127.0.0.1 and no other process
@@ -161,7 +168,8 @@ impl Servers {
     /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched
     /// and how long a launch may take to listen, [`IDLE_LIMIT`] and [`START_LIMIT`] outside
     /// tests, the owner server's IDE capability grants and its owner socket,
-    /// `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach. Output: the
+    /// `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach, and the
+    /// engine's two settings files, none for an engine opened without them. Output: the
     /// register.
     pub(crate) fn new(
         data: &Path,
@@ -169,6 +177,7 @@ impl Servers {
         start: Duration,
         grants: Arc<bridge::Grants>,
         socket: PathBuf,
+        settings_files: Option<(PathBuf, PathBuf)>,
     ) -> Self {
         assert!(!idle.is_zero());
         assert!(!start.is_zero());
@@ -180,11 +189,18 @@ impl Servers {
             start,
             grants,
             socket,
+            settings_files,
             slots: Mutex::default(),
             launches: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             deleting: Mutex::default(),
         }
+    }
+
+    /// The engine's two settings files, for a terminal that reads them as it starts. Output:
+    /// the paths, or none for an engine opened without them.
+    pub(crate) fn settings_files(&self) -> Option<(PathBuf, PathBuf)> {
+        self.settings_files.clone()
     }
 
     /// Ends every server a previous engine recorded and left running, across the project
@@ -238,8 +254,11 @@ impl Servers {
     /// brought to the owner's approvals ([`extensions::on_server_start`]) and the engine proxy
     /// in front of it. Returns
     /// once the server listens on 127.0.0.1 and no other process holds its port. The server
-    /// runs under its Seatbelt profile from [`sandbox::profile`]; where no sandbox is
-    /// qualified it never starts. The idle watch starts with the launch, so a launch whose
+    /// runs at the project's saved access level ([`super::workspace::ide_policy`]), under its
+    /// Seatbelt profile from [`sandbox::profile`] below Full access; one left running under a
+    /// level or network the owner has since changed is stopped first. A start reads the
+    /// owner's local model ports for that profile to keep ([`super::workspace::kept_ports`]),
+    /// and settings that do not read stop it. Where no sandbox is qualified it never starts. The idle watch starts with the launch, so a launch whose
     /// open is cut while it starts is still stopped once it exits, idles or misses its start
     /// limit, and is never handed back to a later open. Inputs: the project, its canonical
     /// folder, the canonical root of a verified build and whether the owner lets the IDE run
@@ -264,9 +283,19 @@ impl Servers {
         if self.deleting(project) {
             return Err(failure("ide_project_deleting"));
         }
-        if let Some(info) = reuse(&slot).await {
+        let policy = holding_start(&mut start, {
+            let (data, project) = (self.data_root(), project.clone());
+            move || super::workspace::ide_policy(&data, &project)
+        })
+        .await??;
+        if let Some(info) = reuse(&slot, policy).await {
             return Ok(info);
         }
+        let kept_ports = holding_start(&mut start, {
+            let settings = self.settings_files.clone();
+            move || super::workspace::kept_ports(settings.as_ref())
+        })
+        .await??;
         if self.running() >= SERVERS_MAX {
             return Err(failure("ide_servers_full"));
         }
@@ -311,6 +340,8 @@ impl Servers {
                 folder: &folder,
                 root,
                 socket: &self.socket,
+                policy,
+                kept_ports: &kept_ports,
             };
             let mut command =
                 command_off_thread(launch, &info, output, project_hooks, &mut start).await?;
@@ -343,6 +374,7 @@ impl Servers {
             group,
             info: info.clone(),
             folder,
+            policy,
             touched: Instant::now(),
             started: Instant::now(),
             ready: false,
@@ -546,6 +578,14 @@ impl Servers {
         })
     }
 
+    /// The engine data root this register's IDE folder sits in, which holds the database the
+    /// projects' saved policies are read from.
+    fn data_root(&self) -> PathBuf {
+        let data = self.folder.parent();
+        data.expect("the IDE folder is inside the data root")
+            .to_path_buf()
+    }
+
     fn prepare(&self, project: &ProjectId) -> Result<PathBuf, EngineError> {
         let folder = self.project_folder(project)?;
         for path in [
@@ -582,15 +622,19 @@ impl Drop for Servers {
     }
 }
 
-/// Hands back the running server of a slot and marks it used. A server that exited, or
-/// one that never passed [`ready`] because the open that started it was cut, is stopped
-/// instead, so an open only ever gets a server that listens and owns its port. Input: the
-/// slot, its start lock held. Output: the server, if alive and ready.
-async fn reuse(slot: &Slot) -> Option<ServerInfo> {
+/// Hands back the running server of a slot and marks it used. A server that exited, one
+/// that never passed [`ready`] because the open that started it was cut, or one the saved
+/// policy no longer [`IdePolicy::holds`] for is stopped instead, so an open only ever gets a
+/// server that listens, owns its port and runs at the project's level. Inputs: the slot, its
+/// start lock held, and the saved policy. Output: the server, if alive, ready and current.
+async fn reuse(slot: &Slot, policy: IdePolicy) -> Option<ServerInfo> {
     let unusable = {
         let mut state = locked(&slot.state);
         let running = state.as_mut()?;
-        if running.ready && matches!(running.child.try_wait(), Ok(None)) {
+        if running.ready
+            && running.policy.holds(policy)
+            && matches!(running.child.try_wait(), Ok(None))
+        {
             running.touched = Instant::now();
             return Some(running.info.clone());
         }
@@ -747,13 +791,29 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Where one IDE server launch runs: its project, the verified build, its state folder,
-/// the project root and the owner socket its built-in extension connects to.
+/// the project root, the owner socket its built-in extension connects to, the saved policy
+/// it runs at and the owner's local model ports its profile keeps.
 struct Launch<'a> {
     project: &'a ProjectId,
     build: &'a Path,
     folder: &'a Path,
     root: &'a Path,
     socket: &'a Path,
+    policy: IdePolicy,
+    kept_ports: &'a [u16],
+}
+
+/// The folders and files of one server launch: the engine data root, the launch's server
+/// data folder, short temp folder, user data folder and extensions folder, the locked-keys
+/// file and the path of the engine-written git config.
+struct Places<'a> {
+    data: &'a Path,
+    home: PathBuf,
+    tmp: PathBuf,
+    user_data: PathBuf,
+    extensions: PathBuf,
+    locked: &'a Path,
+    git_config: PathBuf,
 }
 
 /// [`command`] on a blocking thread, so its git lookup, which runs xcrun on a Mac without the
@@ -767,7 +827,8 @@ async fn command_off_thread(
     project_hooks: bool,
     start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Command, EngineError> {
-    let project = launch.project.clone();
+    let (project, policy) = (launch.project.clone(), launch.policy);
+    let kept_ports = launch.kept_ports.to_vec();
     let (build, folder, root, socket) = (
         launch.build.to_path_buf(),
         launch.folder.to_path_buf(),
@@ -782,6 +843,8 @@ async fn command_off_thread(
             folder: &folder,
             root: &root,
             socket: &socket,
+            policy,
+            kept_ports: &kept_ports,
         };
         command(launch, &info, output, project_hooks)
     })
@@ -808,36 +871,23 @@ async fn holding_start<T: Send + 'static>(
     Ok(made)
 }
 
-/// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
-/// this launch, after the AI lock is written ([`settings::write`]); a lock that cannot be
-/// written stops the start. The build's launcher on 127.0.0.1 at the server port, the token
-/// file (never the token), its own server data folder, the user data folder inside it whose
-/// Remote settings folder is locked, the locked-keys file readable, the extensions folder
-/// read only, license accepted, telemetry off, workspace trust off and a 30 s reconnection
-/// grace; a cleared environment holding only [`env::server_env`], with the owner `socket`
-/// the built-in extension connects to and TMPDIR at its short temp folder, its server data
-/// folder as the working directory (the profile lets it read no folder above), stdout and
-/// stderr into the redacting `output` pipe, and its own process group. The git shim lets
-/// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
-/// at `root`'s agents root, and at its older one while an engine-made worktree of
-/// `project` stays there ([`super::workspace::older_agents`]); a `root` holding a `:` is
-/// refused. Every git of the server reads the engine's own user-level config in the IDE
-/// folder, written here with the owner's name and email ([`super::git::write_global`]), since
-/// the profile denies the one in the owner's home. Inputs: the launch, the server's info, the
-/// output pipe and the hooks switch.
+/// The server's command line, IDE-1 verdict 3, after the AI lock is written
+/// ([`settings::write`]); a lock that cannot be written stops the start. The build's launcher
+/// at the project's level ([`launcher_command`]) with [`server_arguments`]; a cleared
+/// environment holding only [`env::server_env`], with the owner `socket` the built-in
+/// extension connects to and TMPDIR at its short temp folder; stdout and stderr into the
+/// redacting `output` pipe, and its own process group. In a confined server the git shim lets
+/// the project's hooks run in `root` only when `project_hooks` is on, and every git it starts
+/// is held by [`confined_git`]. A Full access server's git is the owner's own, hooks and
+/// config included, so its shim holds no hooks path, whose count line needs the forced keys.
+/// Inputs: the launch, the server's info, the output pipe and the hooks switch.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
     output: PipeWriter,
     project_hooks: bool,
 ) -> Result<Command, EngineError> {
-    let Launch {
-        project,
-        build,
-        folder,
-        root,
-        socket,
-    } = launch;
+    let (folder, policy) = (launch.folder, launch.policy);
     let errors = output
         .try_clone()
         .map_err(|_| failure("ide_state_unavailable"))?;
@@ -846,69 +896,37 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let written = settings::write(
-        folder,
-        &home,
+    let confined = policy.access != AgentAccess::Full;
+    let hooks = (confined && project_hooks).then_some(launch.root);
+    let index_project = confined.then_some(launch.root);
+    let written = settings::write(folder, &home, data, hooks, policy.access, index_project)?;
+    let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
+    let places = Places {
         data,
-        project_hooks.then_some(root),
-        Some(root),
-    )?;
-    let older_agents = super::workspace::older_agents(data, project, root)?;
-    let ceiling = super::git::ceiling(root, older_agents)?;
-    let owner_home = std::env::var_os("HOME");
-    super::git::write_global(folder, root, owner_home.as_deref().map(Path::new))?;
-    let git_config = folder.join(super::git::GLOBAL_CONFIG);
-    let tmp = crate::sandbox::toolchains::make_tmp(&home)
-        .map_err(|_| failure("ide_state_unavailable"))?;
-    let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));
-    let machine = settings::machine_folder(&home);
-    assert!(machine.starts_with(&user_data) && user_data.starts_with(&home));
-    let grants = sandbox::Grants {
-        data,
-        root,
-        build,
-        home: &home,
-        tmp: &tmp,
-        writable: &[],
-        read_only: &[extensions.as_path()],
-        readable: &[
-            info.token_path.as_path(),
-            info.capability_path.as_path(),
-            info.workspace.as_path(),
-            written.locked.as_path(),
-            git_config.as_path(),
-        ],
-        locked: &[machine.as_path()],
+        tmp: crate::sandbox::toolchains::make_tmp(&home)
+            .map_err(|_| failure("ide_state_unavailable"))?,
+        user_data: settings::user_data_folder(&home),
+        extensions: folder.join(EXTENSIONS),
+        locked: &written.locked,
+        git_config: folder.join(super::git::GLOBAL_CONFIG),
+        home,
     };
-    let profile = sandbox::install(folder, &grants, info.server_port)?;
-    let mut command = sandbox::command(&profile, &build.join(LAUNCHER));
+    let mut command = launcher_command(&launch, info, &places)?;
+    server_arguments(&mut command, info, &places);
+    let git = ceiling.as_deref().map(|ceiling| env::ServerGit {
+        ceiling,
+        config: &places.git_config,
+    });
     command
-        .args(["--host", "127.0.0.1", "--port"])
-        .arg(info.server_port.to_string())
-        .arg("--connection-token-file")
-        .arg(&info.token_path)
-        .arg("--server-data-dir")
-        .arg(&home)
-        .arg("--user-data-dir")
-        .arg(&user_data)
-        .arg("--extensions-dir")
-        .arg(&extensions)
-        .arg("--accept-server-license-terms")
-        .args(["--telemetry-level", "off"])
-        .arg("--disable-workspace-trust")
-        .arg("--reconnection-grace-time")
-        .arg(RECONNECTION_GRACE.as_secs().to_string())
-        .current_dir(&home)
         .env_clear()
         .envs(env::server_env(
             std::env::vars_os(),
             &info.capability_path,
-            socket,
-            &written.locked,
-            &ceiling,
-            &git_config,
+            launch.socket,
+            places.locked,
+            git,
         ))
-        .env("TMPDIR", &tmp)
+        .env("TMPDIR", &places.tmp)
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
@@ -919,8 +937,100 @@ fn command(
             .all(|arg| arg != "--connection-token" && arg != "--without-connection-token")
     );
     assert!(command.get_envs().count() <= env::ENV_MAX);
-    assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert_eq!(
+        policy.access == AgentAccess::Full,
+        command.get_program() != crate::sandbox::SANDBOX_EXEC
+    );
     Ok(command)
+}
+
+/// Holds the git of a confined server: writes the engine's own user-level config into the IDE
+/// folder with the owner's name and email ([`super::git::write_global`]), since the profile
+/// denies the one in the owner's home, and finds where git's search stops: `root`'s agents
+/// root, and its older one while an engine-made worktree of the project stays there
+/// ([`super::workspace::older_agents`]). Inputs: the engine data root and the launch. Output:
+/// the ceiling, or a refusal, as for a `root` holding a `:`.
+fn confined_git(data: &Path, launch: &Launch<'_>) -> Result<OsString, EngineError> {
+    let older_agents = super::workspace::older_agents(data, launch.project, launch.root)?;
+    let ceiling = super::git::ceiling(launch.root, older_agents)?;
+    let owner_home = std::env::var_os("HOME");
+    super::git::write_global(
+        launch.folder,
+        launch.root,
+        owner_home.as_deref().map(Path::new),
+    )?;
+    Ok(ceiling)
+}
+
+/// The launcher's command at the project's level: under the Seatbelt profile installed for
+/// this launch at Sandboxed and Own branch, with the network
+/// [`crate::sandbox::policy::ide_network`] gives that level, and with no profile at Full
+/// access. The profile keeps the Remote settings folder locked and the extensions folder read
+/// only. Inputs: the launch, the server's info and its places. Output: the command, or the
+/// profile's refusal.
+fn launcher_command(
+    launch: &Launch<'_>,
+    info: &ServerInfo,
+    places: &Places<'_>,
+) -> Result<Command, EngineError> {
+    let launcher = launch.build.join(LAUNCHER);
+    let level = match launch.policy.access {
+        AgentAccess::Full => return Ok(Command::new(&launcher)),
+        level @ (AgentAccess::Sandboxed | AgentAccess::OwnBranch) => level,
+    };
+    let machine = settings::machine_folder(&places.home);
+    assert!(machine.starts_with(&places.user_data) && places.user_data.starts_with(&places.home));
+    let grants = sandbox::Grants {
+        data: places.data,
+        root: launch.root,
+        build: launch.build,
+        home: &places.home,
+        tmp: &places.tmp,
+        writable: &[],
+        read_only: &[places.extensions.as_path()],
+        readable: &[
+            info.token_path.as_path(),
+            info.capability_path.as_path(),
+            info.workspace.as_path(),
+            places.locked,
+            places.git_config.as_path(),
+        ],
+        locked: &[machine.as_path()],
+    };
+    let network = crate::sandbox::policy::ide_network(level, launch.policy.network);
+    let profile = sandbox::install(
+        launch.folder,
+        &grants,
+        info.server_port,
+        network,
+        launch.kept_ports,
+    )?;
+    Ok(sandbox::command(&profile, &launcher))
+}
+
+/// Adds the server's command line: 127.0.0.1 at the server port, the token file (never the
+/// token), its own server data folder, the user data folder inside it, the extensions folder,
+/// license accepted, telemetry off, workspace trust off and a 30 s reconnection grace, with
+/// its server data folder as the working directory, since a profile lets it read no folder
+/// above. Inputs: the command, the server's info and the launch's places.
+fn server_arguments(command: &mut Command, info: &ServerInfo, places: &Places<'_>) {
+    command
+        .args(["--host", "127.0.0.1", "--port"])
+        .arg(info.server_port.to_string())
+        .arg("--connection-token-file")
+        .arg(&info.token_path)
+        .arg("--server-data-dir")
+        .arg(&places.home)
+        .arg("--user-data-dir")
+        .arg(&places.user_data)
+        .arg("--extensions-dir")
+        .arg(&places.extensions)
+        .arg("--accept-server-license-terms")
+        .args(["--telemetry-level", "off"])
+        .arg("--disable-workspace-trust")
+        .arg("--reconnection-grace-time")
+        .arg(RECONNECTION_GRACE.as_secs().to_string())
+        .current_dir(&places.home);
 }
 
 /// Records a launch's process group and its leader's start time, so the next engine can

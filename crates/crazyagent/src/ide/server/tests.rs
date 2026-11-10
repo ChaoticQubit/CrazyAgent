@@ -1,4 +1,6 @@
 use super::*;
+use crate::ide::workspace::{IdePolicy, ide_policy};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -39,6 +41,7 @@ fn servers_in(data: &Path, idle: Duration) -> Servers {
         START_LIMIT,
         Arc::default(),
         data.join("engine").join("owner.sock"),
+        None,
     )
 }
 
@@ -376,7 +379,11 @@ fn server_env_holds_only_allowlisted_names() {
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
     let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
     let git_config = Path::new("/private/tmp/ide/project/gitconfig");
-    let built = env::server_env(source, capability, socket, locked, ceiling, git_config);
+    let git = env::ServerGit {
+        ceiling,
+        config: git_config,
+    };
+    let built = env::server_env(source, capability, socket, locked, Some(git));
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -715,6 +722,7 @@ async fn an_open_cut_while_its_server_starts_stops_at_its_start_limit_well_befor
         CUT_START_LIMIT,
         Arc::default(),
         data.path().join("engine").join("owner.sock"),
+        None,
     );
     let project = project("cut-start");
     let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
@@ -1117,6 +1125,8 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
             folder: &folder,
             root,
             socket: &servers.socket,
+            policy: ide_policy(servers.folder.parent().unwrap(), project).unwrap(),
+            kept_ports: &[],
         },
         &info,
         writer,
@@ -1332,6 +1342,11 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
             folder: &folder,
             root,
             socket: &servers.socket,
+            policy: IdePolicy {
+                access: AgentAccess::Sandboxed,
+                network: AgentNetwork::Open,
+            },
+            kept_ports: &[],
         },
         &info,
         writer,
@@ -1516,6 +1531,11 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
             folder: &folder,
             root: checkout.path(),
             socket: &socket,
+            policy: IdePolicy {
+                access: AgentAccess::Sandboxed,
+                network: AgentNetwork::Open,
+            },
+            kept_ports: &[],
         },
         &info,
         writer,
@@ -1660,6 +1680,7 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
         START_LIMIT,
         Arc::clone(&grants),
         socket,
+        None,
     );
     let project = project("built-in");
     let info = servers
@@ -1927,4 +1948,251 @@ async fn stop_all_ends_a_recorded_server_behind_a_held_start_lock() {
     assert!(!folder.join(token::FILE).exists(), "token left behind");
     assert!(!folder.join(GROUP).exists(), "group file left behind");
     drop(held);
+}
+
+/// Saves a project's access level in the engine database of a test data root, as the owner's
+/// Save does. Inputs: the data root, the project and the level.
+fn set_level(data: &Path, project: &ProjectId, access: AgentAccess) {
+    let db = crate::landing::open(data).unwrap();
+    let policy = AgentPolicy {
+        access,
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Runs git as a Full access server starts it: the engine's shim under no profile, with the
+/// built server's environment and a test owner's home as `HOME`. Inputs: the built command,
+/// the IDE folder, the owner's home, the working folder and git's arguments. Output: git's
+/// output.
+fn full_access_git(
+    built: &Command,
+    folder: &Path,
+    owner: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let mut git = Command::new(&shim);
+    git.args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(
+            built
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .env("HOME", owner)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn_gate::output(&mut git).unwrap()
+}
+
+#[test]
+fn a_project_with_no_saved_policy_opens_sandboxed() {
+    let data = scratch();
+    let policy = ide_policy(data.path(), &project("none")).unwrap();
+    assert_eq!(policy.access, AgentAccess::Sandboxed);
+}
+
+/// A saved policy that cannot be read stops the open and records no launch. The checkout
+/// stands in for the build, since the policy is read before a build is looked at.
+#[tokio::test]
+async fn a_saved_policy_that_cannot_be_read_never_reaches_a_launch() {
+    let (checkout, data) = (scratch(), scratch());
+    let bad = project("bad");
+    set_level(data.path(), &bad, AgentAccess::Full);
+    let db = crate::landing::open(data.path()).unwrap();
+    db.execute(
+        "UPDATE project_agent_policy SET body='tampered' WHERE project='bad'",
+        [],
+    )
+    .unwrap();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let refused = servers
+        .open(&bad, checkout.path(), checkout.path(), false)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "ide_workspace_unavailable");
+    assert_eq!(servers.group(&bad), None);
+}
+
+/// A port on this machine that the settings rows name as the owner's local model.
+const LOCAL_MODEL_PORT: u16 = 47_011;
+
+/// The global settings of an owner with one local model connection on a port of this machine.
+/// Input: the port. Output: the file's text.
+fn local_model_settings(port: u16) -> String {
+    format!(
+        r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-account"]
+connections = [{{ id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:{port}/v1" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}]
+pools = [{{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }}]
+"#
+    )
+}
+
+/// The servers of an engine whose global settings hold `text`. Inputs: the data folder and the
+/// text. Output: the register.
+fn servers_reading(data: &Path, text: &str) -> Servers {
+    let global = data.join("global.toml");
+    fs::write(&global, text).unwrap();
+    Servers::new(
+        data,
+        IDLE_LIMIT,
+        START_LIMIT,
+        Arc::default(),
+        data.join("engine").join("owner.sock"),
+        Some((global, data.join("project.toml"))),
+    )
+}
+
+/// The owner's local model ports come from the engine's settings files.
+#[test]
+fn the_owners_local_model_ports_are_read_from_the_settings_files() {
+    let data = scratch();
+    let global = data.path().join("global.toml");
+    fs::write(&global, local_model_settings(LOCAL_MODEL_PORT)).unwrap();
+    let files = (global, data.path().join("project.toml"));
+    assert_eq!(
+        crate::ide::workspace::kept_ports(Some(&files)).unwrap(),
+        vec![LOCAL_MODEL_PORT]
+    );
+}
+
+/// Settings that cannot be read stop the start, which never goes on with no port kept.
+#[tokio::test]
+async fn a_settings_file_that_cannot_be_read_stops_the_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_reading(data.path(), "not = = toml");
+    let id = project("broken-settings");
+    let refused = servers
+        .open(&id, checkout.path(), checkout.path(), false)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "ide_settings_unavailable");
+    assert_eq!(servers.group(&id), None);
+}
+
+/// A real open of an Own branch project keeps the owner's local model port in the profile the
+/// server runs under.
+#[tokio::test]
+async fn an_own_branch_server_keeps_the_owners_local_model_port_in_its_profile() {
+    let (checkout, data) = (scratch(), scratch());
+    let build = cached_build();
+    let id = project("kept");
+    set_level(data.path(), &id, AgentAccess::OwnBranch);
+    let servers = servers_reading(data.path(), &local_model_settings(LOCAL_MODEL_PORT));
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    servers.open(&id, &root, &build, false).await.unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+    servers.stop_all().await;
+    let rule = format!("(local ip \"*:{LOCAL_MODEL_PORT}\")");
+    assert!(profile.contains(&rule), "{profile}");
+}
+
+#[test]
+fn a_saved_network_change_only_matters_at_own_branch() {
+    let at = |access, network| IdePolicy { access, network };
+    let own = at(AgentAccess::OwnBranch, AgentNetwork::Open);
+    let sandboxed = at(AgentAccess::Sandboxed, AgentNetwork::Open);
+    let full = at(AgentAccess::Full, AgentNetwork::Open);
+    assert!(own.holds(own));
+    assert!(!own.holds(at(AgentAccess::OwnBranch, AgentNetwork::Https)));
+    assert!(!own.holds(sandboxed));
+    assert!(sandboxed.holds(at(AgentAccess::Sandboxed, AgentNetwork::None)));
+    assert!(full.holds(at(AgentAccess::Full, AgentNetwork::Https)));
+}
+
+#[test]
+fn a_full_access_launch_runs_the_launcher_with_no_seatbelt() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    set_level(data.path(), &project("full"), AgentAccess::Full);
+    let (built, _) = built_server(&servers, &project("full"), &root);
+    assert_ne!(built.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert!(built.get_program().to_string_lossy().ends_with(LAUNCHER));
+}
+
+/// A launch's profile follows the project's saved level: on the same Open choice a Sandboxed
+/// launch cannot reach a listener on this machine and an Own branch launch can.
+#[test]
+fn a_launch_builds_its_profile_at_the_projects_level() {
+    let (checkout, data) = (scratch(), scratch());
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let reaches = |level, name: &str| {
+        let id = project(name);
+        set_level(data.path(), &id, level);
+        let (_, folder) = built_server(&servers, &id, &root);
+        let mut probe = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/usr/bin/nc"));
+        probe
+            .args(["-z", "-G", "5", "127.0.0.1", &port])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::spawn_gate::output(&mut probe)
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(!reaches(AgentAccess::Sandboxed, "at-sandboxed"));
+    assert!(reaches(AgentAccess::OwnBranch, "at-own-branch"));
+}
+
+/// Full access git is the owner's own: no forced key stops the project's hook or hides the
+/// owner's identity, and the shim's count line, which needs those keys, is not written.
+#[test]
+fn a_full_access_git_runs_the_projects_hook_with_the_owners_identity() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let hook = root.join(".git").join("hooks").join("pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\n: > hook-ran\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    set_level(data.path(), &project("full-git"), AgentAccess::Full);
+    let (built, folder) = built_server(&servers, &project("full-git"), &root);
+    let added = full_access_git(&built, &folder, owner.path(), &root, &["add", "a.txt"]);
+    assert!(added.status.success(), "{added:?}");
+    let args = ["commit", "-q", "-m", "owner"];
+    let committed = full_access_git(&built, &folder, owner.path(), &root, &args);
+    assert!(committed.status.success(), "{committed:?}");
+    assert!(root.join("hook-ran").exists());
+    let args = ["log", "-1", "--format=%an"];
+    let author = full_access_git(&built, &folder, owner.path(), &root, &args);
+    assert_eq!(
+        String::from_utf8_lossy(&author.stdout).trim(),
+        "Dana \"Q\" O\\wner"
+    );
+}
+
+/// A level change restarts the server at the next open. The row moves to Own branch so no
+/// lib test runs a real unconfined server under the test process's own home.
+#[tokio::test]
+async fn an_open_after_a_level_change_starts_a_new_server() {
+    let (checkout, data) = (scratch(), scratch());
+    let build = cached_build();
+    let moved = project("moved");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let first = servers.open(&moved, &root, &build, false).await.unwrap();
+    let token = fs::read_to_string(&first.token_path).unwrap();
+    let group = recorded_launch(&servers.project_folder(&moved).unwrap());
+    set_level(data.path(), &moved, AgentAccess::OwnBranch);
+    let second = servers.open(&moved, &root, &build, false).await.unwrap();
+    assert_ne!(token, fs::read_to_string(&second.token_path).unwrap());
+    gone(group).await;
+    servers.stop_all().await;
 }

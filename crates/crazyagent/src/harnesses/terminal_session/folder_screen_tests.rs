@@ -1,5 +1,5 @@
 use super::TerminalSession;
-use crate::harnesses::codex_folder::SCREEN_WAIT;
+use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
 use crate::harnesses::launch::{AccountBinding, LaunchError, LaunchLimits, LaunchRequest};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
 use crate::terminal::{AgentId, FOLDER, Host};
@@ -40,8 +40,8 @@ impl Drop for Server {
 
 /// A shell stand-in for Codex in a real tmux pane: it draws `first`, records every key it
 /// reads, and redraws `then` after a key once that file exists.
-struct Pane {
-    session: TerminalSession,
+pub(crate) struct Pane {
+    pub(crate) session: TerminalSession,
     keys: PathBuf,
     _server: Server,
     _root: tempfile::TempDir,
@@ -61,7 +61,7 @@ fn stand_in(first: &Path, then: &Path, keys: &Path) -> String {
     )
 }
 
-fn start(name: &str, first: &str, then: Option<&str>, codex_folder: bool) -> Pane {
+pub(crate) fn start(name: &str, first: &str, then: Option<&str>, codex_folder: bool) -> Pane {
     let root = tempfile::Builder::new()
         .prefix("ca-fold-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -144,9 +144,74 @@ impl Pane {
         self.session.poll_ready().unwrap_err()
     }
 
+    /// Uses up a launch's wait for its folder access screen, so the next look at it ends
+    /// the launch. Takes the pane, which has not been looked at yet.
+    pub(crate) fn spend_the_wait(&mut self) {
+        assert!(!self.session.poll_ready().unwrap());
+        let first = self.session.first.as_mut().unwrap();
+        first.started = Instant::now() - SCREEN_WAIT - Duration::from_secs(1);
+    }
+
+    /// Waits until the pane's screen reads as `wanted`. Panics when it never does.
+    fn shows(&self, wanted: Screen) {
+        let until = Instant::now() + READY_WITHIN;
+        while read_screen(&self.session.host.screen(&self.session.agent).unwrap()) != wanted {
+            assert!(Instant::now() < until, "the pane never showed {wanted:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Hands the pane to a later engine, as a restart does: this engine lets go of it and a
+    /// new session adopts it from its record. Takes the pane. Returns the adopted pane.
+    fn adopted(self) -> Self {
+        let Self {
+            session,
+            keys,
+            _server,
+            _root,
+        } = self;
+        let record = session.record().cloned().unwrap();
+        let (host, agent) = (session.host.clone(), session.agent.clone());
+        session.leave();
+        let session =
+            TerminalSession::adopt(host, agent, &record, LaunchLimits::default()).unwrap();
+        Self {
+            session,
+            keys,
+            _server,
+            _root,
+        }
+    }
+
     fn close(self) {
         assert!(self.session.stop().is_ok());
     }
+}
+
+/// SECAUDIT-10-L2: a Codex pane a restart finds still on its folder access screen takes the
+/// one Enter its launch owed it and is ready only at the input box, so no prompt is pasted
+/// into the menu.
+#[test]
+fn an_adopted_pane_still_on_the_folder_screen_takes_its_enter_before_it_is_ready() {
+    let pane = start("adopt-menu", MENU_QUIT, Some(INPUT_BOX), true);
+    pane.shows(Screen::Menu);
+    let mut pane = pane.adopted();
+    assert!(pane.ready_within(READY_WITHIN));
+    assert_eq!(pane.keys(), [ENTER_KEY]);
+    pane.close();
+}
+
+/// SECAUDIT-10-L2: an adopted Codex pane at its input box is ready at the first look and gets
+/// no key, as before.
+#[test]
+fn an_adopted_pane_at_its_input_box_is_ready_at_once_and_gets_no_key() {
+    let pane = start("adopt-box", INPUT_BOX, None, false);
+    pane.shows(Screen::InputBox);
+    let mut pane = pane.adopted();
+    assert!(pane.session.poll_ready().unwrap());
+    std::thread::sleep(WATCH);
+    assert_eq!(pane.keys(), Vec::<String>::new());
+    pane.close();
 }
 
 #[test]
