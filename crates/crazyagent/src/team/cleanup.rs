@@ -565,13 +565,15 @@ pub fn finished(
 
 /// What one pass of the engine's own cleanup did: the agents whose worktree it removed, in
 /// id order, the id the next pass starts after, 0 once this pass read the last finished agent
-/// so agents a check keeps never hold the others back, and one line for each agent the
-/// engine could not check or remove, at most `CANDIDATES_MAX`.
+/// so agents a check keeps never hold the others back, one line for each agent the engine
+/// could not check or remove, and one for each agent its check let through but its removal
+/// then kept, with the plain code that kept it, at most `CANDIDATES_MAX` lines in all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swept {
     pub removed: Vec<i64>,
     pub after: i64,
     pub failures: Vec<String>,
+    pub kept: Vec<String>,
 }
 
 /// Removes, on the engine's own schedule, the worktrees of finished agents in every project
@@ -593,6 +595,7 @@ pub fn sweep(
             removed: Vec::new(),
             after: 0,
             failures: Vec::new(),
+            kept: Vec::new(),
         });
     };
     let now = landing_time(now_ms)?;
@@ -622,6 +625,7 @@ pub fn sweep(
         removed: Vec::new(),
         after: 0,
         failures: Vec::new(),
+        kept: Vec::new(),
     };
     for (id, project) in &candidates {
         if swept.removed.len() == RECLAIMABLE_MAX {
@@ -629,7 +633,7 @@ pub fn sweep(
         }
         assert!(*id > swept.after);
         swept.after = *id;
-        if let Err(problem) = sweep_one(db, project, *id, now, now_ms, &mut swept.removed) {
+        if let Err(problem) = sweep_one(db, project, *id, now, now_ms, &mut swept) {
             swept.failures.push(format!(
                 "agent={id} cause={}",
                 crate::protocol::plain_code(&problem.0)
@@ -642,20 +646,22 @@ pub fn sweep(
         swept.after = 0;
     }
     assert!(swept.removed.len() <= RECLAIMABLE_MAX);
-    assert!(swept.failures.len() <= CANDIDATES_MAX);
+    assert!(candidates.len() <= CANDIDATES_MAX);
+    assert!(swept.removed.len() + swept.kept.len() + swept.failures.len() <= candidates.len());
     Ok(swept)
 }
 
 /// Checks one agent as Clean up would and removes its worktree when nothing keeps it. Inputs:
-/// the store, its project, the agent, the time now in both forms and the list it joins once
-/// removed. Output: Ok whether it went or stayed, or the problem that stopped the check.
+/// the store, its project, the agent, the time now in both forms and the pass it adds to:
+/// the agent once removed, or the code its removal kept it with. Output: Ok whether it went
+/// or stayed, or the problem that stopped the check.
 fn sweep_one(
     db: &Connection,
     project: &str,
     id: i64,
     now: u64,
     now_ms: i64,
-    removed: &mut Vec<i64>,
+    swept: &mut Swept,
 ) -> Result<(), EngineError> {
     let project = ProjectId::new(project).map_err(unavailable)?;
     let free = {
@@ -666,9 +672,18 @@ fn sweep_one(
         return Ok(());
     }
     let removal = remove(db, &project, &[id], now_ms)?;
-    if removal.agents == [id] {
-        assert!(removal.kept.is_none());
-        removed.push(id);
+    match removal.kept {
+        None => {
+            assert_eq!(removal.agents, [id]);
+            swept.removed.push(id);
+        }
+        Some(code) => {
+            assert!(removal.agents.is_empty());
+            swept.kept.push(format!(
+                "agent={id} kept={}",
+                crate::protocol::plain_code(&code)
+            ));
+        }
     }
     Ok(())
 }

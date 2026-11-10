@@ -289,8 +289,9 @@ pub(super) fn unlanded_teammates(
 /// the same checks as for a linked worktree (`holds_only`) once `sizes_match` found no
 /// file of another size, so the clone's config, hooks and index are never read. The
 /// teammates' worktree folder is left out of its untracked files, since `teammates_landed`
-/// checks it, and so is the code graph's copy. Inputs: the owner checkout root, the clone
-/// and the tip. Output: true when it holds nothing else.
+/// checks it, and so is the code graph's copy unless the tip tracks it (`graph_excludes`).
+/// Inputs: the owner checkout root, the clone and the tip. Output: true when it holds
+/// nothing else.
 fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<bool, EngineError> {
     let metadata = repository.join(".git");
     let folder = metadata.join(format!(
@@ -304,14 +305,10 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
         }
         let repo = repo.private_index(&folder.join("index"));
         repo.run(&["read-tree", tip])?;
-        holds_only_except(
-            &repo,
-            tip,
-            &[
-                &format!("/{}/", agent_git::TEAMMATES_FOLDER),
-                agent_git::GRAPH_EXCLUDE,
-            ],
-        )
+        let teammates = format!("/{}/", agent_git::TEAMMATES_FOLDER);
+        let mut excluded = vec![teammates.as_str()];
+        excluded.extend_from_slice(graph_excludes(&repo, tip)?);
+        holds_only_except(&repo, tip, &excluded)
     });
     let _ = std::fs::remove_dir_all(&folder);
     held
@@ -470,7 +467,9 @@ fn check(
     }
     match (head, store::base_of(db, text)?) {
         (Some(head), Some(base)) if head == base => {
-            match holds_only_except(&agent.repo, &head, &[agent_git::GRAPH_EXCLUDE]) {
+            let held = graph_excludes(&agent.repo, &head)
+                .and_then(|excluded| holds_only_except(&agent.repo, &head, excluded));
+            match held {
                 Err(refused) if refused.0 == "changes_git_failed" => {
                     Ok(Some("cleanup_worktree_unreadable"))
                 }
@@ -543,13 +542,35 @@ fn linked_teammates_landed(
         if !landed {
             return Ok(Some("cleanup_commits_unlanded"));
         }
-        match holds_only_except(&agent.repo, &head, &[agent_git::GRAPH_EXCLUDE]) {
+        let held = graph_excludes(&agent.repo, &head)
+            .and_then(|excluded| holds_only_except(&agent.repo, &head, excluded));
+        match held {
             Ok(true) => {}
             Ok(false) => return Ok(Some("cleanup_worktree_dirty")),
             Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
         }
     }
     Ok(None)
+}
+
+/// The untracked paths a worktree check leaves out for the code graph's copy (DEC-123): its
+/// folder, unless the commit tracks one, since then files there are the agent's work like any
+/// other and an untracked one left among them keeps the agent, as the removal's git does
+/// (rv-code L2). Inputs: the git to read with and the commit. Output: the paths left out.
+fn graph_excludes(repo: &Repo, commit: &str) -> Result<&'static [&'static str], EngineError> {
+    let name = agent_git::GRAPH_EXCLUDE.trim_matches('/');
+    assert!(!name.is_empty() && !name.contains('/'));
+    let tracked = repo.capture(
+        &["ls-tree", "-z", "--name-only", commit, "--", name],
+        REMOVE_OUTPUT_BYTES_MAX,
+    )?;
+    let excluded: &'static [&'static str] = if tracked.is_empty() {
+        &[agent_git::GRAPH_EXCLUDE]
+    } else {
+        &[]
+    };
+    assert!(excluded.len() <= 1);
+    Ok(excluded)
 }
 
 /// Deletes the code graph's copy at the top of a linked worktree whose commit holds none, so

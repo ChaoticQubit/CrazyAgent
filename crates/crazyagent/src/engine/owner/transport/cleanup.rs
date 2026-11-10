@@ -282,6 +282,9 @@ pub(super) async fn sweep(authority: std::sync::Weak<Authority>, mut stop: onesh
                 for line in swept.failures {
                     eprintln!("finished_agents_sweep_skipped {line}");
                 }
+                for line in swept.kept {
+                    eprintln!("finished_agents_sweep_kept {line}");
+                }
             }
             Err(error) => {
                 after = 0;

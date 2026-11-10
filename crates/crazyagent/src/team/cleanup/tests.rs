@@ -404,6 +404,7 @@ fn swept(removed: &[i64], after: i64) -> Swept {
         removed: removed.to_vec(),
         after,
         failures: Vec::new(),
+        kept: Vec::new(),
     }
 }
 
