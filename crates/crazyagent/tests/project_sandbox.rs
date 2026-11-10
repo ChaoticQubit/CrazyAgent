@@ -504,6 +504,90 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     assert!(!root_commit.status.success());
 }
 
+/// One different-case rename: its name, the script that runs it and the path it must leave.
+type CaseRename = (&'static str, &'static str, fn(&Case) -> PathBuf);
+
+/// DEC-123 rv-secreview L2: on the case-insensitive disk a name may be typed in any letter
+/// case, so each move deny on the project, its worktrees folders, a checkout and a checkout's
+/// `.git` file holds whatever case a rename uses, and a different-case rename never carries
+/// one aside for a link to take its place before the engine removes it. A plain folder's
+/// different-case rename still goes, so each refusal is the sandbox's.
+#[test]
+fn a_different_case_rename_never_moves_the_worktrees_folders_or_a_checkout() {
+    let attacks: [CaseRename; 9] = [
+        ("WORKTREES", "mv WORKTREES w", |case| {
+            case.project.join("worktrees")
+        }),
+        (
+            "WORKTREES/engine-one",
+            "mv WORKTREES/engine-one w",
+            |case| case.project.join("worktrees/engine-one"),
+        ),
+        (
+            "worktrees/ENGINE-ONE",
+            "mv worktrees/ENGINE-ONE w",
+            |case| case.project.join("worktrees/engine-one"),
+        ),
+        (
+            "worktrees/engine-one/.GIT",
+            "mv worktrees/engine-one/.GIT g",
+            |case| case.project.join("worktrees/engine-one/.git"),
+        ),
+        (
+            ".crazyagent/WORKTREES",
+            "mv .crazyagent/WORKTREES .crazyagent/w",
+            |case| case.project.join(".crazyagent/worktrees"),
+        ),
+        (
+            ".CRAZYAGENT/worktrees",
+            "mv .CRAZYAGENT/worktrees .crazyagent/w",
+            |case| case.project.join(".crazyagent/worktrees"),
+        ),
+        (
+            ".crazyagent/WORKTREES/agent-1",
+            "mv .crazyagent/WORKTREES/agent-1 w",
+            |case| case.project.join(".crazyagent/worktrees/agent-1"),
+        ),
+        (".git/WORKTREES", "mv .git/WORKTREES .git/w", |case| {
+            case.project.join(".git/worktrees")
+        }),
+        ("PROJECT", "mv ../PROJECT ../moved", |case| {
+            case.project.clone()
+        }),
+    ];
+    let (case, sandbox, profile, _) = git_case();
+    fs::create_dir_all(case.project.join("plain")).unwrap();
+    let control = run(&sandbox, &profile, "mv PLAIN p");
+    assert!(control.status.success(), "{control:?}");
+    assert!(case.project.join("p").is_dir());
+    let mut moved = Vec::new();
+    for (name, script, target) in attacks {
+        let (case, sandbox, profile, _) = git_case();
+        let agent = case.project.join(".crazyagent/worktrees/agent-1");
+        fs::create_dir_all(&agent).unwrap();
+        let before = fs::symlink_metadata(target(&case)).unwrap();
+        let output = run(&sandbox, &profile, script);
+        let after = fs::symlink_metadata(target(&case));
+        let stayed = after.as_ref().is_ok_and(|after| {
+            std::os::unix::fs::MetadataExt::ino(after)
+                == std::os::unix::fs::MetadataExt::ino(&before)
+        });
+        let denied = String::from_utf8_lossy(&output.stderr).contains("not permitted");
+        if !stayed || !denied {
+            moved.push((
+                name,
+                stayed,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+    }
+    assert_eq!(
+        moved,
+        Vec::<(&str, bool, String)>::new(),
+        "a different-case rename moved these or failed without a sandbox deny"
+    );
+}
+
 /// Checks that `script`, run under `sandbox` and `profile`, cannot create `target`: the
 /// command fails and the file is absent. Input: the sandbox, the profile, the script and
 /// the target path.

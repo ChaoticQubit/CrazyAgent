@@ -1,10 +1,13 @@
 use super::*;
 use crate::protocol::{ProjectId, encode_frame};
-use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal, RemovalPreview};
+use crate::team::cleanup::{
+    self, CANDIDATES_MAX, FinishedAgent, RECLAIMABLE_MAX, Removal, RemovalPreview,
+};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 2048;
 pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(120);
+const SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 
 /// Every code a Cleanup request can answer an owner client with: the reasons a finished
 /// agent is kept, this protocol's own, the change store's it reads through, and the owner
@@ -96,21 +99,22 @@ fn unknown() -> EngineError {
 }
 
 impl OwnerClient {
-    /// Reads a project's finished agents whose worktree and agent folder the owner may
-    /// remove, newest first, with their size on disk. Input: the project. Output: at most
-    /// `RECLAIMABLE_MAX` agents.
+    /// Reads a project's finished agents that still hold a worktree, newest first: the ones
+    /// the owner may remove with their worktree's size on disk, and the ones a check keeps
+    /// with its code. Input: the project. Output: at most `CANDIDATES_MAX` agents.
     pub async fn finished_agents(
         &self,
         project: ProjectId,
     ) -> Result<Vec<FinishedAgent>, EngineError> {
         match self.cleanup_exchange(Action::Finished { project }).await? {
-            Reply::Finished { agents } if agents.len() <= RECLAIMABLE_MAX => Ok(agents),
+            Reply::Finished { agents } if agents.len() <= CANDIDATES_MAX => Ok(agents),
             _ => Err(unknown()),
         }
     }
 
-    /// Removes the worktrees and agent folders of finished agents the owner confirmed; the
-    /// engine checks every one again first. Inputs: the project and the agents.
+    /// Removes the worktrees of finished agents the owner confirmed; the engine checks every
+    /// one again first, and their folders, conversations and history stay. Inputs: the
+    /// project and the agents.
     /// Output: the agents removed with the code of the first one kept when it stopped part
     /// way, or the refusal when it removed none.
     pub async fn remove_finished_agents(
@@ -245,6 +249,58 @@ pub(super) async fn serve(
     write_reply(stream, &frame).await
 }
 
+/// Removes finished agents' worktrees on the engine's own schedule while the owner server
+/// runs, as the owner's setting says: a pass at start, which also takes agents that finished
+/// before this build once their wait is over, then one every `SWEEP_EVERY`, each on a
+/// blocking thread off the request path, reading the setting again each time, and each
+/// starting where the last one stopped. Inputs: the authority, held weakly so a server
+/// dropped without its stop path still releases it, and the server's stop. Runs until the
+/// stop or until the authority is gone; a pass already running ends first.
+pub(super) async fn sweep(authority: std::sync::Weak<Authority>, mut stop: oneshot::Receiver<()>) {
+    let mut after = 0;
+    loop {
+        let Some(root) = authority
+            .upgrade()
+            .map(|authority| super::changes::engine_root(&authority))
+        else {
+            return;
+        };
+        let passed = match root {
+            Ok(root) => tokio::task::spawn_blocking(move || {
+                let db = open(&root)?;
+                crate::cleanup_settings::initialize(&db)?;
+                let settings = crate::cleanup_settings::load(&db)?;
+                cleanup::sweep(&db, &settings, after, crate::team::now_ms())
+            })
+            .await
+            .unwrap_or_else(|_| Err(failure("cleanup_unavailable"))),
+            Err(error) => Err(error),
+        };
+        match passed {
+            Ok(swept) => {
+                after = swept.after;
+                for line in swept.failures {
+                    eprintln!("finished_agents_sweep_skipped {line}");
+                }
+                for line in swept.kept {
+                    eprintln!("finished_agents_sweep_kept {line}");
+                }
+            }
+            Err(error) => {
+                after = 0;
+                eprintln!(
+                    "finished_agents_sweep_failed cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+            }
+        }
+        tokio::select! {
+            _ = &mut stop => return,
+            () = tokio::time::sleep(SWEEP_EVERY) => {}
+        }
+    }
+}
+
 /// Opens the change store of an engine folder with the team tables in place.
 /// Input: the engine folder. Output: the connection, or `cleanup_unavailable`.
 fn open(root: &Path) -> Result<rusqlite::Connection, EngineError> {
@@ -279,7 +335,7 @@ async fn prepare(
         Action::Finished { project } => tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            cleanup::finished(&db, &root.join("team"), &project, now).map(Prepared::Finished)
+            cleanup::finished(&db, &project, now).map(Prepared::Finished)
         })
         .await
         .map_err(|_| failure("cleanup_unavailable"))?,
@@ -328,15 +384,13 @@ async fn remove(
         tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            Ok(
-                match cleanup::remove(&db, &root.join("team"), &project, &agents, now)? {
-                    Removal {
-                        agents,
-                        kept: Some(code),
-                    } if agents.is_empty() => Reply::Rejected { code },
-                    Removal { agents, kept } => Reply::Removed { agents, kept },
-                },
-            )
+            Ok(match cleanup::remove(&db, &project, &agents, now)? {
+                Removal {
+                    agents,
+                    kept: Some(code),
+                } if agents.is_empty() => Reply::Rejected { code },
+                Removal { agents, kept } => Reply::Removed { agents, kept },
+            })
         })
     };
     work.await.map_err(|_| failure("cleanup_unavailable"))?

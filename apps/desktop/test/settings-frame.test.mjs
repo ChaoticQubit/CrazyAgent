@@ -23,7 +23,7 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
   const shown = await onFrame("pools", 1180, ({ evaluate }) => evaluate("Fixture.structure()"));
   assert.deepEqual(shown.groups, [
     { name: "Access", links: ["Accounts", "Pools", "GitHub", "Profile"] },
-    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory"] },
+    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents"] },
     { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
@@ -79,7 +79,7 @@ test("real Tab keys walk every Settings link in list order with a visible ring, 
     }
     return seen;
   });
-  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory",
+  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents",
     "Projects folder", "Sandbox", "Team alerts", "Updates", "In the panel"]);
   assert.deepEqual([...new Set(walked.slice(1, 14).map((item) => item.outline))], ["solid"]);
 });

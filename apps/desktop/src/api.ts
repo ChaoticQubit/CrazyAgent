@@ -336,6 +336,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   master: "changing the master conversation",
   owner_profile: "saving your profile",
   sandbox_settings: "changing the sandbox setting",
+  cleanup_settings: "changing when finished agents' worktrees go",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -416,6 +417,26 @@ export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
 /** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
 export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
   return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
+}
+
+/** When the engine removes a finished agent's worktree on its own, the engine's `CleanupMode`. */
+export type CleanupMode = "after_days" | "once_landed" | "manual";
+
+/** The owner's finished agents setting, the engine's `CleanupSettings`: the mode and the days
+ * the first mode waits, 1 to 365, kept while another mode is picked. */
+export interface CleanupSettings {
+  mode: CleanupMode;
+  days: number;
+}
+
+/** Reads when finished agents' worktrees go. Output: the stored setting, or the default before the first save. */
+export function getCleanupSettings(): Promise<Result<CleanupSettings>> {
+  return call<CleanupSettings>("desktop_cleanup_settings");
+}
+
+/** Saves when finished agents' worktrees go. Input: the full setting. Output: ok once saved. */
+export function saveCleanupSettings(settings: CleanupSettings): Promise<Result<void>> {
+  return change("desktop_set_cleanup_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";

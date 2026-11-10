@@ -1,6 +1,7 @@
 use super::settings_accounts::{send, settings_event};
 use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
+use crate::cleanup_settings::{CleanupMode, CleanupSettings, DAYS_MAX, DAYS_MIN};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
 use crate::sandbox::LinuxSockets;
@@ -31,7 +32,7 @@ const TOOL_WIDTH: usize = 16;
 const NAME_WIDTH: usize = 26;
 const KIND_WIDTH: usize = 10;
 const LICENSE_WIDTH: usize = 12;
-const LABEL_WIDTH: usize = 15;
+const LABEL_WIDTH: usize = 17;
 const FIELD_WIDTH: usize = 72;
 const WINDOW_MIN: usize = 3;
 const NOT_READY_TEXT: &str =
@@ -44,6 +45,43 @@ const SOCKETS_CHOICES: [LinuxSockets; 3] = [
     LinuxSockets::Refuse,
     LinuxSockets::TcpPorts,
 ];
+
+const CLEANUP_TEXT: &str =
+    "Finished agents: when CrazyAgent removes a finished agent's worktree on its own.";
+const CLEANUP_NOTE: &str = "Only the worktree goes: the code checkout and its build files. The agent's conversations, history, logs and messages stay. An agent whose work has not landed stays, and Clean up shows why.";
+const CLEANUP_CHOICES: [CleanupMode; 3] = [
+    CleanupMode::AfterDays,
+    CleanupMode::OnceLanded,
+    CleanupMode::Manual,
+];
+const DAYS_TEXT: &str = "Enter a whole number of days from 1 to 365.";
+const DAYS_DIGITS_MAX: usize = 3;
+
+/// The title of one finished agents option, the same words as the desktop Settings.
+/// Inputs: the mode and the days the first option waits. Output: the title, such as
+/// "3 days after the agent finishes".
+pub(in crate::tui) fn cleanup_title(mode: CleanupMode, days: u16) -> String {
+    match mode {
+        CleanupMode::AfterDays if days == 1 => "1 day after the agent finishes".to_owned(),
+        CleanupMode::AfterDays => format!("{days} days after the agent finishes"),
+        CleanupMode::OnceLanded => "Once its work lands".to_owned(),
+        CleanupMode::Manual => "Only when I click Clean up".to_owned(),
+    }
+}
+
+/// Reads the typed days as the engine takes them. Input: the typed text. Output: the whole
+/// number of days from 1 to 365, or None for anything else.
+fn cleanup_days(typed: &str) -> Option<u16> {
+    let typed = typed.trim();
+    if typed.is_empty()
+        || typed.len() > DAYS_DIGITS_MAX
+        || !typed.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let days: u16 = typed.parse().ok()?;
+    (DAYS_MIN..=DAYS_MAX).contains(&days).then_some(days)
+}
 
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
 /// Input: the option. Output: the title and the sentence naming what it allows and risks.
@@ -75,6 +113,9 @@ pub fn setup_plain(code: &str) -> String {
             "CrazyAgent is not connected to the engine right now."
         }
         "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        "cleanup_settings_invalid" => {
+            "The stored finished agents setting is not one this version knows."
+        }
         crate::storage::versioned::STALE_CODE => {
             "The pack changed in another window, so this was not saved. The list shows it now."
         }
@@ -184,6 +225,10 @@ enum Ask {
     Sockets {
         choice: usize,
     },
+    Cleanup {
+        choice: usize,
+    },
+    CleanupDays(TextField),
 }
 
 enum Sent {
@@ -195,18 +240,19 @@ enum Sent {
 /// skills and plugins pack, with ticks. First run shows it after the projects
 /// home folder: Enter installs and continues to Home, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
-/// remove, the projects home folder, the GitHub account and the Linux sockets
-/// setting.
+/// remove, the projects home folder, the GitHub account, the Linux sockets
+/// setting and when finished agents' worktrees go.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
     home: Load<ProjectsHome>,
     github: Load<GitHubStatus>,
     sandbox: Load<SandboxSettings>,
+    cleanup: Load<CleanupSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 4],
+    reading: [bool; 5],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -217,7 +263,8 @@ impl AppSetup {
     /// A setup page with nothing loaded yet.
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
-    /// home, the GitHub account and the sandbox settings.
+    /// home, the GitHub account, the sandbox settings and the finished agents
+    /// setting.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
@@ -225,10 +272,11 @@ impl AppSetup {
             home: Load::Idle,
             github: Load::Idle,
             sandbox: Load::Idle,
+            cleanup: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 4],
+            reading: [false; 5],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -304,6 +352,10 @@ impl AppSetup {
             self.sandbox = Load::Loading;
         }
         self.read(3, AppSetupJob::Sandbox, ctx);
+        if matches!(self.cleanup, Load::Idle) {
+            self.cleanup = Load::Loading;
+        }
+        self.read(4, AppSetupJob::Cleanup, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -551,6 +603,102 @@ impl AppSetup {
         self.change(job, Sent::Done(done), ctx);
     }
 
+    fn ask_cleanup(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.cleanup else {
+            ctx.say(Message::warning(
+                "The finished agents setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = CLEANUP_CHOICES
+            .iter()
+            .position(|mode| *mode == settings.mode)
+            .expect("every option is listed");
+        self.ask = Some(Ask::Cleanup { choice });
+    }
+
+    fn pick_cleanup(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < CLEANUP_CHOICES.len());
+        let Load::Ready(current) = &self.cleanup else {
+            ctx.say(Message::warning(
+                "The finished agents setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let (mode, days) = (CLEANUP_CHOICES[choice], current.days);
+        if mode != CleanupMode::AfterDays {
+            self.set_cleanup(CleanupSettings { mode, days }, ctx);
+            return;
+        }
+        let mut field =
+            TextField::new("Days after the agent finishes", DAYS_DIGITS_MAX).placeholder("1");
+        field.set(&days.to_string());
+        self.ask = Some(Ask::CleanupDays(field));
+    }
+
+    fn submit_days(&mut self, field: TextField, ctx: &mut Ctx) {
+        let Some(days) = cleanup_days(field.value()) else {
+            ctx.say(Message::error(DAYS_TEXT, ""));
+            self.ask = Some(Ask::CleanupDays(field));
+            return;
+        };
+        let mode = CleanupMode::AfterDays;
+        self.set_cleanup(CleanupSettings { mode, days }, ctx);
+    }
+
+    fn set_cleanup(&mut self, settings: CleanupSettings, ctx: &mut Ctx) {
+        assert!((DAYS_MIN..=DAYS_MAX).contains(&settings.days));
+        if matches!(&self.cleanup, Load::Ready(current) if *current == settings) {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let title = cleanup_title(settings.mode, settings.days);
+        let job = AppSetupJob::SetCleanup {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(format!("Finished agents: {title}.")), ctx);
+    }
+
+    fn cleanup_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.cleanup {
+            Load::Ready(settings) => Line::raw(cleanup_title(settings.mode, settings.days)),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn cleanup_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let muted = |text: &str| -> Vec<Line<'static>> {
+            wrap(text, limit)
+                .into_iter()
+                .map(|part| styled(part, Role::Muted, theme))
+                .collect()
+        };
+        let days = match &self.cleanup {
+            Load::Ready(settings) => settings.days,
+            _ => DAYS_MIN,
+        };
+        let mut lines = muted(CLEANUP_TEXT);
+        for (index, mode) in CLEANUP_CHOICES.iter().enumerate() {
+            let mark = if index == choice { "> " } else { "  " };
+            lines.push(join([
+                Line::raw(mark),
+                styled(cleanup_title(*mode, days), Role::Heading, theme),
+            ]));
+        }
+        lines.extend(muted(CLEANUP_NOTE));
+        lines
+    }
+
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
         match &self.github {
             Load::Ready(github) if github.signed_in => self.ask = Some(Ask::SignOut),
@@ -662,6 +810,29 @@ impl AppSetup {
                 Key::Enter => self.set_sockets(choice, ctx),
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Sockets { choice }),
+            },
+            Ask::Cleanup { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Cleanup {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Cleanup {
+                        choice: (choice + 1).min(CLEANUP_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.pick_cleanup(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Cleanup { choice }),
+            },
+            Ask::CleanupDays(mut field) => match key {
+                Key::Esc => {}
+                Key::Enter => self.submit_days(field, ctx),
+                other => {
+                    field.key(other);
+                    self.ask = Some(Ask::CleanupDays(field));
+                }
             },
         }
     }
@@ -942,6 +1113,10 @@ impl AppSetup {
         if let Some(detail) = detail {
             lines.extend(under(detail));
         }
+        lines.push(label("Finished agents", self.cleanup_value(ctx)));
+        if matches!(self.cleanup, Load::Ready(_)) {
+            lines.extend(under(CLEANUP_NOTE));
+        }
         lines
     }
 
@@ -990,6 +1165,17 @@ impl AppSetup {
                             .map(|part| styled(format!("    {part}"), Role::Muted, theme)),
                     );
                 }
+            }
+            Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
+            Some(Ask::CleanupDays(field)) => {
+                let (field_lines, at) =
+                    field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
+                let top = lines.len() as u16;
+                cursor = at.map(|at| Position::new(at.x, at.y + top));
+                lines.extend(field_lines);
+                lines.extend(sentence(
+                    "Days from 1 to 365. CrazyAgent removes a finished agent's worktree that many days after it finishes.",
+                ));
             }
             Some(Ask::HomeChoice {
                 path,
@@ -1110,7 +1296,8 @@ impl Screen for AppSetup {
             }
             Some(Ask::Remove { .. }) => return vec![hint("y", "Remove"), hint("n", "Keep")],
             Some(Ask::SignOut) => return vec![hint("y", "Sign out"), hint("n", "Stay signed in")],
-            Some(Ask::Sockets { .. }) => {
+            Some(Ask::CleanupDays(_)) => return vec![hint("Enter", "Save"), hint("Esc", "Cancel")],
+            Some(Ask::Sockets { .. } | Ask::Cleanup { .. }) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
                 return vec![
                     hint(&arrows, "Choose"),
@@ -1154,6 +1341,7 @@ impl Screen for AppSetup {
                 hints.push(hint("g", "Sign out of GitHub"));
             }
             hints.push(hint("l", "Linux sockets"));
+            hints.push(hint("f", "Finished agents"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -1162,7 +1350,7 @@ impl Screen for AppSetup {
     }
 
     fn typing(&self) -> bool {
-        matches!(self.ask, Some(Ask::HomePath(_)))
+        matches!(self.ask, Some(Ask::HomePath(_) | Ask::CleanupDays(_)))
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1210,13 +1398,17 @@ impl Screen for AppSetup {
                 self.ask_sockets(ctx);
                 Flow::Handled
             }
+            Key::Char('f') if !self.first_run => {
+                self.ask_cleanup(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 4];
+            self.reading = [false; 5];
             self.sent = None;
             return Flow::Handled;
         }
@@ -1228,10 +1420,15 @@ impl Screen for AppSetup {
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
-            | AppSetupEvent::SandboxSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::SandboxSet(result)
+            | AppSetupEvent::CleanupSet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
+            }
+            AppSetupEvent::Cleanup(result) => {
+                self.reading[4] = false;
+                self.cleanup = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -1280,6 +1477,7 @@ impl Screen for AppSetup {
             || matches!(self.home, Load::Loading)
             || matches!(self.github, Load::Loading)
             || matches!(self.sandbox, Load::Loading)
+            || matches!(self.cleanup, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

@@ -2015,19 +2015,25 @@ impl ProjectSandbox {
     /// does, but never rewritten or removed, and no `config.worktree` may be written. No link
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
-    /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT).
+    /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
+    /// name below the project root matches in any letter case, as in `clone_store_denies`,
+    /// since the case-insensitive disk finds it however it is typed (DEC-123 rv-secreview L2).
     /// Input: the policy. Output: the rule text.
     fn git_link_denies(&self) -> String {
         let project = self.project_root.display();
         let pattern = seatbelt_pattern(&self.project_root);
-        let dot_git = "\\.[gG][iI][tT]";
-        let admin = format!("{pattern}/\\.git/worktrees/[^/]+");
-        let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
+        let git = any_case(".git");
+        let worktrees = any_case("worktrees");
+        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let admin = format!("{pattern}/{git}/{worktrees}/[^/]+");
+        let checkouts = format!("{pattern}(/{state})?/{worktrees}/[^/]+");
         let mut moves = format!(
-            "(deny file-write-unlink\n  (literal \"{project}\")\n  (literal \"{project}/.git/worktrees\")\n  (literal \"{project}/worktrees\")\n  (literal \"{project}/.crazyagent/worktrees\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
+            "(deny file-write-unlink\n  (literal \"{project}\")\n  (regex #\"^{pattern}/{git}/{worktrees}$\")\n  (regex #\"^{pattern}(/{state})?/{worktrees}$\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
         );
         let mut links = format!(
-            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/(commondir|gitdir)$\")\n  (regex #\"^{checkouts}/\\.git$\")"
+            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
+            any_case("commondir"),
+            any_case("gitdir")
         );
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
@@ -2037,10 +2043,12 @@ impl ProjectSandbox {
             ));
         }
         let text = format!(
-            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/config\\.worktree$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{dot_git}/\") (vnode-type SYMLINK)))\n"
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n",
+            any_case("config.worktree")
         );
-        assert!(text.matches("(regex #\"^/").count() == 6);
+        assert_eq!(text.matches("(regex #\"^/").count(), 8);
         assert!(text.contains("(vnode-type SYMLINK)"));
+        assert!(!text.contains("/.crazyagent/worktrees\""));
         text
     }
 

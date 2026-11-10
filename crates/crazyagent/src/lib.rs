@@ -7,6 +7,7 @@ pub mod agent_git;
 pub mod agent_home;
 pub mod agents;
 pub mod assets;
+pub mod cleanup_settings;
 pub mod client_controller;
 pub mod config;
 #[cfg(unix)]
