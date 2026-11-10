@@ -15,6 +15,11 @@ const AWAY_MS: i64 = 60 * 60_000;
 const AGENTS_SHOWN_MAX: usize = 256;
 const QUESTIONS_SHOWN_MAX: usize = 100;
 const UNREAD_SCAN_MAX: usize = 4096;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+/// The most different tools one agent keeps rows for in one hour.
+pub(crate) const TOOLS_PER_HOUR_MAX: i64 = 64;
+/// The most rows the tools chart keeps.
+pub(crate) const TOOL_HOURS_MAX: i64 = 1 << 20;
 
 const _: () =
     assert!(LIVE_MS < IDLE_MS && IDLE_MS < AWAY_MS && super::adoption::UNGROUNDED_MS < IDLE_MS);
@@ -73,7 +78,27 @@ pub fn record_tool(
         params![agent_id, tool, now],
     )
     .map_err(state)?;
+    add_tool_hour(db, now - now.rem_euclid(HOUR_MS), agent_id, tool).map_err(state)?;
     Ok(())
+}
+
+/// Counts one tool call in its hour. A new row needs room under both caps; past them the call
+/// is left out of the chart only. Inputs: the store, the hour, the agent and the tool. Output:
+/// the rows written.
+pub(crate) fn add_tool_hour(
+    db: &Connection,
+    hour_ms: i64,
+    agent: AgentId,
+    tool: &str,
+) -> rusqlite::Result<usize> {
+    db.execute(
+        "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count)
+         SELECT ?1,?2,?3,1 WHERE EXISTS (SELECT 1 FROM coord_tool_hours WHERE hour_ms=?1 AND agent=?2 AND tool=?3)
+            OR (COALESCE((SELECT rows FROM coord_tool_hours_rows),0)<?4
+                AND (SELECT COUNT(*) FROM coord_tool_hours WHERE hour_ms=?1 AND agent=?2)<?5)
+         ON CONFLICT(hour_ms,agent,tool) DO UPDATE SET count=MIN(count+1, 4294967295)",
+        params![hour_ms, agent, tool, TOOL_HOURS_MAX, TOOLS_PER_HOUR_MAX],
+    )
 }
 
 /// Stores activity without checking the agent, for callers that already did.
