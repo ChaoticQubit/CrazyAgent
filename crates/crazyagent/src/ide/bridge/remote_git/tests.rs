@@ -937,3 +937,41 @@ fn a_git_command_past_its_limit_is_killed_and_its_outcome_unknown() {
     );
     drop(silent);
 }
+
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: a `commondir` planted in the
+/// project's `.git`, in any spelling the volume folds together, cannot send the engine's git
+/// to another folder's config and run a command from it.
+#[test]
+fn a_planted_commondir_runs_no_command_from_another_folder_s_config() {
+    let project = Project::new();
+    std::fs::write(project.root.join("CaseProbe"), "").unwrap();
+    let names: &[&str] = if project.root.join("caseprobe").exists() {
+        &["commondir", "COMMONDIR"]
+    } else {
+        &["commondir"]
+    };
+    let store = project.root.join("store");
+    for name in ["objects", "refs"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    let marker = project.root.join("ssh-ran");
+    std::fs::write(
+        store.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tsshCommand = touch {}\n[remote \"origin\"]\n\turl = ssh://dummy.invalid/x.git\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for name in names {
+        let planted = project.folder.join(".git").join(name);
+        std::fs::write(&planted, format!("{}\n", store.display())).unwrap();
+        assert_eq!(
+            refused(project.git(&["ls-remote", "origin"])),
+            "ide_git_config_refused",
+            "{name}"
+        );
+        assert!(!marker.exists(), "{name}");
+        std::fs::remove_file(&planted).unwrap();
+    }
+}
