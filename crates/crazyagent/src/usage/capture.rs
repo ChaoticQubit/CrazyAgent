@@ -1,3 +1,4 @@
+use super::prices::Charged;
 use super::rules::{CodexState, Usage, advisor_usages, claude_usage, codex_usage};
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
@@ -1047,8 +1048,9 @@ fn count_message(
     Ok((usage.tokens.growth_over(before), web - web_before))
 }
 
-/// Counts one read's records. Inputs: the open write, the key table, the records and the
-/// time. Output: what each model added.
+/// Counts one read's records, each priced when it is counted, because the long-context tier
+/// and the one-hour write are per call. Inputs: the open write, the key table, the records
+/// and the time. Output: what each model added.
 pub(super) fn count_usages(
     tx: &Connection,
     table: Messages,
@@ -1057,9 +1059,24 @@ pub(super) fn count_usages(
 ) -> Result<BTreeMap<String, Added>, EngineError> {
     let mut by_model: BTreeMap<String, Added> = BTreeMap::new();
     for usage in usages {
-        let (growth, _web) = count_message(tx, table, usage, now_ms)?;
+        let (growth, web) = count_message(tx, table, usage, now_ms)?;
+        let charged = Charged {
+            tokens: growth,
+            prompt_tokens: usage
+                .tokens
+                .input
+                .saturating_add(usage.tokens.cache_read)
+                .saturating_add(usage.tokens.cache_write),
+            one_hour: usage.one_hour,
+            web_searches: web,
+            fast: usage.fast,
+        };
+        let cost = super::prices::table()
+            .cost_nanos(&usage.model, charged)
+            .unwrap_or(0);
         let row = by_model.entry(usage.model.clone()).or_default();
         row.tokens = row.tokens.plus(growth);
+        row.cost_nanos = row.cost_nanos.saturating_add(cost);
     }
     Ok(by_model)
 }
@@ -1222,8 +1239,8 @@ pub(super) struct Added {
     pub(super) cost_nanos: i64,
 }
 
-/// Adds a session's new tokens to the usage hour that holds `now_ms`, after recording
-/// `now_ms` as when that run was last counted. Inputs: the store, the time, the
+/// Adds a session's new tokens and dollars to the usage hour that holds `now_ms`, after
+/// recording `now_ms` as when that run was last counted. Inputs: the store, the time, the
 /// attribution, the session, the model and what it added. Output: done, or
 /// `usage_unavailable`.
 fn add_tokens(
@@ -1234,7 +1251,7 @@ fn add_tokens(
     model: &str,
     added: Added,
 ) -> Result<(), EngineError> {
-    if added.tokens.is_empty() {
+    if added.tokens.is_empty() && added.cost_nanos == 0 {
         return Ok(());
     }
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);

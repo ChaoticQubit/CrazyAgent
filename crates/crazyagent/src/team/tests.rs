@@ -5203,6 +5203,29 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
 /// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
 /// output reach it, and cache re-reads, however many, never do.
 #[test]
+fn a_budget_spends_the_same_tokens_whatever_the_rows_cost() {
+    let (_directory, mut connection, project) = team_database("team-budget-dollars");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    used_tokens(&connection, &project, "work", now_ms(), 40, 2);
+    let before = budget(&connection, &project).unwrap().unwrap().used;
+    connection
+        .execute(
+            "UPDATE usage_tokens SET cost_nanos=999999999 WHERE session='work'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(budget(&connection, &project).unwrap().unwrap().used, before);
+    assert_eq!(before, 42);
+}
+
+#[test]
 fn a_token_budget_spends_new_input_cache_writes_and_output_but_never_cache_reads() {
     let (_directory, mut connection, project) = team_database("team-budget-headline");
     crate::usage::initialize(&connection).unwrap();

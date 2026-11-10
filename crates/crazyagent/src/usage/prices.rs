@@ -59,7 +59,7 @@ pub struct Prices {
 /// One growth to price: its tokens, the whole call's prompt size that picks the rate, the
 /// part of its cache write held one hour, its web searches and whether it ran fast.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Charged {
+pub(super) struct Charged {
     pub tokens: Tokens,
     pub prompt_tokens: u64,
     pub one_hour: u64,
@@ -217,7 +217,7 @@ impl Prices {
     /// Prices one growth. Inputs: the model and the growth. Output: nanodollars rounded down,
     /// so an estimate never reads over, None for a model without a price. Rules ported from
     /// CodeBurn (MIT, THIRD_PARTY_NOTICES.md).
-    pub fn cost_nanos(&self, model: &str, charged: Charged) -> Option<i64> {
+    pub(super) fn cost_nanos(&self, model: &str, charged: Charged) -> Option<i64> {
         let rates = self.rates(model)?;
         let tier = rates
             .tier
