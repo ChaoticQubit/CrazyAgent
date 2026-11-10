@@ -190,10 +190,10 @@ export function openIde(projectId: string, panel: IdeBounds): Promise<Result<boo
   return call<boolean | null>("desktop_ide_open", { projectId, bounds: panel });
 }
 
-/** Moves a project's loaded IDE into a window of its own. Inputs: the project and the height of
- * this page, which measures the title bar. Output: done, or the refusal. */
-export function openIdeWindow(projectId: string, viewport: number): Promise<Result<null>> {
-  return call<null>("desktop_ide_window_open", { projectId, viewport });
+/** Moves a project's loaded IDE into a window of its own. Input: the project. Output: done, or
+ * the refusal. */
+export function openIdeWindow(projectId: string): Promise<Result<null>> {
+  return call<null>("desktop_ide_window_open", { projectId });
 }
 
 /** Brings a project's own IDE window forward. Input: the project. Output: done, or the refusal. */

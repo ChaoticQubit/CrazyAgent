@@ -29,6 +29,7 @@ const LINK_GAP: Duration = Duration::from_secs(1);
 const OWN_WINDOW_TOUCH: Duration = Duration::from_secs(60);
 const OWN_WINDOW_MIN_WIDTH: f64 = 640.0;
 const OWN_WINDOW_MIN_HEIGHT: f64 = 420.0;
+const OWN_WINDOW_TITLE_BAR: f64 = if cfg!(target_os = "macos") { 32.0 } else { 0.0 };
 
 static LINKS: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -94,21 +95,6 @@ impl Bounds {
         let content = window.inner_size().map_err(failed)?;
         let height = content.to_logical::<f64>(scale).height;
         Ok(InWindow(self.below_inset(height)))
-    }
-
-    /// Measures how far the title bar reaches into a window's content view, from the height of
-    /// the page in the main window. Inputs: the page's height and the content view's, both
-    /// logical. Output: the inset, or `ide_bounds_invalid` for a height no page can have.
-    fn title_bar(viewport: f64, content_height: f64) -> Result<f64, BridgeError> {
-        let page = Self {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            viewport,
-        }
-        .checked()?;
-        Ok(page.below_inset(content_height).y)
     }
 
     /// The place of an IDE webview that has a window of its own: all of the content view below
@@ -371,9 +357,13 @@ impl IdeViews {
         self.lock().out.contains_key(project.as_str())
     }
 
-    /// Stub for the red rows.
-    pub fn page_left(&self, _project: &ProjectId) -> bool {
-        false
+    /// Whether a project's page closed while its IDE had its own window, so that page's server
+    /// stop is still owed. Input: the project. Output: true then.
+    pub fn page_left(&self, project: &ProjectId) -> bool {
+        self.lock()
+            .out
+            .get(project.as_str())
+            .is_some_and(|out| out.page_closed)
     }
 
     /// Keeps a project's IDE when its page closes while the IDE has its own window, noting the
@@ -600,15 +590,22 @@ fn hex_of(project: &ProjectId) -> String {
         .collect()
 }
 
-/// Stub for the red rows.
-fn title_inset(_fullscreen: bool) -> f64 {
-    0.0
+/// How far the title bar reaches into an IDE window's content view: on macOS the view runs
+/// under it, and a window in native full screen has none. Input: that window's full screen
+/// state. Output: the inset, logical.
+fn title_inset(fullscreen: bool) -> f64 {
+    if fullscreen {
+        0.0
+    } else {
+        OWN_WINDOW_TITLE_BAR
+    }
 }
 
 /// Where an IDE webview goes in its own window, from the window's frame. Inner size will not do:
 /// in a window with no child webview Tauri reports it as the frame of the webview being placed.
-/// Inputs: the window and the title bar's inset. Output: the place, or the failed read.
-fn whole_window<R: Runtime>(window: &Window<R>, inset: f64) -> Result<Rect, BridgeError> {
+/// Input: the window. Output: the place, or the failed read.
+fn whole_window<R: Runtime>(window: &Window<R>) -> Result<Rect, BridgeError> {
+    let inset = title_inset(window.is_fullscreen().map_err(failed)?);
     let scale = window.scale_factor().map_err(failed)?;
     let frame = window.outer_size().map_err(failed)?;
     let frame = frame.to_logical::<f64>(scale);
@@ -617,18 +614,14 @@ fn whole_window<R: Runtime>(window: &Window<R>, inset: f64) -> Result<Rect, Brid
 
 /// Moves a project's loaded IDE webview into a maximized window of its own, the same webview, so
 /// nothing reloads. A project already out only comes forward. A move that fails puts the webview
-/// back and closes the new window. Inputs: the app, the main window, the views, the project and
-/// the height of the main page, which measures the title bar. Output: Ok, or the refusal.
+/// back and closes the new window. Inputs: the app, the main window, the views and the project.
+/// Output: Ok, or the refusal.
 pub fn move_out(
     app: &AppHandle,
     main: &Window,
     views: &IdeViews,
     project: &ProjectId,
-    viewport: f64,
 ) -> Result<(), BridgeError> {
-    let scale = main.scale_factor().map_err(failed)?;
-    let content = main.inner_size().map_err(failed)?;
-    let inset = Bounds::title_bar(viewport, content.to_logical::<f64>(scale).height)?;
     let mut held = views.lock();
     if let Some(out) = held.out.get(project.as_str()) {
         return bring_forward(app, &out.window);
@@ -657,7 +650,7 @@ pub fn move_out(
             beat: beat(app.clone(), project.clone()),
         },
     );
-    if let Err(error) = settle(app, &window, &webview, inset, project) {
+    if let Err(error) = settle(app, &window, &webview, project) {
         held.out.remove(project.as_str());
         if was_shown {
             held.shown = Some(project.as_str().to_owned());
@@ -673,26 +666,17 @@ fn settle(
     app: &AppHandle,
     window: &Window,
     webview: &Webview,
-    inset: f64,
     project: &ProjectId,
 ) -> Result<(), BridgeError> {
     webview.reparent(window).map_err(failed)?;
-    watch_own_window(app, window, webview, inset, project);
-    webview
-        .set_bounds(whole_window(window, inset)?)
-        .map_err(failed)?;
+    watch_own_window(app, window, webview, project);
+    webview.set_bounds(whole_window(window)?).map_err(failed)?;
     webview.show().map_err(failed)?;
     window.set_focus().map_err(failed)?;
     webview.set_focus().map_err(failed)
 }
 
-fn watch_own_window(
-    app: &AppHandle,
-    window: &Window,
-    webview: &Webview,
-    inset: f64,
-    project: &ProjectId,
-) {
+fn watch_own_window(app: &AppHandle, window: &Window, webview: &Webview, project: &ProjectId) {
     let (app, own, webview, project) = (
         app.clone(),
         window.clone(),
@@ -709,7 +693,7 @@ fn watch_own_window(
             follow_focus(app.clone());
         }
         WindowEvent::Resized(_) => {
-            if let Ok(rect) = whole_window(&own, inset) {
+            if let Ok(rect) = whole_window(&own) {
                 let _ = webview.set_bounds(rect);
             }
         }
@@ -826,11 +810,16 @@ fn bring_home(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<
 }
 
 /// Closes IDE windows for good, with their webviews: one project's when it is removed, every one
-/// when the main window has gone. It runs off the main thread, since it is called from there.
+/// when the main window has gone. A named project whose page had already closed also gets the
+/// server stop that close skipped. It runs off the main thread, since it is called from there.
 /// Inputs: the app and the project, if any. Output: none.
 pub fn shut_own_windows(app: AppHandle, project: Option<ProjectId>) {
     tauri::async_runtime::spawn(async move {
         let views = app.state::<IdeViews>();
+        if let Some(one) = project.as_ref().filter(|one| views.page_left(one)) {
+            window_closed(app.clone(), one.clone()).await;
+            return;
+        }
         let mut held = views.lock();
         let going: Vec<String> = held
             .out
@@ -1353,7 +1342,10 @@ mod tests {
     fn a_removal_owes_the_server_stop_only_when_the_page_had_already_closed() {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();
-        assert!(!views.page_left(&alpha), "with no window nothing was skipped");
+        assert!(
+            !views.page_left(&alpha),
+            "with no window nothing was skipped"
+        );
         views
             .lock()
             .out

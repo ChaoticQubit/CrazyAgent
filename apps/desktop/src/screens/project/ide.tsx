@@ -204,7 +204,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
   };
 
   const moveOut = () => once(async () => {
-    const result = await openIdeWindow(projectId, window.innerHeight);
+    const result = await openIdeWindow(projectId);
     setProblem(result.kind === "ok" ? null : IDE_NOT_MOVED);
     if (result.kind === "ok") setOutProject(projectId);
   });

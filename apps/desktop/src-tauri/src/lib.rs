@@ -3523,19 +3523,18 @@ async fn close_ide<R: Runtime>(
         .map(|_| ())
 }
 
-/// Moves a project's loaded IDE into a maximized window of its own. Inputs: the project and the
-/// height of the page, which measures the title bar. Output: Ok, or the refusal.
+/// Moves a project's loaded IDE into a maximized window of its own. Input: the project.
+/// Output: Ok, or the refusal.
 #[tauri::command]
 async fn desktop_ide_window_open(
     webview: Webview,
     app: AppHandle,
     views: State<'_, ide::IdeViews>,
     project_id: String,
-    viewport: f64,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    ide::move_out(&app, &webview.window(), &views, &project, viewport)
+    ide::move_out(&app, &webview.window(), &views, &project)
 }
 
 /// Brings a project's own IDE window forward. Input: the project. Output: Ok, also when the
