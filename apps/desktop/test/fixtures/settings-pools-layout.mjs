@@ -6,9 +6,15 @@ export * from "./settings-tab.mjs";
 
 const FAILURE = { code: "engine_failed" };
 const APPLIED = { pending: false, outcome: "applied", rejection: null };
+const SAVED_LINE_MS = 6000;
 let timers = [];
 let usageSince;
 let current = {};
+let schedule = null;
+let saves = [];
+let gated = null;
+let gatedAnswers = [];
+let savedLineTimers = [];
 const say = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
 const member = (index, kind = "chatgpt") => ({ id: `acct-${index}`, kind, provider: "chatgpt", status: "signed_in", status_label: "Signed in" });
 const account = (index) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription", url: null, model: null, status: "signed_in", status_label: "Signed in" });
@@ -28,11 +34,48 @@ const SPARE_ORDER = { pool: "pool-spare", strategy: "balanced", accounts: [ranke
 const READY_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(0, next({ kind: "least_used" })), ranked(1, next({ kind: "more_used" }))];
 const HELD_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(1, { kind: "not_signed_in" }), ranked(0, { kind: "never_use" })];
 const NONE_ROWS = [ranked(1, { kind: "not_signed_in" }), ranked(0, { kind: "never_use" }), ranked(2, { kind: "five_hour_cap", until_ms: null })];
-const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], bare: [] };
+const FULL_ROWS = Array.from({ length: 15 }, (_, index) => ranked(index, next({ kind: "tied_order" })));
+const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], full: [order(FULL_ROWS)], bare: [] };
 const SCHEDULE = { strategy: "use_it_or_lose_it", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
 const reading = (used_percent) => (used_percent === null ? null : { used_percent, resets_at_ms: null });
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
 const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limit(0, 79), limit(1, 100)], mixed: [limit(2, 80), limit(1, 100)] };
+
+/** Applies one change to the fake schedule and moves its version on, as the engine does.
+ * Inputs: the schedule and the change. Output: the new schedule. */
+function applied(current, change) {
+  const version = current.version + 1;
+  if (change.kind === "app_strategy") return { ...current, strategy: change.strategy, version };
+  if (change.kind === "pool_strategy") {
+    const pools = current.pools.filter((item) => item.id !== change.pool);
+    return { ...current, pools: change.strategy === null ? pools : [...pools, { id: change.pool, strategy: change.strategy }], version };
+  }
+  return { ...current, accounts: [...current.accounts.filter((item) => item.connection !== change.connection), { connection: change.connection, plan: change.plan }], version };
+}
+
+/** Answers one save as the engine does: a change naming an old version is refused. Inputs: the
+ * scene, whose `refuse` names a refusal for every save or only for save number `refuseAt`, and
+ * the save's arguments. Output: the receipt. */
+function saveChange(scene, args) {
+  saves.push({ change: args.change, version: args.version });
+  if (scene.refuse && saves.length === (scene.refuseAt ?? saves.length)) return { pending: false, outcome: "rejected", rejection: scene.refuse };
+  if (args.version !== schedule.version) return { pending: false, outcome: "rejected", rejection: "stale_revision" };
+  schedule = applied(schedule, args.change);
+  return APPLIED;
+}
+
+/** Ranks the main pool from the fake schedule: Never use is held, Use last goes after the rest
+ * and under Manual rank the ranks set the order. Output: the rankings. */
+function liveRanking() {
+  const plan = (index) => schedule.accounts.find((item) => item.connection === `acct-${index}`)?.plan ?? { rank: null, reserve_percent: 0, pin: null };
+  const strategy = schedule.pools.find((item) => item.id === "pool-main")?.strategy ?? schedule.strategy;
+  const ready = [2, 0, 1].filter((index) => plan(index).pin !== "never_use");
+  if (strategy === "manual_rank") ready.sort((a, b) => (plan(a).rank ?? 1000) - (plan(b).rank ?? 1000));
+  const last = (index) => (plan(index).pin === "use_last" ? 1 : 0);
+  ready.sort((a, b) => last(a) - last(b));
+  const held = [2, 0, 1].filter((index) => plan(index).pin === "never_use");
+  return [{ ...order([...ready.map((index) => ranked(index, next({ kind: "tied_order" }))), ...held.map((index) => ranked(index, { kind: "never_use" }))]), strategy }, SPARE_ORDER];
+}
 
 /** Answers one engine command for a scene. Inputs: the scene and the command. Output: the
  * answer, a failure thrown, or a read that never lands. */
@@ -44,9 +87,9 @@ function answer(scene, command, args) {
     const accounts = failing(scene.accounts ?? "ok", ACCOUNTS);
     return accounts instanceof Promise ? accounts : { accounts, next: null };
   }
-  if (command === "desktop_account_schedule") return failing(scene.schedule ?? "ok", { ok: SCHEDULE });
-  if (command === "desktop_account_ranking") return failing(scene.ranking ?? "ok", RANKINGS);
-  if (command === "desktop_set_account_schedule") return APPLIED;
+  if (command === "desktop_account_schedule") return failing(scene.schedule ?? "ok", { ok: schedule });
+  if (command === "desktop_account_ranking") return scene.ranking === "live" ? liveRanking() : failing(scene.ranking ?? "ok", RANKINGS);
+  if (command === "desktop_set_account_schedule") return saveChange(scene, args);
   if (command === "desktop_usage_report") {
     usageSince = args.sinceMs;
     const limits = failing(scene.limits ?? "ok", LIMITS);
@@ -59,14 +102,85 @@ function answer(scene, command, args) {
 }
 
 /** Mounts the real Settings page on Pools against a fake engine. Inputs: the scene, naming the
- * pools and accounts reads as ok, full, waiting, long, empty, error, missing or pending, and
- * the theme. Output: nothing. */
+ * pools and accounts reads as ok, full, waiting, long, empty, error, missing or pending, with
+ * `start` for what the schedule starts as, and the theme. Output: nothing. */
 export async function mount(scene = {}, theme = "light") {
   current = scene;
   timers = [];
+  saves = [];
+  gated = null;
+  gatedAnswers = [];
+  savedLineTimers = [];
+  schedule = { ...SCHEDULE, ...scene.start };
   const start = window.setInterval.bind(window);
   window.setInterval = (run, ms, ...rest) => { timers.push({ run, ms }); return start(run, ms, ...rest); };
-  await mountTab(createElement(Settings, { tab: "pools" }), (command, args) => answer(scene, command, args), theme);
+  const wait = window.setTimeout.bind(window);
+  window.setTimeout = (run, ms, ...rest) => {
+    if (ms !== SAVED_LINE_MS) return wait(run, ms, ...rest);
+    savedLineTimers.push(run);
+    return 0;
+  };
+  await mountTab(createElement(Settings, { tab: "pools" }), (command, args) => (command === gated ? new Promise((done) => gatedAnswers.push(() => done(answer(scene, command, args)))) : answer(scene, command, args)), theme);
+}
+
+/** Lists every change the page asked the engine to save. Output: each change and its version. */
+export function savedChanges() {
+  return saves;
+}
+
+/** Makes one engine command wait for `openGate`. Input: the command. Output: nothing. */
+export function gate(command) {
+  gated = command;
+}
+
+/** Answers every command that waits at the gate and stops holding new ones. Output: nothing. */
+export async function openGate() {
+  gated = null;
+  gatedAnswers.splice(0).forEach((go) => go());
+  await settle(80);
+}
+
+/** Answers the oldest command waiting at the gate and keeps holding new ones. Output: nothing. */
+export async function passGate() {
+  gatedAnswers.shift()?.();
+  await settle(80);
+}
+
+/** Reads the option a choice group shows. Input: the group's label. Output: its words. */
+export function checked(label) {
+  return say(document.querySelector(`[role="radiogroup"][aria-label="${label}"] [aria-checked="true"]`));
+}
+
+/** Reads the options of a choice group. Input: the group's label. Output: their words. */
+export function optionsOf(label) {
+  return [...document.querySelectorAll(`[role="radiogroup"][aria-label="${label}"] [role="radio"]`)].map(say);
+}
+
+/** Says where the focus is. Output: the focused element's tag, words and id, and the label of
+ * the choice group around it. */
+export function focusPlace() {
+  const node = document.activeElement;
+  return { tag: node?.tagName ?? "", words: say(node), id: node?.id ?? "", group: node?.closest('[role="radiogroup"]')?.getAttribute("aria-label") ?? "" };
+}
+
+/** Ends the wait of the saved line, as its six seconds passing does. Output: nothing; throws
+ * when no saved line waits. */
+export async function fireSavedLine() {
+  if (savedLineTimers.length === 0) throw new Error("no saved line is waiting to clear");
+  await act(async () => { savedLineTimers.at(-1)(); });
+  await settle(20);
+}
+
+/** Says whether every row's controls stay inside it. Output: a boolean, false with no rows. */
+export function controlsFit() {
+  const rows = [...document.querySelectorAll(".pool-row")];
+  return rows.length > 0 && rows.every((row) => [...row.querySelectorAll(".pool-ctl, .pool-sched")].every((part) => part.getBoundingClientRect().right <= row.getBoundingClientRect().right));
+}
+
+/** Says whether the alert is inside the window. Output: a boolean, false with no alert. */
+export function alertInView() {
+  const box = document.querySelector('#mount [role="alert"]')?.getBoundingClientRect();
+  return Boolean(box && box.top >= 0 && box.bottom <= window.innerHeight);
 }
 
 /** Reads the first account line. Output: its words and the edges of its name and checkbox. */

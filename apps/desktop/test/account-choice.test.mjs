@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { AccountChoiceView, ProjectAccountOrderView, planFor, planLine, poolStrategy, projectStrategy, rankInput, reserveInput, strategyOptions, STRATEGIES } = await import("../src/screens/settings/account-choice.tsx");
+const { ProjectAccountOrderView, planFor, planLine, poolStrategy, projectStrategy, rankInput, reserveInput, strategyOptions, STRATEGIES } = await import("../src/screens/settings/account-choice.tsx");
 const { plainError } = await import("../src/api.ts");
 
 const schedule = {
@@ -41,27 +41,6 @@ test("stored choices read back per pool, project and account with defaults for t
   assert.equal(planLine({ rank: 1, reserve_percent: 0, pin: "never_use" }), "Never used");
   assert.deepEqual(STRATEGIES.map((item) => item.value), ["use_it_or_lose_it", "manual_rank", "balanced"]);
   assert.deepEqual(strategyOptions("Manual rank")[0], { value: "", label: "Default (Manual rank)" });
-});
-
-test("the panel shows the app strategy, the pool's own strategy and each member's plan", () => {
-  const html = renderToStaticMarkup(createElement(AccountChoiceView, {
-    schedule: { kind: "ok", value: schedule }, pools: { kind: "ok", value: [pool] },
-    names: new Map([["acct-1", "Work Claude"], ["acct-2", "Home Claude"]]), onChange: forbidden, onRetry: forbidden,
-  }));
-  assert.match(html, /How every pool picks an account/);
-  assert.match(html, /<option value="manual_rank" selected="">Manual rank<\/option>/);
-  assert.match(html, /Main: account order/);
-  assert.match(html, /<option value="balanced" selected="">Balanced<\/option>/);
-  assert.match(html, /Work Claude/);
-  assert.match(html, /Home Claude/);
-  assert.match(html, /Rank 2, keeps 10% of its week, used last/);
-  assert.match(html, /No rank, used to 100%/);
-  assert.match(html, /<option value="never_use">Never use<\/option>/);
-  const failed = renderToStaticMarkup(createElement(AccountChoiceView, {
-    schedule: { kind: "error", code: "owner_read_failed", message: "x" }, pools: { kind: "ok", value: [pool] },
-    names: new Map(), onChange: forbidden, onRetry: forbidden,
-  }));
-  assert.match(failed, /Couldn&#x27;t load account choice\./);
 });
 
 test("every scheduling refusal reads as a sentence", () => {

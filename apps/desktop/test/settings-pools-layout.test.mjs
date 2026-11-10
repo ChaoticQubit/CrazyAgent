@@ -53,14 +53,15 @@ test("a 60-letter pool name wraps in the list and in the pane and nothing moves 
   assert.equal(seen.panes.sideways, false, JSON.stringify(seen.panes));
 });
 
-test("real Tab keys walk New pool, each pool in the list, then the selected pool's actions", async () => {
-  const walked = await onPools({}, (page) => tabWalk(page, 6));
+test("real Tab keys walk New pool, each pool in the list, the app's order, then the selected pool's actions", async () => {
+  const walked = await onPools({}, (page) => tabWalk(page, 7));
   const from = walked.indexOf("New pool");
   assert.notEqual(from, -1, JSON.stringify(walked));
-  const names = walked.slice(from, from + 6);
+  const names = walked.slice(from, from + 7);
   assert.match(names[1], /^Main pool/);
   assert.match(names[2], /^Spare/);
-  assert.deepEqual(names.slice(3), ["Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool"]);
+  assert.equal(names[3], "Use it or lose it");
+  assert.deepEqual(names.slice(4), ["Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool"]);
 });
 
 test("the rows stand exactly as the ranking gives them, each with its place, name, state, plan, why and usage", async () => {
@@ -210,16 +211,6 @@ test("the page asks usage for a short range, since it reads only the limits", as
   assert.equal(typeof since, "number", String(since));
   assert.ok(since <= Date.now(), "a range start past the engine's clock is refused");
   assert.ok(since >= Date.now() - 2 * 60 * 60 * 1000, new Date(since).toISOString());
-});
-
-test("a change saved in Account choice reads the order on the right again", async () => {
-  const seen = await onPools({}, async (page) => {
-    const before = await commandCount(page, RANKING);
-    await press(page, 'form.row button[type="submit"]');
-    return { before, after: await commandCount(page, RANKING), saved: await commandCount(page, "desktop_set_account_schedule") };
-  });
-  assert.equal(seen.saved, 1);
-  assert.equal(seen.after, seen.before + 1);
 });
 
 for (const [state, expected, absent] of [
@@ -387,11 +378,11 @@ test("Try again reads the pools a second time", async () => {
   assert.equal(reads.filter((command) => command === "desktop_pool_summaries").length, 2, JSON.stringify(reads));
 });
 
-test("Account choice stays below a list of pools and only there", async () => {
+test("How every pool picks an account stays under Your pools and only with a list of pools", async () => {
   const listed = await onPools({}, say);
-  assert.ok(listed.indexOf("Account choice") > listed.indexOf("Your pools"), listed);
+  assert.ok(listed.indexOf("How every pool picks an account") > listed.indexOf("Your pools"), listed);
   const none = await onPools({ pools: "empty" }, say);
-  assert.ok(!none.includes("Account choice"), none);
+  assert.ok(!none.includes("How every pool picks an account"), none);
 });
 
 test("Delete pool asks first, and a refused delete shows under the title", async () => {
