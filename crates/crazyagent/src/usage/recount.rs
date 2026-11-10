@@ -630,6 +630,7 @@ pub(crate) mod tests_support {
                 path: home.to_path_buf(),
                 format: Format::Claude,
                 attribution,
+                removed: false,
             }],
             now_ms,
         )
