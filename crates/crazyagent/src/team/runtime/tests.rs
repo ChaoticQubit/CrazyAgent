@@ -8179,6 +8179,197 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
     assert!(text.contains("Plan the footer"), "{text}");
 }
 
+/// A Claude Code stand-in for a piped session: it records each turn's line in its home and
+/// answers it.
+#[cfg(target_os = "macos")]
+const PIPED_CLAUDE: &str = r#"#!/bin/sh
+n=0
+while IFS= read -r turn; do
+  n=$((n+1))
+  printf '%s\n' "$turn" >> "$CLAUDE_CONFIG_DIR/turns"
+  printf '{"type":"system","subtype":"init","uuid":"init-%s","session_id":"piped-session","model":"observed-model","capabilities":[]}\n' "$n"
+  printf '{"type":"assistant","uuid":"step-%s","session_id":"piped-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"Done."}]}}\n' "$n" "$n"
+  printf '{"type":"result","subtype":"success","uuid":"result-%s","session_id":"piped-session","is_error":false,"result":"Done."}\n' "$n"
+done
+"#;
+
+/// A runtime with no terminal host, so Claude Code agents run piped, with `PIPED_CLAUDE` and
+/// `claude_access`. Takes the fixture. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn piped_runtime(fixture: &Fixture) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, PIPED_CLAUDE).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let access = claude_access(fixture);
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("claude-code", claude)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+}
+
+/// The fixture's edited instructions with enough further sections to pass the 32 KiB a piped
+/// session takes. Returns the text.
+#[cfg(target_os = "macos")]
+fn large_edit() -> String {
+    let large: String = std::iter::once(EDITED_TEXT.to_owned())
+        .chain((0..80).map(|part| {
+            format!(
+                "\n## Part {part}\n\n{}\n",
+                "Keep each page short and plain. ".repeat(20)
+            )
+        }))
+        .collect();
+    assert!(large.len() > 40 * 1024);
+    large
+}
+
+/// With the default choice, an owner edit larger than a piped session takes still reaches a
+/// master that keeps running, once: its next message starts with as many changed sections as
+/// fit and the line saying the rest apply at its next start (OP4-I1).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_a_large_edit_is_cut_to_fit_a_piped_masters_next_message() {
+    let fixture = Fixture::new(1);
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    set_master(&fixture, "claude-code");
+    let mut team = piped_runtime(&fixture);
+    for (replies, text) in [
+        (1, "Plan the page"),
+        (2, "Plan the title"),
+        (3, "Plan the footer"),
+    ] {
+        if replies == 2 {
+            crate::agent_home::save_app(&fixture.base, &large_edit()).unwrap();
+        }
+        tell_master(&fixture, text);
+        fixture.until(&mut team, text, |f| master_replies(f) == replies);
+    }
+    let master = masters(&fixture.connection)[0];
+    let turns = std::fs::read_to_string(stand_in_file(&fixture, master, "turns")).unwrap();
+    team.shutdown().unwrap();
+    let lines: Vec<&str> = turns.lines().collect();
+    assert_eq!(lines.len(), 3, "one process took all three messages");
+    assert_eq!(turns.matches(CHANGED_HEADER).count(), 1);
+    let cut = lines[1];
+    assert!(cut.contains(CHANGED_HEADER));
+    assert!(cut.contains("Use spaces.") && cut.contains("## Part 0"));
+    assert!(!cut.contains("## Part 79"));
+    assert!(cut.contains(SECTIONS_CUT_LINE));
+}
+
+/// With the default choice, an owner edit larger than a piped session takes reaches a running
+/// sub-agent the same way, in its next task (OP4-I1).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_a_large_edit_is_cut_to_fit_a_piped_agents_next_task() {
+    let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut setup = fixture.setup.clone();
+    setup.team.sub_harnesses = vec![HarnessSlot {
+        harness: "claude-code".into(),
+        agents: 1,
+        tools: false,
+    }];
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    let mut team = piped_runtime(&fixture);
+    delegate_claude(&fixture, "Run the compile check.");
+    fixture.until(&mut team, "the first task ends", |f| {
+        task_of(f, "Run the compile check.").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    crate::agent_home::save_app(&fixture.base, &large_edit()).unwrap();
+    delegate_claude(&fixture, "Write the second page.");
+    fixture.until(&mut team, "the second task ends", |f| {
+        task_of(f, "Write the second page.").0 == "done"
+    });
+    let turns = std::fs::read_to_string(stand_in_file(&fixture, agent, "turns")).unwrap();
+    team.shutdown().unwrap();
+    let lines: Vec<&str> = turns.lines().collect();
+    assert_eq!(lines.len(), 2, "one process took both tasks");
+    let cut = lines[1];
+    assert!(cut.contains(CHANGED_HEADER) && cut.contains("Write the second page."));
+    assert!(cut.contains(SECTIONS_CUT_LINE));
+}
+
+/// A turn with no room left for an owner edit goes without it: the prompt stays as it was and
+/// no edit is returned to mark delivered, so a later turn carries it.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_no_room_left_an_edit_stays_for_a_later_turn() {
+    let fixture = Fixture::new(1);
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    set_master(&fixture, "claude-code");
+    let mut team = piped_runtime(&fixture);
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers", |f| master_replies(f) == 1);
+    let master = masters(&fixture.connection)[0];
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    let home = agent_home(&fixture.base.join("team"), master);
+    let edit = crate::instruction_files::edit_for(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &home,
+        "claude-code",
+    )
+    .unwrap()
+    .expect("the edit is pending");
+    team.shutdown().unwrap();
+    let mut prompt = "x".repeat(100);
+    assert!(edit_in_front(&mut prompt, Some(edit), 110).is_none());
+    assert_eq!(prompt.len(), 100, "the prompt stays as it was");
+}
+
+/// A pane app takes a far longer turn than a piped session, so the same large edit reaches a
+/// pane master whole (OP4-I1).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_a_large_edit_reaches_a_pane_master_whole() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        master_replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    crate::agent_home::save_app(&fixture.base, &large_edit()).unwrap();
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        master_replies(f) == 2
+    });
+    let text = pasted(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(text.contains("## Part 79"), "{}", text.len());
+    assert!(!text.contains(SECTIONS_CUT_LINE), "{}", text.len());
+}
+
 /// With the default choice, typed messages that leave the live master no room for an owner
 /// edit say so in one team note per edited text: task results filling its whole input three
 /// times in a row leave one note, and after a later edit to other text the next full input

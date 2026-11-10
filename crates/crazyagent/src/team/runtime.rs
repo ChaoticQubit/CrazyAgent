@@ -3250,12 +3250,7 @@ impl TeamRuntime {
             true => None,
             false => self.next_message_edit(project, id, &home),
         };
-        if let Some(edit) = &edit {
-            prompt.insert_str(
-                0,
-                &crate::instruction_files::changed_message(&edit.sections),
-            );
-        }
+        let edit = edit_in_front(&mut prompt, edit, usize::MAX);
         if team_tool {
             tool::clear(&self.tool_record(id));
         }
@@ -5066,12 +5061,7 @@ impl TeamRuntime {
             prompt.push_str(&waiting);
             let home = agent_home(&self.state, agent);
             let edit = self.next_message_edit(project, agent, &home);
-            if let Some(edit) = &edit {
-                prompt.insert_str(
-                    0,
-                    &crate::instruction_files::changed_message(&edit.sections),
-                );
-            }
+            let edit = edit_in_front(&mut prompt, edit, usize::MAX);
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -10155,6 +10145,23 @@ fn told(prompt: String, rules: TurnRules, stops: bool) -> String {
     } else {
         prompt
     }
+}
+
+/// Puts an owner's instruction edit at the front of a turn's prompt, cut to what the turn's
+/// limit leaves; with no room the edit stays out and a later turn carries it. Inputs: the
+/// prompt, the edit and the limit in bytes. Output: the edit that went in, or none.
+fn edit_in_front(
+    prompt: &mut String,
+    edit: Option<crate::instruction_files::Edit>,
+    limit: usize,
+) -> Option<crate::instruction_files::Edit> {
+    assert!(limit > 0);
+    let edit = edit?;
+    prompt.insert_str(
+        0,
+        &crate::instruction_files::changed_message(&edit.sections),
+    );
+    Some(edit)
 }
 
 /// How a turn ends on a launch error: the deadline and the output limits keep their own
