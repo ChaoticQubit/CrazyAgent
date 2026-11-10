@@ -4438,6 +4438,128 @@ fn a_linked_lead_does_not_finish_over_a_resting_teammate_s_unsaved_edits() {
     );
 }
 
+/// team-20 r1 L1: a resting teammate whose folder under the teammates' folder the engine
+/// cannot read as the worktree it made, such as one with a broken `.git` file, keeps the
+/// lead's Complete back with that teammate's name and the reason, never a bare "try again",
+/// and every other teammate is still read; once the folder is gone, Complete goes through.
+#[test]
+fn a_linked_lead_s_finish_names_a_teammate_whose_worktree_cannot_be_read() {
+    const CHECK: i64 = 61;
+    let mut fixture = Fixture::new();
+    let (home, project) = owner_repository(&fixture);
+    let lead = project
+        .join(".crazyagent/worktrees")
+        .join(format!("agent-{LEAD}"));
+    let path = |folder: &std::path::Path| folder.to_str().unwrap().to_owned();
+    git_in(
+        &home,
+        &project,
+        &["worktree", "add", "-q", "--detach", &path(&lead), "HEAD"],
+    );
+    let git_dir = project.join(".git/worktrees").join(format!("agent-{LEAD}"));
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let branch = crate::landing::claim_task_branch(&db, &project, &lead, "lead").unwrap();
+    crate::landing::name_agent_branch(&db, &project, &lead, &git_dir).unwrap();
+    let folder = lead.join(crate::agent_git::TEAMMATES_FOLDER);
+    for name in ["greet", "check"] {
+        let own = crate::agent_git::teammate_branch(&branch, name).unwrap();
+        git_in(
+            &home,
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &own,
+                &path(&folder.join(name)),
+                "HEAD",
+            ],
+        );
+    }
+    std::fs::write(folder.join("greet").join(".git"), "gitdir: /nowhere\n").unwrap();
+    std::fs::write(folder.join("check").join("check.txt"), "Checked.\n").unwrap();
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES ({LEAD},'{PROJECT}','{}','{}','{}');
+             INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES ({WORKER},'{PROJECT}','teammate','claude-code',1,'idle',{NOW},{NOW},{LEAD},'%7'),
+                    ({CHECK},'{PROJECT}','teammate','claude-code',1,'idle',{NOW},{NOW},{LEAD},'%8');
+             INSERT INTO team_teammate_names(agent,name) VALUES ({WORKER},'greet'),({CHECK},'check');",
+            project.display(),
+            lead.display(),
+            git_dir.display()
+        ))
+        .unwrap();
+    let agents = fixture.base.join("team/agents");
+    let access = ModelAccess::default();
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        Call::StartWork {
+            title: "Lead the check".into(),
+            claims: vec!["check.txt".into()],
+        },
+    );
+    assert!(!error, "{answer}");
+    let work: i64 = answer
+        .strip_prefix("Started work #")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(id, _)| id.parse().ok())
+        .unwrap_or_else(|| panic!("no work id in {answer}"));
+    let finish = |fixture: &mut Fixture| {
+        lead_call(
+            fixture,
+            &access,
+            &agents,
+            LEAD,
+            Call::FinishWork {
+                work,
+                version: 1,
+                outcome: crate::coord::Finish::Complete,
+                evidence: "Checked.".into(),
+            },
+        )
+    };
+
+    let (answer, error) = finish(&mut fixture);
+
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: the edits of these teammates are not saved on their own branches yet: check. CrazyAgent saves a teammate's work each time it rests and tells you when it cannot; ask that teammate to work and rest again, then finish again.",
+            true
+        ),
+        "check is read past greet's unreadable folder"
+    );
+    std::fs::remove_file(folder.join("check").join("check.txt")).unwrap();
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!(
+                "Not finished: CrazyAgent could not read the worktree of these teammates, so it cannot tell whether their edits are saved: greet (changes_workspace_invalid). Ask the owner to look at each one's folder in {}, then finish again.",
+                crate::agent_git::TEAMMATES_FOLDER
+            )
+            .as_str(),
+            true
+        )
+    );
+    std::fs::remove_dir_all(folder.join("greet")).unwrap();
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Work #{work} is complete at version 2.").as_str(),
+            false
+        )
+    );
+}
+
 /// A lead cannot report its work Complete while a worker's branch holds a commit its task
 /// branch does not: finish_work names the worker's branch until the lead merges it, then
 /// completes (feat/coord-spawn 4f372a7e).
