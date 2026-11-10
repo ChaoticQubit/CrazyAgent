@@ -32,6 +32,12 @@ const BIND_TRIES: usize = 16;
 const REFUSALS_SHOWN: u64 = 20;
 const REFUSAL_TOTAL_EVERY: Duration = Duration::from_secs(60);
 const OWN_ADDRESS: &str = "resolves to this machine";
+const BINDS_ANY_ADDRESS: &str = "this machine lets programs bind any address, so CrazyAgent cannot tell which addresses are its own";
+const NONLOCAL_BIND: [&str; 2] = [
+    "/proc/sys/net/ipv4/ip_nonlocal_bind",
+    "/proc/sys/net/ipv6/ip_nonlocal_bind",
+];
+const SYSCTL_BYTES_MAX: u64 = 16;
 
 /// One host a model proxy lets an agent reach: a DNS name, never an IP literal, and its
 /// port. Names are kept in lower case, as hosts compare.
@@ -474,7 +480,8 @@ fn tunnel(client: TcpStream, shared: &Shared) {
     let upstream = match open_upstream(&host, deadline, shared.any_address) {
         Ok(upstream) => upstream,
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            cut(shared, &client, host.name(), "resolves to this machine");
+            let reason = own_address_reason(&nonlocal_bind());
+            cut(shared, &client, host.name(), reason);
             return;
         }
         Err(_) => {
@@ -728,7 +735,9 @@ fn dialable(address: IpAddr) -> bool {
 /// address, which reaches the owner's services from outside the sandbox as loopback does
 /// (S4B-I1). A socket binds only to an address an interface holds, and binding sends nothing.
 /// An IPv4 address inside an IPv6 one is tried as IPv4. Any other bind error counts as held,
-/// so a failed check refuses the dial. Input: the address. Output: true when held or unsure.
+/// so a failed check refuses the dial. Where a Linux sysctl lets any address bind, every
+/// address counts as held and the cut says why ([`own_address_reason`]). Input: the address.
+/// Output: true when held or unsure.
 fn on_this_machine(address: IpAddr) -> bool {
     let held = |ip: IpAddr| match spawn_gate::bind_udp_std((ip, 0)) {
         Ok(_) => true,
@@ -740,8 +749,36 @@ fn on_this_machine(address: IpAddr) -> bool {
     }
 }
 
-fn own_address_reason(_values: &[Option<String>; 2]) -> &'static str {
-    OWN_ADDRESS
+/// Why a host whose every address was refused is cut: it resolves to this machine, unless a
+/// sysctl lets programs bind any address, when the proxy cannot tell its own addresses at all.
+/// Input: each [`NONLOCAL_BIND`] value, None where it was not read. Output: the reason.
+fn own_address_reason(values: &[Option<String>; 2]) -> &'static str {
+    let on = |value: &String| {
+        value
+            .trim()
+            .parse::<u32>()
+            .is_ok_and(|setting| setting != 0)
+    };
+    if values.iter().flatten().any(on) {
+        BINDS_ANY_ADDRESS
+    } else {
+        OWN_ADDRESS
+    }
+}
+
+/// Reads the Linux sysctls that let programs bind any address, each cut to
+/// `SYSCTL_BYTES_MAX`. Output: each value, None where it cannot be read, as on macOS and
+/// Windows, which have no such file.
+fn nonlocal_bind() -> [Option<String>; 2] {
+    NONLOCAL_BIND.map(|path| {
+        let mut value = String::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(SYSCTL_BYTES_MAX)
+            .read_to_string(&mut value)
+            .ok()?;
+        Some(value)
+    })
 }
 
 /// Passes bytes both ways until either side closes, the proxy stops or nothing moved for
