@@ -451,6 +451,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         for (const deadline = Date.now() + STOP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
           assert.ok(Date.now() < deadline, "the IDE server kept running after its level was saved");
         }
+        let asked = false;
+        page.on("Page.javascriptDialogOpening", () => {
+          asked = true;
+          void page.send("Page.handleJavaScriptDialog", { accept: true });
+        });
         const reopened = await bridgeCall(bridge, "e2e_ide_open", { projectId: project });
         assert.ok("value" in reopened, `the IDE opens again: ${JSON.stringify(reopened)}`);
         await page.send("Page.navigate", { url: workbenchUrl(reopened.value) });
@@ -460,7 +465,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           back = await page.evaluate(`[...document.querySelectorAll(".view-line")].some((line) => line.textContent.includes(${JSON.stringify(UNSAVED)}))`);
         }
         await me.capture("unsaved-after-restart");
-        writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"}\n`);
+        writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"} prompt ${asked}\n`);
         const said = readFileSync(join(appRoot, "src/screens/project/access.tsx"), "utf8").includes("Unsaved edits are lost.");
         assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
       });

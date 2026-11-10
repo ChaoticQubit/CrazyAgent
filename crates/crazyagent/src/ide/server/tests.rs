@@ -2009,7 +2009,7 @@ async fn a_saved_policy_that_cannot_be_read_never_reaches_a_launch() {
     .unwrap();
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let refused = servers
-        .open(&bad, checkout.path(), checkout.path(), false)
+        .open(&bad, checkout.path(), checkout.path())
         .await
         .unwrap_err();
     assert_eq!(refused.0, "ide_workspace_unavailable");
@@ -2070,7 +2070,7 @@ async fn a_settings_file_that_cannot_be_read_stops_the_start() {
     let servers = servers_reading(data.path(), "not = = toml");
     let id = project("broken-settings");
     let refused = servers
-        .open(&id, checkout.path(), checkout.path(), false)
+        .open(&id, checkout.path(), checkout.path())
         .await
         .unwrap_err();
     assert_eq!(refused.0, "ide_settings_unavailable");
