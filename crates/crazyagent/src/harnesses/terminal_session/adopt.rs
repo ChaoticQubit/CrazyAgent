@@ -306,6 +306,7 @@ impl TerminalSession {
             turn: false,
             held: false,
             over_hold: false,
+            noticed: false,
             own_held: false,
             live: false,
             own: false,
