@@ -1008,18 +1008,20 @@ fn a_lead_worker_takes_in_its_lead_s_gitlink_and_its_own_is_still_refused() {
 /// Leaves the owner repository with no `.git/info`, as a clone or `init --template=` leaves
 /// a project and as the case's repository starts, and writes a grafts file into a case
 /// variant of it that gives `child` the only parent `parent`, as a project-root agent could
-/// (land-19 r2 M1). The owner's own git then answers ancestry from it. Inputs: the case,
-/// the grafted commit and its claimed parent.
+/// (land-19 r2 M1). A file system that keeps case, as on Linux, never reads the variant as
+/// `info`, so there the grafts file also goes into `info` itself. The owner's own git then
+/// answers ancestry from it. Inputs: the case, the grafted commit and its claimed parent.
 fn forge_grafts(case: &Case, child: &str, parent: &str) {
     let git = case.repo.join(".git");
     match std::fs::remove_dir_all(git.join("info")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         removed => removed.unwrap(),
     }
-    write(
-        &git.join("INFO").join("grafts"),
-        &format!("{child} {parent}\n"),
-    );
+    let grafts = format!("{child} {parent}\n");
+    write(&git.join("INFO").join("grafts"), &grafts);
+    if !git.join("info").join("grafts").is_file() {
+        write(&git.join("info").join("grafts"), &grafts);
+    }
     case.owner(&["merge-base", "--is-ancestor", parent, child]);
 }
 
