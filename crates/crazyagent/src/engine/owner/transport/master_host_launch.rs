@@ -2214,9 +2214,10 @@ mod tests {
     /// cannot move them: real git and plain writes from inside its boundary are refused for
     /// the owner's branch, `HEAD`, a new engine ref, the reflog, `packed-refs` and both its
     /// own and another worktree's admin `HEAD`, and every ref stays where the owner left it.
-    /// Not built on Linux: the row first adds a file at the top of the worktree, which the
-    /// Linux boundary refuses a master in v2.2.0 (a known limit, see the batch 10 notes).
-    #[cfg(not(target_os = "linux"))]
+    /// Its last step writes a file at the top of the worktree. On Linux that file is made
+    /// before the step: the Linux boundary lets a master write the entries its worktree
+    /// holds when a command starts and refuses a new one at its top in v2.2.0 (a known
+    /// limit, stated by the tools-on row below).
     #[test]
     fn a_tools_off_master_reads_the_repository_but_cannot_move_its_refs() {
         use std::process::{Command, Stdio};
@@ -2380,6 +2381,10 @@ mod tests {
         );
         assert!(!git_dir.join("packed-refs").exists());
         assert!(!git_dir.join("refs/heads/planted").exists());
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::write(worktree.join("work.txt"), "").unwrap();
+        }
         assert!(run(Path::new("/bin/sh"), &["-c", "echo agent >> work.txt"]));
         assert_eq!(
             std::fs::read_to_string(worktree.join("work.txt")).unwrap(),
@@ -2453,9 +2458,10 @@ mod tests {
     }
 
     /// A tools-on master writes in its worktree and its own folders, nowhere else, and starts
-    /// the engine executable. Not built on Linux: the row adds a file at the top of the
-    /// worktree, which the Linux boundary refuses a master in v2.2.0 (a known limit).
-    #[cfg(not(target_os = "linux"))]
+    /// the engine executable. On Linux the row first states the known v2.2.0 limit, a master
+    /// cannot add an entry at the top of its worktree, and then makes the worktree file
+    /// itself: the Linux boundary lets a master write the entries its worktree holds when a
+    /// command starts.
     #[test]
     fn a_tools_on_master_writes_only_in_its_worktree_and_own_folders_and_runs_the_engine() {
         use std::process::{Command, Stdio};
@@ -2564,6 +2570,13 @@ mod tests {
                 ],
             )
         };
+        #[cfg(target_os = "linux")]
+        {
+            let fresh = worktree.join("fresh.txt");
+            assert!(!write(&fresh), "{}", fresh.display());
+            assert!(!fresh.exists());
+            std::fs::write(worktree.join("work.txt"), "").unwrap();
+        }
         for allowed in [
             worktree.join("work.txt"),
             home.join("account.txt"),
