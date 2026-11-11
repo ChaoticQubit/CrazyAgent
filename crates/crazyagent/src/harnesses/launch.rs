@@ -746,7 +746,7 @@ fn codex_invocation(
 /// Checks the path of an account's key file before a harness is told to read it: an
 /// absolute path that fits inside a single-quoted shell word and a TOML string unchanged.
 /// Input: the path. Output: its text, or `launch_key_file_invalid`.
-pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
+pub(crate) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
     let file = path
         .to_str()
         .filter(|text| !text.chars().any(char::is_control))

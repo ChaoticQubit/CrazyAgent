@@ -54,7 +54,7 @@ fn put(row: &str, column: usize, text: &str, room: usize) -> String {
 fn engine_table(rows: &mut [String], first: usize, control: usize, works: usize, room: usize) {
     let words = [
         "Any account",
-        "Subscription, API key, Local model",
+        "Subscription, API key",
         "Any account",
         "Subscription, API key",
         "Subscription, API key",

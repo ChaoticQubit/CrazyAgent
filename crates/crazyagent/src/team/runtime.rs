@@ -19,7 +19,7 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    RUN_TIME_MAX, claude_bare,
+    RUN_TIME_MAX, Secret, claude_bare,
 };
 use crate::harnesses::leftovers::Unstopped;
 use crate::harnesses::terminal_session::{
@@ -28,6 +28,7 @@ use crate::harnesses::terminal_session::{
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
+use crate::model_gateway::relay::Relay;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
@@ -200,8 +201,10 @@ struct Grant {
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
-/// through, the only network its profile allows (S4b); `network` is the project network its
-/// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
+/// through, the only network its profile allows (S4b); `relay` is the key relay a keyed
+/// endpoint agent reaches its model through, so the key stays in the engine (DEC-141 PA-4);
+/// `network` is the project network its profile was made for, which a narrower saved choice
+/// stops it for (CS-2); `claude_display`
 /// is the project's Claude Code terminal display, read when the agent is prepared (N-D9);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
 /// (T3-15, DEC-116).
@@ -229,8 +232,32 @@ struct Plan {
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
     proxy: Option<Arc<ModelProxy>>,
+    relay: Option<Arc<Relay>>,
     claude_display: crate::coord::settings::ClaudeDisplay,
     task_start: Option<String>,
+}
+
+/// Why a pane an earlier engine left running on a keyed endpoint is not taken over: its key
+/// relay lived in that engine's memory and ended with it (DEC-141 PA-4).
+const KEYED_PANE_NOT_ADOPTED: &str = "its key relay ended with the earlier engine";
+
+/// The owner's sentence for a keyed endpoint agent whose key relay did not start.
+/// Input: the refusal code. Output: the sentence, which names the fix for a missing key.
+fn key_relay_sentence(code: &str) -> &'static str {
+    if code == "account_key_missing" {
+        "The account's key is not saved on this computer. Add the key again in Accounts"
+    } else {
+        "The account's key relay could not start"
+    }
+}
+
+/// Tells whether a later engine may take over a pane that reaches its model this way.
+/// Input: the account's reach. Output: Ok, or the reason it starts afresh instead.
+fn adoptable(reach: &TeamReach) -> Result<(), String> {
+    match reach {
+        TeamReach::Endpoint { key: Some(_), .. } => Err(KEYED_PANE_NOT_ADOPTED.to_owned()),
+        TeamReach::Endpoint { key: None, .. } | TeamReach::Managed { .. } => Ok(()),
+    }
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -348,6 +375,16 @@ impl Launch {
         match self {
             Launch::Fresh(plan, _) => plan.proxy.clone(),
             Launch::Adopt(adoption) => adoption.proxy.clone(),
+        }
+    }
+
+    /// Names the key relay a keyed endpoint agent reaches its model through, which its worker
+    /// thread holds until the thread ends (DEC-141 PA-4). An adopted pane has none: a keyed
+    /// pane is never adopted. Takes the launch. Returns the relay, if any.
+    fn relay(&self) -> Option<Arc<Relay>> {
+        match self {
+            Launch::Fresh(plan, _) => plan.relay.clone(),
+            Launch::Adopt(_) => None,
         }
     }
 
@@ -1165,6 +1202,9 @@ impl TeamRuntime {
                 .map(|account| account.reach.clone()),
             _ => None,
         };
+        if let Some(Err(problem)) = account_reach.as_ref().map(adoptable) {
+            return Ok(Err(problem));
+        }
         let reach = account_reach
             .as_ref()
             .map(|reach| matches!(reach, TeamReach::Endpoint { .. }));
@@ -7594,11 +7634,31 @@ impl TeamRuntime {
             private_directory(directory)
                 .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
+        let relay = match &account.reach {
+            TeamReach::Endpoint {
+                base_url,
+                key: Some(key),
+                ..
+            } => Some(Arc::new(
+                crate::harnesses::key_relay(&self.root, base_url, key)
+                    .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?,
+            )),
+            _ => None,
+        };
+        let relay_url = relay.as_ref().map(|relay| relay.base_url());
+        let relay_token = relay
+            .as_ref()
+            .map(|relay| Secret::new(relay.token().to_owned()))
+            .transpose()
+            .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?;
         let (home, remote, model) = match &account.reach {
-            TeamReach::Endpoint { base_url, model } => {
+            TeamReach::Endpoint {
+                base_url, model, ..
+            } => {
                 let endpoint = ResearchAccount::Endpoint {
-                    base_url: base_url.clone(),
+                    base_url: relay_url.clone().unwrap_or_else(|| base_url.clone()),
                     model: model.clone(),
+                    key: None,
                 };
                 let remote = model_remote(&endpoint).map_err(|e| {
                     with_code("the endpoint address was refused", Some(run_code(&e)))
@@ -7975,6 +8035,7 @@ impl TeamRuntime {
             #[cfg(unix)]
             scratch_pin,
             proxy,
+            relay,
             claude_display,
             task_start,
         };
@@ -7982,8 +8043,8 @@ impl TeamRuntime {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
                 account: AccountBinding::Url {
                     home,
-                    base_url: base_url.clone(),
-                    key: None,
+                    base_url: relay_url.unwrap_or_else(|| base_url.clone()),
+                    key: relay_token,
                 },
                 context: Box::new(context),
             },
@@ -9411,6 +9472,7 @@ fn work(
     leave: Arc<AtomicBool>,
 ) {
     let _proxy = launch.proxy();
+    let _relay = launch.relay();
     let launch = match launch {
         Launch::Fresh(plan, mode) if plan.live => {
             let problem = live(&plan, *mode, &orders, &reports, &cancel, &leave);

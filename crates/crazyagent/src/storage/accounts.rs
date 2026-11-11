@@ -61,7 +61,23 @@ pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 /// directory.
 #[cfg(unix)]
 pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::AtFlags;
+    let Some(directory) = key_folder(root, name)? else {
+        return Ok(());
+    };
+    match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
+
+/// Opens the engine root's key folder for one key name, refusing a name that is not a plain
+/// credential reference. Inputs: the engine root and the key name. Output: the folder, none
+/// when it does not exist, `account_key_reference_invalid`, or `account_key_store_unsafe`
+/// for a folder that is not this user's 0700 directory.
+#[cfg(unix)]
+fn key_folder(root: &Path, name: &str) -> Result<Option<std::fs::File>, EngineError> {
+    use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
     if CredentialRef::new(name).is_err() || name.starts_with('.') {
         return Err(error("account_key_reference_invalid"));
@@ -72,7 +88,7 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
         Mode::empty(),
     ) {
         Ok(fd) => std::fs::File::from(fd),
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(_) => return Err(error("account_key_store_unavailable")),
     };
     let metadata = directory.metadata().map_err(error)?;
@@ -82,11 +98,71 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
     {
         return Err(error("account_key_store_unsafe"));
     }
-    match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(_) => Err(error("account_key_store_unavailable")),
-    }
+    Ok(Some(directory))
 }
+
+/// The longest account key the store holds, as the owner transport writes it.
+#[cfg(unix)]
+const KEY_BYTES_MAX: u64 = 8192;
+
+/// Reads one saved account key so the engine can hand it to its key relay, never to an agent
+/// (DEC-141 PA-4). Inputs: the engine root and the key's credential reference. Output: the
+/// key, none when it was never saved, or `account_key_store_unsafe` for a key file that is not
+/// this user's single-link 0600 file; a link in its place is `account_key_store_unavailable`.
+#[cfg(unix)]
+pub(crate) fn read_key_file(
+    root: &Path,
+    credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let Some(directory) = key_folder(root, credential.as_str())? else {
+        return Ok(None);
+    };
+    let file = match rustix::fs::openat(
+        &directory,
+        credential.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    };
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.len() > KEY_BYTES_MAX
+    {
+        return Err(error("account_key_store_unsafe"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
+        bytes.fill(0);
+        return Err(error("account_key_store_unavailable"));
+    }
+    crate::credentials::SecretString::new(bytes)
+        .map(Some)
+        .map_err(|_| error("account_key_store_unsafe"))
+}
+
+/// Refuses to read an account key where the Unix owner-only key folder does not exist.
+/// Inputs: the engine root and credential, both unused. Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn read_key_file(
+    _root: &Path,
+    _credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+#[cfg(all(test, unix))]
+#[path = "account_key_tests.rs"]
+mod account_key_tests;
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
     let body = serde_json::to_vec(record).map_err(error)?;

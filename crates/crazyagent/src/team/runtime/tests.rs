@@ -20,6 +20,10 @@ use std::process::{Command, Stdio};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+#[path = "keyed_relay_tests.rs"]
+mod keyed_relay_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";
@@ -1557,6 +1561,7 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     for id in [1, 2] {
@@ -1728,6 +1733,7 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     assert_eq!(
@@ -2491,6 +2497,7 @@ fn a_prepared_agent_renews_its_credential_through_the_harness_entry_after_an_upd
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let access = fixture.access.clone();
@@ -2546,6 +2553,7 @@ fn a_harness_installed_after_engine_start_is_prepared_only_through_the_engines_l
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let open = || {
@@ -2607,6 +2615,7 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let open = || {
@@ -2693,6 +2702,7 @@ fn a_tools_on_launch_whose_settings_do_not_read_is_refused() {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let (global, project) = (
@@ -2784,6 +2794,7 @@ fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
             reach: TeamReach::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
+                key: None,
             },
         };
         runtime
@@ -2845,6 +2856,7 @@ fn a_sub_agent_s_own_git_merges_main_only_while_catch_up_with_main_is_on() {
             reach: TeamReach::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
+                key: None,
             },
         };
         runtime
@@ -2918,6 +2930,7 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let project = fixture.setup.project_id.as_str();
@@ -3057,6 +3070,7 @@ fn a_team_agent_starts_the_delegation_engine_from_its_app_bundle_but_no_other_bu
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let bundle = |name: &str| {
@@ -3148,6 +3162,7 @@ fn a_clone_launch_that_fails_after_making_the_clone_leaves_no_clone_behind() {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let access = fixture.access.clone();
@@ -13566,6 +13581,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        relay: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
         task_start: None,
     };
@@ -20866,6 +20882,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
+        relay: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
         task_start: None,
     }
@@ -20886,6 +20903,7 @@ fn endpoint_account() -> TeamAccount {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     }
 }
@@ -22471,6 +22489,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
+        relay: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
         task_start: None,
     };
@@ -22956,6 +22975,7 @@ fn an_endpoint_agent_under_no_network_gets_a_proxy_only_for_its_named_https_endp
         reach: TeamReach::Endpoint {
             base_url: base_url.into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let (_, local) = prepare_tools_on(&fixture, &runtime, &endpoint("http://127.0.0.1:11434/v1"));
