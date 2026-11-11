@@ -98,6 +98,11 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
+/// Why a sandbox with an open network and kept local model ports does not start on Linux:
+/// its boundary cannot keep a port free of the agent's listeners, so the launch is refused
+/// instead of started without that protection (DEC-137 G3).
+pub const KEPT_PORTS_NEED_SEATBELT: &str = "keeping local model ports free needs the macOS sandbox";
+
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
@@ -1735,6 +1740,16 @@ impl ProjectSandbox {
     /// The network reach this sandbox grants the agent.
     pub fn network(&self) -> &SandboxNetwork {
         &self.network
+    }
+
+    /// Tells whether this sandbox must keep ports of the owner's configured local model
+    /// endpoints free of the agent's listeners: its network is open and
+    /// [`ProjectSandbox::keep_ports`] kept at least one port. Only Seatbelt can do that, so
+    /// the Linux boundary refuses such a sandbox. Output: the answer.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn keeps_ports_free(&self) -> bool {
+        assert!(self.kept_ports.len() <= KEPT_PORTS_MAX);
+        self.network == SandboxNetwork::Open && !self.kept_ports.is_empty()
     }
 
     /// Sets how this agent's sockets are held on Linux when its network is limited. Input:
@@ -3420,6 +3435,29 @@ mod linux_sockets_tests {
 
     fn model() -> SandboxNetwork {
         SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+    }
+
+    #[test]
+    fn only_an_open_network_with_a_kept_port_must_keep_ports_free() {
+        let case = case();
+        let open = || sandbox(&case, SandboxNetwork::Open, LinuxSockets::TcpOnly);
+        assert!(
+            open().keep_ports(&[20_000]).unwrap().keeps_ports_free(),
+            "the Linux boundary cannot keep the port free, so it must refuse this sandbox"
+        );
+        assert!(!open().keeps_ports_free());
+        assert!(!open().keep_ports(&[]).unwrap().keeps_ports_free());
+        assert!(
+            !open().keep_ports(&OWNER_PORTS).unwrap().keeps_ports_free(),
+            "the fixed owner ports are not kept ports"
+        );
+        let limited = sandbox(&case, model(), LinuxSockets::TcpOnly)
+            .keep_ports(&[20_000])
+            .unwrap();
+        assert!(
+            !limited.keeps_ports_free(),
+            "a limited network opens no listener, so it has no port to keep free"
+        );
     }
 
     fn local() -> SandboxNetwork {
