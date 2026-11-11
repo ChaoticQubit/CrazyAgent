@@ -1168,8 +1168,9 @@ fn found(tx: &Transaction<'_>, id: u64) -> Result<Question, EngineError> {
 
 /// Reads the questions a query selects, its columns in `COLUMNS` order, each with its
 /// versioned-write version. A pending question always holds version 0: only settling it
-/// writes its item. Inputs: the transaction, the query and its parameters. Output: the
-/// questions, or `questions_unavailable` for a row this module never writes.
+/// writes its item. A kind name from a later engine reads like a row from before kinds.
+/// Inputs: the transaction, the query and its parameters. Output: the questions, or
+/// `questions_unavailable` for a row this module never writes.
 fn select(
     tx: &Transaction<'_>,
     query: &str,
@@ -1248,7 +1249,9 @@ fn select(
             Some(ms) => Some(u64::try_from(ms).map_err(unavailable)?),
         };
         let options: Vec<String> = serde_json::from_str(&options).map_err(unavailable)?;
-        let kind = QuestionKind::stored(&kind, options.len()).ok_or_else(|| unavailable(()))?;
+        let kind = QuestionKind::stored(&kind, options.len())
+            .or_else(|| QuestionKind::stored("", options.len()))
+            .ok_or_else(|| unavailable(()))?;
         assert!(
             kind != QuestionKind::Text || options.is_empty(),
             "a text question never has options"
@@ -1411,7 +1414,8 @@ fn ask_from_item(item: &serde_json::Value, context: &str) -> Option<Ask> {
             .collect::<Option<_>>()?,
         Some(_) => return None,
     };
-    let kind = QuestionKind::stored(&text("kind")?, options.len())?;
+    let named = text("kind").filter(|name| !name.is_empty())?;
+    let kind = QuestionKind::stored(&named, options.len())?;
     let ask = Ask {
         question: text("question")?,
         kind,

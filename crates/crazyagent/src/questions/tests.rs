@@ -1798,6 +1798,13 @@ fn a_row_written_before_kinds_reads_as_single_with_options_and_text_without() {
             [],
         )
         .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind)
+             VALUES ('alpha','engine:planning','engine','From a later engine?','[\"A\",\"B\"]','pending',0,1,'ranked')",
+            [],
+        )
+        .unwrap();
     let pending = pending(&case.db, &case.project).unwrap();
     let kind_of = |text: &str| {
         pending
@@ -1808,6 +1815,11 @@ fn a_row_written_before_kinds_reads_as_single_with_options_and_text_without() {
     };
     assert_eq!(kind_of("Old with options?"), QuestionKind::Single);
     assert_eq!(kind_of("Old without?"), QuestionKind::Text);
+    assert_eq!(
+        kind_of("From a later engine?"),
+        QuestionKind::Single,
+        "a kind this engine does not know reads like a row from before kinds"
+    );
     assert_eq!(kind_of("Which platform ships first?"), QuestionKind::Text);
 }
 
@@ -1853,6 +1865,8 @@ fn asks_from_json_stops_at_the_cap_and_reads_nothing_from_another_shape() {
         serde_json::json!(["Which name?"]),
         serde_json::json!({"questions": [{"question": 7, "kind": "text"}]}),
         serde_json::json!({"questions": [{"question": "Which?", "kind": "choice"}]}),
+        serde_json::json!({"questions": [{"question": "Which?", "kind": ""}]}),
+        serde_json::json!({"questions": [{"question": "Which?", "options": ["Web", "Desktop"], "recommended": "Web"}]}),
         serde_json::json!({"questions": [{"question": "Which?", "kind": "single", "options": "Web"}]}),
     ] {
         assert!(asks_from_json(&other, "c").is_empty(), "{other}");
