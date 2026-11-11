@@ -2729,9 +2729,15 @@ fn owner_read(
                 more: listed.more,
             }
         }
-        OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
-            context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
-        },
+        OwnerRead::ProjectContext { project_id } => {
+            let links = crate::project_setup::links::list(&tx, project_id)?;
+            OwnerData::ProjectContext {
+                context: crate::project_setup::list_context_with_links(
+                    &stored_setup(&tx, project_id)?,
+                    &links,
+                )?,
+            }
+        }
         OwnerRead::ResearchLog { project_id, job } => {
             crate::project_setup::project_job(&tx, project_id, *job)?
                 .ok_or_else(|| error("research_job_missing"))?;
@@ -2745,13 +2751,21 @@ fn owner_read(
             project_id,
             path,
             offset,
-        } => OwnerData::ProjectContextItem {
-            chunk: crate::project_setup::read_context(
-                &stored_setup(&tx, project_id)?,
-                path,
-                *offset,
-            )?,
-        },
+        } => {
+            let links = if path.starts_with(crate::project_setup::LINKED_PREFIX) {
+                crate::project_setup::links::list(&tx, project_id)?
+            } else {
+                Vec::new()
+            };
+            OwnerData::ProjectContextItem {
+                chunk: crate::project_setup::read_context_with_links(
+                    &stored_setup(&tx, project_id)?,
+                    &links,
+                    path,
+                    *offset,
+                )?,
+            }
+        }
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,

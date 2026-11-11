@@ -156,6 +156,7 @@ fn planning_asks_before_it_can_replace_the_roadmap() {
         path: "context/brief.md".into(),
         kind: ContextKind::Brief,
         bytes: 10,
+        linked: false,
     };
     let plan = SetupAction::PlanRoadmap {
         project_id: project.clone(),
@@ -171,11 +172,27 @@ fn planning_asks_before_it_can_replace_the_roadmap() {
     );
 
     screen.context = Some(context(vec![
+        brief.clone(),
+        ContextItem {
+            path: "repo/docs/roadmap.md".into(),
+            kind: ContextKind::Plan,
+            bytes: 10,
+            linked: true,
+        },
+    ]));
+    assert_eq!(
+        press(&mut screen, KeyCode::Char('p')),
+        ProjectReply::Change(Box::new(plan.clone())),
+        "a roadmap linked from the repo is never written by planning"
+    );
+
+    screen.context = Some(context(vec![
         brief,
         ContextItem {
             path: "context/roadmap.md".into(),
             kind: ContextKind::Plan,
             bytes: 10,
+            linked: false,
         },
     ]));
     assert_eq!(

@@ -134,10 +134,13 @@ export interface ActivityItem {
   place?: "changes" | "ide" | null;
 }
 
+/** One file of a project's context. `linked` is true for a file linked from the owner's
+ * repository; its path then starts with "repo/" and the rest is the path in the repository. */
 export interface ContextItem {
   path: string;
   kind: "brief" | "document" | "research" | "plan";
   bytes: number;
+  linked?: boolean;
 }
 
 export interface ProjectContext {

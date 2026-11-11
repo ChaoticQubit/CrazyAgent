@@ -70,10 +70,11 @@ export function planningView(state: PlanningState): PlanningView {
 export const REPLACE_LINE = "Planning writes roadmap.md and release-process.md again from the brief and research. Your edits to them are lost.";
 
 /** Whether a planning run can replace roadmap documents the owner may have edited: a plan ran
- * before, the context lists one of them, or the context isn't read. Inputs: the state and the
+ * before, the context lists one of them, or the context isn't read. A roadmap linked from the
+ * repository is never written by planning, so it does not count. Inputs: the state and the
  * context read. Output: true when the owner confirms first. */
 export function planReplaces(state: PlanningState, context: Result<ProjectContext> | undefined): boolean {
-  return state.kind !== "idle" || context?.kind !== "ok" || context.value.items.some((item) => item.kind === "plan");
+  return state.kind !== "idle" || context?.kind !== "ok" || context.value.items.some((item) => item.kind === "plan" && item.linked !== true);
 }
 
 /** Sends the planning line's action to the engine: Retry runs the failed or stopped planning job

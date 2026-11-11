@@ -1379,9 +1379,20 @@ impl ProjectScreen {
     }
 
     /// Names one context file to open: the folder its context paths start from, as the
-    /// engine listed them, and the path inside it. Takes the path inside that folder.
-    /// Returns the request, or none before the folder is known.
+    /// engine listed them, and the path inside it; a linked repository file, listed as
+    /// `repo/<path>`, is named by the project folder and its path below it. Takes the path
+    /// the context tree lists. Returns the request, or none before the folder is known.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
+        if let Some(linked) = path.strip_prefix(crate::project_setup::LINKED_PREFIX) {
+            if linked.is_empty() {
+                return None;
+            }
+            let folder = self.project_folder()?;
+            return Some(OpenRequest::Context {
+                folder: folder.to_string_lossy().into_owned(),
+                path: linked.to_owned(),
+            });
+        }
         let folder = self
             .context
             .as_ref()
@@ -2169,6 +2180,9 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Char('d') => match item {
+                Some(item) if item.linked => {
+                    self.problem = Some(LINKED_KEPT.into());
+                }
                 Some(item) if item.kind == ContextKind::Plan => {
                     self.problem = Some("The roadmap and release process can't be deleted.".into());
                 }
@@ -2476,7 +2490,8 @@ impl ProjectScreen {
     }
 
     /// Whether a planning run can replace roadmap documents the owner may have edited: a plan
-    /// ran before, the context lists one of them, or the context is not read yet.
+    /// ran before, the context lists one of them, or the context is not read yet. A roadmap
+    /// linked from the repository is never written by planning, so it does not count.
     /// Takes the planning state. Returns true when the owner must confirm first.
     fn plan_replaces(&self, state: &Planning) -> bool {
         *state != Planning::Idle
@@ -2484,7 +2499,7 @@ impl ProjectScreen {
                 context
                     .items
                     .iter()
-                    .any(|item| item.kind == ContextKind::Plan)
+                    .any(|item| item.kind == ContextKind::Plan && !item.linked)
             })
     }
 
@@ -2830,7 +2845,12 @@ impl ProjectScreen {
             );
         }
         if let Some(preview) = &self.preview {
-            assert!(preview.path.starts_with(CONTEXT_DIRECTORY));
+            assert!(
+                preview.path.starts_with(CONTEXT_DIRECTORY)
+                    || preview
+                        .path
+                        .starts_with(crate::project_setup::LINKED_PREFIX)
+            );
         }
     }
 }
@@ -2853,6 +2873,10 @@ pub(in crate::tui) fn memory_source(memory: &KnowledgeEntry) -> Option<ResearchK
         expected.get(..32) == Some(digest)
     })
 }
+
+/// What the Context tab says when the owner asks to delete a file linked from the repository.
+pub(in crate::tui) const LINKED_KEPT: &str =
+    "This file is linked from your repo. It can't be deleted here.";
 
 /// Finds the research kind of a report path.
 /// Takes a context path such as `context/research/market_research.md`.

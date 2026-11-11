@@ -880,7 +880,10 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectContextItem { path, .. } => {
-                if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+                if path.is_empty()
+                    || path.len() > crate::project_setup::CONTEXT_PATH_BYTES_MAX
+                    || path.chars().any(char::is_control)
+                {
                     return Err(failure("context_path_invalid"));
                 }
                 return Ok(None);

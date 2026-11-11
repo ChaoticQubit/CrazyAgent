@@ -1817,7 +1817,13 @@ pub(in crate::tui) fn activity(
     steps
 }
 
+/// Where the Context tab says a file linked from the repository comes from.
+pub(in crate::tui) const LINKED_SOURCE: &str = "Linked from your repo";
+
 fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row) {
+    if item.linked {
+        return (Row::default(), Row::of(LINKED_SOURCE, look.muted));
+    }
     match item.kind {
         ContextKind::Brief => (Row::default(), Row::of("Project brief", look.muted)),
         ContextKind::Document => (Row::default(), Row::of("You added it", look.muted)),
