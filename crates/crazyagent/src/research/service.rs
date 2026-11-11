@@ -242,6 +242,7 @@ enum Upkeep {
 struct StatusUpkeep {
     db: Option<rusqlite::Connection>,
     checks: Vec<JoinHandle<()>>,
+    overview_runs: crate::project_overview::Started,
     passes: u32,
     failed: bool,
     overview_failed: bool,
@@ -275,6 +276,7 @@ impl StatusUpkeep {
         Self {
             db,
             checks: Vec::new(),
+            overview_runs: crate::project_overview::Started::default(),
             passes: 0,
             failed: false,
             overview_failed: false,
@@ -314,7 +316,10 @@ impl StatusUpkeep {
             );
         }
         starts.upkeep = Upkeep::Overview;
-        if let Err(error) = crate::project_overview::tick(db, &mut starts, now)
+        let steady = std::time::Instant::now();
+        let ticked =
+            crate::project_overview::tick(db, &mut starts, &mut self.overview_runs, steady, now);
+        if let Err(error) = ticked
             && !self.overview_failed
         {
             self.overview_failed = true;

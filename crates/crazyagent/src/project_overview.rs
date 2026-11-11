@@ -24,7 +24,7 @@ pub use pack::{
 };
 pub use run::{
     Ended, NO_ACCOUNT, NO_TABS, NOT_WRITTEN, REPLY_BYTES_MAX, REPLY_TOO_LONG, RUN_TIME,
-    STARTS_PER_TICK_MAX, UNFINISHED, brief, close_orphans, fail, finish, requeue, tick,
+    STARTS_PER_TICK_MAX, Started, UNFINISHED, brief, close_orphans, fail, finish, requeue, tick,
 };
 
 /// The folder inside a project's `.crazyagent` that holds the tab files.
@@ -1003,9 +1003,10 @@ pub fn competitors(
 /// Reads the project's Overview. The first read of a project makes its row stale and due
 /// at once, which asks for the first writing run; a project with no `.crazyagent` folder
 /// gets no row and `needs_home` instead, so no run is asked for it. The README and the
-/// competitor state are read as well. Inputs: the connection, the project, its folder
-/// and the time. Output: the Overview with the four tabs in order, or
-/// `overview_unavailable`.
+/// competitor state are read as well. A run counts as running for as long as its claim is
+/// open: the engine closes it when it ends or its time is over, and at engine start.
+/// Inputs: the connection, the project, its folder and the time. Output: the Overview
+/// with the four tabs in order, or `overview_unavailable`.
 pub fn read(
     db: &Connection,
     project: &ProjectId,
@@ -1064,9 +1065,7 @@ pub fn read(
         readme: readme(folder),
         tabs,
         competitors: competitors(db, project, folder)?,
-        running: state
-            .running_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) < run::RUN_MS),
+        running: state.running_ms.is_some(),
         stale: state.stale && !needs_home,
         checked_ms: state.checked_ms,
         failure,
