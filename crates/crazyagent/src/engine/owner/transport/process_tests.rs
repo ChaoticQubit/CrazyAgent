@@ -1777,6 +1777,47 @@ fn a_project_whose_agents_get_its_file_alone_never_sends_the_app_text() {
 }
 
 #[test]
+fn with_the_app_wide_setting_off_a_project_proposal_never_sends_the_app_text() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, None, "- App secret rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let off = AppInstructionSettings {
+        edit_with_ai: false,
+    };
+    let propose_once = |root: &Path| {
+        let mut seen = String::new();
+        let proposed = propose(root, Some(&project), None, |prompt| {
+            seen = prompt.to_owned();
+            Ok("~~~\n- Run make check.\n~~~".to_owned())
+        })
+        .unwrap();
+        assert_eq!(proposed.text, "- Run make check.\n");
+        seen
+    };
+    let on = propose_once(&root);
+    assert!(
+        on.contains("- App secret rule.") && on.contains("- Run make check."),
+        "On, a project whose agents get both texts compares them: {on}"
+    );
+    assert_eq!(app_settings(&root, Some(off)).unwrap(), off);
+    let seen = propose_once(&root);
+    assert!(
+        !seen.contains("App secret rule"),
+        "Off, the app text is sent to no model: {seen}"
+    );
+    assert!(!seen.contains("repeat the app instructions file"), "{seen}");
+    assert!(seen.contains("- Run make check."), "{seen}");
+    assert!(
+        instruction_settings(&root, &project, None)
+            .unwrap()
+            .settings
+            .edit_with_ai,
+        "the project's own setting stays on and still governs its editor"
+    );
+}
+
+#[test]
 fn the_app_proposal_needs_the_picked_pool_and_a_project_takes_none() {
     let (_directory, root) = root();
     let project = cleanup_project(&root);
