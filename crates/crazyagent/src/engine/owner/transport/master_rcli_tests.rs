@@ -1,4 +1,4 @@
-use super::{rcli_failure_observation, require_rcli_connection};
+use super::{rcli_failure_observation, require_rcli_connection, timed_out};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::engine::EngineError;
 use crate::master_session::MasterReason;
@@ -130,7 +130,10 @@ fn rcli_failures_keep_capture_budget_and_approval_reasons() {
             MasterReason::CaptureIncomplete,
         ),
         ("rcli_master_input_required", MasterReason::ApprovalRequired),
-        ("rcli_master_turn_deadline", MasterReason::BudgetExhausted),
+        ("rcli_master_turn_deadline", MasterReason::TimeLimit),
+        ("master_time_limit_10", MasterReason::TimeLimit),
+        ("master_time_limit_30", MasterReason::TimeLimit),
+        ("master_time_limit_60", MasterReason::TimeLimit),
         (
             "master_runtime_budget_exhausted",
             MasterReason::BudgetExhausted,
@@ -169,6 +172,44 @@ fn rcli_failures_keep_capture_budget_and_approval_reasons() {
     ] {
         assert_eq!(reason(code), expected, "{code}");
     }
+}
+
+/// An rcli master turn its run clock ended names the owner's master time limit, as a Claude
+/// or Codex one does (OB-5d): the stored cause is `master_time_limit_<minutes>` with the
+/// reason time_limit. With no limit the code is kept, and no other code is renamed.
+#[test]
+fn an_rcli_turn_its_clock_ended_names_the_time_limit_it_ran_under() {
+    use crate::master_time_limit::TimeLimit;
+
+    let clock = || EngineError("rcli_master_turn_deadline".into());
+    for (limit, minutes) in [
+        (TimeLimit::Minutes10, 10),
+        (TimeLimit::Minutes30, 30),
+        (TimeLimit::Minutes60, 60),
+    ] {
+        let named = timed_out(clock(), limit);
+        assert_eq!(named.0, format!("master_time_limit_{minutes}"));
+        match rcli_failure_observation(&named) {
+            MasterRuntimeObservation::Failed { reason, cause } => {
+                assert_eq!(reason, MasterReason::TimeLimit);
+                assert_eq!(cause, named.0);
+            }
+            _ => panic!("a turn its clock ended is a failed turn"),
+        }
+    }
+    let kept = timed_out(clock(), TimeLimit::NoLimit);
+    assert_eq!(kept.0, "rcli_master_turn_deadline");
+    assert_eq!(reason(&kept.0), MasterReason::TimeLimit);
+    for code in [
+        "master_runtime_budget_exhausted",
+        "rcli_master_startup_deadline",
+        "rcli_master_execution_failed",
+    ] {
+        let other = timed_out(EngineError(code.into()), TimeLimit::Minutes10);
+        assert_eq!(other.0, code);
+        assert_ne!(reason(code), MasterReason::TimeLimit, "{code}");
+    }
+    assert_eq!(reason("master_time_limit_600"), MasterReason::Unknown);
 }
 
 #[test]

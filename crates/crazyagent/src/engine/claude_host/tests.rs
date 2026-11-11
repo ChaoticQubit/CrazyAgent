@@ -272,7 +272,6 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
         cleanup_time: Duration::from_secs(2),
         stdout_bytes: 262_144,
         stderr_bytes: 65_536,
-        events: 4096,
     };
     assert!(valid.validate().is_ok());
     for limits in [
@@ -308,11 +307,6 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
             stderr_bytes: 262_145,
             ..valid
         },
-        ClaudeHostLimits { events: 0, ..valid },
-        ClaudeHostLimits {
-            events: 4097,
-            ..valid
-        },
     ] {
         assert!(limits.validate().is_err());
     }
@@ -326,7 +320,6 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
         let limits = limits.unwrap_or_else(|_| panic!("{limit:?} is a host clock"));
         assert_eq!(limits.run_time, limit.run_time());
         assert_eq!(limits.run_time.is_none(), limit.minutes().is_none());
-        assert_eq!(limits.events, 4096);
     }
     let long = ResourceBudget {
         wall_time_ms: 86_400_000,
@@ -337,7 +330,11 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
         (long, Some(Duration::from_secs(600))),
     ] {
         let limits = ClaudeHostLimits::from_budget(&budget, clock).unwrap();
-        assert_eq!(limits.run_time, clock, "the clock is the setting, not the budget");
+        assert_eq!(
+            limits.run_time,
+            clock,
+            "the clock is the setting, not the budget"
+        );
     }
     for refused in [Duration::ZERO, Duration::from_secs(3601)] {
         assert!(ClaudeHostLimits::from_budget(&ResourceBudget::unit(), Some(refused)).is_err());
@@ -1166,7 +1163,10 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
         match limit.steps() {
             Some(steps) => {
                 assert_eq!(args.len(), plain.len() + 2, "{limit:?}");
-                assert_eq!(args[plain.len()..], ["--max-turns".to_owned(), steps.to_string()]);
+                assert_eq!(
+                    args[plain.len()..],
+                    ["--max-turns".to_owned(), steps.to_string()]
+                );
             }
             None => assert_eq!(args, plain),
         }
@@ -1405,6 +1405,68 @@ async fn a_burst_past_the_event_queue_waits_for_the_reader_and_is_not_a_failed_t
         "{} events",
         kinds.len()
     );
+}
+
+/// A stand-in Claude Code whose turn writes 10,000 small frames, each with its own id, 9,500
+/// tool answers and 500 reply lines, then ends the turn with DONE.
+const MANY_EVENTS_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 10000 ]; do
+  i=$((i+1))
+  if [ "$((i % 20))" -eq 0 ]; then
+    printf '{"type":"assistant","uuid":"said-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"line"}]}}\n' "$i" "$i"
+  else
+    printf '{"type":"user","uuid":"answer-%s","session_id":"native-session"}\n' "$i"
+  fi
+done
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A turn of 10,000 small events ends with its reply (OB-5d): no count of events ends a
+/// turn. It used to fail with claude_host_event_limit at the 4,097th event, and the protocol
+/// refused the 4,097th message id as over capacity. Its frames stay under the stand-in
+/// host's 1 MiB of stdout, the bound that remains.
+#[tokio::test]
+async fn a_turn_of_ten_thousand_small_events_ends_with_its_reply() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let (kinds, error) =
+        tool_step_turn(&mut fixture, "claude-many", 1, true, MANY_EVENTS_HARNESS).await;
+    assert_eq!(error, None, "{} events", kinds.len());
+    let said = kinds
+        .iter()
+        .filter(|kind| matches!(kind, EventKind::AssistantText { text, .. } if text == "line"))
+        .count();
+    let answers = kinds
+        .iter()
+        .filter(|kind| {
+            matches!(kind, EventKind::Unsupported { message_type, .. } if message_type == "user")
+        })
+        .count();
+    assert_eq!(said, 500, "every reply line reached the reader");
+    assert_eq!(answers, 9_500, "every tool answer reached the reader");
+    assert!(kinds.len() > 10_000, "{} events", kinds.len());
+    let outcome = match kinds.last() {
+        Some(EventKind::TurnFinished { outcome, .. }) => Some(outcome),
+        _ => None,
+    };
+    let reply = match kinds.last() {
+        Some(EventKind::TurnFinished { result, .. }) => result.as_deref(),
+        _ => None,
+    };
+    assert_eq!(
+        outcome,
+        Some(&TurnOutcome::Success),
+        "{} events",
+        kinds.len()
+    );
+    assert_eq!(reply, Some("DONE"), "the turn ended with its reply");
 }
 
 #[tokio::test]
@@ -1909,8 +1971,14 @@ async fn quiet_turn_under(clock: Option<Duration>) -> (Option<String>, Duration)
 async fn a_claude_master_with_no_clock_outlasts_the_quiet_turn_a_clock_ends() {
     let (error, took) = quiet_turn_under(Some(Duration::from_secs(2))).await;
     assert_eq!(error.as_deref(), Some("claude_host_deadline"));
-    assert!(took < Duration::from_secs(5), "the clock ended it: {took:?}");
+    assert!(
+        took < Duration::from_secs(5),
+        "the clock ended it: {took:?}"
+    );
     let (error, took) = quiet_turn_under(None).await;
     assert_eq!(error, None, "no clock ends the turn");
-    assert!(took >= Duration::from_secs(5), "the turn ran whole: {took:?}");
+    assert!(
+        took >= Duration::from_secs(5),
+        "the turn ran whole: {took:?}"
+    );
 }

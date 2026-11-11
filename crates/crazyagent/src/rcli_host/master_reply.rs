@@ -3,7 +3,7 @@ use super::master_launch::error;
 use super::{Event, EventBody, TurnStatus};
 use crate::protocol::{ProtocolError, RequestId};
 use crate::usage::capture::Tokens;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const REPLY_BYTES_MAX: usize = 1_048_576;
 
@@ -16,7 +16,9 @@ struct Message {
 
 pub(super) struct TurnCapture {
     pub(super) id: RequestId,
-    pub(super) deadline: Instant,
+    /// When a cancel the host asked for must have ended; none until a cancel. A turn has no
+    /// clock of its own: its host's run clock, the master time limit, bounds it (OB-5d).
+    pub(super) deadline: Option<Instant>,
     pub(super) cancelling: bool,
     messages: Vec<Message>,
     retained_bytes: usize,
@@ -29,7 +31,7 @@ impl TurnCapture {
     pub(super) fn new(id: RequestId) -> Self {
         let capture = Self {
             id,
-            deadline: Instant::now() + Duration::from_secs(120),
+            deadline: None,
             cancelling: false,
             messages: Vec::new(),
             retained_bytes: 0,
@@ -39,6 +41,7 @@ impl TurnCapture {
         };
         assert!(capture.messages.is_empty());
         assert_eq!(capture.retained_bytes, 0);
+        assert!(capture.deadline.is_none());
         capture
     }
 

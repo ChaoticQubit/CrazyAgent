@@ -1,3 +1,5 @@
+use super::master::clock_ended;
+use super::master_reply::TurnCapture;
 use super::{RcliMasterBinding, RcliMasterHost, RcliMasterLaunch};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
@@ -275,12 +277,12 @@ fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child
     let other = root.join("other-project");
     fs::create_dir(&other).unwrap();
     let elsewhere = sandbox(&case, &other);
-    let refused = RcliMasterHost::launch(case.launch.clone(), &elsewhere)
+    let refused = RcliMasterHost::launch(case.launch.clone(), &elsewhere, None)
         .err()
         .unwrap();
     assert_eq!(refused.0, "rcli_master_sandbox_refused");
     let boundary = sandbox(&case, &case.launch.cwd);
-    let mut host = RcliMasterHost::launch(case.launch, &boundary).unwrap();
+    let mut host = RcliMasterHost::launch(case.launch, &boundary, None).unwrap();
     assert_eq!(
         host.binding().connection.account_ref,
         credential("account-a")
@@ -307,6 +309,102 @@ fn real_process_exit_never_becomes_ready_or_reply_and_shutdown_reaps_owned_child
     }
     host.shutdown().unwrap();
     host.shutdown().unwrap();
+}
+
+/// With no master time limit and no cancel asked for, no clock ends an rcli turn however
+/// long it runs (OB-5d): it used to end 120 s after its prompt and 600 s after its host
+/// started. A run clock, one per limit the owner can pick, ends it from its end on, and so
+/// does the wait for a cancel.
+#[test]
+fn no_clock_ends_a_turn_without_a_time_limit_and_each_limit_ends_it_on_time() {
+    use crate::master_time_limit::TimeLimit;
+
+    let start = Instant::now();
+    let day = start + Duration::from_secs(86_400);
+    for seconds in [0, 120, 600, 3_600, 86_400] {
+        let now = start + Duration::from_secs(seconds);
+        assert!(!clock_ended(now, None, None), "no limit at {seconds} s");
+    }
+    let clocks: Vec<Duration> = TimeLimit::ALL
+        .into_iter()
+        .filter_map(TimeLimit::run_time)
+        .collect();
+    assert_eq!(clocks.len(), 3, "10, 30 and 60 minutes");
+    for time in clocks {
+        let end = start + time;
+        let before = end - Duration::from_millis(1);
+        assert!(!clock_ended(before, Some(end), None), "{time:?}");
+        assert!(clock_ended(end, Some(end), None), "{time:?}");
+        assert!(clock_ended(day, Some(end), None), "{time:?}");
+    }
+    let cancel = start + Duration::from_secs(6);
+    assert!(!clock_ended(start, None, Some(cancel)));
+    assert!(clock_ended(cancel, None, Some(cancel)));
+    assert!(
+        clock_ended(cancel, Some(day), Some(cancel)),
+        "the earlier end decides"
+    );
+    let turn = TurnCapture::new(RequestId::new("turn-clock").unwrap());
+    assert!(
+        turn.deadline.is_none(),
+        "a prompted turn has no clock of its own"
+    );
+    assert!(!turn.cancelling);
+}
+
+/// A stand-in rcli that never says it is ready and waits on its input until it is stopped.
+const WAITING_HOST: &str = "#!/bin/sh\nIFS= read -r line\n";
+
+/// Runs the waiting stand-in as a real rcli master host under a run clock and polls it
+/// until the host ends. Input: the clock, none for no master time limit. Output: the code
+/// the host ended with and how long after its launch.
+fn waiting_host_end(clock: Option<Duration>) -> (String, Duration) {
+    let mut case = Case::new();
+    fs::write(&case.launch.executable, WAITING_HOST).unwrap();
+    case.launch.artifact_sha256 = digest(WAITING_HOST.as_bytes());
+    let first =
+        crate::spawn_gate::first_run(&mut std::process::Command::new(&case.launch.executable));
+    assert_eq!(
+        first.code(),
+        Some(1),
+        "the stand-in did not end with its input"
+    );
+    let boundary = sandbox(&case, &case.launch.cwd);
+    let started = Instant::now();
+    let mut host = RcliMasterHost::launch(case.launch.clone(), &boundary, clock).unwrap();
+    let ended = loop {
+        match host.poll() {
+            Ok(None) => assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the host never ended"
+            ),
+            Ok(Some(_)) => panic!("the silent stand-in produced a host observation"),
+            Err(error) => break (error.0, started.elapsed()),
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    host.shutdown().unwrap();
+    assert!(!ended.0.is_empty());
+    ended
+}
+
+/// A launched rcli host obeys the run clock it is given, the owner's master time limit, and
+/// has none without one (OB-5d). The stand-in never becomes ready: under a 1 s clock the
+/// host ends as out of time, and with no clock only the 5 s start bound ends it, which is
+/// no turn clock.
+#[test]
+fn a_launched_host_ends_at_its_run_clock_and_has_no_clock_without_one() {
+    let (code, after) = waiting_host_end(Some(Duration::from_secs(1)));
+    assert_eq!(code, "rcli_master_turn_deadline");
+    assert!(after >= Duration::from_secs(1), "{after:?}");
+    assert!(after < Duration::from_secs(5), "{after:?}");
+    let (code, after) = waiting_host_end(None);
+    assert_eq!(
+        code,
+        "rcli_master_startup_deadline",
+        "no run clock ended it"
+    );
+    assert!(after >= Duration::from_secs(5), "{after:?}");
 }
 
 #[test]

@@ -33,7 +33,7 @@ export const TIME_LIMIT_CHOICES: { choice: TimeLimit; title: string; help: strin
 
 /** What a turn stopped by the time limit says and which masters the limit covers, the same
  * words in the TUI. */
-export const TIME_LIMIT_NOTE = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers Claude and Codex masters; an rcli master still stops after 10 minutes.";
+export const TIME_LIMIT_NOTE = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
 
 const MASTER_TOP = <div className="settings-top"><div>
   <h2>Master</h2>

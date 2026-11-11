@@ -85,7 +85,8 @@ test("Settings, Master lists the master time limit with its four options, what a
   assert.match(shown, /No limit A turn runs until the master replies or you stop it\./);
   for (const minutes of [10, 30, 60]) assert.ok(shown.includes(`${minutes} min A turn stops after ${minutes} minutes.`), `${minutes} min is listed`);
   assert.match(shown, /Stopped after N minutes; reply with 'continue' to go on\./);
-  assert.match(shown, /The limit covers Claude and Codex masters; an rcli master still stops after 10 minutes\./);
+  assert.match(shown, /The limit covers every master: Claude, Codex and rcli\./);
+  assert.doesNotMatch(shown, /still stops after/, "no master keeps a clock of its own (OB-5d)");
   assert.doesNotMatch(shown, /ran out of time|cut off/);
   assert.match(markup, /<form[^>]*aria-label="Master time limit"/);
   assert.doesNotMatch(markup, /<h2>Master<\/h2>/, "the tab has one title, above the step limit");

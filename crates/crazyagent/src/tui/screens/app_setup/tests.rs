@@ -1287,7 +1287,10 @@ fn settings_show_no_master_step_limit_by_default_with_the_four_options() {
     let rows = render(&mut shell, 200, 80);
     find(&rows, "the most steps a project's master takes in one turn");
     find(&rows, "> No limit");
-    find(&rows, "A turn runs until the master replies or its time is up.");
+    find(
+        &rows,
+        "A turn runs until the master replies or its time is up.",
+    );
     for steps in [50, 100, 200] {
         find(&rows, &format!("  {steps} steps"));
         find(&rows, &format!("A turn stops after {steps} steps."));
@@ -1390,14 +1393,18 @@ fn settings_show_no_master_time_limit_by_default_with_the_four_options() {
     let rows = render(&mut shell, 200, 80);
     find(&rows, "the longest a project's master works on one turn");
     find(&rows, "> No limit");
-    find(&rows, "A turn runs until the master replies or you stop it.");
+    find(
+        &rows,
+        "A turn runs until the master replies or you stop it.",
+    );
     for minutes in [10, 30, 60] {
         find(&rows, &format!("  {minutes} min"));
         find(&rows, &format!("A turn stops after {minutes} minutes."));
     }
     let shown = flat(&rows);
-    assert!(shown.contains("The limit covers Claude and Codex masters;"), "{shown}");
-    assert!(shown.contains("an rcli master still stops after 10 minutes."), "{shown}");
+    assert!(shown.contains("The limit covers every master:"), "{shown}");
+    assert!(shown.contains("Claude, Codex and rcli."), "{shown}");
+    assert!(!shown.contains("still stops after"), "{shown}");
     assert!(rows.last().unwrap().contains("Enter Save"));
     shell.key(Key::Enter);
     assert!(

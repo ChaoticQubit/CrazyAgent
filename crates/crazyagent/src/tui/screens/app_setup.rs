@@ -71,7 +71,7 @@ const HOURS_TEXT: &str = "Enter a whole number of hours from 1 to 168.";
 const STEPS_TEXT: &str = "Master step limit: the most steps a project's master takes in one turn.";
 const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers a Claude master with tools on; a Codex master counts no steps.";
 const TIME_TEXT: &str = "Master time limit: the longest a project's master works on one turn.";
-const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers Claude and Codex masters; an rcli master still stops after 10 minutes.";
+const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
 const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.

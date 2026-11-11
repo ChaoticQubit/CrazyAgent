@@ -1628,6 +1628,32 @@ async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission(
     case.finish().await;
 }
 
+/// An rcli master turn is prepared with the saved master time limit, as a Claude or Codex
+/// one is (OB-5d): one setting for every master harness. With No limit it names no run
+/// time, so its host gets no clock; with 30 min it names 30 minutes.
+#[tokio::test]
+async fn an_rcli_master_turn_is_prepared_with_the_saved_time_limit() {
+    for limit in [TimeLimit::NoLimit, TimeLimit::Minutes30] {
+        let case = Fixture::new(MasterBackend::Rcli, true).await;
+        case.register().await;
+        store_time_limit(&case, limit);
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(prepared.session.selection.backend, MasterBackend::Rcli);
+        assert_eq!(
+            prepared.time,
+            limit,
+            "the turn carries the saved time limit"
+        );
+        assert_eq!(prepared.time.run_time(), limit.run_time());
+        assert_eq!(
+            prepared.time.run_time().is_none(),
+            limit == TimeLimit::NoLimit
+        );
+        drop(prepared);
+        case.finish().await;
+    }
+}
+
 #[tokio::test]
 async fn a_repository_vs_code_and_the_codex_app_wrote_to_gets_a_master_worktree_lease() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
@@ -2796,7 +2822,10 @@ fn store_step_limit(case: &Fixture, limit: StepLimit) {
         .unwrap();
     let saved = crate::master_step_limit::save(&writer, &MasterStepSettings { limit }).unwrap();
     assert_eq!(saved, crate::protocol::Outcome::Applied);
-    assert_eq!(crate::master_step_limit::load(&writer).unwrap().limit, limit);
+    assert_eq!(
+        crate::master_step_limit::load(&writer).unwrap().limit,
+        limit
+    );
 }
 
 /// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
@@ -2817,7 +2846,10 @@ fn store_time_limit(case: &Fixture, limit: TimeLimit) {
         .unwrap();
     let saved = crate::master_time_limit::save(&writer, &MasterTimeSettings { limit }).unwrap();
     assert_eq!(saved, crate::protocol::Outcome::Applied);
-    assert_eq!(crate::master_time_limit::load(&writer).unwrap().limit, limit);
+    assert_eq!(
+        crate::master_time_limit::load(&writer).unwrap().limit,
+        limit
+    );
 }
 
 /// Collects one tools-on console master turn on a real Claude host running a stand-in
@@ -2846,7 +2878,11 @@ async fn limited_turn_on(
     case.sign_in("codex-c", true).await;
     let prepared = case.prepared(&case.turn.id).await;
     assert!(prepared.tools, "the project's master tools switch is on");
-    assert_eq!(prepared.steps, limit, "the turn carries the saved step limit");
+    assert_eq!(
+        prepared.steps,
+        limit,
+        "the turn carries the saved step limit"
+    );
     assert_eq!(prepared.time, time, "the turn carries the saved time limit");
     let (profile, hold) = case
         .runtime()
@@ -2904,7 +2940,7 @@ async fn a_tools_on_master_turn_of_thirty_tool_steps_ends_with_its_reply() {
 
 /// With the master step limit at No limit, the default, a tools-on Claude master turn of
 /// 210 tool steps ends with its reply (OB-5b): past every limit the owner could pick, only
-/// the host's run time, event and output limits bound it.
+/// the host's run time and output limits bound it.
 #[tokio::test]
 async fn a_master_turn_with_no_step_limit_runs_past_two_hundred_steps_to_its_reply() {
     let (ended, stored) = tools_turn_on(&stepping_harness(210), StepLimit::NoLimit).await;
@@ -2998,7 +3034,11 @@ async fn a_master_turn_its_clock_ends_under_each_time_limit_stops_with_that_limi
         assert!(stored.reply.is_none());
         let (ended, stored) =
             limited_turn_on(SLOW_REPLY_HARNESS, StepLimit::NoLimit, limit, TEST_CLOCK).await;
-        assert_eq!(ended, "reply DONE", "a three second turn fits in {minutes} minutes");
+        assert_eq!(
+            ended,
+            "reply DONE",
+            "a three second turn fits in {minutes} minutes"
+        );
         assert!(stored.is_none(), "a replied turn is not stored as failed");
     }
 }

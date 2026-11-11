@@ -373,7 +373,7 @@ impl Process {
                     if decode && self.fault.is_none() {
                         self.decode(&buffer[..count]);
                     }
-                    assert!(self.events <= self.limits.events);
+                    assert!(self.events <= self.stdout_bytes);
                     assert!(count <= buffer.len());
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
@@ -416,10 +416,6 @@ impl Process {
             };
             self.frame.clear();
             for event in events {
-                if self.events == self.limits.events {
-                    self.fail(Fault::Host("claude_host_event_limit"));
-                    return;
-                }
                 self.events += 1;
                 if matches!(&event.kind, EventKind::TurnFinished { .. }) {
                     self.completed_turns += 1;
@@ -453,7 +449,7 @@ impl Process {
     /// Input: the event. Output: whether the reader has it.
     fn deliver(&mut self, event: ObservedEvent) -> bool {
         assert!(self.events >= 1);
-        assert!(self.events <= self.limits.events);
+        assert!(self.completed_turns <= self.events);
         let mut waiting = event;
         loop {
             match self.output.try_send(waiting) {

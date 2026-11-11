@@ -5,7 +5,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "master_rcli_capture_tests.rs"]
 mod capture_tests;
-use super::master_runtime::Capture;
+use super::master_runtime::{Capture, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
@@ -13,6 +13,7 @@ use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
     MasterTurnPhase, MasterTurnView, fitted_reply,
 };
+use crate::master_time_limit::minutes_of_cause;
 use crate::protocol::RequestId;
 use crate::rcli_host::RcliMasterStatus;
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
@@ -27,13 +28,23 @@ use custody::RcliCustody;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// The code of an rcli master turn its run clock ended, the host's own code for it. Under a
+/// master time limit the stored cause names the limit instead (OB-5d).
+const TURN_DEADLINE: &str = "rcli_master_turn_deadline";
+
+/// Whether a turn's run clock ran out; never with no clock, the owner's choice of no master
+/// time limit (OB-5d). Input: the clock's end, if any. Output: the answer.
+fn late(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
 struct ActiveRcliMaster {
     custody: RcliCustody,
     capture: Capture,
     runtime: MasterRuntimeView,
     capture_ref: RequestId,
     generation: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
     reported: crate::usage::capture::Tokens,
 }
 
@@ -83,9 +94,9 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "master_capture_unavailable"
         | "master_capture_encoding" => MasterReason::CaptureIncomplete,
         "rcli_master_input_required" => MasterReason::ApprovalRequired,
-        "rcli_master_turn_deadline" | "master_runtime_budget_exhausted" => {
-            MasterReason::BudgetExhausted
-        }
+        "master_runtime_budget_exhausted" => MasterReason::BudgetExhausted,
+        TURN_DEADLINE => MasterReason::TimeLimit,
+        code if minutes_of_cause(code).is_some() => MasterReason::TimeLimit,
         "rcli_master_profile_changed"
         | "rcli_master_profile_mismatch"
         | "native_profile_binding_conflict"
@@ -137,6 +148,7 @@ impl OwnerRuntimeHandle {
                 .await
             }
             Err(error) => {
+                let error = timed_out(error, prepared.time);
                 self.observe_master_turn(prepared, turn_id, rcli_failure_observation(&error))
                     .await?;
                 Err(error)
@@ -162,9 +174,9 @@ impl OwnerRuntimeHandle {
         resources
             .validate()
             .map_err(|_| failure("master_runtime_budget_exhausted"))?;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(resources.wall_time_ms))
-            .ok_or_else(|| failure("master_runtime_budget_exhausted"))?;
+        let run_time = prepared.time.run_time();
+        let deadline = run_time.map(|time| Instant::now() + time);
+        assert_eq!(deadline.is_none(), prepared.time.minutes().is_none());
         let (profile, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(
@@ -242,15 +254,15 @@ impl OwnerRuntimeHandle {
             current.ordinal,
             NativeProfileUsePurpose::Execution,
         )?;
-        if Instant::now() >= deadline {
-            return Err(failure("master_runtime_budget_exhausted"));
+        if late(deadline) {
+            return Err(failure(TURN_DEADLINE));
         }
         let runtime = MasterRuntimeView {
             runtime_ref,
             artifact_sha256: launch.artifact_sha256.clone(),
             native_session_id: None,
         };
-        let custody = RcliCustody::launch(launch, sandbox, profile)?;
+        let custody = RcliCustody::launch(launch, sandbox, profile, run_time)?;
         let mut active = ActiveRcliMaster {
             custody,
             capture,
@@ -280,9 +292,9 @@ impl OwnerRuntimeHandle {
         }
         capture?;
         if matches!(&observed, Ok(MasterRuntimeObservation::Response { .. }))
-            && Instant::now() >= active.deadline
+            && late(active.deadline)
         {
-            return Err(failure("master_runtime_budget_exhausted"));
+            return Err(failure(TURN_DEADLINE));
         }
         observed
     }
@@ -298,8 +310,8 @@ impl OwnerRuntimeHandle {
         let mut prompted = false;
         let mut inspect_at = Instant::now();
         loop {
-            if Instant::now() >= active.deadline {
-                return Err(failure("master_runtime_budget_exhausted"));
+            if late(active.deadline) {
+                return Err(failure(TURN_DEADLINE));
             }
             if Instant::now() >= inspect_at {
                 let current = self.inspect_rcli_scope(prepared, turn_id, active).await?;
@@ -309,8 +321,9 @@ impl OwnerRuntimeHandle {
                 inspect_at = Instant::now() + INSPECT_INTERVAL;
             }
             let Some(observed) = active.custody.poll()? else {
-                tokio::time::sleep_until((Instant::now() + POLL_INTERVAL).min(active.deadline))
-                    .await;
+                let wake = Instant::now() + POLL_INTERVAL;
+                let wake = active.deadline.map_or(wake, |deadline| wake.min(deadline));
+                tokio::time::sleep_until(wake).await;
                 continue;
             };
             active.reported = active.reported.plus(observed.usage);
@@ -411,8 +424,8 @@ impl OwnerRuntimeHandle {
                 active.generation,
                 NativeProfileUsePurpose::Execution,
             )?;
-            if Instant::now() >= active.deadline {
-                return Err(failure("master_runtime_budget_exhausted"));
+            if late(active.deadline) {
+                return Err(failure(TURN_DEADLINE));
             }
         }
         Ok(current)

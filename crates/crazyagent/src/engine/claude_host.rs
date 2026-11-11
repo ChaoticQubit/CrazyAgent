@@ -119,7 +119,6 @@ pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) cleanup_time: Duration,
     pub(in crate::engine) stdout_bytes: usize,
     pub(in crate::engine) stderr_bytes: usize,
-    pub(in crate::engine) events: usize,
 }
 
 #[cfg(unix)]
@@ -132,7 +131,6 @@ impl ClaudeHostLimits {
             || self.cleanup_time > Duration::from_secs(5)
             || !(1..=STDOUT_BYTES_MAX).contains(&self.stdout_bytes)
             || !(1..=262_144).contains(&self.stderr_bytes)
-            || !(1..=4096).contains(&self.events)
         {
             return Err(failure("claude_host_invalid_limits"));
         }
@@ -157,7 +155,6 @@ impl ClaudeHostLimits {
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
             stderr_bytes: usize::try_from(budget.output_bytes.min(262_144))
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
-            events: 4096,
         };
         limits.validate()?;
         assert_eq!(limits.run_time, run_time);
@@ -190,7 +187,7 @@ pub(in crate::engine) fn launch_command(
 
 /// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
 /// agents' tool flags, hooks and setting sources off, only the engine's team MCP server, and
-/// no step count, since the host's run time, event and output limits bound the turn (OB-5).
+/// no step count, since the host's run time and output limits bound the turn (OB-5).
 /// Input: as `launch_command`, plus the engine executable, drop file, mailbox and tools
 /// switched off. Output: the command, or a plain refusal for an unsafe input.
 #[cfg(unix)]

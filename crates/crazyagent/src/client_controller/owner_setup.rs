@@ -131,7 +131,10 @@ impl OwnerController {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.read(OwnerRead::MasterStepSettings).await?;
-        self.begin_mutation(OwnerMutation::SetMasterStepSettings { settings }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::SetMasterStepSettings { settings },
+            generation,
+        )?;
         self.send_pending().await
     }
 
@@ -156,7 +159,10 @@ impl OwnerController {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.read(OwnerRead::MasterTimeSettings).await?;
-        self.begin_mutation(OwnerMutation::SetMasterTimeSettings { settings }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::SetMasterTimeSettings { settings },
+            generation,
+        )?;
         self.send_pending().await
     }
 

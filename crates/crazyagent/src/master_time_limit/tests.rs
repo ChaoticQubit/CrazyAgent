@@ -112,5 +112,8 @@ fn a_stored_value_this_engine_does_not_know_fails_closed() {
             "DROP TABLE master_time_settings; CREATE TABLE master_time_settings (singleton INTEGER PRIMARY KEY, time_limit TEXT NOT NULL); INSERT INTO master_time_settings VALUES(1,'minutes5');",
         )
         .unwrap();
-    assert_eq!(load(&connection).unwrap_err().0, "master_time_settings_invalid");
+    assert_eq!(
+        load(&connection).unwrap_err().0,
+        "master_time_settings_invalid"
+    );
 }

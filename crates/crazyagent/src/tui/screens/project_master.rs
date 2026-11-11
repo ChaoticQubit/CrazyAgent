@@ -652,7 +652,11 @@ mod tests {
     #[test]
     fn a_turn_that_ended_without_reply_text_is_not_called_cut_off() {
         let turns = [turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::NoReply))];
-        let transcript = build(Some(MasterSessionPhase::Configured), &turns, &[entry(3, "Go.")]);
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &turns,
+            &[entry(3, "Go.")],
+        );
         let last = &transcript.messages.last().unwrap().text;
         assert!(
             last.contains("stopped: it ended its turn without writing a reply. (no_reply)"),
@@ -674,7 +678,10 @@ mod tests {
             let last = &transcript.messages.last().unwrap().text;
             let line = format!("Stopped after {steps} steps; reply with 'continue' to go on.");
             assert!(last.contains(&line), "{last}");
-            assert!(last.contains(&format!("(master_step_limit_{steps})")), "{last}");
+            assert!(
+                last.contains(&format!("(master_step_limit_{steps})")),
+                "{last}"
+            );
             assert!(!last.contains("cut off"), "{last}");
             assert!(!last.contains("Press r"), "{last}");
         }
@@ -693,7 +700,10 @@ mod tests {
             let last = &transcript.messages.last().unwrap().text;
             let line = format!("Stopped after {minutes} minutes; reply with 'continue' to go on.");
             assert!(last.contains(&line), "{last}");
-            assert!(last.contains(&format!("(master_time_limit_{minutes})")), "{last}");
+            assert!(
+                last.contains(&format!("(master_time_limit_{minutes})")),
+                "{last}"
+            );
             assert!(!last.contains("ran out of time"), "{last}");
             assert!(!last.contains("at most"), "{last}");
             assert!(!last.contains("cut off"), "{last}");
@@ -705,7 +715,11 @@ mod tests {
     fn a_turn_a_clock_ended_with_no_minutes_named_claims_no_ten_minutes() {
         let mut late = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::TimeLimit));
         late.cause = Some("codex_host_deadline".into());
-        let transcript = build(Some(MasterSessionPhase::Configured), &[late], &[entry(3, "Go.")]);
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[late],
+            &[entry(3, "Go.")],
+        );
         let last = &transcript.messages.last().unwrap().text;
         let line = "stopped: it reached its time limit. (codex_host_deadline)";
         assert!(last.contains(line), "{last}");
@@ -715,11 +729,20 @@ mod tests {
 
     #[test]
     fn a_turn_with_more_output_than_the_app_keeps_says_so_plainly() {
-        let mut large = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::OutputLimit));
-        large.cause = Some("claude_host_event_limit".into());
-        let transcript = build(Some(MasterSessionPhase::Configured), &[large], &[entry(3, "Go.")]);
+        let mut large = turn(
+            1,
+            3,
+            MasterTurnPhase::Failed,
+            Some(MasterReason::OutputLimit),
+        );
+        large.cause = Some("claude_host_stdout_limit".into());
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[large],
+            &[entry(3, "Go.")],
+        );
         let last = &transcript.messages.last().unwrap().text;
-        let line = "stopped: this turn's output was too large to keep. (claude_host_event_limit)";
+        let line = "stopped: this turn's output was too large to keep. (claude_host_stdout_limit)";
         assert!(last.contains(line), "{last}");
         assert!(!last.contains("something went wrong"), "{last}");
         assert!(!last.contains("cut off"), "{last}");

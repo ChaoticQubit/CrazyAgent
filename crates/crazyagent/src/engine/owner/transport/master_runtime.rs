@@ -1409,14 +1409,18 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
 
-/// The host codes for a master host whose wall clock ran out.
-const CLOCK_ENDED: [&str; 2] = ["claude_host_deadline", "codex_host_deadline"];
+/// The host codes for a master host whose wall clock ran out: Claude, Codex and rcli.
+const CLOCK_ENDED: [&str; 3] = [
+    "claude_host_deadline",
+    "codex_host_deadline",
+    "rcli_master_turn_deadline",
+];
 
 /// Names the owner's time limit in the error of a turn its host's wall clock ended, so the
 /// turn says how long it ran (OB-5c). Inputs: the turn's error and the limit the turn ran
 /// under. Output: `master_time_limit_<minutes>` for a clock that ran out under a limit,
 /// else the error unchanged.
-fn timed_out(error: EngineError, limit: TimeLimit) -> EngineError {
+pub(super) fn timed_out(error: EngineError, limit: TimeLimit) -> EngineError {
     let clock = CLOCK_ENDED.contains(&error.0.as_str());
     match limit.cause() {
         Some(cause) if clock => {
@@ -1450,7 +1454,6 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit"
-        | "claude_host_event_limit"
         | "claude_host_stdout_limit"
         | "claude_host_stderr_limit"
         | "claude_host_output_limit"
@@ -1937,7 +1940,6 @@ mod tests {
             ("gateway_cooldown", MasterReason::CooldownActive),
             ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
             ("codex_host_output_limit", MasterReason::OutputLimit),
-            ("claude_host_event_limit", MasterReason::OutputLimit),
             ("claude_host_stdout_limit", MasterReason::OutputLimit),
             ("claude_host_stderr_limit", MasterReason::OutputLimit),
             ("claude_host_output_limit", MasterReason::OutputLimit),
@@ -1945,6 +1947,7 @@ mod tests {
             ("master_empty_reply", MasterReason::NoReply),
             ("claude_host_deadline", MasterReason::TimeLimit),
             ("codex_host_deadline", MasterReason::TimeLimit),
+            ("rcli_master_turn_deadline", MasterReason::TimeLimit),
             ("master_time_limit_10", MasterReason::TimeLimit),
             ("master_time_limit_30", MasterReason::TimeLimit),
             ("master_time_limit_60", MasterReason::TimeLimit),

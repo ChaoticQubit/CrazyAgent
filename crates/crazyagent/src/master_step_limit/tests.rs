@@ -92,5 +92,8 @@ fn a_stored_value_this_engine_does_not_know_fails_closed() {
             "DROP TABLE master_step_settings; CREATE TABLE master_step_settings (singleton INTEGER PRIMARY KEY, step_limit TEXT NOT NULL); INSERT INTO master_step_settings VALUES(1,'steps24');",
         )
         .unwrap();
-    assert_eq!(load(&connection).unwrap_err().0, "master_step_settings_invalid");
+    assert_eq!(
+        load(&connection).unwrap_err().0,
+        "master_step_settings_invalid"
+    );
 }

@@ -339,6 +339,33 @@ fn frame_output_and_event_counts_are_bounded() {
     assert_eq!(p.receive(&bytes), Err(ProtocolError::Capacity));
 }
 
+/// One small stream message with its own 36 byte id, the length of Claude Code's ids.
+/// Input: the message's number. Output: its line.
+fn numbered(index: usize) -> Vec<u8> {
+    let uuid = format!("00000000-0000-4000-8000-{index:012}");
+    assert_eq!(uuid.len(), 36);
+    wire(json!({"type":"user","uuid":uuid,"session_id":"native-session"}))
+}
+
+/// A stream has no message count limit (OB-5d): 20,000 messages, each with its own 36 byte
+/// id, are all taken, where the 4,097th id used to be refused as over capacity. The ids are
+/// remembered by bytes: the oldest is forgotten and taken again, and one sent 10,000
+/// messages ago is still refused as sent twice.
+#[test]
+fn a_stream_of_any_length_is_taken_and_a_recent_duplicate_is_still_refused() {
+    let mut p = active();
+    for index in 0..20_000 {
+        let events = p.receive(&numbered(index)).unwrap();
+        assert_eq!(events.len(), 1, "message {index}");
+    }
+    assert_eq!(p.state(), State::Active);
+    let again = p.receive(&numbered(0)).unwrap();
+    assert_eq!(again.len(), 1, "the oldest id was forgotten");
+    let twice = p.receive(&numbered(10_000));
+    assert_eq!(twice, Err(ProtocolError::StaleMessage));
+    assert_eq!(p.state(), State::Failed);
+}
+
 #[test]
 fn malformed_usage_and_missing_native_identity_never_become_zero_or_success() {
     for bad in [json!(-1), json!(1.5), json!("5"), json!(null)] {
