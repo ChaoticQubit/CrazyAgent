@@ -178,7 +178,7 @@ jobs:
 
   macos:
     name: macOS lint and tests
-    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
