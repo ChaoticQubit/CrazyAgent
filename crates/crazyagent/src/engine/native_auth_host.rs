@@ -8,6 +8,13 @@ use std::path::{Path, PathBuf};
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 
+/// How long after a harness identity was first seen a matching hash must start to prove its
+/// bytes for good off macOS. A write after that stamps a change time more than one clock tick
+/// and the coarsest file system time grain (2 s) past the seen one, so it cannot keep the
+/// identity, and from then on the identity check alone sees every write.
+#[cfg(not(target_os = "macos"))]
+const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub async fn run_native_auth_custodian(
     runtime_dir: &Path,
     input: OwnedFd,
@@ -75,6 +82,12 @@ pub(crate) struct RegisteredNativeAuthHost {
     file: File,
     identity: ExecutableIdentity,
     digest: [u8; 32],
+    #[cfg(not(target_os = "macos"))]
+    seen: std::time::Instant,
+    #[cfg(not(target_os = "macos"))]
+    settled: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, not(target_os = "macos")))]
+    rehashes: std::sync::atomic::AtomicUsize,
 }
 
 impl RegisteredNativeAuthHost {
@@ -116,6 +129,8 @@ impl RegisteredNativeAuthHost {
     pub(crate) fn capture(path: &Path) -> Result<Self, EngineError> {
         let file = Self::open(path)?;
         let identity = ExecutableIdentity::of(&file.metadata().map_err(io_error)?)?;
+        #[cfg(not(target_os = "macos"))]
+        let seen = std::time::Instant::now();
         let digest = Self::hash(&file, identity.length)?;
         if ExecutableIdentity::of(&file.metadata().map_err(io_error)?)? != identity
             || ExecutableIdentity::of(&std::fs::symlink_metadata(path).map_err(io_error)?)?
@@ -128,6 +143,12 @@ impl RegisteredNativeAuthHost {
             file,
             identity,
             digest,
+            #[cfg(not(target_os = "macos"))]
+            seen,
+            #[cfg(not(target_os = "macos"))]
+            settled: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, not(target_os = "macos")))]
+            rehashes: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -135,8 +156,9 @@ impl RegisteredNativeAuthHost {
     /// have the identity hashed at capture. On macOS every content write moves ctime by the
     /// fine clock, so equal identity means the hashed bytes without re-reading a harness of
     /// hundreds of MB. Linux moves file times by the coarse clock tick, so a same-size write
-    /// in that tick keeps the identity, and there the retained file is hashed again. Input:
-    /// none. Output: the path, or `native_auth_host_executable_changed`.
+    /// in that tick keeps the identity: there the retained file is hashed again, off the
+    /// tokio worker, until one matching hash starts [`SETTLE_AFTER`] past the seen identity.
+    /// Input: none. Output: the path, or `native_auth_host_executable_changed`.
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         let named = Self::open(&self.path)?;
         if ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
@@ -147,8 +169,20 @@ impl RegisteredNativeAuthHost {
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
         #[cfg(not(target_os = "macos"))]
-        if Self::hash(&self.file, self.identity.length)? != self.digest {
-            return Err(EngineError("native_auth_host_executable_changed".into()));
+        if !self.settled.load(std::sync::atomic::Ordering::Acquire) {
+            let started = std::time::Instant::now();
+            #[cfg(test)]
+            self.rehashes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if crate::engine::off_worker(|| Self::hash(&self.file, self.identity.length))?
+                != self.digest
+            {
+                return Err(EngineError("native_auth_host_executable_changed".into()));
+            }
+            if started >= self.seen + SETTLE_AFTER {
+                self.settled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
         Ok(&self.path)
     }

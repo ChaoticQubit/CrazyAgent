@@ -61,6 +61,77 @@ fn native_auth_registered_executable_verified_sha256_rejects_replacement() {
     );
 }
 
+/// Off macOS a request that verifies the claude and codex harnesses, the way a harness catalog
+/// or a launch does, hashes each one again only until one matching hash starts
+/// [`super::SETTLE_AFTER`] past its seen identity; after that a request hashes nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_a_request_hashes_each_harness_only_until_it_settles() {
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let mut harnesses = ["claude", "codex"]
+        .map(|name| RegisteredNativeAuthHost::capture(&executable(root.path(), name)).unwrap());
+    let request = |harnesses: &[RegisteredNativeAuthHost; 2]| {
+        for registered in harnesses {
+            registered.verified_path().unwrap();
+            let digest = registered.verified_sha256().unwrap();
+            assert_eq!(
+                digest,
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(&registered.path).unwrap())
+                )
+            );
+        }
+        harnesses
+            .iter()
+            .map(|registered| registered.rehashes.load(Ordering::Relaxed))
+            .sum::<usize>()
+    };
+    let fresh = request(&harnesses);
+    if harnesses
+        .iter()
+        .all(|registered| registered.seen.elapsed() < super::SETTLE_AFTER)
+    {
+        assert_eq!(fresh, 4);
+    }
+    let unsettled = harnesses
+        .iter()
+        .filter(|registered| !registered.settled.load(Ordering::Acquire))
+        .count();
+    for registered in &mut harnesses {
+        registered.seen = registered.seen.checked_sub(super::SETTLE_AFTER).unwrap();
+    }
+    let settling = request(&harnesses);
+    assert_eq!(settling, fresh + unsettled);
+    assert!(
+        harnesses
+            .iter()
+            .all(|registered| registered.settled.load(Ordering::Acquire))
+    );
+    assert_eq!(request(&harnesses), settling);
+}
+
+/// Off macOS a same-size write before the identity settles is refused even when the hash
+/// that sees it starts past the settle time, and the harness never settles.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_a_same_size_write_never_settles_the_harness() {
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "codex");
+    let mut registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all(b"REGISTERED-HOST-BYTES").unwrap();
+    drop(file);
+    registered.seen = registered.seen.checked_sub(super::SETTLE_AFTER).unwrap();
+    assert_eq!(
+        registered.verified_path().unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+    assert!(!registered.settled.load(Ordering::Acquire));
+}
+
 #[test]
 fn native_auth_custodian_command_keeps_self_and_codex_pins_distinct() {
     let root = tempfile::tempdir().unwrap();
