@@ -120,10 +120,11 @@ const LANDLOCK_DEVICES: &[&str] = &[
 
 /// The rules the Landlock helper applies to itself before it starts the harness: read and
 /// execute beneath `read`, full access beneath `write`, and, when `limit_network` is set,
-/// outbound TCP only to the `connect` ports, no TCP listener and no socket but TCP, unless
-/// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). An open
-/// network names `keep_free` instead: the agent binds any TCP port but those. The engine
-/// renders it as helper arguments and the helper parses it back.
+/// outbound TCP only to the `connect` ports, no bind and no listen ([`refuse_sockets`]),
+/// and no socket but TCP, unless `open_sockets` keeps the other socket kinds open
+/// ([`LinuxSockets::TcpPorts`]). An open network names `keep_free` instead: the agent binds
+/// any TCP port but those. The engine renders it as helper arguments and the helper parses
+/// it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
@@ -290,10 +291,12 @@ fn read_picked_ports() -> Option<RangeInclusive<u16>> {
 
 /// Refuses an open network whose kept ports Linux could hand to the agent by itself.
 /// Landlock checks only the port a bind names: a bind to port 0, or a listen on a socket
-/// that was never bound, gets a port Linux picks from its range with no check, and no rule
-/// can refuse a listen. So every kept port must lie outside that range, or no open-network
-/// agent starts. Inputs: the kept ports and the range, none when it cannot be read.
-/// Output: Ok, or the plain reason naming the first kept port inside the range.
+/// that was never bound, gets a port Linux picks from its range with no check, and no
+/// Landlock rule can refuse a listen. An open network keeps its listens, so every kept port
+/// must lie outside that range, or no open-network agent starts; a limited network refuses
+/// every listen instead ([`refuse_sockets`]). Inputs: the kept ports and the range, none
+/// when it cannot be read. Output: Ok, or the plain reason naming the first kept port
+/// inside the range.
 fn kept_outside_picked(kept: &[u16], picked: Option<&RangeInclusive<u16>>) -> Result<(), String> {
     let Some(picked) = picked else {
         return Err(PICKED_PORTS_UNREADABLE.into());
@@ -380,13 +383,19 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
 /// `socketpair(2)` stays allowed since it reaches no path. With `plain_tcp` the filter also
 /// refuses the stream sockets that hold a TCP port without being plain TCP, which
-/// Landlock's bind rules do not see on every kernel. Inputs: whether only TCP sockets may open, and whether
-/// Landlock keeps TCP ports free of this agent. Output: the installed filter, or the reason
-/// this kernel or architecture cannot hold it.
-fn refuse_sockets(tcp_only: bool, plain_tcp: bool) -> Result<(), String> {
+/// Landlock's bind rules do not see on every kernel. With `no_listen` every `listen(2)`
+/// fails too: a limited network binds nothing, so its only listen is one on a socket never
+/// bound, which takes a port Linux picks with no Landlock check, a kept port among them
+/// when it lies in that range. Inputs: whether only TCP sockets may open, whether Landlock
+/// keeps TCP ports free of this agent, and whether no listen may succeed. Output: the
+/// installed filter, or the reason this kernel or architecture cannot hold it.
+fn refuse_sockets(tcp_only: bool, plain_tcp: bool, no_listen: bool) -> Result<(), String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     rules.insert(libc::SYS_socket, refused_sockets(tcp_only, plain_tcp)?);
     rules.insert(libc::SYS_io_uring_setup, Vec::new());
+    if no_listen {
+        rules.insert(libc::SYS_listen, Vec::new());
+    }
     #[cfg(target_arch = "x86_64")]
     {
         rules.insert(
@@ -394,7 +403,12 @@ fn refuse_sockets(tcp_only: bool, plain_tcp: bool) -> Result<(), String> {
             refused_sockets(tcp_only, plain_tcp)?,
         );
         rules.insert(X32_SYSCALL_BIT | libc::SYS_io_uring_setup, Vec::new());
+        if no_listen {
+            rules.insert(X32_SYSCALL_BIT | libc::SYS_listen, Vec::new());
+        }
     }
+    assert_eq!(rules.contains_key(&libc::SYS_listen), no_listen);
+    assert!(rules.contains_key(&libc::SYS_socket));
     let arch: TargetArch = std::env::consts::ARCH
         .try_into()
         .map_err(|error| format!("seccomp: {error}"))?;
@@ -565,7 +579,11 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         return ExitCode::from(3);
     }
     let plain_tcp = policy.limit_network || !policy.keep_free.is_empty();
-    if let Err(reason) = refuse_sockets(policy.limit_network && !policy.open_sockets, plain_tcp) {
+    if let Err(reason) = refuse_sockets(
+        policy.limit_network && !policy.open_sockets,
+        plain_tcp,
+        policy.limit_network,
+    ) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
@@ -1165,7 +1183,7 @@ mod tests {
         let closed = sandbox.keep_ports(&[inside]).unwrap();
         assert!(
             LinuxSandbox::new(closed, landlock()).is_ok(),
-            "a network that binds nothing is not held to the range"
+            "a network that binds and listens on nothing is not held to the range"
         );
     }
 
