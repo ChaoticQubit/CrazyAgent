@@ -171,6 +171,36 @@ test("a master turn names its account, and a turn no account could run names eac
   assert.ok(![...told, ...research.accountLines(blocked)].some((line) => /work-claude|home-claude|spare-claude|work-codex/u.test(line)), "no line shows a sign-in reference");
 });
 
+test("two accounts with the same name show their ids, an account with its own name does not (OB4-F1)", async () => {
+  const { accountLabels } = await import("../src/api.ts");
+  const accounts = [
+    { id: "claude-account-1a", name: "Claude" },
+    { id: "claude-account-2b", name: "Claude" },
+    { id: "chatgpt-account-3c", name: "Work ChatGPT" },
+  ];
+  assert.deepEqual([...accountLabels(accounts)], [
+    ["claude-account-1a", "Claude (claude-account-1a)"],
+    ["claude-account-2b", "Claude (claude-account-2b)"],
+    ["chatgpt-account-3c", "Work ChatGPT"],
+  ]);
+  assert.equal(accountLabels([]).size, 0);
+  assert.equal(research.accountName(accounts, "claude-account-2b"), "Claude (claude-account-2b)");
+  assert.equal(research.accountName(accounts, "chatgpt-account-3c"), "Work ChatGPT");
+  assert.equal(research.accountName(accounts, "gone"), "gone");
+  assert.equal(research.accountName(accounts.slice(1), "claude-account-2b"), "Claude", "a name used once stays plain");
+  const blocked = {
+    id: "t3", ordinal: 3, phase: "blocked", reason: "rate_limited", reply: null, attempt: null,
+    accounts: [
+      { account_ref: "claude-login-1a", connection: "claude-account-1a", harness: "claude", reason: "rate_limited" },
+      { account_ref: "claude-login-2b", connection: "claude-account-2b", harness: "claude", reason: "readiness_unknown" },
+    ],
+  };
+  assert.deepEqual(research.accountLines(blocked, accounts), [
+    "Claude (claude-account-1a): rate limited, paused for a few minutes",
+    "Claude (claude-account-2b): not signed in",
+  ], "a blocked turn tells two accounts of one name apart");
+});
+
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
   const { SessionContext, useSession } = await import("../src/state.ts");

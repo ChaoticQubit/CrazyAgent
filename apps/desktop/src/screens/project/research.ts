@@ -2,7 +2,7 @@ import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import { namedFailure } from "../../api";
+import { accountLabels, namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
@@ -185,10 +185,11 @@ export function resultSummary(text: string): string {
 }
 
 /** Names an account as the owner sees it in Accounts. Inputs: the owner's account names and
- * the account id. Output: the name, the id itself for an account with no name known (not read
- * yet or removed), or "No account yet". */
+ * the account id. Output: the name, with the id after it when another account has the same
+ * name ([accountLabels]), the id itself for an account with no name known (not read yet or
+ * removed), or "No account yet". */
 export function accountName(accounts: { id: string; name: string }[], id: string | null): string {
-  return id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? id;
+  return id === null ? "No account yet" : accountLabels(accounts).get(id) ?? id;
 }
 
 /** Builds the Team panel: each agent with its role, plain name, harness, account, current task

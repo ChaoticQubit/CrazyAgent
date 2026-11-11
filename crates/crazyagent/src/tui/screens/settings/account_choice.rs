@@ -7,7 +7,7 @@ use crate::scheduling::{
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Modal, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::AccountRow;
+use crate::tui::seam::{AccountRow, account_label};
 use ratatui::text::Line;
 
 const RESERVE_STEP: u8 = 5;
@@ -157,16 +157,16 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
 }
 
 /// Names one pool account as Accounts does. Takes the account's id, its provider word when
-/// it is a member of the pool, and the owner's account rows. Returns the account's name or,
-/// while no name is known, the provider word and the id, or the id alone.
+/// it is a member of the pool, and the owner's account rows. Returns the account's words
+/// ([`account_label`]: the name, with the id after a name two accounts share) or, while no
+/// name is known, the provider word and the id, or the id alone.
 fn shown_name(id: &CredentialRef, provider: Option<&str>, accounts: &[AccountRow]) -> String {
-    match accounts.iter().find(|account| &account.id == id) {
-        Some(account) => account.name.clone(),
-        None => provider.map_or_else(
+    account_label(id.as_str(), accounts).unwrap_or_else(|| {
+        provider.map_or_else(
             || id.as_str().to_owned(),
             |provider| format!("{provider} {}", id.as_str()),
-        ),
-    }
+        )
+    })
 }
 
 /// The "Next accounts" lines for one pool: each account work would try now, numbered in

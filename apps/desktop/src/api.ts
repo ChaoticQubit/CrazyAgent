@@ -518,6 +518,19 @@ export function accountCatalog(): Promise<Result<ProviderEntry[]>> {
   return call<ProviderEntry[]>("desktop_account_catalog");
 }
 
+/** The words each account goes by wherever a view shows it outside its own row in Accounts:
+ * the name the owner gave it, with the account id after it when another account has the
+ * same name, so two accounts never read the same. Input: the accounts. Output: the words by
+ * account id. */
+export function accountLabels(accounts: readonly { id: string; name: string }[]): Map<string, string> {
+  const uses = new Map<string, number>();
+  for (const account of accounts) uses.set(account.name, (uses.get(account.name) ?? 0) + 1);
+  const labels = new Map<string, string>();
+  for (const account of accounts) labels.set(account.id, uses.get(account.name) === 1 ? account.name : `${account.name} (${account.id})`);
+  if (labels.size > accounts.length) throw new Error(`more account labels than accounts: ${labels.size} for ${accounts.length}`);
+  return labels;
+}
+
 /** Reads every account, following the engine's pages. Output: all accounts in engine order. */
 export async function listAccounts(): Promise<Result<AccountView[]>> {
   const accounts: AccountView[] = [];
