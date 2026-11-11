@@ -804,8 +804,9 @@ fn owner_commits_gitlink(case: &Case, commit: &str) -> String {
 
 /// land-19 r1 M1 (a): a commit-graph claiming the agent's gitlink commit is on the landing
 /// tip changes nothing for the engine, whose git reads no commit-graph, so the gitlink is
-/// still the agent's own and refused at its turn end. The owner's own git does take the
-/// forged answer, which shows the graph was in place.
+/// still the agent's own and refused at its turn end. The owner's own git reads the forged
+/// parent, which shows the graph was in place; whether its merge-base also takes the forged
+/// answer depends on the git version.
 #[test]
 fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_the_turn_end() {
     let case = Case::new();
@@ -825,7 +826,10 @@ fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_the_turn_end() {
         .to_owned();
     let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
     forge_commit_graph(&case, &head, &tip, &gitlinked);
-    case.owner(&["merge-base", "--is-ancestor", &gitlinked, &tip]);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &tip]).trim(),
+        gitlinked
+    );
     assert_eq!(
         refused(record_turn_end(&case.db, &agent, &merge_turn())),
         "changes_embedded_repository"
@@ -854,7 +858,10 @@ fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_accept() {
         .unwrap();
     let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
     forge_commit_graph(&case, &head, &tip, &gitlinked);
-    case.owner(&["merge-base", "--is-ancestor", &gitlinked, &tip]);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &tip]).trim(),
+        gitlinked
+    );
     assert_eq!(refused(case.accept(&id)), "changes_embedded_repository");
     assert_eq!(case.tip(), tip);
 }
