@@ -13,6 +13,8 @@ export const MESSAGES_HELD_MAX = 4096;
 export const NO_TEXT = "Typed in the master's terminal. The words were not read.";
 /** What the master view says when a session holds more messages than the view reads. */
 export const TOO_LONG = "This session has more messages than this view holds. Open it in Sessions to read the earlier ones.";
+/** What a plain message list says once it holds `MESSAGES_HELD_MAX` rows and older ones exist. */
+export const EARLIER_NOT_SHOWN = `Earlier messages are not shown. This list holds the newest ${MESSAGES_HELD_MAX}.`;
 
 const NOT_IN_BUILD = "Not ready yet: stored messages aren't in this build.";
 const BACKENDS: Record<string, string> = { rcli: "RCLI", codex: "Codex", claude: "Claude" };
@@ -55,6 +57,33 @@ export function mergeMessages(held: readonly SessionMessage[], read: readonly Se
   return merged;
 }
 
+/** The rows a view holds after a read: the held rows and the read rows merged, cut to the
+ * newest `MESSAGES_HELD_MAX`. A cut drops the oldest rows, so the rows no longer start at
+ * the session's first message and older rows lie below the first one kept. Inputs: the
+ * held rows and the read rows. Output: the rows, oldest first, and whether rows were cut. */
+export function heldAfter(held: readonly SessionMessage[], read: readonly SessionMessage[]): { rows: SessionMessage[]; cut: boolean } {
+  const merged = mergeMessages(held, read);
+  const rows = merged.slice(-MESSAGES_HELD_MAX);
+  assert(rows.length <= MESSAGES_HELD_MAX, "a view holds more rows than its bound");
+  return { rows, cut: rows.length < merged.length };
+}
+
+/** What a view may say of the rows it holds. They are the whole session only when a read
+ * arrived, the engine named no older row and the rows run from the session's first message
+ * with none missing: sequence numbers start at 1 and are never reused, so that is rows 1 to
+ * n. A view that reads the whole session is capped when its read stopped before the first
+ * message, or when the engine named no older row and rows are missing all the same, which
+ * is the cut to `MESSAGES_HELD_MAX`. Inputs: the held rows oldest first, the sequence number
+ * older rows lie below or null, whether a read arrived, whether the view reads the whole
+ * session and whether that read stopped early. Output: whether the rows are the whole
+ * session and whether the view is capped, never both. */
+export function heldView(rows: readonly SessionMessage[], cursor: number | null, loaded: boolean, all: boolean, stopped: boolean): { whole: boolean; capped: boolean } {
+  const whole = loaded && cursor === null && rows.every((row, index) => row.seq === index + 1);
+  const capped = all && !whole && (stopped || (loaded && cursor === null));
+  assert(!(whole && capped), "a whole session is never capped");
+  return { whole, capped };
+}
+
 /** One stored message as a console line: the owner's words, the engine's request, the
  * master's reply, or the divider where another master took the conversation over. An owner
  * row with no text says the words were typed in the terminal. Input: the row. Output: the
@@ -80,6 +109,7 @@ export function messageLines(rows: readonly SessionMessage[]): ConsoleLine[] {
  * turn left shows as its stored text. Inputs: all stored rows, the turns and what turns a
  * turn into lines. Output: the lines in order. */
 export function conversationLines(rows: readonly SessionMessage[], turns: readonly MasterTurn[], turnLines: (turn: MasterTurn) => ConsoleLine[]): ConsoleLine[] {
+  assert(rows.every((row, index) => row.seq === index + 1), "the rows are not the whole session from its first message");
   const lines: ConsoleLine[] = [];
   let next = 0;
   let stored = true;
@@ -129,8 +159,8 @@ export function storedCount(count: number): string {
 
 /** The stored messages of one session as a view holds them: the rows oldest first, the count
  * of all stored rows, whether older rows exist that are not held, whether a read arrived,
- * whether every row of the session is held, whether a whole-session read stopped at
- * `MESSAGES_HELD_MAX`, a read problem and a read of the next older page. */
+ * whether every row of the session is held, whether a whole-session view does not hold
+ * them all (see `heldView`), a read problem and a read of the next older page. */
 export type StoredMessages = { rows: SessionMessage[]; count: number; older: boolean; loaded: boolean; whole: boolean; capped: boolean; problem: string; earlier: () => Promise<void> };
 
 /** Reads a session's stored messages and keeps them current: the newest page when the
@@ -151,6 +181,7 @@ export function useSessionMessages(ticket: string, sessionId: string | null, mar
   const run = useRef(0);
   const held = useRef<SessionMessage[]>([]);
   const oldest = useRef<number | null>(null);
+  const cut = useRef(false);
   const marked = useRef(mark);
 
   const page = async (mine: number, before: number | null): Promise<MasterMessagePage | null> => {
@@ -162,7 +193,9 @@ export function useSessionMessages(ticket: string, sessionId: string | null, mar
       setProblem(read.kind === "error" ? failureCopy(read) : NOT_IN_BUILD);
       return null;
     }
-    held.current = mergeMessages(held.current, got.messages).slice(-MESSAGES_HELD_MAX);
+    const kept = heldAfter(held.current, got.messages);
+    held.current = kept.rows;
+    cut.current = cut.current || kept.cut;
     setRows(held.current);
     setSource(sessionId);
     setCount(got.count);
@@ -175,7 +208,7 @@ export function useSessionMessages(ticket: string, sessionId: string | null, mar
     for (let reads = 0; before !== null && held.current.length < MESSAGES_HELD_MAX && reads < MESSAGES_HELD_MAX / MESSAGES_PER_READ; reads += 1) {
       const got = await page(mine, before);
       if (got === null) return;
-      before = got.next;
+      before = cut.current ? held.current[0].seq : got.next;
       oldest.current = before;
       setCursor(before);
       if (!all) return;
@@ -189,11 +222,18 @@ export function useSessionMessages(ticket: string, sessionId: string | null, mar
     setLoaded(true);
     const joined = first || got.messages.length === 0 || held.current.some((row) => row.seq === got.messages[0].seq - 1) || got.messages[0].seq === 1;
     if (first || !joined) {
-      if (!joined) held.current = got.messages;
+      if (!joined) {
+        held.current = got.messages;
+        cut.current = false;
+      }
       oldest.current = got.next;
       setRows(held.current);
       setCursor(got.next);
       if (all) await older(mine, got.next);
+    } else if (cut.current) {
+      oldest.current = held.current[0].seq;
+      setCursor(oldest.current);
+      if (all) setCapped(true);
     }
   };
 
@@ -201,6 +241,7 @@ export function useSessionMessages(ticket: string, sessionId: string | null, mar
     run.current += 1;
     held.current = [];
     oldest.current = null;
+    cut.current = false;
     setRows([]);
     setCount(0);
     setCursor(null);
@@ -217,11 +258,22 @@ export function useSessionMessages(ticket: string, sessionId: string | null, mar
   }, [mark]);
 
   const mine = source === sessionId && sessionId !== null;
+  const view = heldView(mine ? rows : [], cursor, mine && loaded, all, mine && capped);
   return {
     rows: mine ? rows : [], count: mine ? count : 0, older: mine && cursor !== null, loaded: mine && loaded,
-    whole: mine && loaded && cursor === null, capped: mine && capped, problem,
+    whole: view.whole, capped: view.capped, problem,
     earlier: () => older(run.current, oldest.current),
   };
+}
+
+/** The way to a session's earlier messages above a plain list: the Show earlier messages
+ * button while older rows can still be read, and a plain line once the list holds
+ * `MESSAGES_HELD_MAX` rows and reads no further back. Input: the held messages. Output: the
+ * button, the line, or nothing when no older row exists. */
+export function EarlierMessages({ stored }: { stored: Pick<StoredMessages, "older" | "rows" | "earlier"> }) {
+  if (!stored.older) return null;
+  if (stored.rows.length >= MESSAGES_HELD_MAX) return <p className="pj-small pj-muted" data-testid="messages-cut">{EARLIER_NOT_SHOWN}</p>;
+  return <button type="button" className="btn quiet small" onClick={() => void stored.earlier()} data-testid="messages-earlier">Show earlier messages</button>;
 }
 
 /** The plain list of a session's messages. Input: the rows. Output: the list. */
@@ -243,7 +295,7 @@ export function MessageList({ rows }: { rows: readonly MessageRow[] }) {
 export function SessionMessages({ ticket, sessionId, mark = null, harnesses }: { ticket: string; sessionId: string; mark?: string | null; harnesses: HarnessEntry[] | null }) {
   const stored = useSessionMessages(ticket, sessionId, mark, false);
   return <div className="pj-messages" data-testid="session-messages">
-    {stored.older && <button type="button" className="btn quiet small" onClick={() => void stored.earlier()} data-testid="messages-earlier">Show earlier messages</button>}
+    <EarlierMessages stored={stored} />
     {stored.problem && <p className="pj-error" role="alert">{stored.problem}</p>}
     {!stored.loaded && !stored.problem && <p className="pj-small pj-muted" role="status">Reading the messages...</p>}
     {stored.loaded && stored.rows.length === 0 && <p className="pj-small pj-muted">No stored messages in this session.</p>}
@@ -272,7 +324,7 @@ export function LiveConversation({ ticket, sessionId, mark, harnesses }: { ticke
     <button type="button" className="btn quiet small" aria-expanded={shown} onClick={() => setChosen(!shown)} data-testid="live-conversation-toggle">
       {shown ? "Hide" : "Show"} conversation ({storedCount(stored.count)})</button>
     {shown && <div className="pj-messages">
-      {stored.older && <button type="button" className="btn quiet small" onClick={() => void stored.earlier()} data-testid="messages-earlier">Show earlier messages</button>}
+      <EarlierMessages stored={stored} />
       <MessageList rows={messageRows(stored.rows, harnesses)} />
     </div>}
   </div>;

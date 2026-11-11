@@ -641,3 +641,54 @@ fn m_opens_the_chosen_session_s_stored_messages_and_esc_goes_back_to_the_list() 
         "a session the engine no longer lists is closed"
     );
 }
+
+#[test]
+fn an_opened_session_draws_stored_text_without_terminal_escapes_and_inside_its_width() {
+    use MasterMode::Live;
+    use MessageSpeaker::{Master, Owner, Switch};
+    let look = Look::plain();
+    let mut sessions = opened();
+    sessions.key(press(KeyCode::Down), true, false);
+    sessions.key(press(KeyCode::Char('m')), true, false);
+    let hostile = "\u{1b}[2J\u{1b}[31mRed\u{1b}[0m\u{7}\u{0} text\r\n\u{1b}]52;c;cGF5bG9hZA==\u{7}clip\u{9b}31m\u{202e}evil\ttab";
+    let hidden = "a\u{200b}".repeat(60);
+    let rows = [
+        stored(1, Owner, Live, "claude-code", Some(hostile)),
+        stored(2, Master, Live, "claude-code", Some(hostile)),
+        stored(3, Switch, Live, "claude-code", Some(hostile)),
+        stored(4, Owner, Live, "claude-code", Some(hidden.as_str())),
+    ];
+    sessions.set_messages(Some((&rows[..], true)));
+    let (body, _) = sessions.view(76, 40, NOW, 0, &look).unwrap();
+    assert_eq!(
+        &texts(&body)[2..11],
+        [
+            "You",
+            "  Red text",
+            "  clip31m\\u202eevil tab",
+            "Claude Code",
+            "  Red text",
+            "  clip31m\\u202eevil tab",
+            "Red text",
+            "clip31m\\u202eevil tab",
+            "You",
+        ]
+    );
+    for row in &body {
+        assert!(
+            row.text().chars().all(|character| !character.is_control()),
+            "{:?}",
+            row.text()
+        );
+    }
+    assert!(
+        body.iter().all(|row| row.width() <= 76),
+        "hidden characters are shown as escapes before the text is wrapped, so no line outgrows the view"
+    );
+    let shown: String = texts(&body)[11..].concat().replace(' ', "");
+    assert_eq!(
+        shown,
+        "a\\u200b".repeat(60),
+        "every hidden character shows as an escape"
+    );
+}

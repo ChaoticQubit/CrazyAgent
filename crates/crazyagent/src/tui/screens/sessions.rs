@@ -1,5 +1,6 @@
 use super::new_project::harness_name;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
+use super::project_markdown::sanitize;
 use super::project_master::TYPED_IN_TERMINAL;
 use super::project_team::{Help, window};
 use super::project_time::{clock, duration};
@@ -547,7 +548,9 @@ impl Sessions {
         if detail_room > 0 {
             lines.push(Row::default());
             for text in detail {
-                let cut = wrap_words(&text, inner.max(1)).into_iter().next();
+                let cut = wrap_words(&sanitize(&text), inner.max(1))
+                    .into_iter()
+                    .next();
                 lines.push(Row::of(
                     format!("  {}", cut.unwrap_or_default()),
                     look.muted,
@@ -596,16 +599,18 @@ fn detail_lines(row: &SessionRow) -> Vec<String> {
 /// One stored message as an opened session shows it: the owner as "You", the engine as
 /// "CrazyAgent" and the master by `ran_by`; a master switch and a terminal turn whose
 /// typed words were not read have no speaker. Input: the row. Output: the line, or none
-/// for any other row with no text.
+/// for any other row with no text. Stored text is untrusted: its terminal escapes and
+/// control characters are removed here, before the view wraps or measures it.
 fn stored_line(row: &SessionMessage) -> Option<StoredLine> {
     let (who, text) = match (row.speaker, &row.text) {
-        (MessageSpeaker::Owner, Some(text)) => (Some("You".to_owned()), text.clone()),
+        (MessageSpeaker::Owner, Some(text)) => (Some("You".to_owned()), sanitize(text)),
         (MessageSpeaker::Owner, None) => (None, TYPED_IN_TERMINAL.to_owned()),
-        (MessageSpeaker::Master, Some(text)) => {
-            (Some(ran_by(row.mode, row.harness.as_deref())), text.clone())
-        }
-        (MessageSpeaker::Engine, Some(text)) => (Some("CrazyAgent".to_owned()), text.clone()),
-        (MessageSpeaker::Switch, Some(text)) => (None, text.clone()),
+        (MessageSpeaker::Master, Some(text)) => (
+            Some(ran_by(row.mode, row.harness.as_deref())),
+            sanitize(text),
+        ),
+        (MessageSpeaker::Engine, Some(text)) => (Some("CrazyAgent".to_owned()), sanitize(text)),
+        (MessageSpeaker::Switch, Some(text)) => (None, sanitize(text)),
         (_, None) => return None,
     };
     Some(StoredLine { who, text })

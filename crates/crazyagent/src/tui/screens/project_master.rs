@@ -1,4 +1,5 @@
 use super::project::{MasterStatus, Message, Speaker, Transcript};
+use super::project_markdown::sanitize;
 use super::project_time::clock;
 use crate::conversation::ConversationEntry;
 use crate::master_session::{MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView};
@@ -24,14 +25,16 @@ pub(in crate::tui) const TYPED_IN_TERMINAL: &str =
 /// One stored message as the transcript shows it: the owner's words, the master's reply,
 /// or a notice for a request the engine typed, for the divider where another master took
 /// the conversation over and for a terminal turn whose typed words were not read. Input:
-/// the row. Output: the message, or none for any other row with no text.
+/// the row. Output: the message, or none for any other row with no text. Stored text is
+/// untrusted: its terminal escapes and control characters are removed here, before the
+/// transcript wraps or measures it.
 fn stored_message(row: &SessionMessage) -> Option<Message> {
     let (speaker, text) = match (row.speaker, &row.text) {
-        (MessageSpeaker::Owner, Some(text)) => (Speaker::You, text.clone()),
+        (MessageSpeaker::Owner, Some(text)) => (Speaker::You, sanitize(text)),
         (MessageSpeaker::Owner, None) => (Speaker::Notice, TYPED_IN_TERMINAL.to_owned()),
-        (MessageSpeaker::Master, Some(text)) => (Speaker::Master, text.clone()),
+        (MessageSpeaker::Master, Some(text)) => (Speaker::Master, sanitize(text)),
         (MessageSpeaker::Engine | MessageSpeaker::Switch, Some(text)) => {
-            (Speaker::Notice, text.clone())
+            (Speaker::Notice, sanitize(text))
         }
         (_, None) => return None,
     };
@@ -571,6 +574,40 @@ mod tests {
                 (Speaker::Master, "Noted.", false),
             ]
         );
+    }
+
+    #[test]
+    fn stored_text_reaches_the_transcript_without_terminal_escapes_or_control_characters() {
+        use MasterMode::Live;
+        use MessageSpeaker::{Engine, Master, Owner, Switch};
+        let hostile = "\u{1b}[2J\u{1b}[31mRed\u{1b}[0m\u{7}\u{0} text\r\n\u{1b}]52;c;cGF5bG9hZA==\u{7}clip\u{9b}31m\u{202e}evil\ttab";
+        let clean = "Red text\nclip31m\\u202eevil    tab";
+        let rows = [
+            stored(1, Owner, Live, Some(hostile)),
+            stored(2, Master, Live, Some(hostile)),
+            stored(3, Engine, Live, Some(hostile)),
+            stored(4, Switch, Live, Some(hostile)),
+        ];
+        let transcript = build_stored(Some(MasterSessionPhase::Configured), &[], &[], &rows);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, clean, false),
+                (Speaker::Master, clean, false),
+                (Speaker::Notice, clean, false),
+                (Speaker::Notice, clean, false),
+            ]
+        );
+        for message in &transcript.messages {
+            assert!(
+                message
+                    .text
+                    .chars()
+                    .all(|character| character == '\n' || !character.is_control()),
+                "{:?}",
+                message.text
+            );
+        }
     }
 
     fn said(transcript: &Transcript) -> Vec<(Speaker, &str, bool)> {

@@ -110,6 +110,60 @@ test("a turn the store has no row for yet comes last and a stored row with no tu
   assert.deepEqual(said(lines([row(1, "master", "one_turn", "orphan")], [])), ["reply: orphan"]);
 });
 
+test("a view cut to its newest rows is never the whole session, and a whole-session view says it is capped", () => {
+  const run = (from, to) => Array.from({ length: to - from + 1 }, (_, index) => row(from + index, index % 2 === 0 ? "owner" : "master", "live", `m${from + index}`));
+  const max = stored.MESSAGES_HELD_MAX;
+  assert.deepEqual(stored.heldView(run(1, 5), null, true, true, false), { whole: true, capped: false });
+  assert.deepEqual(stored.heldView([], null, true, true, false), { whole: true, capped: false }, "a session with no stored message is whole");
+  assert.deepEqual(stored.heldView(run(1, 5), null, false, true, false), { whole: false, capped: false }, "before a read arrives");
+  assert.deepEqual(stored.heldView(run(3, 5), 3, true, true, false), { whole: false, capped: false }, "older rows are still being read");
+  assert.deepEqual(stored.heldView(run(3, 5), 3, true, true, true), { whole: false, capped: true }, "the read stopped before the first message");
+  assert.deepEqual(stored.heldView(run(3, 5), null, true, true, false), { whole: false, capped: true }, "no older row is named, yet the first rows are gone");
+  assert.deepEqual(stored.heldView([...run(1, 2), ...run(4, 5)], null, true, true, false), { whole: false, capped: true }, "a row is missing in the middle");
+  assert.deepEqual(stored.heldView(run(3, 5), null, true, false, false), { whole: false, capped: false }, "a list that reads page by page never says capped");
+
+  const full = run(1, max);
+  assert.deepEqual(stored.heldView(full, null, true, true, false), { whole: true, capped: false });
+  assert.deepEqual(stored.heldAfter(run(1, 5), run(5, 6)), { rows: run(1, 6), cut: false });
+  const after = stored.heldAfter(full, run(max, max + 2));
+  assert.equal(after.cut, true, "the hook moves its older cursor to the first row kept");
+  const grown = after.rows;
+  assert.equal(grown.length, max);
+  assert.deepEqual([grown[0].seq, grown[max - 1].seq], [3, max + 2], "a session that grows past the bound loses its oldest rows");
+  assert.deepEqual(stored.heldView(grown, null, true, true, false), { whole: false, capped: true });
+
+  const last = stored.heldAfter(run(65, max + 4), run(1, 64)).rows;
+  assert.equal(last.length, max);
+  assert.equal(last[0].seq, 5, "the page that holds the first message is cut when it passes the bound");
+  assert.deepEqual(stored.heldView(last, null, true, true, false), { whole: false, capped: true });
+
+  const earlier = async () => {};
+  const way = (older, rows) => renderToStaticMarkup(createElement(stored.EarlierMessages, { stored: { older, rows, earlier } }));
+  assert.equal(way(false, run(1, 5)), "", "a list that starts at the first message offers nothing");
+  assert.match(way(true, run(3, 5)), /data-testid="messages-earlier"[^>]*>Show earlier messages</);
+  const held = way(true, grown);
+  assert.doesNotMatch(held, /messages-earlier/, "a full list offers no button that reads nothing");
+  assert.match(held, /data-testid="messages-cut"[^>]*>Earlier messages are not shown\. This list holds the newest 4096\.</);
+});
+
+test("a mixed session cut at the front is never placed against its turns", () => {
+  const rows = [
+    row(1, "owner", "one_turn", "first"), row(2, "master", "one_turn", "first done"),
+    row(3, "switch", "live", SWITCHED), row(4, "owner", "live", "in the terminal"), row(5, "master", "live", "terminal done"),
+    row(6, "switch", "one_turn", BACK), row(7, "owner", "one_turn", "second"), row(8, "master", "one_turn", "second done"),
+  ];
+  const turns = [turn({ id: "t1", reply: { text: "first done" } }), turn({ id: "t2", ordinal: 2, reply: { text: "second done" } })];
+  const sent = { t1: "first", t2: "second" };
+  assert.deepEqual(said(lines(rows, turns, sent)), [
+    "owner: first", "reply: first done", `engine: ${SWITCHED}`, "owner: in the terminal", "reply: terminal done",
+    `engine: ${BACK}`, "owner: second", "reply: second done",
+  ]);
+  const cut = rows.slice(2);
+  assert.deepEqual(stored.heldView(cut, null, true, true, false), { whole: false, capped: true }, "the tab shows the turns alone and says the view is cut");
+  assert.throws(() => lines(cut, turns, sent), /not the whole session/, "the first turn would land under the second Switched to divider");
+  assert.throws(() => lines([rows[0], rows[2]], turns, sent), /not the whole session/, "a missing row is refused too");
+});
+
 test("a session only the one-turn master ran reads exactly as its turns do", () => {
   const turns = [
     turn({ id: "t1", reply: { text: "I handed it to Ada." }, tasks: [{ task: 8, note: null }], changes: "Its edits wait in Changes." }),
