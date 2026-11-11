@@ -10,20 +10,26 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// The folder inside a [`MasterFixture`] project that every stand-in writes its files into.
+/// The fixture makes it before any sandbox is built: the Linux boundary lets an agent write
+/// only into what the project root already holds, never a new entry at its top.
+pub(in crate::engine) const RUN_FOLDER: &str = "run";
+
 /// A stand-in harness that starts a descendant sharing its stdout and stderr, writes both
-/// process ids into its working folder and then sleeps, so only a group kill ends it.
+/// process ids into the `run` folder of its working folder and then sleeps, so only a group
+/// kill ends it.
 pub(in crate::engine) const PIPE_HOLDING_HARNESS: &str = "#!/bin/sh
 /bin/sleep 30 &
-echo $! > descendant.pid
-echo $$ > leader.pid
+echo $! > run/descendant.pid
+echo $$ > run/leader.pid
 exec /bin/sleep 30
 ";
 
 /// A stand-in harness whose descendant moves into its own process group before it writes its
 /// id, still holding the harness stdout and stderr, so no group kill can reach it.
 pub(in crate::engine) const GROUP_LEAVING_HARNESS: &str = r#"#!/bin/sh
-/usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' &
-echo $$ > leader.pid
+/usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' &
+echo $$ > run/leader.pid
 exec /bin/sleep 30
 "#;
 
@@ -32,20 +38,20 @@ exec /bin/sleep 30
 /// reaped, then writes its own id and sleeps. macOS answers a probe of that group with EPERM.
 #[cfg(target_os = "macos")]
 pub(in crate::engine) const ZOMBIE_HOLDING_HARNESS: &str = r#"#!/bin/sh
-/usr/bin/perl -e 'my $group = getpgrp(); setpgrp(0, 0) or exit 1; pipe(my $read, my $write) or exit 1; my $child = fork(); defined $child or exit 1; if ($child == 0) { close($read); setpgrp(0, $group) or exit 1; exit 0 } close($write); my $gone = <$read>; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
-echo $$ > leader.pid
+/usr/bin/perl -e 'my $group = getpgrp(); setpgrp(0, 0) or exit 1; pipe(my $read, my $write) or exit 1; my $child = fork(); defined $child or exit 1; if ($child == 0) { close($read); setpgrp(0, $group) or exit 1; exit 0 } close($write); my $gone = <$read>; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+echo $$ > run/leader.pid
 exec /bin/sleep 30
 "#;
 
 /// The start of a stand-in harness that leaves what a Claude Code Bash tool shell can leave: a
 /// process that started its own session with its own stdio, as each tool shell does, and a
-/// `nohup` command whose shell already exited. It writes their ids into its working folder; a
-/// test appends how the harness itself ends.
+/// `nohup` command whose shell already exited. It writes their ids into the `run` folder of its
+/// working folder; a test appends how the harness itself ends.
 #[cfg(target_os = "macos")]
 pub(in crate::engine) const DETACHING_HARNESS: &str = r#"#!/bin/sh
-/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
-/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; exec "/bin/sh", "-c", q(/usr/bin/nohup /bin/sleep 30 < /dev/null > /dev/null 2>&1 & echo $! > orphan.pid)' < /dev/null > /dev/null 2>&1
-echo $$ > leader.pid
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; exec "/bin/sh", "-c", q(/usr/bin/nohup /bin/sleep 30 < /dev/null > /dev/null 2>&1 & echo $! > run/orphan.pid)' < /dev/null > /dev/null 2>&1
+echo $$ > run/leader.pid
 "#;
 
 /// The start of a stand-in harness whose child lives five seconds and forks a process that
@@ -55,12 +61,13 @@ echo $$ > leader.pid
 /// appends how the harness itself ends.
 #[cfg(target_os = "macos")]
 pub(in crate::engine) const ORPHANING_HARNESS: &str = r#"#!/bin/sh
-/usr/bin/perl -mPOSIX -e 'defined(my $child = fork()) or exit 1; if ($child == 0) { POSIX::setsid() > 0 or exit 1; open(my $file, ">", "orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } sleep 5' < /dev/null > /dev/null 2>&1 &
-echo $$ > leader.pid
+/usr/bin/perl -mPOSIX -e 'defined(my $child = fork()) or exit 1; if ($child == 0) { POSIX::setsid() > 0 or exit 1; open(my $file, ">", "run/orphan.pid") or exit 1; print $file "$$\n"; close($file); sleep 60; exit 0 } sleep 5' < /dev/null > /dev/null 2>&1 &
+echo $$ > run/leader.pid
 "#;
 
 /// A real native profile custody in a private engine folder under the canonical `/tmp`, with a
-/// project folder, for master host tests that need an actual profile lease and sandbox.
+/// project folder that holds a [`RUN_FOLDER`], for master host tests that need an actual
+/// profile lease and sandbox.
 pub(in crate::engine) struct MasterFixture {
     pub(in crate::engine) root: tempfile::TempDir,
     pub(in crate::engine) project: PathBuf,
@@ -87,6 +94,7 @@ impl MasterFixture {
         fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
         let project = root.path().join("project");
         fs::create_dir(&project).unwrap();
+        fs::create_dir(project.join(RUN_FOLDER)).unwrap();
         let mut custody =
             NativeProfileCustody::capture(&database, &fs::metadata(&database).unwrap()).unwrap();
         let host = HostStamp {
@@ -222,11 +230,11 @@ pub(in crate::engine) struct HarnessProcesses {
 }
 
 impl HarnessProcesses {
-    /// Waits up to five seconds until the stand-in wrote both process ids into `folder`.
-    /// Takes the stand-in's working folder. Returns both processes.
+    /// Waits up to five seconds until the stand-in wrote both process ids into the
+    /// [`RUN_FOLDER`] of `folder`. Takes the stand-in's working folder. Returns both processes.
     pub(in crate::engine) fn wait(folder: &Path) -> Self {
         let read = |name: &str| {
-            fs::read_to_string(folder.join(name))
+            fs::read_to_string(folder.join(RUN_FOLDER).join(name))
                 .ok()
                 .and_then(|text| text.trim().parse::<i32>().ok())
                 .and_then(Pid::from_raw)
@@ -286,7 +294,7 @@ impl Drop for HarnessProcesses {
 pub(in crate::engine) fn reap_before_the_host(folder: &Path) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     let harness = loop {
-        if let Some(harness) = fs::read_to_string(folder.join("leader.pid"))
+        if let Some(harness) = fs::read_to_string(folder.join(RUN_FOLDER).join("leader.pid"))
             .ok()
             .and_then(|text| text.trim().parse::<i32>().ok())
             .and_then(Pid::from_raw)
@@ -323,12 +331,12 @@ pub(in crate::engine) struct DetachedProcesses {
 
 #[cfg(target_os = "macos")]
 impl DetachedProcesses {
-    /// Waits up to five seconds until the stand-in wrote all three ids into `folder`, then
-    /// checks the two detached ones left the harness group and are alive.
+    /// Waits up to five seconds until the stand-in wrote all three ids into the [`RUN_FOLDER`]
+    /// of `folder`, then checks the two detached ones left the harness group and are alive.
     /// Takes the stand-in's working folder. Returns the three processes.
     pub(in crate::engine) fn wait(folder: &Path) -> Self {
         let read = |name: &str| {
-            fs::read_to_string(folder.join(name))
+            fs::read_to_string(folder.join(RUN_FOLDER).join(name))
                 .ok()
                 .and_then(|text| text.trim().parse::<i32>().ok())
                 .and_then(Pid::from_raw)
@@ -385,12 +393,13 @@ pub(in crate::engine) struct Orphan(pub(in crate::engine) Pid);
 
 #[cfg(target_os = "macos")]
 impl Orphan {
-    /// Waits up to fifteen seconds until the stand-in wrote its id and the orphan's into
-    /// `folder` and launchd is the orphan's parent, then checks the orphan left the harness
-    /// session and is alive. Takes the stand-in's working folder. Returns the orphan.
+    /// Waits up to fifteen seconds until the stand-in wrote its id and the orphan's into the
+    /// [`RUN_FOLDER`] of `folder` and launchd is the orphan's parent, then checks the orphan
+    /// left the harness session and is alive. Takes the stand-in's working folder. Returns the
+    /// orphan.
     pub(in crate::engine) fn wait(folder: &Path) -> Self {
         let read = |name: &str| {
-            fs::read_to_string(folder.join(name))
+            fs::read_to_string(folder.join(RUN_FOLDER).join(name))
                 .ok()
                 .and_then(|text| text.trim().parse::<i32>().ok())
                 .and_then(Pid::from_raw)
