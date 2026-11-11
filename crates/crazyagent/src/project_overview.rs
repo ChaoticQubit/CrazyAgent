@@ -847,8 +847,44 @@ pub(crate) fn cut_at_line(text: &str, max: usize) -> usize {
 /// [`README_BYTES_MAX`] and cut at its last whole line when it is longer. Input: the
 /// project folder. Output: the README, none without one or for one that is not text.
 pub fn readme(folder: &Path) -> Option<Readme> {
-    let _ = (folder, README_NAMES);
-    None
+    let root = draft::open_folder(folder)?;
+    let (name, file) = README_NAMES.iter().find_map(|name| {
+        let file = draft::open_in(&root, name)?;
+        file.metadata()
+            .is_ok_and(|metadata| metadata.is_file())
+            .then_some((*name, file))
+    })?;
+    let mut bytes = Vec::new();
+    file.take(README_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let cut = bytes.len() as u64 > README_BYTES_MAX;
+    bytes.truncate(README_BYTES_MAX as usize);
+    let mut text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let valid = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            if !cut || bytes.len() - valid > 3 {
+                return None;
+            }
+            bytes.truncate(valid);
+            String::from_utf8(bytes).ok()?
+        }
+    };
+    if cut {
+        let end = text.rfind('\n').map_or(text.len(), |at| at + 1);
+        text.truncate(end);
+    }
+    assert!(text.len() as u64 <= README_BYTES_MAX);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(Readme {
+        path: name.to_owned(),
+        text,
+        cut,
+    })
 }
 
 /// Whether the engine database holds a table. Inputs: the connection and the table name.
@@ -873,8 +909,37 @@ pub fn competitors(
     project: &ProjectId,
     folder: &Path,
 ) -> Result<Competitors, EngineError> {
-    let _ = (db, project, folder, REPORT_PATH_BYTES_MAX);
-    Ok(Competitors::Missing)
+    if present(db, "research_jobs")? {
+        let report: Option<String> = db
+            .query_row(
+                "SELECT report_path FROM research_jobs
+                 WHERE project=?1 AND kind=?2 AND status='done' AND report_path IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+                params![project.as_str(), ResearchKind::CompetitorResearch.name()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?;
+        if let Some(path) = report.filter(|path| path.len() <= REPORT_PATH_BYTES_MAX) {
+            return Ok(Competitors::Report { path });
+        }
+    }
+    if !present(db, "project_doc_links")? {
+        return Ok(Competitors::Missing);
+    }
+    let paths: Vec<String> = links::list(db, project)
+        .map_err(unavailable)?
+        .into_iter()
+        .filter(|link| link.kind == LinkKind::Research(ResearchKind::CompetitorResearch))
+        .map(|link| link.path)
+        .filter(|path| links::read_linked(folder, path).is_some())
+        .collect();
+    assert!(paths.len() <= links::LINKS_MAX);
+    Ok(if paths.is_empty() {
+        Competitors::Missing
+    } else {
+        Competitors::Linked { paths }
+    })
 }
 
 /// Reads the project's Overview. The first read of a project makes its row stale and due

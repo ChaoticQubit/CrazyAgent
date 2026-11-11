@@ -320,8 +320,12 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 /// `overview_request_bounds` for a body over the bound or `overview_request_invalid` for
 /// one that is not a request, an unknown field included.
 fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
-    let _ = (bytes, REQUEST_BYTES_MAX);
-    Err(unavailable())
+    if bytes.len() > REQUEST_BYTES_MAX {
+        return Err(failure("overview_request_bounds"));
+    }
+    let Envelope { overview } =
+        serde_json::from_slice(bytes).map_err(|_| failure("overview_request_invalid"))?;
+    Ok(overview)
 }
 
 /// Whether a text fits one reply frame as JSON. Input: the text. Output: the answer.
@@ -333,22 +337,75 @@ fn fits(text: &str) -> bool {
 /// are listed, and a tab whose text cannot travel in one frame reads as blocked. Input:
 /// the Overview as read. Output: the reply.
 fn state_reply(mut overview: Overview) -> Reply {
+    let mut proposals = Vec::with_capacity(Tab::ALL.len());
     overview.readme = None;
+    for tab in &mut overview.tabs {
+        if tab.text.take().is_some_and(|text| !fits(&text)) {
+            tab.version = String::new();
+            tab.edited = false;
+            tab.blocked = Some(project_overview::BLOCKED_TOO_LARGE.to_owned());
+        }
+        if tab.proposal.take().is_some_and(|text| fits(&text)) {
+            proposals.push(tab.tab);
+        }
+    }
+    assert!(proposals.len() <= Tab::ALL.len());
+    assert!(
+        overview
+            .tabs
+            .iter()
+            .all(|tab| tab.text.is_none() && tab.proposal.is_none())
+    );
     Reply::Overview {
         overview: Box::new(overview),
-        proposals: Vec::new(),
+        proposals,
     }
 }
 
 /// The text frame of one part of an Overview as read. The README is cut further, at a
 /// line, until it fits the frame. Inputs: the Overview and the part. Output: the reply.
 fn text_reply(overview: Overview, part: Part) -> Reply {
-    let _ = (overview, part, fits(""));
-    Reply::Text {
+    let none = Reply::Text {
         text: None,
         version: String::new(),
         path: None,
         cut: false,
+    };
+    match part {
+        Part::Readme => {
+            let Some(mut readme) = overview.readme else {
+                return none;
+            };
+            while !fits(&readme.text) {
+                let half = project_overview::cut_at_line(&readme.text, readme.text.len() / 2);
+                readme.text.truncate(half);
+                readme.cut = true;
+            }
+            Reply::Text {
+                text: Some(readme.text),
+                version: String::new(),
+                path: Some(readme.path),
+                cut: readme.cut,
+            }
+        }
+        Part::Tab { tab } | Part::Proposal { tab } => {
+            let Some(found) = overview.tabs.into_iter().find(|state| state.tab == tab) else {
+                return none;
+            };
+            let (text, version) = match part {
+                Part::Proposal { .. } => (found.proposal, String::new()),
+                _ => (found.text, found.version),
+            };
+            match text {
+                Some(text) if fits(&text) => Reply::Text {
+                    text: Some(text),
+                    version,
+                    path: None,
+                    cut: false,
+                },
+                _ => none,
+            }
+        }
     }
 }
 
