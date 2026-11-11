@@ -1138,11 +1138,7 @@ fn server_view(
         status_label: status.label().into(),
         problem: current
             .and_then(|check| check.problem.as_deref())
-            .map(|code| {
-                crate::plugins::plain_problem(code)
-                    .unwrap_or("The server can't start.")
-                    .into()
-            }),
+            .map(crate::plugins::check_problem),
         tools: current.map(|check| check.tools.clone()).unwrap_or_default(),
         checks: record.checks,
         secrets: record
