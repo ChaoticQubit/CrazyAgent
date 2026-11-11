@@ -3,6 +3,7 @@ use super::project_time::clock;
 use crate::conversation::ConversationEntry;
 use crate::master_session::{MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView};
 use crate::master_step_limit::steps_of_cause;
+use crate::master_time_limit::minutes_of_cause;
 
 pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
 
@@ -194,6 +195,13 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             "Stopped after {steps} steps; reply with 'continue' to go on. ({code})"
         ));
     }
+    if turn.reason == Some(MasterReason::TimeLimit)
+        && let Some(minutes) = turn.cause.as_deref().and_then(minutes_of_cause)
+    {
+        return Some(format!(
+            "Stopped after {minutes} minutes; reply with 'continue' to go on. ({code})"
+        ));
+    }
     let retry = if latest { " Press r to try again." } else { "" };
     if turn.reason == Some(MasterReason::RepositoryConfigRefused)
         && let Some(detail) = &turn.detail
@@ -228,10 +236,8 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::CaptureIncomplete) => "its reply was cut off.",
         Some(MasterReason::NoReply) => "it ended its turn without writing a reply.",
         Some(MasterReason::StepLimit) => "it used every step its limit allows.",
-        Some(MasterReason::TimeLimit) => {
-            "it ran out of time; a turn may run for 10 minutes at most."
-        }
-        Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
+        Some(MasterReason::TimeLimit) => "it reached its time limit.",
+        Some(MasterReason::OutputLimit) => "this turn's output was too large to keep.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
         Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
         Some(MasterReason::RepositoryConfigRefused) => {
@@ -675,13 +681,47 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_that_ran_out_of_time_says_so_and_is_not_called_cut_off() {
+    fn a_turn_stopped_at_each_time_limit_names_its_minutes_and_how_to_go_on() {
+        for minutes in [10_u16, 30, 60] {
+            let mut stopped = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::TimeLimit));
+            stopped.cause = Some(format!("master_time_limit_{minutes}"));
+            let transcript = build(
+                Some(MasterSessionPhase::Configured),
+                &[stopped],
+                &[entry(3, "Go.")],
+            );
+            let last = &transcript.messages.last().unwrap().text;
+            let line = format!("Stopped after {minutes} minutes; reply with 'continue' to go on.");
+            assert!(last.contains(&line), "{last}");
+            assert!(last.contains(&format!("(master_time_limit_{minutes})")), "{last}");
+            assert!(!last.contains("ran out of time"), "{last}");
+            assert!(!last.contains("at most"), "{last}");
+            assert!(!last.contains("cut off"), "{last}");
+            assert!(!last.contains("Press r"), "{last}");
+        }
+    }
+
+    #[test]
+    fn a_turn_a_clock_ended_with_no_minutes_named_claims_no_ten_minutes() {
         let mut late = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::TimeLimit));
-        late.cause = Some("claude_host_deadline".into());
+        late.cause = Some("codex_host_deadline".into());
         let transcript = build(Some(MasterSessionPhase::Configured), &[late], &[entry(3, "Go.")]);
         let last = &transcript.messages.last().unwrap().text;
-        assert!(last.contains("stopped: it ran out of time;"), "{last}");
-        assert!(last.contains("10 minutes at most. (claude_host_deadline)"), "{last}");
+        let line = "stopped: it reached its time limit. (codex_host_deadline)";
+        assert!(last.contains(line), "{last}");
+        assert!(!last.contains("10 minutes"), "{last}");
+        assert!(!last.contains("cut off"), "{last}");
+    }
+
+    #[test]
+    fn a_turn_with_more_output_than_the_app_keeps_says_so_plainly() {
+        let mut large = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::OutputLimit));
+        large.cause = Some("claude_host_event_limit".into());
+        let transcript = build(Some(MasterSessionPhase::Configured), &[large], &[entry(3, "Go.")]);
+        let last = &transcript.messages.last().unwrap().text;
+        let line = "stopped: this turn's output was too large to keep. (claude_host_event_limit)";
+        assert!(last.contains(line), "{last}");
+        assert!(!last.contains("something went wrong"), "{last}");
         assert!(!last.contains("cut off"), "{last}");
     }
 

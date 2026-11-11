@@ -178,6 +178,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) hidden_paths: Vec<std::path::PathBuf>,
     pub(crate) tools_off: Vec<String>,
     pub(crate) steps: crate::master_step_limit::StepLimit,
+    pub(crate) time: crate::master_time_limit::TimeLimit,
 }
 
 impl PreparedMasterTurn {
@@ -2831,6 +2832,7 @@ fn bundle(
         hidden_paths,
         tools_off,
         steps: crate::master_step_limit::load(tx)?.limit,
+        time: crate::master_time_limit::load(tx)?.limit,
     };
     assert_eq!(
         prepared.attempt.request.task_id,

@@ -15,16 +15,45 @@ const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
-const SHOWN = `document.querySelector('input[type=radio][name="step-limit"]:checked')?.value ?? null`;
-const SAVE = 'form[aria-label="Master"] button[type=submit]';
-const RESTING = `[${SHOWN}, document.querySelector(${JSON.stringify(SAVE)})?.disabled ?? null]`;
 const TOP = "How far a project's master goes in one turn.";
-const CARDS = {
-  no_limit: "No limit A turn runs until the master replies or its time is up.",
-  steps50: "50 steps A turn stops after 50 steps.",
-  steps100: "100 steps A turn stops after 100 steps.",
-  steps200: "200 steps A turn stops after 200 steps.",
+/** The two master limits of Settings, Master: each one's radio name, form, engine read, saved
+ * note and the words of its option cards. */
+const LIMITS = {
+  steps: {
+    name: "step-limit", form: "Master", command: "desktop_master_step_settings", saved: "Master step limit saved.",
+    cards: {
+      no_limit: "No limit A turn runs until the master replies or its time is up.",
+      steps50: "50 steps A turn stops after 50 steps.",
+      steps100: "100 steps A turn stops after 100 steps.",
+      steps200: "200 steps A turn stops after 200 steps.",
+    },
+  },
+  time: {
+    name: "time-limit", form: "Master time limit", command: "desktop_master_time_settings", saved: "Master time limit saved.",
+    cards: {
+      no_limit: "No limit A turn runs until the master replies or you stop it.",
+      minutes10: "10 min A turn stops after 10 minutes.",
+      minutes30: "30 min A turn stops after 30 minutes.",
+      minutes60: "60 min A turn stops after 60 minutes.",
+    },
+  },
 };
+
+/** The page read of one limit's checked option. Input: the limit's entry. Output: the script. */
+function shown(entry) {
+  return `document.querySelector('input[type=radio][name="${entry.name}"]:checked')?.value ?? null`;
+}
+
+/** The selector of one limit's Save changes button. Input: the limit's entry. Output: it. */
+function saveButton(entry) {
+  return `form[aria-label="${entry.form}"] button[type=submit]`;
+}
+
+/** The page read of one limit's checked option and whether its Save rests. Input: the limit's
+ * entry. Output: the script. */
+function resting(entry) {
+  return `[${shown(entry)}, document.querySelector(${JSON.stringify(saveButton(entry))})?.disabled ?? null]`;
+}
 
 /** Runs the owner's git in a folder with no global or system config. Inputs: the folder and
  * the arguments. Output: what git printed, trimmed. */
@@ -161,57 +190,79 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
-/** Opens Settings, Master and waits for the four step limit options. Inputs: the owner and
- * the route opener. Output: none. */
+/** Opens Settings, Master and waits for both limits with their options. Inputs: the owner
+ * and the route opener. Output: none. */
 async function master(me, open) {
   await open("#/settings/master", "the Master setting", (text) => text.includes(TOP));
-  await me.waitFor("the four options", (text) => ["Master step limit", "No limit", "50 steps", "100 steps", "200 steps", "reply with 'continue' to go on"].every((words) => text.includes(words)));
+  await me.waitFor("the four step options", (text) => ["Master step limit", "No limit", "50 steps", "100 steps", "200 steps", "reply with 'continue' to go on"].every((words) => text.includes(words)));
+  await me.waitFor("the four time options", (text) => ["Master time limit", "10 min", "30 min", "60 min", "Stopped after N minutes"].every((words) => text.includes(words)));
 }
 
-/** The stored step limit as the engine reads it. Input: the bridge. Output: the limit. */
-async function stored(bridge) {
-  return (await value(bridge, "desktop_master_step_settings")).limit;
+/** One stored master limit as the engine reads it. Inputs: the bridge and the limit's entry.
+ * Output: the limit. */
+async function stored(bridge, entry) {
+  return (await value(bridge, entry.command)).limit;
 }
 
-/** Picks one step limit in Settings, Master and saves it, waiting until the engine stores it
- * and the page shows the stored value with Save resting. Inputs: the bridge, the owner, the
- * page and the limit. Output: none. */
-async function save({ bridge, me, page }, limit) {
-  await me.click(CARDS[limit], "label.radio-card");
-  await until(`${limit} picked on the page`, [limit, false], () => page.evaluate(RESTING));
-  await me.click("Save changes", SAVE);
-  await until(`${limit} in the engine`, limit, () => stored(bridge));
-  await me.waitFor("the saved note", (text) => text.includes("Master step limit saved."));
-  await until(`${limit} stored on the page`, [limit, true], () => page.evaluate(RESTING));
+/** Picks one option of a master limit in Settings, Master and saves it, waiting until the
+ * engine stores it and the page shows the stored value with Save resting. Inputs: the bridge,
+ * the owner, the page, the limit's entry and the option. Output: none. */
+async function save({ bridge, me, page }, entry, limit) {
+  await me.click(entry.cards[limit], "label.radio-card");
+  await until(`${limit} picked on the page`, [limit, false], () => page.evaluate(resting(entry)));
+  await me.click("Save changes", saveButton(entry));
+  await until(`${limit} in the engine`, limit, () => stored(bridge, entry));
+  await me.waitFor("the saved note", (text) => text.includes(entry.saved));
+  await until(`${limit} stored on the page`, [limit, true], () => page.evaluate(resting(entry)));
 }
 
-/** Saves one step limit as `save` does, then checks that it stays after a page reload and an
- * engine restart. Inputs: the steps' tools and the limit. Output: none. */
-async function picked(tools, limit) {
+/** Saves one option as `save` does, then checks that it stays after a page reload and an
+ * engine restart. Inputs: the steps' tools, the limit's entry and the option. Output: none. */
+async function picked(tools, entry, limit) {
   const { bridge, me, page, open, reload, restart } = tools;
-  await save(tools, limit);
+  await save(tools, entry, limit);
   await reload(TOP);
-  await until(`${limit} after a reload`, limit, () => page.evaluate(SHOWN));
+  await until(`${limit} after a reload`, limit, () => page.evaluate(shown(entry)));
   await restart();
-  await until(`${limit} after an engine restart`, limit, () => stored(bridge));
+  await until(`${limit} after an engine restart`, limit, () => stored(bridge, entry));
   await master(me, open);
-  await until(`${limit} on the page after the restart`, [limit, true], () => page.evaluate(RESTING));
+  await until(`${limit} on the page after the restart`, [limit, true], () => page.evaluate(resting(entry)));
 }
 
 test("Master step limit: No limit is the default, and picking it again after 50 steps is saved and stays after a reload and an engine restart", { timeout: 600000 }, (t) => onEngine(t, "ca-steps-none-", async (tools) => {
   const { bridge, me, page, open } = tools;
   await master(me, open);
-  await until("the default in the engine", "no_limit", () => stored(bridge));
-  await until("the default on the page, with Save waiting for a change", ["no_limit", true], () => page.evaluate(RESTING));
-  await save(tools, "steps50");
-  await picked(tools, "no_limit");
+  await until("the default in the engine", "no_limit", () => stored(bridge, LIMITS.steps));
+  await until("the default on the page, with Save waiting for a change", ["no_limit", true], () => page.evaluate(resting(LIMITS.steps)));
+  await save(tools, LIMITS.steps, "steps50");
+  await picked(tools, LIMITS.steps, "no_limit");
   await me.capture("master-step-limit-none");
 }));
 
 for (const limit of ["steps50", "steps100", "steps200"]) {
-  test(`Master step limit: ${CARDS[limit].split(" A turn")[0]} is saved and stays after a reload and an engine restart`, { timeout: 600000 }, (t) => onEngine(t, `ca-${limit}-`, async (tools) => {
+  test(`Master step limit: ${LIMITS.steps.cards[limit].split(" A turn")[0]} is saved and stays after a reload and an engine restart`, { timeout: 600000 }, (t) => onEngine(t, `ca-${limit}-`, async (tools) => {
     await master(tools.me, tools.open);
-    await picked(tools, limit);
+    await picked(tools, LIMITS.steps, limit);
     await tools.me.capture(`master-step-limit-${limit}`);
+  }));
+}
+
+test("Master time limit: No limit is the default, and picking it again after 10 min is saved and stays after a reload and an engine restart", { timeout: 600000 }, (t) => onEngine(t, "ca-time-none-", async (tools) => {
+  const { bridge, me, page, open } = tools;
+  await master(me, open);
+  await until("the default in the engine", "no_limit", () => stored(bridge, LIMITS.time));
+  await until("the default on the page, with Save waiting for a change", ["no_limit", true], () => page.evaluate(resting(LIMITS.time)));
+  await save(tools, LIMITS.time, "minutes10");
+  await until("the step limit untouched by a time limit save", "no_limit", () => stored(bridge, LIMITS.steps));
+  await picked(tools, LIMITS.time, "no_limit");
+  await me.capture("master-time-limit-none");
+}));
+
+for (const limit of ["minutes10", "minutes30", "minutes60"]) {
+  test(`Master time limit: ${LIMITS.time.cards[limit].split(" A turn")[0]} is saved and stays after a reload and an engine restart`, { timeout: 600000 }, (t) => onEngine(t, `ca-${limit}-`, async (tools) => {
+    await master(tools.me, tools.open);
+    await picked(tools, LIMITS.time, limit);
+    await until("the step limit untouched by a time limit save", "no_limit", () => stored(tools.bridge, LIMITS.steps));
+    await tools.me.capture(`master-time-limit-${limit}`);
   }));
 }

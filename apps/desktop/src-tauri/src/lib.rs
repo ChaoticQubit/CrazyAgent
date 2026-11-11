@@ -35,6 +35,7 @@ use crazyagent::harnesses::HarnessEntry;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
 use crazyagent::master_step_limit::MasterStepSettings;
+use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
@@ -2735,6 +2736,29 @@ async fn desktop_set_master_step_settings(
 }
 
 #[tauri::command]
+async fn desktop_master_time_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<MasterTimeSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.master_time_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_master_time_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MasterTimeSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_master_time_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_pool_summaries(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4407,6 +4431,8 @@ native_commands! {
     desktop_set_quit_settings,
     desktop_master_step_settings,
     desktop_set_master_step_settings,
+    desktop_master_time_settings,
+    desktop_set_master_time_settings,
     desktop_pool_summaries,
     desktop_account_schedule,
     desktop_account_ranking,

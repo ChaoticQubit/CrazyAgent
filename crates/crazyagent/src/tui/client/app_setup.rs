@@ -3,6 +3,7 @@ use super::*;
 use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
 use crate::master_step_limit::MasterStepSettings;
+use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
 use crate::quit_settings::QuitSettings;
 use crate::sandbox_settings::SandboxSettings;
@@ -54,6 +55,11 @@ pub(in crate::tui) enum AppSetupJob {
         settings: MasterStepSettings,
         generation: u64,
     },
+    MasterTime,
+    SetMasterTime {
+        settings: MasterTimeSettings,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -82,6 +88,8 @@ pub(in crate::tui) enum AppSetupEvent {
     QuitSet(Result<(), String>),
     MasterSteps(Result<MasterStepSettings, String>),
     MasterStepsSet(Result<(), String>),
+    MasterTime(Result<MasterTimeSettings, String>),
+    MasterTimeSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -105,6 +113,8 @@ impl AppSetupJob {
             Self::SetQuit { .. } => "SetQuit",
             Self::MasterSteps => "MasterSteps",
             Self::SetMasterSteps { .. } => "SetMasterSteps",
+            Self::MasterTime => "MasterTime",
+            Self::SetMasterTime { .. } => "SetMasterTime",
         }
     }
 }
@@ -130,6 +140,8 @@ impl AppSetupEvent {
             AppSetupJob::SetQuit { .. } => Self::QuitSet(Err(problem)),
             AppSetupJob::MasterSteps => Self::MasterSteps(Err(problem)),
             AppSetupJob::SetMasterSteps { .. } => Self::MasterStepsSet(Err(problem)),
+            AppSetupJob::MasterTime => Self::MasterTime(Err(problem)),
+            AppSetupJob::SetMasterTime { .. } => Self::MasterTimeSet(Err(problem)),
         }
     }
 }
@@ -259,6 +271,22 @@ impl NativeOwner {
                     .set_master_step_settings(settings, generation)
                     .await,
                 "master_step_settings_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::MasterTime => AppSetupEvent::MasterTime(
+                controller
+                    .master_time_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetMasterTime {
+                settings,
+                generation,
+            } => AppSetupEvent::MasterTimeSet(applied(
+                controller
+                    .set_master_time_settings(settings, generation)
+                    .await,
+                "master_time_settings_outcome_unknown",
                 lost,
             )),
         }
@@ -485,6 +513,31 @@ mod tests {
             let read_steps = AppSetupJob::MasterSteps;
             let AppSetupEvent::MasterSteps(Ok(read)) = ask(&mut native, read_steps).await else {
                 panic!("master step limit required")
+            };
+            assert_eq!(read, settings, "{limit:?} is stored as picked");
+        }
+
+        let read_time = AppSetupJob::MasterTime;
+        let AppSetupEvent::MasterTime(Ok(time)) = ask(&mut native, read_time).await else {
+            panic!("master time limit required")
+        };
+        assert_eq!(time, MasterTimeSettings::default());
+        assert_eq!(time.limit, crate::master_time_limit::TimeLimit::NoLimit);
+        let limits = crate::master_time_limit::TimeLimit::ALL;
+        for (generation, limit) in (13..).zip(limits.into_iter().rev()) {
+            let settings = MasterTimeSettings { limit };
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetMasterTime {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::MasterTimeSet(Ok(()))));
+            let read_time = AppSetupJob::MasterTime;
+            let AppSetupEvent::MasterTime(Ok(read)) = ask(&mut native, read_time).await else {
+                panic!("master time limit required")
             };
             assert_eq!(read, settings, "{limit:?} is stored as picked");
         }

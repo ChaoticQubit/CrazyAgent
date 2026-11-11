@@ -69,3 +69,56 @@ test("the Master tab names what failed: a read that fails offers a retry, and a 
   assert.match(text(refused), /The engine refused the save\./);
   assert.match(refused, /role="alert"/);
 });
+
+const TIMES = ["no_limit", "minutes10", "minutes30", "minutes60"];
+const timeView = (loaded, extra = {}) => renderToStaticMarkup(createElement(settings.MasterTimeView, {
+  settings: loaded, picked: null, saving: false, problem: "", onPick: forbidden, onSave: forbidden, onRetry: forbidden, ...extra,
+}));
+const timeChecked = (markup) => [...markup.matchAll(/<input type="radio" name="time-limit"[^>]*>/g)]
+  .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z0-9_]+)"/)[1]);
+
+test("Settings, Master lists the master time limit with its four options, what a stopped turn says and which masters it covers", () => {
+  const markup = timeView(ok("no_limit"));
+  const shown = text(markup);
+  assert.match(shown, /Master time limit/);
+  assert.match(shown, /Longest one turn may run/);
+  assert.match(shown, /No limit A turn runs until the master replies or you stop it\./);
+  for (const minutes of [10, 30, 60]) assert.ok(shown.includes(`${minutes} min A turn stops after ${minutes} minutes.`), `${minutes} min is listed`);
+  assert.match(shown, /Stopped after N minutes; reply with 'continue' to go on\./);
+  assert.match(shown, /The limit covers Claude and Codex masters; an rcli master still stops after 10 minutes\./);
+  assert.doesNotMatch(shown, /ran out of time|cut off/);
+  assert.match(markup, /<form[^>]*aria-label="Master time limit"/);
+  assert.doesNotMatch(markup, /<h2>Master<\/h2>/, "the tab has one title, above the step limit");
+  assert.deepEqual(settings.TIME_LIMIT_CHOICES.map((option) => option.choice), TIMES);
+  assert.deepEqual(settings.TIME_LIMIT_DEFAULT, { limit: "no_limit" });
+});
+
+test("No time limit is the default: it is checked before any save, unmarked, and Save waits for a change", () => {
+  const markup = timeView(ok("no_limit"));
+  assert.deepEqual(timeChecked(markup), ["no_limit"]);
+  assert.ok(saveDisabled(markup));
+  assert.ok(!marked(markup), "the default carries no changed mark");
+});
+
+for (const limit of TIMES) {
+  test(`time limit ${limit}: a stored one is checked with Save resting, and picking it over another enables Save`, () => {
+    const stored = timeView(ok(limit));
+    assert.deepEqual(timeChecked(stored), [limit]);
+    assert.ok(saveDisabled(stored));
+    assert.equal(marked(stored), limit !== "no_limit", "only a limit away from the default is marked changed");
+    const other = TIMES.find((choice) => choice !== limit);
+    const picked = timeView(ok(other), { picked: limit });
+    assert.deepEqual(timeChecked(picked), [limit]);
+    assert.ok(!saveDisabled(picked));
+    assert.ok(saveDisabled(timeView(ok(limit), { picked: limit })), "picking the stored limit is no change");
+  });
+}
+
+test("the master time limit names what failed: a read that fails offers a retry, and a failed save shows its problem", () => {
+  const failed = text(timeView({ kind: "error", message: "engine_failed" }));
+  assert.match(failed, /Couldn't load the master time limit\. engine_failed/);
+  assert.doesNotMatch(timeView({ kind: "loading" }), /<form/);
+  const refused = timeView(ok("no_limit"), { picked: "minutes10", problem: "The engine refused the save." });
+  assert.match(text(refused), /The engine refused the save\./);
+  assert.match(refused, /role="alert"/);
+});

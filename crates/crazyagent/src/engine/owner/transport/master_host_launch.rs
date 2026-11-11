@@ -140,8 +140,7 @@ impl OwnerRuntimeHandle {
         } else {
             None
         };
-        let wall_time =
-            Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms);
+        let wall_time = prepared.time.sign_in_ahead();
         let delegate = engine.as_deref().map(delegate_engine).transpose()?;
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;

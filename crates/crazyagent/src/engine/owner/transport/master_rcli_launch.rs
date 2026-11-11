@@ -559,6 +559,7 @@ fallback_allowed = false
             hidden_paths: prepared.hidden_paths.clone(),
             tools_off: prepared.tools_off.clone(),
             steps: prepared.steps,
+            time: prepared.time,
         }
     }
 

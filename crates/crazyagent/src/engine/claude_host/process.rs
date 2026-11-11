@@ -71,7 +71,7 @@ struct Process {
     events: usize,
     completed_turns: usize,
     frame: Vec<u8>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     record: StreamDiagnostic,
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
@@ -189,7 +189,7 @@ pub(super) fn run(
         events: 0,
         completed_turns: 0,
         frame: Vec::new(),
-        deadline: Instant::now() + limits.run_time,
+        deadline: limits.run_time.map(|time| Instant::now() + time),
         record: StreamDiagnostic::default(),
         kept: diagnostic,
     };
@@ -237,7 +237,7 @@ impl Process {
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
-            if Instant::now() >= self.deadline {
+            if self.late() {
                 self.fail(Fault::Host("claude_host_deadline"));
                 return;
             }
@@ -439,6 +439,13 @@ impl Process {
         assert!(self.completed_turns <= self.events);
     }
 
+    /// Whether the host's wall clock ran out; never with no clock, the owner's choice of no
+    /// master time limit (OB-5c). Input: the process. Output: the answer.
+    fn late(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
     /// Hands one event to the turn's reader, waiting while the reader's queue is full, so a
     /// burst of frames is never a failed turn (OB-5b); the harness waits on its pipe
     /// meanwhile. The wait ends at the host's stop, at its deadline, which is recorded as the
@@ -460,7 +467,7 @@ impl Process {
             if self.stop.load(Ordering::Acquire) {
                 return false;
             }
-            if Instant::now() >= self.deadline {
+            if self.late() {
                 self.fail(Fault::Host("claude_host_deadline"));
                 return false;
             }

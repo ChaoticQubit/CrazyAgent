@@ -4,6 +4,7 @@ use super::{Flow, Place, Screen, open};
 use crate::cleanup_settings::{CleanupMode, CleanupSettings, DAYS_MAX, DAYS_MIN};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::master_step_limit::{MasterStepSettings, StepLimit};
+use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
 use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
@@ -69,6 +70,8 @@ const LEFT_CHOICES: [LeftRunning; 2] = [LeftRunning::AfterHours, LeftRunning::Ne
 const HOURS_TEXT: &str = "Enter a whole number of hours from 1 to 168.";
 const STEPS_TEXT: &str = "Master step limit: the most steps a project's master takes in one turn.";
 const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers a Claude master with tools on; a Codex master counts no steps.";
+const TIME_TEXT: &str = "Master time limit: the longest a project's master works on one turn.";
+const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers Claude and Codex masters; an rcli master still stops after 10 minutes.";
 const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.
@@ -147,6 +150,20 @@ pub(in crate::tui) fn step_limit_words(limit: StepLimit) -> (&'static str, &'sta
     }
 }
 
+/// The title of one master time limit option and what it does, the same words as the
+/// desktop Settings. Input: the option. Output: the title and the sentence.
+pub(in crate::tui) fn time_limit_words(limit: TimeLimit) -> (&'static str, &'static str) {
+    match limit {
+        TimeLimit::NoLimit => (
+            "No limit",
+            "A turn runs until the master replies or you stop it.",
+        ),
+        TimeLimit::Minutes10 => ("10 min", "A turn stops after 10 minutes."),
+        TimeLimit::Minutes30 => ("30 min", "A turn stops after 30 minutes."),
+        TimeLimit::Minutes60 => ("60 min", "A turn stops after 60 minutes."),
+    }
+}
+
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
 /// Input: the option. Output: the title and the sentence naming what it allows and risks.
 pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
@@ -183,6 +200,9 @@ pub fn setup_plain(code: &str) -> String {
         "quit_settings_invalid" => "The stored quitting setting is not one this version knows.",
         "master_step_settings_invalid" => {
             "The stored master step limit is not one this version knows."
+        }
+        "master_time_settings_invalid" => {
+            "The stored master time limit is not one this version knows."
         }
         crate::storage::versioned::STALE_CODE => {
             "The pack changed in another window, so this was not saved. The list shows it now."
@@ -311,6 +331,9 @@ enum Ask {
     Steps {
         choice: usize,
     },
+    Time {
+        choice: usize,
+    },
 }
 
 enum Sent {
@@ -334,10 +357,11 @@ pub struct AppSetup {
     cleanup: Load<CleanupSettings>,
     quit: Load<QuitSettings>,
     steps: Load<MasterStepSettings>,
+    time: Load<MasterTimeSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 7],
+    reading: [bool; 8],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -349,7 +373,7 @@ impl AppSetup {
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
     /// home, the GitHub account, the sandbox settings, the finished agents
-    /// setting, the quitting setting and the master step limit.
+    /// setting, the quitting setting and the master step and time limits.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
@@ -360,10 +384,11 @@ impl AppSetup {
             cleanup: Load::Idle,
             quit: Load::Idle,
             steps: Load::Idle,
+            time: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 7],
+            reading: [false; 8],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -451,6 +476,10 @@ impl AppSetup {
             self.steps = Load::Loading;
         }
         self.read(6, AppSetupJob::MasterSteps, ctx);
+        if matches!(self.time, Load::Idle) {
+            self.time = Load::Loading;
+        }
+        self.read(7, AppSetupJob::MasterTime, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -1012,6 +1041,81 @@ impl AppSetup {
         lines
     }
 
+    fn ask_time(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.time else {
+            ctx.say(Message::warning(
+                "The master time limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = TimeLimit::ALL
+            .iter()
+            .position(|limit| *limit == settings.limit)
+            .expect("every option is listed");
+        assert!(choice < TimeLimit::ALL.len());
+        self.ask = Some(Ask::Time { choice });
+    }
+
+    fn set_time(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < TimeLimit::ALL.len());
+        let settings = MasterTimeSettings {
+            limit: TimeLimit::ALL[choice],
+        };
+        let Load::Ready(current) = &self.time else {
+            ctx.say(Message::warning(
+                "The master time limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        if *current == settings {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Master time limit: {}.", time_limit_words(settings.limit).0);
+        let job = AppSetupJob::SetMasterTime {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn time_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.time {
+            Load::Ready(settings) => Line::raw(time_limit_words(settings.limit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn time_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < TimeLimit::ALL.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let mut lines = muted(TIME_TEXT, 0);
+        for (index, option) in TimeLimit::ALL.iter().enumerate() {
+            let (title, detail) = time_limit_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            let title = styled(title, Role::Heading, theme);
+            lines.push(join([Line::raw(mark), title]));
+            lines.extend(muted(detail, 4));
+        }
+        lines.extend(muted(TIME_NOTE, 0));
+        assert!(lines.len() > 2 * TimeLimit::ALL.len());
+        lines
+    }
+
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
         match &self.github {
             Load::Ready(github) if github.signed_in => self.ask = Some(Ask::SignOut),
@@ -1153,6 +1257,21 @@ impl AppSetup {
                 Key::Enter => self.set_steps(choice, ctx),
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Steps { choice }),
+            },
+            Ask::Time { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Time {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Time {
+                        choice: (choice + 1).min(TimeLimit::ALL.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_time(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Time { choice }),
             },
             Ask::CleanupDays(mut field) => match key {
                 Key::Esc => {}
@@ -1495,6 +1614,10 @@ impl AppSetup {
         if matches!(self.steps, Load::Ready(_)) {
             lines.extend(under(STEPS_NOTE));
         }
+        lines.push(label("Master time", self.time_value(ctx)));
+        if matches!(self.time, Load::Ready(_)) {
+            lines.extend(under(TIME_NOTE));
+        }
         lines
     }
 
@@ -1546,6 +1669,7 @@ impl AppSetup {
             }
             Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
             Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
+            Some(Ask::Time { choice }) => lines.extend(self.time_rows(*choice, limit, ctx)),
             Some(Ask::CleanupDays(field)) => {
                 let (field_lines, at) =
                     field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
@@ -1696,7 +1820,8 @@ impl Screen for AppSetup {
                 | Ask::Cleanup { .. }
                 | Ask::QuitChoice { .. }
                 | Ask::QuitLimit { .. }
-                | Ask::Steps { .. }),
+                | Ask::Steps { .. }
+                | Ask::Time { .. }),
             ) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
                 let enter = if matches!(ask, Ask::QuitChoice { .. }) {
@@ -1749,6 +1874,7 @@ impl Screen for AppSetup {
             hints.push(hint("f", "Finished agents"));
             hints.push(hint("q", "Quitting"));
             hints.push(hint("m", "Master steps"));
+            hints.push(hint("t", "Master time"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -1820,13 +1946,17 @@ impl Screen for AppSetup {
                 self.ask_steps(ctx);
                 Flow::Handled
             }
+            Key::Char('t') if !self.first_run => {
+                self.ask_time(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 7];
+            self.reading = [false; 8];
             self.sent = None;
             return Flow::Handled;
         }
@@ -1841,7 +1971,8 @@ impl Screen for AppSetup {
             | AppSetupEvent::SandboxSet(result)
             | AppSetupEvent::CleanupSet(result)
             | AppSetupEvent::QuitSet(result)
-            | AppSetupEvent::MasterStepsSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::MasterStepsSet(result)
+            | AppSetupEvent::MasterTimeSet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -1857,6 +1988,10 @@ impl Screen for AppSetup {
             AppSetupEvent::MasterSteps(result) => {
                 self.reading[6] = false;
                 self.steps = loaded(result);
+            }
+            AppSetupEvent::MasterTime(result) => {
+                self.reading[7] = false;
+                self.time = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -1908,6 +2043,7 @@ impl Screen for AppSetup {
             || matches!(self.cleanup, Load::Loading)
             || matches!(self.quit, Load::Loading)
             || matches!(self.steps, Load::Loading)
+            || matches!(self.time, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

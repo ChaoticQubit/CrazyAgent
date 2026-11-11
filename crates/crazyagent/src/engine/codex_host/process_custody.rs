@@ -64,7 +64,7 @@ pub(super) fn run(
     unconfined: bool,
     mut input: mpsc::Receiver<WriteRequest>,
     shared: Arc<ProcessShared>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     output_limit: u64,
 ) {
     let mut custody = match start(command, profile, unconfined, &shared) {
@@ -82,7 +82,7 @@ pub(super) fn run(
         return;
     };
     loop {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             shared.fail("codex_host_deadline");
         }
         child.input(&mut input);

@@ -220,6 +220,10 @@ pub enum Command {
         settings: crate::master_step_limit::MasterStepSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerMasterTime {
+        settings: crate::master_time_limit::MasterTimeSettings,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

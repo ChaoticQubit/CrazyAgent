@@ -266,6 +266,9 @@ pub enum OwnerMutation {
     SetMasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
     },
+    SetMasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -575,6 +578,9 @@ impl OwnerMutation {
             Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
                 settings: *settings,
             },
+            Self::SetMasterTimeSettings { settings } => Command::OwnerMasterTime {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -768,6 +774,7 @@ pub enum OwnerRead {
     CleanupSettings,
     QuitSettings,
     MasterStepSettings,
+    MasterTimeSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -868,6 +875,7 @@ impl OwnerRead {
             | Self::CleanupSettings
             | Self::QuitSettings
             | Self::MasterStepSettings
+            | Self::MasterTimeSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1306,6 +1314,9 @@ pub enum OwnerData {
     },
     MasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
+    },
+    MasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

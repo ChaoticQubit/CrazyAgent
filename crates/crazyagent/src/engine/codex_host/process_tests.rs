@@ -151,7 +151,8 @@ async fn stand_in_host_at(
         wall_time_ms: 20_000,
         ..budget()
     };
-    CodexHostProcess::spawn_guarded(command, &limits, Some(profile), unconfined)
+    let clock = Some(Duration::from_millis(limits.wall_time_ms));
+    CodexHostProcess::spawn_guarded(command, &limits, clock, Some(profile), unconfined)
         .await
         .unwrap()
 }
@@ -561,6 +562,7 @@ async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_frames_with
         home,
         action,
         CredentialRef::new("group-master-account").unwrap(),
+        Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
         "stand-in instructions",
     )

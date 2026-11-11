@@ -268,7 +268,7 @@ fn claude_launch_appends_only_a_private_engine_instruction_file() {
 #[test]
 fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
     let valid = ClaudeHostLimits {
-        run_time: Duration::from_secs(120),
+        run_time: Some(Duration::from_secs(120)),
         cleanup_time: Duration::from_secs(2),
         stdout_bytes: 262_144,
         stderr_bytes: 65_536,
@@ -277,11 +277,11 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
     assert!(valid.validate().is_ok());
     for limits in [
         ClaudeHostLimits {
-            run_time: Duration::ZERO,
+            run_time: Some(Duration::ZERO),
             ..valid
         },
         ClaudeHostLimits {
-            run_time: Duration::from_secs(601),
+            run_time: Some(Duration::from_secs(3601)),
             ..valid
         },
         ClaudeHostLimits {
@@ -315,6 +315,32 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
         },
     ] {
         assert!(limits.validate().is_err());
+    }
+    let unclocked = ClaudeHostLimits {
+        run_time: None,
+        ..valid
+    };
+    assert!(unclocked.validate().is_ok(), "no master time limit");
+    for limit in crate::master_time_limit::TimeLimit::ALL {
+        let limits = ClaudeHostLimits::from_budget(&ResourceBudget::unit(), limit.run_time());
+        let limits = limits.unwrap_or_else(|_| panic!("{limit:?} is a host clock"));
+        assert_eq!(limits.run_time, limit.run_time());
+        assert_eq!(limits.run_time.is_none(), limit.minutes().is_none());
+        assert_eq!(limits.events, 4096);
+    }
+    let long = ResourceBudget {
+        wall_time_ms: 86_400_000,
+        ..ResourceBudget::unit()
+    };
+    for (budget, clock) in [
+        (ResourceBudget::unit(), Some(Duration::from_secs(3600))),
+        (long, Some(Duration::from_secs(600))),
+    ] {
+        let limits = ClaudeHostLimits::from_budget(&budget, clock).unwrap();
+        assert_eq!(limits.run_time, clock, "the clock is the setting, not the budget");
+    }
+    for refused in [Duration::ZERO, Duration::from_secs(3601)] {
+        assert!(ClaudeHostLimits::from_budget(&ResourceBudget::unit(), Some(refused)).is_err());
     }
 }
 
@@ -492,6 +518,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
             worktree_lease: RequestId::new("claude-master-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -538,6 +565,19 @@ async fn stand_in_master_at(
     body: &str,
     unconfined: bool,
 ) -> ClaudeHost {
+    let clock = Some(Duration::from_secs(60));
+    stand_in_master_under(fixture, body, unconfined, clock).await
+}
+
+/// Starts a stand-in Claude Code master host running `body` under a wall clock, none for
+/// no clock. Takes the fixture, the script body, the access and the clock. Returns the
+/// host.
+async fn stand_in_master_under(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    unconfined: bool,
+    clock: Option<Duration>,
+) -> ClaudeHost {
     let profile = fixture.lease("claude-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", body);
@@ -561,6 +601,7 @@ async fn stand_in_master_at(
             worktree_lease: RequestId::new("claude-group-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        clock,
         ResourceBudget::unit(),
     )
     .await
@@ -1197,6 +1238,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             worktree_lease: RequestId::new("claude-tools-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -1287,6 +1329,7 @@ async fn held_turn(
             worktree_lease: RequestId::new("claude-steps-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -1555,6 +1598,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             worktree_lease: RequestId::new("claude-late-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -1783,6 +1827,7 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
             worktree_lease: RequestId::new("claude-large-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget {
             output_bytes: 64 * 1024 * 1024,
             ..ResourceBudget::unit()
@@ -1819,4 +1864,53 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
         ),
         "{kinds:?}"
     );
+}
+
+/// A stand-in Claude Code that reads a turn, works five seconds without a word and then
+/// replies DONE.
+const QUIET_THEN_DONE: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+/bin/sleep 5
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Runs one turn of `QUIET_THEN_DONE` on a host under a wall clock. Takes the clock, none
+/// for no clock. Returns the error that ended the turn, none for a turn that finished, and
+/// how long the turn took.
+async fn quiet_turn_under(clock: Option<Duration>) -> (Option<String>, Duration) {
+    use crate::adapters::events::EventKind;
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master_under(&mut fixture, QUIET_THEN_DONE, false, clock).await;
+    let started = std::time::Instant::now();
+    let turn = RequestId::new("claude-quiet-turn").unwrap();
+    let mut error = claude.start_turn(turn, "Work quietly").await.err();
+    while error.is_none() {
+        match claude.next_event().await {
+            Ok(event) if matches!(event.kind, EventKind::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(failed) => error = Some(failed),
+        }
+    }
+    let took = started.elapsed();
+    let _ = claude.close().await;
+    (error.map(|error| error.0), took)
+}
+
+/// A master host with no wall clock, the owner's choice of no master time limit, waits for
+/// a quiet turn however long it works (OB-5c): the turn that a two second clock ends with
+/// `claude_host_deadline` runs its five seconds to the reply under no clock.
+#[tokio::test]
+async fn a_claude_master_with_no_clock_outlasts_the_quiet_turn_a_clock_ends() {
+    let (error, took) = quiet_turn_under(Some(Duration::from_secs(2))).await;
+    assert_eq!(error.as_deref(), Some("claude_host_deadline"));
+    assert!(took < Duration::from_secs(5), "the clock ended it: {took:?}");
+    let (error, took) = quiet_turn_under(None).await;
+    assert_eq!(error, None, "no clock ends the turn");
+    assert!(took >= Duration::from_secs(5), "the turn ran whole: {took:?}");
 }

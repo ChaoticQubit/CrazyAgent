@@ -13,6 +13,7 @@ use crate::master_session::{
     MasterTurnPhase, MasterTurnView, REPLY_BYTES_MAX, fitted_reply,
 };
 use crate::master_step_limit::steps_of_cause;
+use crate::master_time_limit::{TimeLimit, minutes_of_cause};
 use crate::protocol::{ProjectId, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::storage::{
@@ -838,6 +839,7 @@ impl OwnerRuntimeHandle {
                     launch.home,
                     action,
                     account_ref,
+                    prepared.time.run_time(),
                     resources,
                 )
                 .await?,
@@ -851,6 +853,7 @@ impl OwnerRuntimeHandle {
                     launch.home,
                     action,
                     account_ref,
+                    prepared.time.run_time(),
                     resources,
                     &prepared.instructions,
                 )
@@ -1057,13 +1060,30 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Collects one started master turn, as `collect_turn` does, and names the owner's
+    /// master time limit in the error of a turn its host's wall clock ended (OB-5c). Inputs
+    /// and output: those of `collect_turn`; the error of a clocked-out turn under a limit is
+    /// `master_time_limit_<minutes>`.
+    async fn collect_master_turn(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        text: &str,
+        active: &mut ActiveMaster,
+        mailbox: Option<&std::path::Path>,
+    ) -> Result<MasterRuntimeObservation, EngineError> {
+        self.collect_turn(prepared, turn_id, text, active, mailbox)
+            .await
+            .map_err(|error| timed_out(error, prepared.time))
+    }
+
     /// Collects a running console master turn to its end: the host's events up to the
     /// reply, with the turn inspected for cancellation and its memory calls served one
     /// INSPECT_INTERVAL after the last inspection ended, so a slow inspection never leaves
     /// the host's events and deadline unread (OP-22 r1). Inputs: the prepared turn, its id,
     /// the prompt it sends with the engine's question lines, the active host and the turn's
     /// mailbox. Output: the observation, or an engine error.
-    async fn collect_master_turn(
+    async fn collect_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
@@ -1389,6 +1409,24 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
 
+/// The host codes for a master host whose wall clock ran out.
+const CLOCK_ENDED: [&str; 2] = ["claude_host_deadline", "codex_host_deadline"];
+
+/// Names the owner's time limit in the error of a turn its host's wall clock ended, so the
+/// turn says how long it ran (OB-5c). Inputs: the turn's error and the limit the turn ran
+/// under. Output: `master_time_limit_<minutes>` for a clock that ran out under a limit,
+/// else the error unchanged.
+fn timed_out(error: EngineError, limit: TimeLimit) -> EngineError {
+    let clock = CLOCK_ENDED.contains(&error.0.as_str());
+    match limit.cause() {
+        Some(cause) if clock => {
+            assert!(minutes_of_cause(&cause).is_some());
+            EngineError(cause)
+        }
+        _ => error,
+    }
+}
+
 fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
@@ -1411,9 +1449,15 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "gateway_cooldown" => MasterReason::CooldownActive,
         "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
-        "codex_host_output_limit" => MasterReason::OutputLimit,
+        "codex_host_output_limit"
+        | "claude_host_event_limit"
+        | "claude_host_stdout_limit"
+        | "claude_host_stderr_limit"
+        | "claude_host_output_limit"
+        | "claude_host_frame_limit" => MasterReason::OutputLimit,
         EMPTY_REPLY => MasterReason::NoReply,
-        "claude_host_deadline" | "codex_host_deadline" => MasterReason::TimeLimit,
+        code if CLOCK_ENDED.contains(&code) => MasterReason::TimeLimit,
+        code if minutes_of_cause(code).is_some() => MasterReason::TimeLimit,
         code if steps_of_cause(code).is_some() => MasterReason::StepLimit,
         "codex_host_capture_incomplete"
         | "master_capture_incomplete"
@@ -1893,9 +1937,19 @@ mod tests {
             ("gateway_cooldown", MasterReason::CooldownActive),
             ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
             ("codex_host_output_limit", MasterReason::OutputLimit),
+            ("claude_host_event_limit", MasterReason::OutputLimit),
+            ("claude_host_stdout_limit", MasterReason::OutputLimit),
+            ("claude_host_stderr_limit", MasterReason::OutputLimit),
+            ("claude_host_output_limit", MasterReason::OutputLimit),
+            ("claude_host_frame_limit", MasterReason::OutputLimit),
             ("master_empty_reply", MasterReason::NoReply),
             ("claude_host_deadline", MasterReason::TimeLimit),
             ("codex_host_deadline", MasterReason::TimeLimit),
+            ("master_time_limit_10", MasterReason::TimeLimit),
+            ("master_time_limit_30", MasterReason::TimeLimit),
+            ("master_time_limit_60", MasterReason::TimeLimit),
+            ("master_time_limit_600", MasterReason::Unknown),
+            ("master_time_limit_", MasterReason::Unknown),
             ("master_step_limit_50", MasterReason::StepLimit),
             ("master_step_limit_100", MasterReason::StepLimit),
             ("master_step_limit_200", MasterReason::StepLimit),
@@ -1972,6 +2026,28 @@ mod tests {
                 MasterReason::InvalidAuthentication,
                 "{code}"
             );
+        }
+    }
+
+    #[test]
+    fn a_clock_that_ran_out_under_a_time_limit_names_the_limit_and_nothing_else_does() {
+        for (limit, minutes) in [
+            (TimeLimit::Minutes10, "10"),
+            (TimeLimit::Minutes30, "30"),
+            (TimeLimit::Minutes60, "60"),
+        ] {
+            for code in CLOCK_ENDED {
+                let named = timed_out(EngineError(code.into()), limit);
+                assert_eq!(named.0, format!("master_time_limit_{minutes}"), "{code}");
+                assert_eq!(reason_for_error(&named), MasterReason::TimeLimit);
+            }
+            for code in ["claude_host_startup_timeout", "master_empty_reply"] {
+                assert_eq!(timed_out(EngineError(code.into()), limit).0, code);
+            }
+        }
+        for code in CLOCK_ENDED {
+            let kept = timed_out(EngineError(code.into()), TimeLimit::NoLimit);
+            assert_eq!(kept.0, code, "no limit names no minutes");
         }
     }
 

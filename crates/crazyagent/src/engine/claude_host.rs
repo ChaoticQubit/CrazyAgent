@@ -11,6 +11,8 @@ use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
 use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 use crate::master_step_limit::StepLimit;
 #[cfg(unix)]
+use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
+#[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
@@ -113,7 +115,7 @@ const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
-    pub(in crate::engine) run_time: Duration,
+    pub(in crate::engine) run_time: Option<Duration>,
     pub(in crate::engine) cleanup_time: Duration,
     pub(in crate::engine) stdout_bytes: usize,
     pub(in crate::engine) stderr_bytes: usize,
@@ -123,8 +125,9 @@ pub(in crate::engine) struct ClaudeHostLimits {
 #[cfg(unix)]
 impl ClaudeHostLimits {
     fn validate(&self) -> Result<(), EngineError> {
-        if self.run_time.is_zero()
-            || self.run_time > Duration::from_secs(600)
+        if self
+            .run_time
+            .is_some_and(|time| time.is_zero() || time > RUN_TIME_MAX)
             || self.cleanup_time.is_zero()
             || self.cleanup_time > Duration::from_secs(5)
             || !(1..=STDOUT_BYTES_MAX).contains(&self.stdout_bytes)
@@ -136,12 +139,19 @@ impl ClaudeHostLimits {
         Ok(())
     }
 
-    fn from_budget(budget: &ResourceBudget) -> Result<Self, EngineError> {
+    /// The limits of one master host: the owner's master time limit as its wall clock, none
+    /// for no limit (OB-5c), and the budget's output bounds. Inputs: the turn's budget and
+    /// the wall clock. Output: the limits, or `claude_host_invalid_budget` or
+    /// `claude_host_invalid_limits`.
+    fn from_budget(
+        budget: &ResourceBudget,
+        run_time: Option<Duration>,
+    ) -> Result<Self, EngineError> {
         budget
             .validate()
             .map_err(|_| failure("claude_host_invalid_budget"))?;
         let limits = Self {
-            run_time: Duration::from_millis(budget.wall_time_ms.min(600_000)),
+            run_time,
             cleanup_time: Duration::from_secs(5),
             stdout_bytes: usize::try_from(budget.output_bytes.min(STDOUT_BYTES_MAX as u64))
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
@@ -150,7 +160,7 @@ impl ClaudeHostLimits {
             events: 4096,
         };
         limits.validate()?;
-        assert!(limits.run_time.as_millis() <= u128::from(budget.wall_time_ms));
+        assert_eq!(limits.run_time, run_time);
         assert!(limits.stdout_bytes as u64 <= budget.output_bytes);
         Ok(limits)
     }
@@ -441,11 +451,27 @@ pub(in crate::engine) struct ClaudeHost {
     group: Arc<AtomicU32>,
     diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
-    expires: tokio::time::Instant,
+    expires: Option<tokio::time::Instant>,
+}
+
+/// Waits for a master host's wall clock to run out; with none, the owner's choice of no
+/// master time limit, it never ends, and the owner's Stop or the turn's own end ends the
+/// wait it races. Input: when the clock runs out. Output: none.
+#[cfg(unix)]
+async fn expired(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(unix)]
 impl ClaudeHost {
+    /// Starts one Claude Code master under custody. Inputs: the engine's command, its
+    /// sandbox, the account lease, the turn's home, the launch action, the account, the
+    /// wall clock, none for no master time limit (OB-5c), and the turn's budget, whose
+    /// output bounds it keeps. Output: the host, or the refusal.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
         sandbox: InstalledSandbox,
@@ -453,9 +479,10 @@ impl ClaudeHost {
         home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
+        run_time: Option<Duration>,
         budget: ResourceBudget,
     ) -> Result<Self, EngineError> {
-        let limits = ClaudeHostLimits::from_budget(&budget)?;
+        let limits = ClaudeHostLimits::from_budget(&budget, run_time)?;
         let protocol = ClaudeProtocol::new(action, account_ref)
             .map_err(|error| Fault::Protocol(error).error())?;
         let (turns, input) = sync_channel(1);
@@ -480,7 +507,9 @@ impl ClaudeHost {
                 } else {
                     Duration::ZERO
                 },
-            expires: tokio::time::Instant::now() + limits.run_time,
+            expires: limits
+                .run_time
+                .map(|time| tokio::time::Instant::now() + time),
         };
         let _custodian = std::thread::Builder::new()
             .name("claude-master-custodian".into())
@@ -503,6 +532,9 @@ impl ClaudeHost {
                 );
             })
             .map_err(|_| failure("claude_host_custodian_unavailable"))?;
+        let started_by = host
+            .expires
+            .unwrap_or_else(|| tokio::time::Instant::now() + START_TIME_MAX);
         loop {
             let current = *host.status.borrow();
             if let Some(error) = current.fault {
@@ -514,7 +546,7 @@ impl ClaudeHost {
             if current.phase == Phase::Retired {
                 return Err(failure("claude_host_disconnected"));
             }
-            tokio::time::timeout_at(host.expires, host.status.changed())
+            tokio::time::timeout_at(started_by, host.status.changed())
                 .await
                 .map_err(|_| failure("claude_host_startup_timeout"))?
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
@@ -556,7 +588,7 @@ impl ClaudeHost {
                 changed = self.status.changed() => {
                     changed.map_err(|_| failure("claude_host_custodian_lost"))?;
                 }
-                _ = tokio::time::sleep_until(self.expires) => {
+                () = expired(self.expires) => {
                     self.stop.store(true, Ordering::Release);
                     return Err(failure("claude_host_deadline"));
                 }
@@ -588,7 +620,7 @@ impl ClaudeHost {
                 changed = self.status.changed() => {
                     changed.map_err(|_| failure("claude_host_custodian_lost"))?;
                 }
-                _ = tokio::time::sleep_until(self.expires) => {
+                () = expired(self.expires) => {
                     self.stop.store(true, Ordering::Release);
                     return Err(failure("claude_host_deadline"));
                 }
@@ -651,7 +683,9 @@ pub(in crate::engine) enum ClaudeHost {}
 #[cfg(not(unix))]
 impl ClaudeHost {
     /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
-    /// action, account and budget. Returns nothing because the lease cannot exist.
+    /// action, account, wall clock and budget. Returns nothing because the lease cannot
+    /// exist.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         _command: Command,
         _sandbox: InstalledSandbox,
@@ -659,6 +693,7 @@ impl ClaudeHost {
         _home: PathBuf,
         _action: NativeAction,
         _account_ref: CredentialRef,
+        _run_time: Option<std::time::Duration>,
         _budget: ResourceBudget,
     ) -> Result<Self, EngineError> {
         match profile {}

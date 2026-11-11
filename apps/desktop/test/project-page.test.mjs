@@ -324,8 +324,18 @@ test("a stopped or failed master turn offers its own message to send again", () 
   }
   const unnamed = { ...turn(1, "failed"), reason: "step_limit", cause: null };
   assert.equal(research.turnLine(unnamed), "The master stopped: it used every step its limit allows. (step_limit)", "a step limit stop with no cause still reads plainly");
-  const late = { ...turn(1, "failed"), reason: "time_limit", cause: "claude_host_deadline" };
-  assert.equal(research.turnLine(late), "The master stopped: it ran out of time; a turn may run for 10 minutes at most. (claude_host_deadline)", "a turn that ran out of time is not called cut off (OB-5b)");
+  for (const minutes of [10, 30, 60]) {
+    const timed = { ...turn(1, "failed"), reason: "time_limit", cause: `master_time_limit_${minutes}` };
+    assert.equal(research.turnLine(timed), `Stopped after ${minutes} minutes; reply with 'continue' to go on. (master_time_limit_${minutes})`, "a turn stopped at its time limit names the minutes and how to go on (OB-5c)");
+    assert.equal(research.minutesOfCause(timed.cause), minutes);
+  }
+  for (const cause of ["master_time_limit_5", "master_time_limit_", "master_time_limit_600", "master_step_limit_50", "claude_host_deadline", null, undefined]) {
+    assert.equal(research.minutesOfCause(cause), null, `${cause} names no time limit`);
+  }
+  const late = { ...turn(1, "failed"), reason: "time_limit", cause: "codex_host_deadline" };
+  assert.equal(research.turnLine(late), "The master stopped: it reached its time limit. (codex_host_deadline)", "a clock that ended a turn with no minutes named claims no 10 minutes (OB-5c)");
+  const large = { ...turn(1, "failed"), reason: "output_limit", cause: "claude_host_event_limit" };
+  assert.equal(research.turnLine(large), "The master stopped: this turn's output was too large to keep. (claude_host_event_limit)", "a turn with more output than the app keeps says so plainly (OB-5c)");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
 

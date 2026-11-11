@@ -10,6 +10,7 @@ use crate::adapters::events::ObservedEvent;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::claude_host::diagnostic::StreamDiagnostic;
+use crate::master_time_limit::START_TIME_MAX;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
@@ -18,6 +19,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 const EVENTS_MAX: usize = 128;
 
@@ -38,6 +40,10 @@ impl CodexHost {
         self.process.pid()
     }
 
+    /// Starts the Codex harness under custody and brings its thread to idle. `run_time` is
+    /// the wall clock of the whole run; with none the run has no clock and only its start
+    /// is bounded, by `START_TIME_MAX`. Inputs: the launch, its sandbox, lease, home, action,
+    /// account, clock, budget and instructions. Output: the idle host or a plain code.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
@@ -46,6 +52,7 @@ impl CodexHost {
         home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
+        run_time: Option<Duration>,
         budget: ResourceBudget,
         instructions: &str,
     ) -> Result<Self, EngineError> {
@@ -59,6 +66,7 @@ impl CodexHost {
         let process = CodexHostProcess::spawn_guarded(
             command,
             &budget,
+            run_time,
             Some(profile),
             sandbox.is_unconfined(),
         )
@@ -72,15 +80,34 @@ impl CodexHost {
             disconnected: false,
             diagnostic: StreamDiagnostic::default(),
         };
-        let bytes = host.protocol.initialize()?;
-        host.process.send(&bytes).await?;
-        host.wait_for(State::Ready).await?;
-        let bytes = host
-            .protocol
-            .start_instructed_thread(&cwd, instructions, tools)?;
-        host.process.send(&bytes).await?;
-        host.wait_for(State::Idle).await?;
+        let started = host.start(&cwd, instructions, tools);
+        match run_time {
+            Some(_) => started.await?,
+            None => tokio::time::timeout(START_TIME_MAX, started)
+                .await
+                .map_err(|_| EngineError("codex_host_startup_timeout".into()))??,
+        }
+        assert!(host.protocol.state() == State::Idle);
         Ok(host)
+    }
+
+    /// Initializes the harness and starts its instructed thread. Inputs: the host, the
+    /// thread's folder, the instructions and whether tools are on. Output: Ok once the
+    /// thread is idle, or a plain code.
+    async fn start(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+        tools: bool,
+    ) -> Result<(), EngineError> {
+        let bytes = self.protocol.initialize()?;
+        self.process.send(&bytes).await?;
+        self.wait_for(State::Ready).await?;
+        let bytes = self
+            .protocol
+            .start_instructed_thread(cwd, instructions, tools)?;
+        self.process.send(&bytes).await?;
+        self.wait_for(State::Idle).await
     }
 
     /// What this host kept about its app-server stream for the engine log: the protocol
