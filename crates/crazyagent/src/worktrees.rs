@@ -1187,6 +1187,11 @@ pub(crate) fn reserve_master_bootstrap(
     repository: &str,
 ) -> Result<Outcome, EngineError> {
     assert!(!connection.is_autocommit());
+    if crate::projects_home::project_move_holds(connection, std::path::Path::new(repository))
+        .map_err(error)?
+    {
+        return Ok(rejected("move_project_in_progress"));
+    }
     let body: Option<String> = connection
         .query_row(
             "SELECT body FROM repository_admissions WHERE project=?1 AND repository=?2",

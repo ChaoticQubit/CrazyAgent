@@ -494,3 +494,23 @@ fn a_row_with_documents_found_still_reads_on_18_14_and_the_view_keeps_them() {
         "a later draft naming nothing keeps the earlier map"
     );
 }
+
+/// While a project move is pending for a project's folder, its waiting step is not claimed;
+/// it is once the move is finished or forgotten.
+#[test]
+fn a_step_of_a_project_whose_folder_is_being_moved_is_not_claimed() {
+    let database = database();
+    crate::projects_home::initialize(&database).unwrap();
+    waiting_to_map(&database, "alpha", 1);
+    database
+        .execute(
+            "INSERT INTO projects_home_project_move VALUES (1,'request-1',1,'alpha','/repos/alpha','/home/alpha','move')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(claimed(&database), None);
+    database
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    assert_eq!(claimed(&database).as_deref(), Some("alpha"));
+}

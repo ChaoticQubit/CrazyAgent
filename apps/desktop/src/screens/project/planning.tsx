@@ -8,6 +8,7 @@ import { Button, ConfirmDialog } from "../../ui";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { changeOutcome, planningJob, researchJobs } from "./research";
+import { RoadmapStatusPanel } from "./roadmap-status";
 import { Badge, NotReady } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -70,10 +71,11 @@ export function planningView(state: PlanningState): PlanningView {
 export const REPLACE_LINE = "Planning writes roadmap.md and release-process.md again from the brief and research. Your edits to them are lost.";
 
 /** Whether a planning run can replace roadmap documents the owner may have edited: a plan ran
- * before, the context lists one of them, or the context isn't read. Inputs: the state and the
+ * before, the context lists one of them, or the context isn't read. A roadmap linked from the
+ * repository is never written by planning, so it does not count. Inputs: the state and the
  * context read. Output: true when the owner confirms first. */
 export function planReplaces(state: PlanningState, context: Result<ProjectContext> | undefined): boolean {
-  return state.kind !== "idle" || context?.kind !== "ok" || context.value.items.some((item) => item.kind === "plan");
+  return state.kind !== "idle" || context?.kind !== "ok" || context.value.items.some((item) => item.kind === "plan" && item.linked !== true);
 }
 
 /** Sends the planning line's action to the engine: Retry runs the failed or stopped planning job
@@ -106,9 +108,11 @@ export function PlanningLineView({ view, busy, problem, onAction, onOpen }: {
 
 /** The planning line on the project Overview and in Project Settings, General: reads the state
  * from the project's jobs, and runs Retry or Plan roadmap now through the engine, asking first
- * when the run can replace the roadmap documents.
- * Input: the project data. Output: the section, or a plain line while jobs can't be read. */
-export function PlanningLine({ data }: { data: ProjectData }) {
+ * when the run can replace the roadmap documents. Under it sits the roadmap status, or in
+ * Project Settings the setting that says when it is checked.
+ * Inputs: the project data and whether this is Project Settings. Output: the section, or a
+ * plain line while jobs can't be read. */
+export function PlanningLine({ data, settings = false }: { data: ProjectData; settings?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [asking, setAsking] = useState(false);
@@ -130,6 +134,7 @@ export function PlanningLine({ data }: { data: ProjectData }) {
     <PlanningLineView view={planningView(state)} busy={busy} problem={problem}
       onAction={() => { if (planReplaces(state, data.context)) setAsking(true); else void act(); }}
       onOpen={(path) => data.navigate(`/projects/${encodeURIComponent(data.id)}/context?file=${encodeURIComponent(path)}`)} />
+    <RoadmapStatusPanel data={data} settings={settings} />
     <ConfirmDialog open={asking} title="Replace the roadmap?" confirmLabel="Replace" pending={busy}
       onConfirm={() => { setAsking(false); void act(); }} onCancel={() => setAsking(false)}>{REPLACE_LINE}</ConfirmDialog>
   </>;

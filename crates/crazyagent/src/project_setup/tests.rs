@@ -855,3 +855,366 @@ fn a_rate_limited_wait_reads_back_the_minute_the_research_service_wrote() {
         );
     }
 }
+
+struct ContextCase {
+    _temp: tempfile::TempDir,
+    folder: PathBuf,
+    stored: StoredSetup,
+}
+
+fn context_case() -> ContextCase {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().canonicalize().unwrap();
+    let stored = StoredSetup {
+        project_id: ProjectId::new("linked").unwrap(),
+        name: "Linked".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1000,
+        revision: 1,
+    };
+    ContextCase {
+        _temp: temp,
+        folder,
+        stored,
+    }
+}
+
+fn roadmap_link(path: &str) -> links::DocLink {
+    links::DocLink {
+        path: path.into(),
+        kind: links::LinkKind::Roadmap,
+    }
+}
+
+#[test]
+fn a_linked_repo_file_is_listed_and_read_from_the_project_folder() {
+    let case = context_case();
+    std::fs::create_dir_all(case.folder.join(".crazyagent/context")).unwrap();
+    std::fs::write(
+        case.folder.join(".crazyagent/context/brief.md"),
+        "# Brief\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(case.folder.join("docs")).unwrap();
+    std::fs::write(case.folder.join("docs/plan-2026.md"), "# Product plan\n").unwrap();
+    std::fs::write(case.folder.join("docs/market.md"), "# Market\n").unwrap();
+    let linked = vec![
+        links::DocLink {
+            path: "docs/market.md".into(),
+            kind: links::LinkKind::Research(ResearchKind::MarketResearch),
+        },
+        roadmap_link("docs/plan-2026.md"),
+    ];
+    assert_eq!(case.stored.state_folder(), case.folder.join(".crazyagent"));
+
+    let context = list_context_with_links(&case.stored, &linked).unwrap();
+    let listed: Vec<(&str, ContextKind, u64, bool)> = context
+        .items
+        .iter()
+        .map(|item| (item.path.as_str(), item.kind, item.bytes, item.linked))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("context/brief.md", ContextKind::Brief, 8, false),
+            ("repo/docs/market.md", ContextKind::Research, 9, true),
+            ("repo/docs/plan-2026.md", ContextKind::Plan, 15, true),
+        ]
+    );
+    assert_eq!(
+        list_context_with_links(&case.stored, &[]).unwrap(),
+        list_context(&case.stored).unwrap(),
+        "with no links the list is the context alone"
+    );
+
+    let chunk =
+        read_context_with_links(&case.stored, &linked, "repo/docs/plan-2026.md", 0).unwrap();
+    assert_eq!(chunk.text.as_deref(), Some("# Product plan\n"));
+    assert_eq!(
+        (chunk.bytes, chunk.offset, chunk.next_offset),
+        (15, 0, None)
+    );
+    assert_eq!(chunk.path, "repo/docs/plan-2026.md");
+    let brief = read_context_with_links(&case.stored, &linked, "context/brief.md", 0).unwrap();
+    assert_eq!(brief.text.as_deref(), Some("# Brief\n"));
+}
+
+#[test]
+fn a_repo_path_that_is_not_a_stored_link_is_refused() {
+    let case = context_case();
+    std::fs::write(case.folder.join("notes.md"), "private").unwrap();
+    std::fs::write(case.folder.join("plan.md"), "# Plan\n").unwrap();
+    let linked = vec![roadmap_link("plan.md")];
+    for (links, path) in [
+        (&[][..], "repo/notes.md"),
+        (&linked[..], "repo/notes.md"),
+        (&linked[..], "repo/"),
+        (&linked[..], "repo/./plan.md"),
+        (&linked[..], "repo/../plan.md"),
+    ] {
+        let refused = read_context_with_links(&case.stored, links, path, 0);
+        assert_eq!(refused.unwrap_err().0, "context_path_invalid", "{path}");
+    }
+    let read = read_context_with_links(&case.stored, &linked, "repo/plan.md", 0).unwrap();
+    assert_eq!(read.text.as_deref(), Some("# Plan\n"));
+}
+
+#[test]
+fn a_linked_path_through_a_symlink_is_refused_and_left_out_of_the_list() {
+    let case = context_case();
+    std::os::unix::fs::symlink("/etc", case.folder.join("docs")).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let outside = other.path().join("outside.md");
+    std::fs::write(&outside, "outside").unwrap();
+    std::os::unix::fs::symlink(&outside, case.folder.join("plan.md")).unwrap();
+    let linked = vec![roadmap_link("docs/hosts"), roadmap_link("plan.md")];
+    for path in ["repo/docs/hosts", "repo/plan.md"] {
+        let refused = read_context_with_links(&case.stored, &linked, path, 0);
+        assert_eq!(refused.unwrap_err().0, "context_item_missing", "{path}");
+    }
+    let context = list_context_with_links(&case.stored, &linked).unwrap();
+    assert!(context.items.iter().all(|item| !item.linked));
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
+}
+
+#[test]
+fn a_long_linked_file_is_read_in_chunks_that_end_on_whole_characters() {
+    let case = context_case();
+    let text = format!("a{}", "\u{e9}".repeat(6000));
+    assert_eq!(text.len(), 12_001);
+    std::fs::write(case.folder.join("plan.md"), &text).unwrap();
+    let linked = vec![roadmap_link("plan.md")];
+    let first = read_context_with_links(&case.stored, &linked, "repo/plan.md", 0).unwrap();
+    assert_eq!(first.bytes, 12_001);
+    assert_eq!(
+        first.next_offset,
+        Some(8191),
+        "a chunk that would stop inside a character stops before it"
+    );
+    let second = read_context_with_links(&case.stored, &linked, "repo/plan.md", 8191).unwrap();
+    assert_eq!(second.next_offset, None);
+    assert_eq!(
+        format!("{}{}", first.text.unwrap(), second.text.unwrap()),
+        text
+    );
+    let end = read_context_with_links(&case.stored, &linked, "repo/plan.md", 12_001).unwrap();
+    assert_eq!((end.text.as_deref(), end.next_offset), (Some(""), None));
+    let past = read_context_with_links(&case.stored, &linked, "repo/plan.md", 12_002);
+    assert_eq!(past.unwrap_err().0, "context_offset_invalid");
+}
+
+#[test]
+fn a_link_that_does_not_read_or_whose_context_path_is_too_long_is_left_out_of_the_list() {
+    let case = context_case();
+    let deep = format!("{}/{}", "a".repeat(200), "b".repeat(200));
+    let long = format!("{deep}/{}.md", "c".repeat(105));
+    assert_eq!(long.len(), 510);
+    assert!(long.len() <= links::LINK_PATH_BYTES_MAX);
+    assert!(LINKED_PREFIX.len() + long.len() > CONTEXT_PATH_BYTES_MAX);
+    std::fs::create_dir_all(case.folder.join(&deep)).unwrap();
+    std::fs::write(case.folder.join(&long), "# Deep\n").unwrap();
+    std::fs::write(case.folder.join("kept.md"), "# Kept\n").unwrap();
+    std::fs::write(case.folder.join("binary.md"), [0xff_u8, 0xfe, 0x00]).unwrap();
+    let linked = vec![
+        roadmap_link(&long),
+        roadmap_link("binary.md"),
+        roadmap_link("gone.md"),
+        roadmap_link("kept.md"),
+    ];
+    let context = list_context_with_links(&case.stored, &linked).unwrap();
+    let listed: Vec<&str> = context
+        .items
+        .iter()
+        .filter(|item| item.linked)
+        .map(|item| item.path.as_str())
+        .collect();
+    assert_eq!(listed, ["repo/kept.md"]);
+}
+
+#[test]
+fn a_planned_roadmap_linked_in_an_older_project_is_listed_once() {
+    let case = context_case();
+    std::fs::create_dir_all(case.folder.join("context")).unwrap();
+    std::fs::write(case.folder.join(crate::planning::ROADMAP), "## V1\n").unwrap();
+    assert_eq!(case.stored.state_folder(), case.folder);
+    let linked = vec![roadmap_link(crate::planning::ROADMAP)];
+    let context = list_context_with_links(&case.stored, &linked).unwrap();
+    let paths: Vec<&str> = context
+        .items
+        .iter()
+        .map(|item| item.path.as_str())
+        .collect();
+    assert_eq!(paths, [crate::planning::ROADMAP]);
+}
+
+#[test]
+fn only_a_linked_item_carries_the_linked_field_on_the_wire() {
+    let own = ContextItem {
+        path: "context/brief.md".into(),
+        kind: ContextKind::Brief,
+        bytes: 8,
+        linked: false,
+    };
+    let wire = serde_json::to_string(&own).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"path":"context/brief.md","kind":"brief","bytes":8}"#
+    );
+    assert_eq!(serde_json::from_str::<ContextItem>(&wire).unwrap(), own);
+    let linked = ContextItem {
+        path: "repo/plan.md".into(),
+        kind: ContextKind::Plan,
+        bytes: 8,
+        linked: true,
+    };
+    let wire = serde_json::to_string(&linked).unwrap();
+    assert!(wire.ends_with(r#","linked":true}"#), "{wire}");
+    assert_eq!(serde_json::from_str::<ContextItem>(&wire).unwrap(), linked);
+}
+
+#[test]
+fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for_them() {
+    const ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
+    const RIVALS: &str = "docs/research-competitors.md";
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir_all(folder.join(".crazyagent/context")).unwrap();
+    let mut connection = database(&base);
+    crate::onboarding::initialize(&connection).unwrap();
+    let project = ProjectId::new("found-project").unwrap();
+    let found = serde_json::json!({
+        "research": [
+            {"kind": "competitor_research", "files": [RIVALS, ".crazyagent/context/brief.md"]},
+            {"kind": "market_research", "files": ["docs/market.md"]}
+        ],
+        "documents": [],
+        "roadmap": [ROADMAP]
+    });
+    connection
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,
+                created_ms,updated_ms,mapping_found)
+             VALUES (?1,?2,'pool-managed','done','done','{}',1,1,?3)",
+            params![
+                project.as_str(),
+                folder.to_str().unwrap(),
+                found.to_string()
+            ],
+        )
+        .unwrap();
+    let stored = StoredSetup {
+        project_id: project.clone(),
+        name: "found".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 2,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups(project,body) VALUES (?1,?2)",
+            params![project.as_str(), serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    let confirm = |revision: u64, kept: Option<Vec<String>>| SetupAction::Update {
+        project_id: project.clone(),
+        expected_revision: revision,
+        name: None,
+        setup: ProjectSetup {
+            about: "Finds papers.".into(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![
+                ResearchKind::CompetitorResearch,
+                ResearchKind::MarketResearch,
+                ResearchKind::RoadmapPlanning,
+            ],
+            pool: None,
+            team: None,
+            documents: vec![],
+        },
+        kept,
+    };
+    let kept = vec![
+        ROADMAP.to_owned(),
+        RIVALS.to_owned(),
+        ".crazyagent/context/brief.md".to_owned(),
+    ];
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &config(), &confirm(2, Some(kept)), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        links::list(&tx, &project).unwrap(),
+        vec![
+            links::DocLink {
+                path: RIVALS.into(),
+                kind: links::LinkKind::Research(ResearchKind::CompetitorResearch),
+            },
+            links::DocLink {
+                path: ROADMAP.into(),
+                kind: links::LinkKind::Roadmap,
+            },
+        ]
+    );
+    let stored = load_setup(&tx, &project).unwrap().unwrap();
+    assert_eq!(stored.research, [ResearchKind::MarketResearch]);
+    let queued: Vec<ResearchKind> = list_jobs(&tx, &config(), &project)
+        .unwrap()
+        .iter()
+        .map(|job| job.kind)
+        .collect();
+    assert!(
+        !queued.contains(&ResearchKind::CompetitorResearch),
+        "{queued:?}"
+    );
+    assert!(queued.contains(&ResearchKind::MarketResearch), "{queued:?}");
+
+    assert_eq!(
+        execute(&tx, &config(), &confirm(3, None), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(links::list(&tx, &project).unwrap().len(), 2);
+    assert_eq!(
+        execute(&tx, &config(), &confirm(4, Some(Vec::new())), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert!(links::list(&tx, &project).unwrap().is_empty());
+    assert_eq!(
+        load_setup(&tx, &project).unwrap().unwrap().research,
+        [
+            ResearchKind::CompetitorResearch,
+            ResearchKind::MarketResearch,
+            ResearchKind::RoadmapPlanning,
+        ]
+    );
+    let too_many = confirm(5, Some(vec!["docs/a.md".to_owned(); links::LINKS_MAX + 1]));
+    assert_eq!(too_many.validate().unwrap_err().0, "project_setup_bounds");
+}

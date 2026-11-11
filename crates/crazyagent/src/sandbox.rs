@@ -111,6 +111,9 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
+/// The most folder links one sandbox makes readable by name beside its roots: the links
+/// its process is started through.
+const LINKS_MAX: usize = 4;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
 /// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
@@ -120,6 +123,11 @@ pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
+/// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
+/// attribute values are denied with every write, run, link and clone, while names, sizes
+/// and dates stay readable, so a tool that only stats such a path does not fail.
+const KEPT_OUT_DENY: &str =
+    "(deny file-read-data file-read-xattr file-write* process-exec file-link file-clone";
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -794,6 +802,7 @@ pub struct ProjectSandbox {
     hidden: Vec<PathBuf>,
     kept_out: Vec<PathBuf>,
     revealed: Vec<PathBuf>,
+    links: Vec<PathBuf>,
     network: SandboxNetwork,
     linux_sockets: LinuxSockets,
     kept_ports: Vec<u16>,
@@ -872,6 +881,7 @@ impl ProjectSandbox {
             hidden: Vec::new(),
             kept_out: Vec::new(),
             revealed: Vec::new(),
+            links: Vec::new(),
             network,
             linux_sockets: LinuxSockets::default(),
             kept_ports: Vec::new(),
@@ -1260,6 +1270,46 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets the agent follow one folder link that leads to a read root it already has, such
+    /// as the version link uv keeps beside a managed Python: only the link's own text becomes
+    /// readable, and no deny gives way to it, since the profile writes it before every deny.
+    /// Input: a clean absolute link in a real folder, outside the hidden, kept-out and
+    /// [`Self::secret_paths`], leading to a read root. Output: the sandbox, or `Invalid`.
+    pub fn allow_read_link(mut self, link: &Path) -> Result<Self, SandboxError> {
+        if self.links.len() >= LINKS_MAX {
+            return Err(invalid("too many links to read roots"));
+        }
+        clear_of_secrets(link, &self.secret_paths())?;
+        let is_link =
+            std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        let in_real_folder = link
+            .parent()
+            .is_some_and(|parent| canonical(parent).is_ok_and(|real| real == parent));
+        if !clean_absolute(link) || !is_link || !in_real_folder {
+            return Err(invalid(
+                "a link to a read root must be a clean absolute link in a real folder",
+            ));
+        }
+        let denied = self
+            .hidden
+            .iter()
+            .chain(self.kept_out.iter())
+            .any(|path| link.starts_with(path));
+        if denied {
+            return Err(invalid(
+                "a link to a read root must lie outside every hidden and kept-out path",
+            ));
+        }
+        let target = canonical(link)?;
+        assert!(target.is_absolute());
+        if !self.read_roots.contains(&target) {
+            return Err(invalid("a link must lead to a read root already granted"));
+        }
+        self.links.push(link.to_path_buf());
+        assert!(self.links.len() <= LINKS_MAX);
+        Ok(self)
+    }
+
     /// Lets the agent start one exact program the engine itself launches, such as its
     /// harness or the engine executable, from an app bundle's `Contents/MacOS`, which no
     /// agent may start otherwise (OP-24). One inside a folder the agent can write stays
@@ -1464,11 +1514,13 @@ impl ProjectSandbox {
         self
     }
 
-    /// Keeps one file or folder inside a granted root out of the agent's reach, read and
-    /// write, as a hidden folder is; the graph step keeps the project's secret-like and
-    /// git-ignored paths from graphify (MAP-2). Input: a clean absolute path below a root, of
-    /// any kind or absent. Output: the narrowed sandbox, or `Invalid` past [`KEPT_OUT_MAX`].
-    /// Only Seatbelt holds it, so the Linux and Windows boundaries refuse such a sandbox.
+    /// Keeps one file or folder inside a granted root from being read, written or run: its
+    /// name, size and dates stay visible, its contents, folder listing and attribute values
+    /// do not, so a tool that stats an import does not fail; the graph step keeps the
+    /// project's secret-like and git-ignored paths from graphify (MAP-2). Input: a clean
+    /// absolute path below a root, of any kind or absent. Output: the narrowed sandbox, or
+    /// `Invalid` past [`KEPT_OUT_MAX`]. Only Seatbelt holds it, so the Linux and Windows
+    /// boundaries refuse such a sandbox.
     pub fn keep_out(mut self, path: &Path) -> Result<Self, SandboxError> {
         if self.kept_out.len() >= KEPT_OUT_MAX {
             return Err(invalid("too many paths kept out"));
@@ -1914,6 +1966,13 @@ impl ProjectSandbox {
                 regex_escape(branch)
             ));
         }
+        assert!(self.links.len() <= LINKS_MAX);
+        for link in self.links.iter().filter(|link| clean_absolute(link)) {
+            text.push_str(&format!(
+                "(allow file-read* (literal \"{}\"))\n",
+                link.display()
+            ));
+        }
         text.push_str("(deny file-read* file-write*");
         for secret in self.secret_paths() {
             if clean_absolute(&secret) {
@@ -1936,12 +1995,17 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
-        if !self.hidden.is_empty() || !self.kept_out.is_empty() {
+        if !self.hidden.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
-            for folder in self.hidden.iter().chain(&self.kept_out) {
-                if clean_absolute(folder) {
-                    text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
-                }
+            for folder in self.hidden.iter().filter(|folder| clean_absolute(folder)) {
+                text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
+            }
+            text.push_str(")\n");
+        }
+        if !self.kept_out.is_empty() {
+            text.push_str(KEPT_OUT_DENY);
+            for path in self.kept_out.iter().filter(|path| clean_absolute(path)) {
+                text.push_str(&format!("\n  (subpath \"{}\")", path.display()));
             }
             text.push_str(")\n");
         }

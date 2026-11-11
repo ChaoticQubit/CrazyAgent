@@ -1,16 +1,22 @@
 pub mod icloud;
 mod intake;
 mod layout;
+mod move_project;
+#[cfg(all(test, unix))]
+mod move_tests;
 mod platform;
 mod watch;
 
 pub use intake::{
-    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, copy_tree,
-    folder_size, move_by_copy, verify_tree,
+    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
+    copy_tree, folder_size, move_by_copy, verify_tree,
 };
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
+pub(crate) use move_project::holds as project_move_holds;
+pub(crate) use move_project::{Asked, Finished, finish, forget, pending, plan};
+pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;
@@ -35,6 +41,15 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
+);
+CREATE TABLE IF NOT EXISTS projects_home_project_move (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    exchange INTEGER NOT NULL CHECK(exchange > 0),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
+    target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
@@ -126,7 +141,8 @@ fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), Engin
 
 /// An owner change to the projects home recorded by the engine: picking the
 /// home folder, switching to a new one and optionally moving every project
-/// folder there, or recording a folder the transport moved or copied in.
+/// folder there, recording a folder the transport moved or copied in, or
+/// recording a registered project the transport moved or copied in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HomeAction {
@@ -145,6 +161,12 @@ pub enum HomeAction {
     },
     Trash {
         path: String,
+    },
+    MoveProject {
+        project_id: ProjectId,
+        mode: AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<AddOverride>,
     },
 }
 
@@ -166,6 +188,9 @@ impl HomeAction {
                 check_overrides(*mode, overrides)
             }
             Self::Trash { path } => path_text(path, "home_trash_invalid"),
+            Self::MoveProject {
+                mode, overrides, ..
+            } => check_overrides(*mode, overrides),
         }
     }
 }
@@ -752,10 +777,10 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent, each research run of its jobs and, on macOS, the tool caches of
-    /// its folders (T8), with the identity of the folder that holds it. A folder that is no
-    /// real run, or that is not there, is left out. Input: the project's research jobs.
-    /// Output: the records.
+    /// writes: each agent, each research run of its jobs, each roadmap status run and, on
+    /// macOS, the tool caches of its folders (T8), with the identity of the folder that
+    /// holds it. A folder that is no real run, or that is not there, is left out. Input: the
+    /// project's research jobs. Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -773,6 +798,7 @@ impl DeletePlan {
                 if research
                     .iter()
                     .any(|job| name.starts_with(&format!("job-{job}-")))
+                    || crate::roadmap_status::names_run(&self.project, &name)
                 {
                     names.push(name);
                 }
@@ -843,6 +869,7 @@ const TOOL_CACHE_DIGEST_BYTES: usize = 32;
 enum EngineFile {
     Agent(i64),
     Run,
+    StatusRun,
     ToolCache,
 }
 
@@ -852,7 +879,7 @@ impl EngineFile {
     fn folder(&self, root: &Path, name: &str) -> PathBuf {
         match self {
             Self::Agent(_) => root.join("team").join("agents").join(name),
-            Self::Run => root.join("research").join("agents").join(name),
+            Self::Run | Self::StatusRun => root.join("research").join("agents").join(name),
             Self::ToolCache => root
                 .join(TOOL_CACHE_FOLDER)
                 .join(&name[TOOL_CACHE_PREFIX.len()..]),
@@ -862,9 +889,17 @@ impl EngineFile {
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
 /// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
-/// or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input: the name. Output: what
-/// it names, or None for anything else.
+/// or `roadmap-status-<project>-<time>`, or `tool-cache-<digest>` with 32 lowercase hex
+/// digits (T8). Input: the name. Output: what it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
+    if let Some(run) = name.strip_prefix(crate::roadmap_status::RUN_NAME_HEAD) {
+        let (project, time) = run.rsplit_once('-')?;
+        let plain = !project.is_empty()
+            && project
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        return (plain && plain_number(time).is_some()).then_some(EngineFile::StatusRun);
+    }
     if let Some(digest) = name.strip_prefix(TOOL_CACHE_PREFIX) {
         let plain = digest.len() == TOOL_CACHE_DIGEST_BYTES
             && digest
@@ -878,6 +913,26 @@ fn engine_file(name: &str) -> Option<EngineFile> {
     let parts: Vec<&str> = name.strip_prefix("job-")?.split('-').collect();
     (matches!(parts.len(), 2 | 3) && parts.iter().all(|part| plain_number(part).is_some()))
         .then_some(EngineFile::Run)
+}
+
+/// Removes the Seatbelt profile of a research run a delete recorded; a profile that is not
+/// there is fine. Inputs: the engine root and the run's exact name. Output: unit, or
+/// `project_files_left` when the profile is there and cannot be removed.
+fn remove_run_profile(root: &Path, name: &str) -> Result<(), crate::engine::EngineError> {
+    assert!(engine_file(name).is_some());
+    let profile = root
+        .join("research")
+        .join("profiles")
+        .join(format!("{name}.sb"));
+    assert_eq!(
+        profile.parent(),
+        Some(root.join("research/profiles").as_path())
+    );
+    match std::fs::remove_file(&profile) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(crate::engine::EngineError("project_files_left".into())),
+    }
 }
 
 fn plain_number(text: &str) -> Option<i64> {
@@ -899,8 +954,9 @@ fn folder_inode(folder: &Path) -> Option<i64> {
 }
 
 /// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
-/// and teammates' records, a research run's folder, or a project's tool caches, which an
-/// agent may have closed or pinned inside and are cleared of that first. Only the
+/// and teammates' records, a research run's folder, a roadmap status run's folder and
+/// Seatbelt profile, or a project's tool caches, which an agent may have closed or pinned
+/// inside and are cleared of that first. Only the
 /// folder the record was written for goes: under any other identity it stays, logged as
 /// `project_files_kept`, and the record is finished. A name that is no engine file removes
 /// nothing. A file left behind is logged as `project_files_left` and keeps its record.
@@ -922,6 +978,9 @@ pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<Strin
                     crate::team::cleanup::remove_agent_files(&root.join("team"), id)
                 } else if matches!(file, EngineFile::ToolCache) {
                     crate::team::cleanup::remove_agent_tree(&folder)
+                } else if matches!(file, EngineFile::StatusRun) {
+                    crate::team::cleanup::remove_tree(&folder)
+                        .and_then(|()| remove_run_profile(root, name))
                 } else {
                     crate::team::cleanup::remove_tree(&folder)
                 }
@@ -1089,8 +1148,9 @@ pub(crate) fn save(connection: &rusqlite::Connection, home: &Path) -> Result<(),
     Ok(())
 }
 
-/// Tells whether a projects home move recorded before its folders move holds `folder`: one
-/// is pending and the folder is inside its old home, as given or as it resolves now. No
+/// Tells whether a move recorded before its folders move holds `folder`: a projects home
+/// move is pending and the folder is inside its old home, or a project move is pending and
+/// the folder is inside that project's old folder, as given or as it resolves now. No
 /// agent or research run starts there until the move is finished or forgotten.
 /// Input: an engine connection and the folder. Output: the answer, or any SQLite failure.
 pub(crate) fn move_holds(
@@ -1106,6 +1166,9 @@ pub(crate) fn move_holds(
         )
         .optional()?
         .is_some();
+    if move_project::holds(connection, folder)? {
+        return Ok(true);
+    }
     if !present {
         return Ok(false);
     }
@@ -1241,6 +1304,31 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_research_running" => {
             "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved."
+        }
+        "move_project_already_home" => "This project is already in your projects folder.",
+        "move_project_busy" => {
+            "The project is still working: an agent, a research job, onboarding or a change being landed. Stop the team or let it finish, then try again. Nothing was moved."
+        }
+        "move_project_master_session" => {
+            "The project's master has an open session with its own working copy. Close that session, then try again. Nothing was moved."
+        }
+        "move_project_copy_worktrees" => {
+            "Some agents of this project work in git worktrees that a copy would leave behind. Choose Move instead. Nothing was copied."
+        }
+        "move_project_folder_link" => {
+            "This project's folder is reached through a link. Add the real folder to CrazyAgent instead. Nothing was moved."
+        }
+        "move_project_in_progress" => {
+            "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "move_project_old_folder_left" => {
+            "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself."
+        }
+        "move_project_unavailable" => {
+            "The engine could not check the project's agents. Nothing was moved."
+        }
+        "move_project_interrupted" => {
+            "The move stopped part way. Check the project folder before trying again."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",

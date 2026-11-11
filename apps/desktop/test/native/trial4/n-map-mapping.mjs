@@ -18,6 +18,8 @@ const RUNNING = ["Working", "Waiting"];
 const PAUSED = /^Rate limited until /;
 const LINE = /^Mapping, try ([1-9][0-9]*) of ([1-9][0-9]*), (?:under 1 min|([0-9]+) min)\./;
 const IN_REPO = "Already in the repo: ";
+const LINKED = "Linked: ";
+const LINKED_TAIL = ". CrazyAgent reads them from your repo; edits go to those files.";
 const DECOY_MARK = DECOY.split("/").pop().replace(/\.md$/, "").toLowerCase();
 const NEEDED = [
   { kind: "competitor_research", label: "Competitor research", file: RESEARCH_DOCS.competitor },
@@ -80,13 +82,16 @@ export function endFault(sample) {
   return sample.ms > MAPPING_MS ? `the mapping ended Done after ${seconds} s, over the ${MAPPING_MS / 1000} s it may take` : null;
 }
 
-/** Lists the repository files the review's research switches name. Input: the switches,
- * [{ label, notes }]. Output: label to files, empty when a switch names none. */
+/** Lists the repository files the review's research switches name, linked or only found in the
+ * repo. Input: the switches, [{ label, notes }]. Output: label to files, empty when a switch names
+ * none. */
 export function repoFiles(items) {
   const files = {};
   for (const item of items) {
-    const note = item.notes.find((text) => text.startsWith(IN_REPO));
-    files[item.label] = note ? note.slice(IN_REPO.length).split(",").map((path) => path.trim()).filter(Boolean) : [];
+    const found = item.notes.find((text) => text.startsWith(IN_REPO));
+    const linked = item.notes.find((text) => text.startsWith(LINKED) && text.endsWith(LINKED_TAIL));
+    const list = found ? found.slice(IN_REPO.length) : linked ? linked.slice(LINKED.length, -LINKED_TAIL.length) : "";
+    files[item.label] = list.split(",").map((path) => path.trim()).filter(Boolean);
   }
   return files;
 }

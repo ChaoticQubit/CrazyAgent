@@ -166,6 +166,16 @@ impl NativeOwner {
                     .map_err(problem)?;
                 SetupView::OverviewAsked
             }
+            SetupQuery::MoveHome {
+                project,
+                mode,
+                generation,
+            } => SetupView::Changed(owner_result(
+                controller
+                    .move_project_home(project, mode, Vec::new(), generation)
+                    .await
+                    .map_err(problem)?,
+            )?),
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,
@@ -225,13 +235,15 @@ impl NativeOwner {
                         expected_revision,
                         name,
                         setup,
+                        kept,
                     } => {
                         controller
-                            .update_project_setup(
+                            .confirm_project_setup(
                                 project_id,
                                 expected_revision,
                                 name,
                                 setup,
+                                kept,
                                 generation,
                             )
                             .await
@@ -773,6 +785,7 @@ mod tests {
             },
             SetupAction::Update {
                 project_id: project.clone(),
+                kept: None,
                 expected_revision: stored.revision,
                 name: Some("Team notes".into()),
                 setup: edited,

@@ -1792,10 +1792,11 @@ fn app_settings(
 /// Edit with AI setting, reads the saved text and its version, hands the prompt to the model
 /// run and reads the proposed file out of the reply. A project's prompt also holds the app
 /// text, so the model drops what it repeats, unless the project's agents get the project
-/// file alone. Inputs: the engine root, none for the app text or the project, the pool the
-/// owner picked for this run and the model run, given the prompt. Output: the proposed text
-/// with the version of the saved text it was made from, or an `instructions_cleanup_*` code.
-/// Nothing is written.
+/// file alone or the app-wide Edit with AI setting is off, which keeps the app text from
+/// every model run made for editing. Inputs: the engine root, none for the app text or the
+/// project, the pool the owner picked for this run and the model run, given the prompt.
+/// Output: the proposed text with the version of the saved text it was made from, or an
+/// `instructions_cleanup_*` code. Nothing is written.
 fn propose(
     root: &Path,
     project: Option<&ProjectId>,
@@ -1820,6 +1821,9 @@ fn propose(
                     return Err(failure(cleanup::OFF));
                 }
                 settings.mode != InstructionMode::ProjectOnly
+                    && crate::instruction_files::load_app(&connection)
+                        .map_err(failure)?
+                        .edit_with_ai
             }
         }
     };

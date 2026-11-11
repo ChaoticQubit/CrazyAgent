@@ -1523,8 +1523,9 @@ fn an_engine_reason_with_hidden_or_direction_changing_characters_shows_them_as_e
 }
 
 #[test]
-fn the_review_shows_the_research_and_documents_already_in_the_repo() {
+fn the_review_shows_the_roadmap_research_and_documents_already_in_the_repo() {
     let (mut shell, _) = review_with(|view| {
+        view.facts.roadmap = vec!["research/docs/ss-phase1-revision/report.md".into()];
         view.facts.research = vec![FoundResearch {
             kind: ResearchKind::CompetitorResearch,
             files: vec!["research/landscape-2026.md".into()],
@@ -1535,16 +1536,108 @@ fn the_review_shows_the_research_and_documents_already_in_the_repo() {
     assert!(
         shows(
             &rows,
-            "Competitor research - Already in the repo: research/landscape-2026.md"
+            "Roadmap found: research/docs/ss-phase1-revision/report.md"
         ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(
+            &rows,
+            "Competitor research - Linked: research/landscape-2026.md"
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(
+            &rows,
+            "CrazyAgent reads them from your repo; edits go to those files."
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "[x] Use these files"), "{rows:#?}");
+    assert!(
+        !shows(&rows, "[x] Plan a roadmap after research"),
         "{rows:#?}"
     );
     assert!(shows(&rows, "Project documents found:"), "{rows:#?}");
     assert!(shows(&rows, "- docs/q3-plan.md"), "{rows:#?}");
     let (mut plain, _) = review_with(|_| {});
     let rows = render(&mut plain, 100, 80);
-    assert!(!shows(&rows, "Already in the repo"), "{rows:#?}");
+    assert!(!shows(&rows, "Linked:"), "{rows:#?}");
+    assert!(!shows(&rows, "Roadmap found"), "{rows:#?}");
+    assert!(!shows(&rows, "Use these files"), "{rows:#?}");
     assert!(!shows(&rows, "Project documents found"), "{rows:#?}");
+}
+
+#[test]
+fn confirming_links_the_found_files_unless_the_owner_turns_them_off() {
+    const ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
+    let sent = |turn_off: bool| {
+        let (mut shell, project) = review_with(|view| {
+            view.facts.roadmap = vec![ROADMAP.into()];
+            view.facts.research = vec![FoundResearch {
+                kind: ResearchKind::CompetitorResearch,
+                files: vec!["docs/rivals.md".into(), ROADMAP.into()],
+            }];
+        });
+        while shell.ctx.next_request().is_some() {}
+        let stored = crate::project_setup::StoredSetup {
+            project_id: project.clone(),
+            name: "notes".into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: true,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 1,
+            },
+            documents: vec![],
+            folder: "/Users/owner/Projects/notes".into(),
+            created_ms: 0,
+            revision: 7,
+        };
+        shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+            SetupEvent {
+                query: SetupQuery::Setup { project },
+                result: Ok(crate::project_setup::SetupView::Setup(Some(Box::new(
+                    stored,
+                )))),
+            },
+        )))));
+        shell.key(Key::Tab);
+        keys(&mut shell, "Keeps notes.");
+        for _ in 0..4 {
+            shell.key(Key::Tab);
+        }
+        if turn_off {
+            shell.key(Key::Char(' '));
+        }
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        let Some(Request::Setup(SetupQuery::Change { action, .. })) =
+            shell.ctx.next_screen_request()
+        else {
+            panic!("confirm sends the setup change");
+        };
+        let SetupAction::Update { setup, kept, .. } = action else {
+            panic!("confirm updates the project setup");
+        };
+        assert!(
+            !setup.research.contains(&ResearchKind::RoadmapPlanning),
+            "a found roadmap starts with roadmap planning off"
+        );
+        kept
+    };
+    assert_eq!(
+        sent(false),
+        Some(vec![ROADMAP.to_owned(), "docs/rivals.md".to_owned()])
+    );
+    assert_eq!(sent(true), Some(Vec::new()));
 }
 
 #[test]
@@ -1850,10 +1943,15 @@ fn confirming_the_review_sends_the_edited_setup_and_opens_the_project() {
         expected_revision,
         name,
         setup,
+        kept,
     } = action.clone()
     else {
         panic!("confirm updates the project setup");
     };
+    assert_eq!(
+        kept, None,
+        "nothing was found, so the links stay as they are"
+    );
     assert_eq!(project_id, project);
     assert_eq!(expected_revision, 7);
     assert_eq!(name, None, "the name did not change");

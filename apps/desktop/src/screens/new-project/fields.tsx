@@ -1,7 +1,7 @@
 import type { Result } from "../../api";
 import { useState } from "react";
 import type { Platform, ProjectCatalog, ResearchKind } from "../../api-projects";
-import { Icon, Switch } from "../../ui";
+import { Checkbox, Icon, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, RESEARCH_LABELS } from "./team-editor";
 import { ABOUT_CHARS_MAX, RESEARCH_COPY, addStack, chars, removeStack } from "./wizard";
@@ -103,24 +103,32 @@ export function RoadmapSwitch({ prefix, value, onChange }: { prefix: string; val
   </div></div>;
 }
 
+/** What a linked repository file means for the owner, shown beside every linked file. */
+export const LINKED_COPY = "CrazyAgent reads them from your repo; edits go to those files.";
+
 /** The research switches shared by New Project, Work, Project Settings, General and the setup
  * review: one switch per research kind with its icon and plain description, and the repository
- * files that already hold that research when the mapping found any. Inputs: an id prefix, the
- * engine catalog, the chosen kinds, their change handler and the files per kind. Output: the
- * switch list. */
-export function ResearchSwitches({ prefix, catalog, value, onChange, found = {} }: {
+ * files that already hold that research when the mapping found any. Found files are linked, and
+ * their kind's switch stays off, unless the kind is in `unlinked`; with `onLinked` each kind with
+ * files gets a "Use these files" checkbox. Inputs: an id prefix, the engine catalog, the chosen
+ * kinds, their change handler, the files per kind, the kinds whose files are not linked and the
+ * checkbox handler. Output: the switch list. */
+export function ResearchSwitches({ prefix, catalog, value, onChange, found = {}, unlinked = [], onLinked }: {
   prefix: string; catalog: Result<ProjectCatalog> | undefined; value: ResearchKind[]; onChange: (research: ResearchKind[]) => void;
-  found?: Partial<Record<ResearchKind, string[]>>;
+  found?: Partial<Record<ResearchKind, string[]>>; unlinked?: readonly ResearchKind[]; onLinked?: (kind: ResearchKind) => void;
 }) {
   const research = catalog?.kind === "ok" ? catalog.value.research : (Object.keys(RESEARCH_LABELS) as ResearchKind[]).map((kind) => ({ kind, label: RESEARCH_LABELS[kind] }));
   return <div className="pj-switch-list">{research.map((item) => {
-    const on = value.includes(item.kind);
     const files = found[item.kind] ?? [];
+    const linked = files.length > 0 && !unlinked.includes(item.kind);
+    const on = value.includes(item.kind) && !linked;
     return <div className="pj-switch-item" key={item.kind}>
       <Icon name={RESEARCH_ICONS[item.kind]} size={18} />
       <span><strong>{item.label}</strong><span className="pj-secondary">{RESEARCH_COPY[item.kind]}</span>
-        {files.length > 0 && <span className="pj-secondary">Already in the repo: {files.join(", ")}</span>}</span>
-      <Switch id={`${prefix}-research-${item.kind}`} label={item.label} hideLabel checked={on} onChecked={() => onChange(toggle(value, item.kind))} />
+        {files.length > 0 && <span className="pj-secondary">{linked ? `Linked: ${files.join(", ")}. ${LINKED_COPY}` : `Already in the repo: ${files.join(", ")}`}</span>}
+        {files.length > 0 && onLinked && <Checkbox label="Use these files" checked={linked} onChecked={() => onLinked(item.kind)} />}</span>
+      <Switch id={`${prefix}-research-${item.kind}`} label={item.label} hideLabel checked={on} onChecked={() => onChange(toggle(value, item.kind))}
+        disabledReason={linked ? "CrazyAgent reads the linked files instead." : undefined} />
     </div>;
   })}</div>;
 }

@@ -383,9 +383,9 @@ test("lines the project file repeats are left out or kept, Leave out first, and 
   assert.match(markup, /role="radio" aria-checked="true"[^>]*>Leave out</, "an engine reply without the choice or the count shows the default");
   assert.match(markup, note("No line of this project's file repeats the app instructions."));
   assert.match(shown({ repeated: "leave_out" }, 3),
-    note("3 lines of this project's file repeat the app instructions and are left out for agents. Headings, code blocks, tables and rules always stay."));
+    note("3 lines of this project's file repeat the app instructions and are left out for agents. Only a line in the same place counts. Code blocks, tables and rules always stay."));
   assert.match(shown({ repeated: "leave_out" }, 1),
-    note("1 line of this project's file repeats the app instructions and is left out for agents. Headings, code blocks, tables and rules always stay."));
+    note("1 line of this project's file repeats the app instructions and is left out for agents. Only a line in the same place counts. Code blocks, tables and rules always stay."));
   const kept = shown({ repeated: "keep" }, 2);
   assert.match(kept, /role="radio" aria-checked="true"[^>]*>Keep</);
   assert.match(kept, note("2 lines of this project's file repeat the app instructions, and agents get them twice."));
@@ -395,7 +395,7 @@ test("lines the project file repeats are left out or kept, Leave out first, and 
   }
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
   for (const words of ["No line of this project's file repeats the app instructions.", "Repeated lines only matter when agents get both the app and the project instructions.",
-    "the app instructions, and agents get {them} twice.", "left out for agents. Headings, code blocks, tables and rules always stay."]) {
+    "the app instructions, and agents get {them} twice.", "left out for agents. Only a line in the same place counts. Code blocks, tables and rules always stay."]) {
     assert.ok(tui.includes(words), `the TUI says the same: ${words}`);
   }
 });
@@ -786,6 +786,33 @@ test("Edit with AI says what it waits for while it reads the pools and while the
   const running = page({ cleanup: { kind: "running" } });
   assert.match(running, /aria-busy="true"[^>]*>.*Proposing\.\.\.<\/button>/);
   assert.match(running, /role="status"[^>]*>A model is cleaning up the saved instructions\. This can take up to 5 minutes\. Nothing changes until you accept\./);
+});
+
+test("the editor takes no edits while Edit with AI runs or shows a proposal, so a stale Accept cannot drop typed lines", () => {
+  const project = { kind: "project", id: "alpha", name: "Alpha" };
+  const steps = [{ kind: "pools" }, { kind: "choosing", pools: [{ id: "pool-a", name: "Pool A" }], picked: null }, { kind: "running" },
+    { kind: "proposed", proposal: { text: "Use TDD.\n", base_version: 1 } }];
+  const button = (markup, label) => {
+    const end = markup.indexOf(`${label}</button>`);
+    assert.ok(end >= 0, `the page has a ${label} button`);
+    return markup.slice(markup.lastIndexOf("<button", end), end);
+  };
+  for (const scope of [{ kind: "app" }, project]) {
+    const shown = scope.kind === "app" ? {} : { view: "edit", mode: "both" };
+    const open = page({ scope, ...shown });
+    assert.doesNotMatch(open, /<textarea[^>]*readonly/i, `${scope.kind}: the editor takes typing when no Edit with AI step is open`);
+    assert.doesNotMatch(open, /Edit with AI is open/);
+    for (const cleanup of steps) {
+      const locked = page({ scope, ...shown, cleanup });
+      assert.match(locked, /<textarea[^>]*readonly=""/i, `${scope.kind}, ${cleanup.kind}: the editor is read-only`);
+      assert.match(locked, /Read-only while Edit with AI is open\./, `${scope.kind}, ${cleanup.kind}: the editor says why it takes no typing`);
+      const writers = scope.kind === "app" ? ["Import from file", "Use the CrazyAgent default process"] : ["Use app default"];
+      for (const label of writers) {
+        assert.match(button(locked, label), /disabled=""/, `${scope.kind}, ${cleanup.kind}: ${label} cannot replace the editor's text`);
+        assert.doesNotMatch(button(open, label), /disabled/, `${label} works when no step is open`);
+      }
+    }
+  }
 });
 
 test("a proposal shows as a line diff with Accept and Discard, and nothing is saved by showing it", () => {

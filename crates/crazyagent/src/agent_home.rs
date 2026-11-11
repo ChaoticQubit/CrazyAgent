@@ -143,8 +143,8 @@ pub struct AgentProject {
 }
 
 /// Whether the project part of a joined instruction text leaves out lines the app part
-/// already has (DEC-129 item 5, DEC-132 Q7). Leave out by default; Keep gives agents both
-/// texts whole, as before v2.2.1.
+/// already has in the same place (DEC-129 item 5, DEC-132 Q7). Leave out by default;
+/// Keep gives agents both texts whole, as before v2.2.1.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Repeated {
@@ -292,64 +292,339 @@ fn too_large(part: &str) -> AgentHomeError {
     AgentHomeError(code)
 }
 
-/// Tells whether a line is a code fence marker, which opens or closes a block whose lines
-/// always stay. Input: the trimmed line. Output: the answer.
-fn fence(line: &str) -> bool {
-    line.starts_with("```") || line.starts_with("~~~")
+/// What one line of an instructions text is, for deciding whether a repeated line may be
+/// left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineKind {
+    Blank,
+    Heading,
+    Underline,
+    Rule,
+    Fence,
+    Code,
+    Table,
+    Plain,
 }
 
-/// Tells whether a line is a heading or a horizontal rule, which stay even when repeated
-/// yet give agents nothing on their own. Input: the trimmed line. Output: the answer.
-fn heading_or_rule(line: &str) -> bool {
-    line.starts_with('#') || matches!(line, "---" | "***" | "___")
+/// One line of an instructions text as `outline` reads it: what it is, the place it stands
+/// in, the line it hangs on as an index into the same list, always a lower one, and its
+/// text.
+#[derive(Clone, Copy, Debug)]
+struct Entry<'a> {
+    kind: LineKind,
+    place: usize,
+    anchor: Option<usize>,
+    text: &'a str,
 }
 
-/// Tells whether a line carries structure that must stay even when the app text has the
-/// same line: a heading, a rule, a code fence marker or a table row. Input: the trimmed
-/// line. Output: the answer.
-fn structural(line: &str) -> bool {
-    heading_or_rule(line) || fence(line) || line.starts_with('|')
+/// Numbers the places lines stand in. A place is the chain of lines a line hangs on, from
+/// its outermost heading down to the line right above it in that chain, each compared whole
+/// with only trailing spaces ignored. Two lines stand in the same place exactly when their
+/// numbers match; zero is the start of a text.
+#[derive(Default)]
+struct Places<'a> {
+    known: std::collections::HashMap<(usize, &'a str), usize>,
 }
 
-/// Takes out of the project text each line whose trimmed text is also a line of the app
-/// text, keeping blank and structural lines and every line inside a code block, then folds
-/// the blank runs outside code blocks to one. A text with no such line comes back as it
-/// is; one left with only headings, rules and blank lines comes back empty. Inputs: both
-/// texts. Output: the kept text and how many lines were left out.
+impl<'a> Places<'a> {
+    /// The place right under one line. Inputs: the place that line stands in and the line.
+    /// Output: the place's number, never zero, the same for the same pair every time.
+    fn under(&mut self, place: usize, line: &'a str) -> usize {
+        let next = self.known.len() + 1;
+        let found = *self.known.entry((place, line.trim_end())).or_insert(next);
+        assert!((1..=self.known.len()).contains(&found));
+        found
+    }
+}
+
+/// How far a line is indented, in columns: a space is one column and a tab runs to the next
+/// multiple of four. Input: the line. Output: the column of its first other character.
+fn indent(line: &str) -> usize {
+    let mut columns = 0;
+    for found in line.chars() {
+        match found {
+            ' ' => columns += 1,
+            '\t' => columns += 4 - columns % 4,
+            _ => break,
+        }
+    }
+    assert!(columns <= 4 * line.len());
+    columns
+}
+
+/// Tells whether a line starts a list item: a hyphen, star or plus, or a number with a dot
+/// or a closing bracket, then a space. Input: the line. Output: the answer.
+fn list_item(line: &str) -> bool {
+    let text = line.trim_start();
+    let numbered = text.trim_start_matches(|found: char| found.is_ascii_digit());
+    ["- ", "* ", "+ "].iter().any(|mark| text.starts_with(mark))
+        || (numbered.len() < text.len()
+            && [". ", ") "].iter().any(|mark| numbered.starts_with(mark)))
+}
+
+/// The fence a line opens: its character and run length. A fence line is indented by at
+/// most three spaces and starts with three or more backticks or tildes; a backtick fence's
+/// info text holds no backtick. Input: the line. Output: the fence, or none.
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let spaces = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[spaces..];
+    let mark = rest
+        .chars()
+        .next()
+        .filter(|mark| matches!(mark, '`' | '~'))?;
+    let run = rest.chars().take_while(|found| *found == mark).count();
+    let info = &rest[run..];
+    (spaces <= 3 && run >= 3 && !(mark == '`' && info.contains('`'))).then_some((mark, run))
+}
+
+/// Tells whether a line closes an open fence: the same character, at least as many as the
+/// opening run, indented by at most three spaces, with nothing after it. Inputs: the line
+/// and the open fence. Output: the answer.
+fn fence_close(line: &str, open: (char, usize)) -> bool {
+    fence_open(line).is_some_and(|(mark, run)| {
+        mark == open.0 && run >= open.1 && line.trim().chars().all(|found| found == mark)
+    })
+}
+
+/// The level of an ATX heading line, one to six number signs followed by a space or the
+/// line's end. Input: the trimmed line. Output: the level, or none.
+fn heading_level(line: &str) -> Option<usize> {
+    let level = line.chars().take_while(|found| *found == '#').count();
+    let rest = &line[level..];
+    ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with([' ', '\t'])))
+        .then_some(level)
+}
+
+/// The level of the heading a line becomes when the next line underlines it: one for a
+/// line of equals signs, two for a line of hyphens. Only a paragraph line can be underlined,
+/// so a list item, a quote, a table row or an indented line never is, and neither line is
+/// indented by four columns or more. Inputs: the line and the line after it. Output: the
+/// level, or none.
+fn underlined_level(line: &str, next: Option<&str>) -> Option<usize> {
+    let text = line.trim();
+    let list = list_item(text) || text.starts_with('>') || text.starts_with('|');
+    let rule = matches!(text, "---" | "***" | "___");
+    if text.is_empty() || indent(line) >= 4 || list || rule || heading_level(text).is_some() {
+        return None;
+    }
+    let under = next.filter(|under| indent(under) < 4)?.trim();
+    match under.chars().next()? {
+        '=' if under.chars().all(|found| found == '=') => Some(1),
+        '-' if under.chars().all(|found| found == '-') => Some(2),
+        _ => None,
+    }
+}
+
+/// Reads an instructions text line by line: what each line is, the place it stands in and
+/// the line it hangs on. Lines inside a code block and lines indented by four columns or
+/// more are `Code` whatever they hold, a block left open runs to the end, and the line
+/// under an underlined heading is `Underline`. A line hangs on the nearest line above it in
+/// its section, blank lines aside; a list item passes over the items of its own list and
+/// their deeper lines, so the items of one list all hang on the line that leads the list.
+/// The first line of a section hangs on its heading, and a heading on the heading it stands
+/// under. Inputs: the text, at most `TEXT_BYTES_MAX` bytes, and the place numbers shared
+/// with the other text. Output: one entry per line, in order.
+fn outline<'a>(text: &'a str, places: &mut Places<'a>) -> Vec<Entry<'a>> {
+    assert!(text.len() <= TEXT_BYTES_MAX);
+    let lines: Vec<&str> = text.lines().collect();
+    let mut entries: Vec<Entry<'a>> = Vec::with_capacity(lines.len());
+    let mut path: Vec<(usize, usize, usize)> = Vec::new();
+    let mut lists: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    let mut above: Option<usize> = None;
+    let mut open: Option<(char, usize)> = None;
+    let mut underline = false;
+    for (index, line) in lines.iter().copied().enumerate() {
+        let trimmed = line.trim();
+        let columns = indent(line);
+        let mut level = 0;
+        let kind = if let Some(fence) = open {
+            if fence_close(line, fence) {
+                open = None;
+                LineKind::Fence
+            } else {
+                LineKind::Code
+            }
+        } else if std::mem::take(&mut underline) {
+            LineKind::Underline
+        } else if trimmed.is_empty() {
+            LineKind::Blank
+        } else if columns >= 4 {
+            LineKind::Code
+        } else if let Some(fence) = fence_open(line) {
+            open = Some(fence);
+            LineKind::Fence
+        } else if let Some(found) = heading_level(trimmed) {
+            level = found;
+            LineKind::Heading
+        } else if let Some(found) = underlined_level(line, lines.get(index + 1).copied()) {
+            level = found;
+            underline = true;
+            LineKind::Heading
+        } else if matches!(trimmed, "---" | "***" | "___") {
+            LineKind::Rule
+        } else if trimmed.starts_with('|') {
+            LineKind::Table
+        } else {
+            LineKind::Plain
+        };
+        let section = path.last().map(|(_, place, heading)| (*place, *heading));
+        let (place, anchor) = match kind {
+            LineKind::Heading => {
+                assert!((1..=6).contains(&level));
+                while path.last().is_some_and(|(outer, _, _)| *outer >= level) {
+                    path.pop();
+                }
+                let outer = path.last().map(|(_, place, heading)| (*place, *heading));
+                let place = outer.map_or(0, |(place, _)| place);
+                path.push((level, places.under(place, trimmed), index));
+                assert!(path.len() <= 6);
+                lists.clear();
+                above = None;
+                (place, outer.map(|(_, heading)| heading))
+            }
+            LineKind::Blank | LineKind::Underline => (section.map_or(0, |(place, _)| place), None),
+            LineKind::Rule
+            | LineKind::Fence
+            | LineKind::Code
+            | LineKind::Table
+            | LineKind::Plain => {
+                let item = kind == LineKind::Plain && list_item(line);
+                while lists
+                    .last()
+                    .is_some_and(|(deep, _, _)| *deep > columns || (!item && *deep == columns))
+                {
+                    lists.pop();
+                }
+                let listed = lists
+                    .last()
+                    .filter(|(same, _, _)| item && *same == columns)
+                    .map(|(_, place, anchor)| (*place, *anchor));
+                let found = match (listed, above) {
+                    (Some(found), _) => found,
+                    (None, Some(line)) => (
+                        places.under(entries[line].place, entries[line].text),
+                        Some(line),
+                    ),
+                    (None, None) => (
+                        section.map_or(0, |(place, _)| place),
+                        section.map(|(_, heading)| heading),
+                    ),
+                };
+                if item && listed.is_none() {
+                    lists.push((columns, found.0, found.1));
+                }
+                assert!(lists.len() <= 4);
+                above = Some(index);
+                found
+            }
+        };
+        assert!(anchor.is_none_or(|line| line < index));
+        entries.push(Entry {
+            kind,
+            place,
+            anchor,
+            text: line,
+        });
+    }
+    assert_eq!(entries.len(), lines.len());
+    entries
+}
+
+/// Marks the line a line hangs on and every line that one hangs on in turn, stopping at a
+/// line already marked. Inputs: the lines, the first line to mark or none, and the marks,
+/// one per line.
+fn mark(lines: &[Entry<'_>], from: Option<usize>, marks: &mut [bool]) {
+    assert_eq!(lines.len(), marks.len());
+    let mut next = from;
+    while let Some(index) = next {
+        if marks[index] {
+            break;
+        }
+        marks[index] = true;
+        assert!(lines[index].anchor.is_none_or(|line| line < index));
+        next = lines[index].anchor;
+    }
+}
+
+/// Takes out of the project text each plain line the app text also has in the same place:
+/// under the same headings and hanging on the same lines, compared whole with only trailing
+/// spaces ignored. So the same words under another heading, under another lead-in line or
+/// parent item, or at another indent stay. A line also stays when a line the project keeps
+/// hangs on it, such as a lead-in of a kept list item or code block. Rules, table rows, code
+/// fence markers, every line inside a code block and every line indented by four columns or
+/// more always stay; a heading goes only when lines under it were left out and nothing under
+/// it is kept. A blank line goes only where lines left out would leave two in a row. A text
+/// with no such line comes back as it is; one left with only headings, rules and blank
+/// lines comes back empty. Inputs: both texts. Output: the kept text and how many plain
+/// lines were left out.
 fn without_repeats(app: &str, project: &str) -> (String, usize) {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
-    let known: std::collections::HashSet<&str> = app
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+    let mut places = Places::default();
+    let known: std::collections::HashSet<(usize, &str)> = outline(app, &mut places)
+        .iter()
+        .filter(|entry| entry.kind == LineKind::Plain)
+        .map(|entry| (entry.place, entry.text.trim_end()))
         .collect();
-    let mut kept = String::with_capacity(project.len());
-    let mut left_out = 0;
-    let mut blank = false;
-    let mut fenced = false;
+    let lines = outline(project, &mut places);
+    let mut gone: Vec<bool> = lines
+        .iter()
+        .map(|entry| {
+            entry.kind == LineKind::Plain && known.contains(&(entry.place, entry.text.trim_end()))
+        })
+        .collect();
+    let mut needed = vec![false; lines.len()];
     let mut content = false;
-    for line in project.lines() {
-        let trimmed = line.trim();
-        let marker = fence(trimmed);
-        if !fenced && !trimmed.is_empty() && !structural(trimmed) && known.contains(trimmed) {
-            left_out += 1;
-            continue;
+    for (index, entry) in lines.iter().enumerate() {
+        let holds = matches!(
+            entry.kind,
+            LineKind::Plain | LineKind::Code | LineKind::Fence | LineKind::Table
+        );
+        if holds && !gone[index] {
+            content = true;
+            mark(&lines, entry.anchor, &mut needed);
         }
-        if !fenced && trimmed.is_empty() && blank {
-            continue;
+    }
+    for (index, held) in needed.iter().enumerate() {
+        gone[index] &= !*held;
+    }
+    let left_out = gone.iter().filter(|out| **out).count();
+    if left_out == 0 {
+        return (project.to_owned(), 0);
+    }
+    let mut lost = vec![false; lines.len()];
+    for (index, entry) in lines.iter().enumerate() {
+        if gone[index] {
+            mark(&lines, entry.anchor, &mut lost);
         }
-        blank = !fenced && trimmed.is_empty();
-        content |= fenced || marker || !(trimmed.is_empty() || heading_or_rule(trimmed));
-        fenced ^= marker;
-        kept.push_str(line);
-        kept.push('\n');
+    }
+    for (index, entry) in lines.iter().enumerate() {
+        if entry.kind == LineKind::Heading {
+            gone[index] =
+                !needed[index] && (lost[index] || entry.anchor.is_some_and(|outer| gone[outer]));
+        } else if entry.kind == LineKind::Underline {
+            gone[index] = index > 0 && gone[index - 1];
+        }
+    }
+    let mut kept = String::with_capacity(project.len());
+    let mut blank = false;
+    let mut gap = false;
+    for (index, entry) in lines.iter().enumerate() {
+        let empty = entry.kind == LineKind::Blank;
+        if gone[index] {
+            gap = true;
+        } else if !(empty && blank && gap) {
+            blank = empty;
+            gap = false;
+            kept.push_str(entry.text);
+            kept.push('\n');
+        }
     }
     assert!(kept.len() <= project.len() + 1);
-    assert!(left_out <= project.lines().count());
-    match (left_out, content) {
-        (0, _) => (project.to_owned(), 0),
-        (_, true) => (kept, left_out),
-        (_, false) => (String::new(), left_out),
+    assert!(left_out <= lines.len());
+    if content {
+        (kept, left_out)
+    } else {
+        (String::new(), left_out)
     }
 }
 

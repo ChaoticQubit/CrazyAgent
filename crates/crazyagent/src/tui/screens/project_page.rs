@@ -975,6 +975,19 @@ impl ProjectPage {
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
+        if matches!(query, SetupQuery::MoveHome { .. }) {
+            if matches!(&event.result, Err(code) if code == "move_project_old_folder_left") {
+                ctx.request(Request::Projects);
+            }
+            if applied {
+                ctx.request(Request::Projects);
+                ctx.say(Message::success(
+                    &format!("{} is now in your CrazyAgent folder.", self.screen.name),
+                    "Start the team again from Team.",
+                ));
+            }
+            return;
+        }
         if matches!(query, SetupQuery::AgentPolicy { .. })
             && let Some(access) = self.access_wanted.take()
         {
@@ -1166,6 +1179,7 @@ impl ProjectPage {
         }
         let action = SetupAction::Update {
             project_id: setup.project_id.clone(),
+            kept: None,
             expected_revision: setup.revision,
             name: None,
             setup: ProjectSetup {
@@ -1216,6 +1230,11 @@ impl ProjectPage {
     fn pump(&mut self, ctx: &mut Ctx) {
         if let Some(query) = self.screen.recovery.next_query(now_ms()) {
             ctx.request(Request::Recovery(Box::new(query)));
+        }
+        if matches!(self.screen.tab, Tab::Overview | Tab::Settings)
+            && let Some(query) = self.screen.roadmap.next_query(now_ms())
+        {
+            ctx.request(Request::Roadmap(Box::new(query)));
         }
         if self.screen.tab == Tab::Changes
             && let Some(query) = self.screen.changes.next_query(now_ms())
@@ -1420,6 +1439,18 @@ impl ProjectPage {
                 self.set_order(strategy, ctx);
                 Flow::Handled
             }
+            ProjectReply::MoveHome(mode) => {
+                let generation = ctx.next_generation();
+                self.send(
+                    SetupQuery::MoveHome {
+                        project: self.screen.project.clone(),
+                        mode,
+                        generation,
+                    },
+                    ctx,
+                );
+                Flow::Handled
+            }
         };
         self.sync_master(ctx);
         self.pump(ctx);
@@ -1500,6 +1531,7 @@ impl ProjectPage {
             && self.screen.folders.is_none()
             && self.screen.general.is_none()
             && !self.screen.confirm_remove
+            && !self.screen.confirm_move
             && !self.screen.changes.editing()
             && !self.typing()
     }
@@ -1701,6 +1733,9 @@ impl Screen for ProjectPage {
                 OwnerEvent::Questions(event) => self.screen.questions.apply(event),
                 OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
                     self.screen.recovery.apply(event);
+                }
+                OwnerEvent::Roadmap(event) if event.query.project() == &self.screen.project => {
+                    self.screen.roadmap.apply(event);
                 }
                 OwnerEvent::Process(event) => {
                     self.import_arrived(event, ctx);

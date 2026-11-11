@@ -2065,3 +2065,65 @@ fn a_proposal_made_from_a_newer_text_than_the_page_shows_rereads_instead_of_offe
     assert!(!shown.contains("Proposed instructions"), "{shown}");
     assert!(shown.contains("changed since you opened"), "{shown}");
 }
+
+#[test]
+fn a_skill_written_with_an_engine_namespace_is_tagged_whole_and_an_unknown_one_stays_plain() {
+    let skill = |name: &str| Skill {
+        name: name.chars().collect(),
+        id: format!("id-{name}"),
+        title: name.to_owned(),
+    };
+    let mut skills = vec![skill("tdd"), skill("code-review"), skill("ops:deploy")];
+    skills.sort_by_key(|tag| std::cmp::Reverse(tag.name.len()));
+    let found = |line: &str| {
+        let chars: Vec<char> = line.chars().collect();
+        skill_ranges(&chars, 0, chars.len(), &skills)
+            .into_iter()
+            .map(|(start, end, index)| {
+                (
+                    chars[start..end].iter().collect::<String>(),
+                    skills[index].title.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let pair = |written: &str, title: &str| (written.to_owned(), title.to_owned());
+    assert_eq!(
+        found("Use crazyagent:tdd, then superpowers:code-review."),
+        vec![
+            pair("crazyagent:tdd", "tdd"),
+            pair("superpowers:code-review", "code-review"),
+        ]
+    );
+    assert_eq!(
+        found("software-practices:tdd and tdd"),
+        vec![pair("software-practices:tdd", "tdd"), pair("tdd", "tdd")]
+    );
+    assert_eq!(
+        found("other:tdd"),
+        vec![],
+        "an unknown namespace stays plain text"
+    );
+    assert_eq!(
+        found("crazyagent:tddx"),
+        vec![],
+        "a longer name is another name"
+    );
+    assert_eq!(found("xcrazyagent:tdd"), vec![]);
+    assert_eq!(found("crazyagent:"), vec![]);
+    assert_eq!(
+        found("ops:deploy"),
+        vec![pair("ops:deploy", "ops:deploy")],
+        "a catalog name that holds a colon is still its own tag"
+    );
+    let chars: Vec<char> = "software-practices:code-review".chars().collect();
+    let review = skills
+        .iter()
+        .position(|tag| tag.title == "code-review")
+        .unwrap();
+    assert_eq!(
+        skill_ranges(&chars, 25, 26, &skills),
+        vec![(0, chars.len(), review)],
+        "a qualified name that starts left of the drawn range is found whole"
+    );
+}

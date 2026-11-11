@@ -804,6 +804,7 @@ async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
     assert_eq!(result(missing), rejected("pool_missing"));
     let with_documents = SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision: 3,
         name: None,
         setup: ProjectSetup {
@@ -817,6 +818,7 @@ async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
     );
     let blank_name = SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision: 3,
         name: Some(" ".into()),
         setup: edited,

@@ -76,20 +76,31 @@ impl AddPlan {
     /// the source. Output: Ok once the folder is complete at its destination,
     /// or a code (`home_icloud_not_downloaded` for a file still only in
     /// iCloud, `home_permission_denied` when macOS or permissions refuse);
-    /// on failure the source is left as it was and no partial folder shows.
+    /// on a failure before the folder is complete the source is left as it was and
+    /// no partial folder shows; `home_move_source_left` means the folder landed but
+    /// part of the source could not be deleted.
     pub fn run(self) -> Result<(), EngineError> {
+        match self.place()? {
+            Placed::Whole => Ok(()),
+            Placed::Copied(old) => old.clear(),
+        }
+    }
+
+    /// Puts the folder at its destination and deletes nothing: a rename for a move on
+    /// one disk, else a checked copy that leaves the whole source in place for the
+    /// caller to clear. Output: whether a source is left to clear, or the refusal code
+    /// with the source as it was and no partial folder showing.
+    pub(super) fn place(self) -> Result<Placed, EngineError> {
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
         match self.mode {
             AddMode::Move => match fs::rename(&self.source, &self.destination) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-                    move_within(&self.source, &self.destination, self.bounds)
-                }
+                Ok(()) => Ok(Placed::Whole),
+                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => self.place_by_copy(),
                 Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
                     eprintln!("home_move_by_copy cause=edeadlk");
-                    move_within(&self.source, &self.destination, self.bounds)
+                    self.place_by_copy()
                 }
                 Err(e) => Err(failed_step("rename", &e, "home_move_failed")),
             },
@@ -99,8 +110,57 @@ impl AddPlan {
                 Copying::Standalone,
                 self.bounds,
             )
-            .map(drop),
+            .map(|_| Placed::Whole),
         }
+    }
+
+    /// The copy a move falls back to across disks and out of iCloud Drive: copies every
+    /// entry and checks the copy against the source, which stays whole. Output: the
+    /// source to clear, with what the check matched, or the refusal code.
+    pub(super) fn place_by_copy(self) -> Result<Placed, EngineError> {
+        assert_eq!(self.mode, AddMode::Move);
+        if fs::symlink_metadata(&self.destination).is_ok() {
+            return Err(refused("home_destination_exists"));
+        }
+        let verified = copy_into(&self.source, &self.destination, Copying::Exact, self.bounds)?;
+        Ok(Placed::Copied(OldSource {
+            source: self.source,
+            verified,
+            bounds: self.bounds,
+        }))
+    }
+}
+
+/// What placing a folder left behind: nothing (a rename, or a Copy whose source stays on
+/// purpose), or the whole source of a move that went by copy, still to be cleared.
+#[derive(Debug)]
+pub enum Placed {
+    Whole,
+    Copied(OldSource),
+}
+
+/// The source of a move that went by copy: the folder, what the check of the copy matched
+/// and the bounds of the walk. Clearing it deletes only what the check matched.
+#[derive(Debug)]
+pub struct OldSource {
+    source: PathBuf,
+    verified: Verified,
+    bounds: CopyBounds,
+}
+
+impl OldSource {
+    /// The folder the move left behind.
+    pub fn folder(&self) -> &Path {
+        &self.source
+    }
+
+    /// Deletes the source entries the check matched and that are still as it saw them,
+    /// then each folder left empty. Output: Ok once the source is gone, else
+    /// `home_move_source_left` with every other entry kept in place.
+    pub fn clear(self) -> Result<(), EngineError> {
+        assert!(self.source.is_absolute());
+        make_writable(&self.source).map_err(|_| source_left(1))?;
+        remove_verified(&self.source, &self.verified, self.bounds)
     }
 }
 

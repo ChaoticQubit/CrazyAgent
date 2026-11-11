@@ -153,6 +153,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::OpenLiveSession { .. } => "live session open",
                         SetupQuery::Overview { .. } => "overview",
                         SetupQuery::RefreshOverview { .. } => "overview refresh",
+                        SetupQuery::MoveHome { .. } => "move home",
                     });
                     connection.project_setup(query).unwrap();
                 }
@@ -191,6 +192,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
                 other => panic!("project pages never send {other:?}"),
             }
         }
@@ -1066,6 +1068,7 @@ async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page()
     shell.ctx.request(Request::Setup(SetupQuery::Change {
         action: crate::project_setup::SetupAction::Update {
             project_id: notes.clone(),
+            kept: None,
             expected_revision: stored.revision,
             name: None,
             setup: ProjectSetup {

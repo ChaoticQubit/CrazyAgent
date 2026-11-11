@@ -17,6 +17,7 @@ import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamVali
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
+import { MoveHome } from "./move-home";
 import { RemoveDialogView, deleteReady, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
@@ -754,7 +755,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {SECTIONS.map((item) => <button type="button" key={item.id} aria-current={active === item.id ? "page" : undefined} onClick={() => setActive(item.id)}>{item.label}</button>)}
     </nav>
     <div className="pj-settings-body">
-      {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} /></>)}
+      {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} settings /></>)}
       {active === "overview" && <OverviewSection data={data} onMove={() => setActive("remove")} />}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
@@ -766,7 +767,10 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
       {active === "messages" && <MessagesSection data={data} />}
-      {active === "remove" && <RemoveSection data={data} setup={setup} />}
+      {active === "remove" && <div className="pj-stack">
+        {setup && <MoveHome data={data} setup={setup} />}
+        <RemoveSection data={data} setup={setup} />
+      </div>}
     </div>
   </div>;
 }

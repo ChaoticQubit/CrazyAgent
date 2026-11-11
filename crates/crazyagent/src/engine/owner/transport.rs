@@ -2845,7 +2845,11 @@ fn dispatch_directory(path: &Path) -> Result<(u64, u64), EngineError> {
     let file = File::from(
         rustix::fs::open(
             path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY
+                | OFlags::DIRECTORY
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(io_error)?,
@@ -2860,12 +2864,17 @@ fn dispatch_directory(path: &Path) -> Result<(u64, u64), EngineError> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+/// Reads one small file of a leased worktree or its git folder that an agent may have
+/// replaced: opened without following a link and without waiting on a FIFO or device, kept
+/// only when it is this user's own regular file with one name, not group or world
+/// writable, within `limit` bytes and unchanged while it was read. Inputs: the path and
+/// the limit. Output: the bytes, or the refusal.
 #[cfg(unix)]
 fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     let file = File::from(
         rustix::fs::open(
             path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(io_error)?,
@@ -2895,6 +2904,7 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     {
         return Err(failure("dispatch_file_changed"));
     }
+    assert!(bytes.len() <= limit);
     Ok(bytes)
 }
 

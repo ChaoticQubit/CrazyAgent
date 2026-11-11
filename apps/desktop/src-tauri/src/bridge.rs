@@ -45,6 +45,7 @@ pub mod project_setup;
 pub mod questions;
 mod queue;
 mod recovery;
+mod roadmap;
 mod scheduling;
 mod team;
 pub mod terminal;
@@ -699,6 +700,11 @@ impl NativeBridge {
             OwnerMutation::SetProjectsHome { .. } => ("projects_home", None, None),
             OwnerMutation::MoveProjectsHome { .. } => ("move_projects_home", None, None),
             OwnerMutation::AddExistingFolder { .. } => ("add_existing_folder", None, None),
+            OwnerMutation::MoveProjectHome { project_id, .. } => (
+                "project_move_home",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::StartOnboarding { path, .. } => {
                 ("start_onboarding", onboarded_project(path), None)
             }
@@ -1335,6 +1341,7 @@ mod tests {
             ("agents", agents::agent_error(engine())),
             ("process", process::process_error(engine())),
             ("questions", questions::questions_error(engine())),
+            ("roadmap", roadmap::roadmap_error(engine())),
             ("recovery", recovery::recovery_error(engine())),
             ("cleanup", cleanup::cleanup_error(engine())),
             ("ide reveal", ide_reveal::ide_error(engine())),

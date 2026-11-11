@@ -141,6 +141,7 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                     expected_revision,
                     name,
                     setup,
+                    ..
                 } => {
                     controller
                         .update_project_setup(
@@ -174,6 +175,7 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
         | SetupQuery::TeamChange { .. }
         | SetupQuery::TeamMessages { .. }
         | SetupQuery::OpenLiveSession { .. }
+        | SetupQuery::MoveHome { .. }
         | SetupQuery::Library(_)
         | SetupQuery::CoordQuestions { .. } => {
             panic!("the project screen never reads the team or the library")
@@ -1793,6 +1795,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
 
     let update_at = |expected_revision: u64| SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision,
         name: Some("Notes Pro".into()),
         setup: ProjectSetup {
@@ -3095,6 +3098,7 @@ fn console_screen() -> ProjectScreen {
             path: "docs/brief.md".into(),
             kind: ContextKind::Document,
             bytes: 10,
+            linked: false,
         }],
     });
     screen.open(Tab::Conversation);
@@ -3479,11 +3483,13 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
                 path: "context/brief.md".into(),
                 kind: ContextKind::Brief,
                 bytes: 10,
+                linked: false,
             },
             ContextItem {
                 path: "context/documents/spec.md".into(),
                 kind: ContextKind::Document,
                 bytes: 20,
+                linked: false,
             },
         ],
     });
@@ -3542,6 +3548,7 @@ fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_canno
             path: "context/documents/spec.md".into(),
             kind: ContextKind::Document,
             bytes: 20,
+            linked: false,
         }],
     };
     screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
@@ -3752,6 +3759,7 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         SetupQuery::Change {
             action: SetupAction::Update {
                 project_id: project.clone(),
+                kept: None,
                 expected_revision,
                 name: None,
                 setup: edited,
@@ -4093,6 +4101,146 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
             "{shown}"
         );
     }
+}
+
+/// The Settings key m asks before a project moves into the projects home: the ask says the
+/// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
+/// project where it is. A refusal shows as a plain line and an applied move reads the setup
+/// again.
+#[test]
+fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
+    use crate::projects_home::AddMode;
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
+    assert!(shown.contains("m Move into CrazyAgent folder"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(screen.confirm_move);
+    let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
+    let shown = text(&drawn.rows);
+    assert!(
+        shown.contains("Move Kept into your CrazyAgent folder?"),
+        "{shown}"
+    );
+    assert!(shown.contains("Stop the team first"), "{shown}");
+    assert!(shown.contains("[> Keep it here ]"), "{shown}");
+    assert_eq!(
+        drawn.help,
+        [
+            ("m", "Move"),
+            ("c", "Copy"),
+            ("n", "Keep it here"),
+            ("Esc", "Keep it here")
+        ]
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('q'))), ProjectReply::Handled);
+    assert!(screen.confirm_move);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('m')));
+    assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('m')));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('m'))),
+        ProjectReply::MoveHome(AddMode::Move)
+    );
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('m')));
+    assert_eq!(
+        screen.key(key(KeyCode::Char('c'))),
+        ProjectReply::MoveHome(AddMode::Copy)
+    );
+    assert!(!screen.confirm_move);
+
+    let query = SetupQuery::MoveHome {
+        project,
+        mode: AddMode::Move,
+        generation: 4,
+    };
+    let refused = |code: &str| {
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: code.into(),
+        }))
+    };
+    screen.apply(&query, refused("move_project_busy"));
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| problem.starts_with("Stop the team first")),
+        "{:?}",
+        screen.problem
+    );
+    screen.apply(&query, refused("move_project_already_home"));
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This project is already in your projects folder.")
+    );
+    screen.apply(&query, refused("home_move_worktrees"));
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| !problem.contains("home_move_worktrees")),
+        "{:?}",
+        screen.problem
+    );
+    screen.problem = None;
+    screen.setup_due = false;
+    screen.apply(&query, Ok(SetupView::Changed(OwnerResult::Applied)));
+    assert_eq!(screen.problem, None);
+    assert!(screen.setup_due);
+}
+
+#[test]
+fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_deleted() {
+    use super::project::OpenRequest;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![ContextItem {
+            path: "repo/docs/plan-2026.md".into(),
+            kind: ContextKind::Plan,
+            bytes: 15,
+            linked: true,
+        }],
+    });
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("plan-2026.md"), "{shown}");
+    assert!(shown.contains("Linked from your repo"), "{shown}");
+    assert!(!shown.contains("Planned after research"), "{shown}");
+
+    let plan = OpenRequest::Context {
+        folder: "/private/tmp/ca-notes-cli".into(),
+        path: "docs/plan-2026.md".into(),
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Char('o'))),
+        ProjectReply::Open(plan.clone()),
+        "a linked file opens from the project folder, not the state folder"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(plan)
+    );
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert!(screen.reading, "the linked file opens in the reader");
+    screen.key(key(KeyCode::Esc));
+    assert!(!screen.reading);
+    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert!(screen.confirm_delete.is_none(), "no delete is asked for");
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This file is linked from your repo. It can't be deleted here.")
+    );
 }
 
 mod overview_read {

@@ -535,7 +535,8 @@ impl NativeBridge {
 
     /// Changes a project's name, description, stack, platforms, research, pool and team.
     /// Takes the project id, the new setup, an optional new name, the setup revision the screen
-    /// showed (the current one when absent) and the client generation. Returns the actual
+    /// showed (the current one when absent), the files the setup mapping found that the owner
+    /// keeps linked (none leaves the links alone) and the client generation. Returns the actual
     /// commit receipt; a change made in between is the plain rejection `stale_revision`.
     pub async fn update_project_setup(
         &mut self,
@@ -543,6 +544,7 @@ impl NativeBridge {
         setup: ProjectSetup,
         name: Option<String>,
         revision: Option<u64>,
+        kept: Option<Vec<String>>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
@@ -573,6 +575,7 @@ impl NativeBridge {
                     expected_revision: revision.unwrap_or(stored.revision),
                     name,
                     setup,
+                    kept,
                 },
                 generation,
             )
@@ -602,6 +605,36 @@ impl NativeBridge {
         };
         self.controller()?
             .begin_mutation(mutation, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Moves or copies a project kept where it is into the projects home: the engine waits
+    /// for its team to stop, moves the folder and points the project and its agents' copies
+    /// at the new place. Takes the project id, move or copy, the soft refusals the owner
+    /// chose to go past and the client generation. Returns the actual commit receipt.
+    pub async fn move_project_home(
+        &mut self,
+        id: &str,
+        mode: crazyagent::projects_home::AddMode,
+        overrides: Vec<crazyagent::projects_home::AddOverride>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::MoveProjectHome {
+                    project_id,
+                    mode,
+                    overrides,
+                },
+                generation,
+            )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }

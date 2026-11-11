@@ -288,7 +288,7 @@ mod run {
     /// The name of one try's run, unique per start time and try so the runner never sees a
     /// name twice. Inputs: the cleanup's start in milliseconds and the try. Output: the name.
     pub(super) fn run_name(started_ms: i64, number: u32) -> String {
-        assert!(started_ms >= 0 && number >= 1 && number <= super::TRIES_MAX);
+        assert!(started_ms >= 0 && (1..=super::TRIES_MAX).contains(&number));
         format!("{NAME_PREFIX}{started_ms:013}-t{number}")
     }
 

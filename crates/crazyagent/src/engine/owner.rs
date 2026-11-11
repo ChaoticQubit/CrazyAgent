@@ -188,6 +188,8 @@ pub enum OwnerMutation {
         expected_revision: u64,
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<String>>,
     },
     RemoveProject {
         project_id: ProjectId,
@@ -217,6 +219,12 @@ pub enum OwnerMutation {
     },
     AddExistingFolder {
         source: String,
+        mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
+    },
+    MoveProjectHome {
+        project_id: ProjectId,
         mode: crate::projects_home::AddMode,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         overrides: Vec<crate::projects_home::AddOverride>,
@@ -412,12 +420,14 @@ impl OwnerMutation {
                 expected_revision,
                 name,
                 setup,
+                kept,
             } => {
                 let action = crate::project_setup::SetupAction::Update {
                     project_id: project_id.clone(),
                     expected_revision: *expected_revision,
                     name: name.clone(),
                     setup: setup.clone(),
+                    kept: kept.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -479,6 +489,19 @@ impl OwnerMutation {
             } => {
                 let action = crate::projects_home::HomeAction::Added {
                     source: source.clone(),
+                    mode: *mode,
+                    overrides: overrides.clone(),
+                };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveProject {
+                    project_id: project_id.clone(),
                     mode: *mode,
                     overrides: overrides.clone(),
                 };
@@ -863,7 +886,10 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectContextItem { path, .. } => {
-                if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+                if path.is_empty()
+                    || path.len() > crate::project_setup::CONTEXT_PATH_BYTES_MAX
+                    || path.chars().any(char::is_control)
+                {
                     return Err(failure("context_path_invalid"));
                 }
                 return Ok(None);

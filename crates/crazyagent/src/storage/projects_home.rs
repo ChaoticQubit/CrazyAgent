@@ -355,6 +355,9 @@ fn delete_blocked(
     if pending_move(tx)?.is_some() {
         return Ok(Some(DeleteRefusal::plain("home_move_in_progress")));
     }
+    if home::pending(tx)?.is_some() {
+        return Ok(Some(DeleteRefusal::plain("move_project_in_progress")));
+    }
     let shared = projects.iter().find(|other| {
         &other.project_id != project && moved.iter().any(|folder| home::in_use(folder, other))
     });
@@ -650,6 +653,9 @@ pub(super) fn move_plan(
     if pending_move(&tx)?.is_some() {
         return Err(error("home_move_in_progress"));
     }
+    if home::pending(&tx)?.is_some() {
+        return Err(error("move_project_in_progress"));
+    }
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
@@ -671,6 +677,91 @@ pub(super) fn move_plan(
     .map_err(error)?;
     tx.commit().map_err(error)?;
     Ok(plan)
+}
+
+/// Plans a MoveProjectHome before the owner transport moves or copies the project's folder
+/// and records the move as pending in the same write, which is also the hold on launches
+/// in that folder (`crate::projects_home::move_holds`). Input: the connection, database
+/// path, owner admission, the revision the owner saw, the project, Move or Copy with the
+/// owner's overrides, the request and the transport exchange that will run the move.
+/// Output: the checked plan, or the refusal code (`stale_revision` when the engine moved
+/// on, `home_move_in_progress` or `home_move_delete_in_progress` while the projects home
+/// itself is being changed, else what `crate::projects_home::plan` names); nothing on disk
+/// changes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn project_move_plan(
+    db: &mut Connection,
+    path: &Path,
+    a: &Admission,
+    expected: &Cursor,
+    project: &ProjectId,
+    mode: AddMode,
+    overrides: &[AddOverride],
+    request: &RequestId,
+    exchange: u64,
+) -> Result<home::ProjectMove, EngineError> {
+    let exchange = i64::try_from(exchange).map_err(error)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if owner_revision(&tx)? != expected.value() {
+        return Err(error("stale_revision"));
+    }
+    if pending_move(&tx)?.is_some() {
+        return Err(error("home_move_in_progress"));
+    }
+    if delete_planned(&tx)? {
+        return Err(error("home_move_delete_in_progress"));
+    }
+    let plan = home::plan(
+        &tx,
+        path,
+        &engine_root(path)?,
+        &guarded(&tx)?,
+        &home::Asked {
+            project,
+            mode,
+            overrides,
+            request: request.as_str(),
+            exchange,
+        },
+    )?;
+    tx.commit().map_err(error)?;
+    Ok(plan)
+}
+
+/// Finishes or forgets a pending project move in its own transaction. Input: the
+/// connection, the transport exchange the move must belong to (None at engine start,
+/// before any exchange, which finishes any pending move from disk) and whether that
+/// exchange ran its disk work. A move whose work never ran is forgotten; any other is
+/// finished as `crate::projects_home::finish` does, a Copy never from disk alone; a move
+/// another exchange planned is left alone. Output: Ok, or any SQLite failure.
+pub(super) fn project_move_settle(
+    db: &mut Connection,
+    exchange: Option<u64>,
+    ran: bool,
+) -> Result<(), EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let finished = match exchange {
+        None => home::finish(&tx, |_| true, false)?,
+        Some(exchange) => {
+            let exchange = i64::try_from(exchange).map_err(error)?;
+            if ran {
+                home::finish(&tx, |pending| pending.exchange == exchange, false)?
+            } else {
+                home::forget(&tx, exchange)?;
+                None
+            }
+        }
+    };
+    tx.commit().map_err(error)?;
+    if let Some(home::Finished::Moved { repointed }) = finished {
+        eprintln!("project_move_settled copies_repointed={repointed}");
+    }
+    Ok(())
 }
 
 /// Checks again, under the hold of the pending move, that no agent work appeared in the old
@@ -1086,6 +1177,9 @@ pub(super) fn execute(
             if pending_move(tx)?.is_some() {
                 return rejected("home_move_in_progress");
             }
+            if home::pending(tx)?.is_some() {
+                return rejected("move_project_in_progress");
+            }
             if delete_planned(tx)? {
                 return rejected("home_move_delete_in_progress");
             }
@@ -1096,6 +1190,7 @@ pub(super) fn execute(
             ..
         } => rejected("home_move_requires_transport"),
         HomeAction::Added { .. } => rejected("home_add_requires_transport"),
+        HomeAction::MoveProject { .. } => rejected("move_project_requires_transport"),
         HomeAction::Trash { path: picked } => {
             let Some(saved) = home::load(tx)? else {
                 return rejected("projects_home_unset");
@@ -1113,13 +1208,15 @@ pub(super) fn execute(
 }
 
 /// Records the result of disk work the owner transport carried out for
-/// AddExistingFolder or MoveProjectsHome with `move_projects`.
+/// AddExistingFolder, MoveProjectsHome with `move_projects` or MoveProjectHome.
 /// Input: the transaction, database path, the request, the mutation's command
 /// and the transport's effect. Output: Rejected with the transport's refusal code;
 /// for an add, Applied once the real folder the plan named is confirmed in the
 /// home (and, for Move, gone from its old place); for a home move, the move
-/// pending under this request finished as `settle` does. A move the transport
-/// refused or failed stays pending for the transport's settle job.
+/// pending under this request finished as `settle` does; for a project move, the
+/// move pending under this request finished as `crate::projects_home::finish` does,
+/// Applied once the project's stored folder and agent copies point into the home.
+/// A move the transport refused or failed stays pending for the transport's settle job.
 pub(super) fn record(
     tx: &Transaction<'_>,
     path: &Path,
@@ -1155,6 +1252,19 @@ pub(super) fn record(
             ..
         } if real.is_none() => settle(tx, path, |pending| pending.request == request.as_str())?
             .ok_or_else(|| error("home_record_invalid")),
+        HomeAction::MoveProject { .. } if real.is_some() => {
+            let finished = home::finish(tx, |pending| pending.request == request.as_str(), true)?
+                .ok_or_else(|| error("home_record_invalid"))?;
+            Ok(match finished {
+                home::Finished::Moved { repointed } => {
+                    eprintln!("project_moved copies_repointed={repointed}");
+                    Outcome::Applied
+                }
+                home::Finished::Left => Outcome::Rejected {
+                    code: "home_add_unverified".into(),
+                },
+            })
+        }
         _ => Err(error("home_record_invalid")),
     }
 }

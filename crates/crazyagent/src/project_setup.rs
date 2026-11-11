@@ -31,6 +31,11 @@ pub const CONTEXT_ITEMS_MAX: usize = 64;
 pub const CONTEXT_CHUNK_BYTES: usize = 8192;
 pub const REPORT_BYTES_MAX: u64 = 1024 * 1024;
 pub const CONTEXT_DIRECTORY: &str = "context";
+/// The start of the context path of a repository file linked into the project's context:
+/// `repo/` and the file's path below the project folder.
+pub const LINKED_PREFIX: &str = "repo/";
+/// The most bytes of a context item path an owner read carries.
+pub const CONTEXT_PATH_BYTES_MAX: usize = 512;
 pub const PROJECTS_DIRECTORY: &str = "projects";
 #[cfg(unix)]
 const BRIEF_PARTIAL: &str = ".brief.partial";
@@ -642,12 +647,18 @@ pub enum ContextKind {
     Plan,
 }
 
+/// One file of a project's context: its context path, what it is and its size. `linked` is
+/// set for a repository file linked into the context, whose path starts with
+/// [`LINKED_PREFIX`]; it is left off the wire when false, so a list with no linked file
+/// reads as it did before, while a reader from before linked files refuses a list with one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextItem {
     pub path: String,
     pub kind: ContextKind,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -742,6 +753,11 @@ pub enum SetupQuery {
         project: ProjectId,
         generation: u64,
     },
+    MoveHome {
+        project: ProjectId,
+        mode: crate::projects_home::AddMode,
+        generation: u64,
+    },
     Library(crate::memory::library::LibraryQuery),
     Overview {
         project: ProjectId,
@@ -803,6 +819,8 @@ pub enum SetupAction {
         expected_revision: u64,
         name: Option<String>,
         setup: ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<String>>,
     },
     Remove {
         project_id: ProjectId,
@@ -899,7 +917,9 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetAgentPolicy { policy, .. } => policy.validate().map_err(failure),
-            Self::Update { name, setup, .. } => {
+            Self::Update {
+                name, setup, kept, ..
+            } => {
                 let renamed = name.as_ref().map(|name| ProjectSpec {
                     name: name.clone(),
                     repositories: Vec::new(),
@@ -908,6 +928,14 @@ impl SetupAction {
                     return Err(failure("project_spec_bounds"));
                 }
                 if !setup.documents.is_empty() {
+                    return Err(failure("project_setup_bounds"));
+                }
+                if kept.as_ref().is_some_and(|kept| {
+                    kept.len() > links::LINKS_MAX
+                        || kept
+                            .iter()
+                            .any(|path| path.len() > links::LINK_PATH_BYTES_MAX)
+                }) {
                     return Err(failure("project_setup_bounds"));
                 }
                 setup.validate()
@@ -1900,6 +1928,7 @@ pub(crate) fn execute(
             expected_revision,
             name,
             setup,
+            kept,
         } => update(
             tx,
             config,
@@ -1907,6 +1936,7 @@ pub(crate) fn execute(
             *expected_revision,
             name.as_deref(),
             setup,
+            kept.as_deref(),
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
@@ -2079,9 +2109,12 @@ fn rejected(code: &str) -> Outcome {
 }
 
 /// Changes an existing project's name, description, stack, platforms, research, pool and team.
+/// With `kept`, the files the setup mapping found that the owner kept become the project's
+/// links, replacing earlier ones, and no research job is queued for a kind they cover.
 /// Takes the transaction, configuration, project, the setup revision the owner edited, an
-/// optional new name and the new setup; documents keep their own add and delete actions.
-/// Returns Applied, or a plain rejection such as `stale_revision` after a concurrent change.
+/// optional new name, the new setup and the kept paths, none to leave the links alone;
+/// documents keep their own add and delete actions. Returns Applied, or a plain rejection
+/// such as `stale_revision` after a concurrent change.
 fn update(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2089,6 +2122,7 @@ fn update(
     expected_revision: u64,
     name: Option<&str>,
     setup: &ProjectSetup,
+    kept: Option<&[String]>,
 ) -> Result<Outcome, EngineError> {
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
@@ -2125,6 +2159,16 @@ fn update(
         .collect();
     stored.platforms = setup.platforms.clone();
     stored.research = setup.research.clone();
+    if let Some(kept) = kept {
+        let linked = crate::onboarding::found_links(tx, project_id, kept)?;
+        links::set(tx, project_id, &linked)?;
+        stored.research.retain(|kind| {
+            !linked.iter().any(|link| match link.kind {
+                links::LinkKind::Roadmap => *kind == ResearchKind::RoadmapPlanning,
+                links::LinkKind::Research(found) => found == *kind,
+            })
+        });
+    }
     stored.pool = setup.pool.clone();
     if let Some(team) = &setup.team {
         stored.team = team.clone();
@@ -3126,6 +3170,7 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
                 path,
                 kind,
                 bytes: metadata.len(),
+                linked: false,
             });
         }
         Ok(())
@@ -3163,6 +3208,108 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
     })
 }
 
+/// Lists a project's context as [`list_context`] does, then the repository files linked into
+/// it: each link that [`links::read_linked`] reads becomes a `repo/<path>` item with `linked`
+/// set, a roadmap as a plan and a research file as research. A link that does not read, or
+/// whose context path is over [`CONTEXT_PATH_BYTES_MAX`], is left out. Inputs: the stored
+/// setup and its links. Output: at most [`CONTEXT_ITEMS_MAX`] items.
+pub fn list_context_with_links(
+    stored: &StoredSetup,
+    links: &[links::DocLink],
+) -> Result<ProjectContext, EngineError> {
+    assert!(links.len() <= links::LINKS_MAX);
+    let mut context = list_context(stored)?;
+    let folder = stored.project_folder();
+    let shared = stored.state_folder() == folder;
+    for link in links {
+        if context.items.len() >= CONTEXT_ITEMS_MAX {
+            break;
+        }
+        let path = format!("{LINKED_PREFIX}{}", link.path);
+        let listed = shared && context.items.iter().any(|item| item.path == link.path);
+        if listed || path.len() > CONTEXT_PATH_BYTES_MAX {
+            continue;
+        }
+        let Some(text) = links::read_linked(&folder, &link.path) else {
+            continue;
+        };
+        assert!(text.len() as u64 <= links::LINK_BYTES_MAX);
+        context.items.push(ContextItem {
+            path,
+            kind: match link.kind {
+                links::LinkKind::Roadmap => ContextKind::Plan,
+                links::LinkKind::Research(_) => ContextKind::Research,
+            },
+            bytes: text.len() as u64,
+            linked: true,
+        });
+    }
+    assert!(context.items.len() <= CONTEXT_ITEMS_MAX);
+    Ok(context)
+}
+
+/// Reads one bounded chunk of a context item as [`read_context`] does, or of a linked
+/// repository file asked for as `repo/<path>`: only a path that is a stored link is read,
+/// below the project folder through [`links::read_linked`], so no link is followed and no
+/// other file of the repository can be asked for. Inputs: the stored setup, its links, the
+/// item path and a byte offset. Output: the chunk, `context_path_invalid` for a `repo/` path
+/// that is no stored link, or `context_item_missing` when the linked file does not read.
+pub fn read_context_with_links(
+    stored: &StoredSetup,
+    links: &[links::DocLink],
+    path: &str,
+    offset: u64,
+) -> Result<ContextChunk, EngineError> {
+    let Some(linked) = path.strip_prefix(LINKED_PREFIX) else {
+        return read_context(stored, path, offset);
+    };
+    assert!(links.len() <= links::LINKS_MAX);
+    if !links.iter().any(|link| link.path == linked) {
+        return Err(failure("context_path_invalid"));
+    }
+    let text = links::read_linked(&stored.project_folder(), linked)
+        .ok_or_else(|| failure("context_item_missing"))?;
+    let size = text.len() as u64;
+    assert!(size <= links::LINK_BYTES_MAX);
+    if offset > size {
+        return Err(failure("context_offset_invalid"));
+    }
+    let start = offset as usize;
+    let end = text.len().min(start + CONTEXT_CHUNK_BYTES);
+    Ok(text_chunk(
+        path,
+        size,
+        offset,
+        text.as_bytes()[start..end].to_vec(),
+    ))
+}
+
+/// Makes the chunk for the bytes read at one offset of a text item: bytes that stop inside
+/// a character are cut back to the last whole one unless they end the item, and the next
+/// offset is named while more remains. Inputs: the item path, its size, the offset and at
+/// most [`CONTEXT_CHUNK_BYTES`] bytes read there. Output: the chunk.
+fn text_chunk(path: &str, size: u64, offset: u64, mut bytes: Vec<u8>) -> ContextChunk {
+    assert!(bytes.len() <= CONTEXT_CHUNK_BYTES);
+    let complete = offset + bytes.len() as u64 >= size;
+    if !complete {
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(_) => bytes.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => bytes.len(),
+        };
+        bytes.truncate(valid.max(1));
+    }
+    let consumed = bytes.len() as u64;
+    assert!(consumed <= CONTEXT_CHUNK_BYTES as u64);
+    ContextChunk {
+        path: path.into(),
+        bytes: size,
+        offset,
+        text: Some(String::from_utf8_lossy(&bytes).into_owned()),
+        next_offset: (offset + consumed < size).then_some(offset + consumed),
+    }
+}
+
 /// Reads one bounded chunk of a context item without following links.
 /// Takes the stored setup, the relative item path and a byte offset.
 /// Returns text for markdown, text and csv files; other kinds return only their size.
@@ -3180,7 +3327,7 @@ pub fn read_context(
     } else {
         0
     };
-    let (mut bytes, size) =
+    let (bytes, size) =
         read_beneath(&stored.state_folder(), path, offset, limit).map_err(failure)?;
     if !textual {
         return Ok(ContextChunk {
@@ -3191,25 +3338,7 @@ pub fn read_context(
             next_offset: None,
         });
     }
-    let complete = offset + bytes.len() as u64 >= size;
-    if !complete {
-        let valid = match std::str::from_utf8(&bytes) {
-            Ok(_) => bytes.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => bytes.len(),
-        };
-        bytes.truncate(valid.max(1));
-    }
-    let consumed = bytes.len() as u64;
-    let chunk = ContextChunk {
-        path: path.into(),
-        bytes: size,
-        offset,
-        text: Some(String::from_utf8_lossy(&bytes).into_owned()),
-        next_offset: (offset + consumed < size).then_some(offset + consumed),
-    };
-    assert!(consumed <= CONTEXT_CHUNK_BYTES as u64);
-    Ok(chunk)
+    Ok(text_chunk(path, size, offset, bytes))
 }
 
 /// Reads the last plain lines of one research job's agent output, with secrets hidden.
