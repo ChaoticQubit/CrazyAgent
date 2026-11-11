@@ -3,6 +3,7 @@ use super::{
     in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
 };
 use crate::engine::EngineError;
+use crate::landing::RepositoryHolds;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
@@ -105,6 +106,22 @@ pub struct ProjectMove {
     add: AddPlan,
 }
 
+/// What a project move's disk work leaves for its caller: what to clear once the move is
+/// recorded, and the landing holds to keep until then.
+#[derive(Debug)]
+pub struct Moved {
+    placed: Placed,
+    landing: RepositoryHolds,
+}
+
+impl Moved {
+    /// Splits the outcome. Output: what is left to clear after the record, and the landing
+    /// holds, which the caller drops only once the move is recorded or given up.
+    pub(crate) fn into_parts(self) -> (Placed, RepositoryHolds) {
+        (self.placed, self.landing)
+    }
+}
+
 impl ProjectMove {
     /// The project being moved.
     pub fn project(&self) -> &ProjectId {
@@ -124,7 +141,7 @@ impl ProjectMove {
     /// Waits for the project's agents to stop, then puts the folder in the home as an add
     /// does, deleting nothing. Output: what is left to clear once the move is recorded (the
     /// whole old folder of a move that went by copy), or the refusal code.
-    pub fn run(self) -> Result<Placed, EngineError> {
+    pub fn run(self) -> Result<Moved, EngineError> {
         self.run_with(MOVE_STOP_WAIT)
     }
 
@@ -132,18 +149,20 @@ impl ProjectMove {
     /// runs (`move_project_busy` past the wait), then the folder is placed by
     /// [`AddPlan::place`], which leaves the source whole. Input: the wait. Output: the
     /// outcome.
-    pub(crate) fn run_with(self, wait: Duration) -> Result<Placed, EngineError> {
-        self.ready(wait)?;
-        self.add.place()
+    pub(crate) fn run_with(self, wait: Duration) -> Result<Moved, EngineError> {
+        let landing = self.ready(wait)?;
+        let placed = self.add.place()?;
+        Ok(Moved { placed, landing })
     }
 
     /// Runs the plan as a move across disks or out of iCloud Drive does, by a checked
     /// copy, on any disk. Input: the wait. Output: the old folder to clear, or the
     /// refusal code.
     #[cfg(test)]
-    pub(crate) fn run_by_copy(self, wait: Duration) -> Result<Placed, EngineError> {
-        self.ready(wait)?;
-        self.add.place_by_copy()
+    pub(crate) fn run_by_copy(self, wait: Duration) -> Result<Moved, EngineError> {
+        let landing = self.ready(wait)?;
+        let placed = self.add.place_by_copy()?;
+        Ok(Moved { placed, landing })
     }
 
     /// Waits until no agent of the project runs, then asks again, under the move's hold,
@@ -151,7 +170,7 @@ impl ProjectMove {
     /// copy, a change set step, an onboarding step, research) refuses the move before
     /// anything moves. Input: the wait. Output: Ok when the folder may move now,
     /// `move_project_busy` past the wait, or the code of the work found.
-    fn ready(&self, wait: Duration) -> Result<(), EngineError> {
+    fn ready(&self, wait: Duration) -> Result<RepositoryHolds, EngineError> {
         let unavailable = |_| refused("move_project_unavailable");
         let db =
             Connection::open_with_flags(&self.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -171,9 +190,14 @@ impl ProjectMove {
             .to_str()
             .ok_or_else(|| refused("move_project_unavailable"))?;
         assert!(self.add.source().is_absolute());
+        let landing = crate::landing::hold_repositories(
+            &std::collections::BTreeSet::new(),
+            deadline.saturating_duration_since(Instant::now()),
+        )
+        .ok_or_else(|| refused("move_project_busy"))?;
         match busy(&db, &self.project, origin)? {
             Some(code) => Err(refused(code)),
-            None => Ok(()),
+            None => Ok(landing),
         }
     }
 }

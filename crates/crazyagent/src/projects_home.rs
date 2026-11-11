@@ -16,7 +16,7 @@ pub use layout::{
 };
 pub(crate) use move_project::holds as project_move_holds;
 pub(crate) use move_project::{Asked, Finished, finish, forget, pending, plan};
-pub use move_project::{MOVE_STOP_WAIT, ProjectMove};
+pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;

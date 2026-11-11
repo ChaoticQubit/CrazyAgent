@@ -1,7 +1,7 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
 use crate::projects_home::{
-    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, OldSource, Placed,
+    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, Moved, OldSource, Placed,
     ProjectMove, folder_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,9 +41,9 @@ impl Work {
         }
     }
 
-    /// Runs the disk work. Output: the step to record and, for a project move that went
-    /// by copy, the whole old folder, cleared only after the record is applied.
-    fn run(self) -> (Step, Option<OldSource>) {
+    /// Runs the disk work. Output: the step to record and, for a project move, what it
+    /// leaves for after the record.
+    fn run(self) -> (Step, After) {
         let step = match self {
             Self::Add(plan) => {
                 let source = plan.source().to_path_buf();
@@ -52,10 +52,18 @@ impl Work {
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::MoveProject(plan) => {
                 let source = plan.source().to_path_buf();
-                return match plan.run() {
-                    Ok(Placed::Whole) => (Step::Record(Ok(Some(source))), None),
-                    Ok(Placed::Copied(old)) => (Step::Record(Ok(Some(source))), Some(old)),
-                    Err(e) => (Step::Record(Err(e.0)), None),
+                return match plan.run().map(Moved::into_parts) {
+                    Ok((placed, landing)) => (
+                        Step::Record(Ok(Some(source))),
+                        After {
+                            old_folder: match placed {
+                                Placed::Whole => None,
+                                Placed::Copied(old) => Some(old),
+                            },
+                            landing: Some(landing),
+                        },
+                    ),
+                    Err(e) => (Step::Record(Err(e.0)), After::default()),
                 };
             }
             Self::New(plan) => Step::Staged(plan.run()),
@@ -64,8 +72,17 @@ impl Work {
                 (plan.database, files)
             })),
         };
-        (step, None)
+        (step, After::default())
     }
+}
+
+/// What a project move's disk work leaves for after its record: the old folder of a move
+/// that went by copy, cleared only once the record is applied, and the landing holds,
+/// dropped once the record was tried.
+#[derive(Default)]
+struct After {
+    old_folder: Option<OldSource>,
+    landing: Option<crate::landing::RepositoryHolds>,
 }
 
 enum Planned {
@@ -159,7 +176,7 @@ pub(super) async fn serve(
     );
     #[cfg(unix)]
     let mut _moved_ide = None;
-    let mut old_folder: Option<OldSource> = None;
+    let mut after = After::default();
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -200,7 +217,7 @@ pub(super) async fn serve(
                         .await
                         .map_err(|_| failure(interrupted))
                         .map(|(step, left)| {
-                            old_folder = left;
+                            after = left;
                             step
                         });
                     (step, Instant::now() + engine.timeout, true)
@@ -227,7 +244,8 @@ pub(super) async fn serve(
             Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
             Err(e) => Err(e),
         };
-        if let Some(old) = old_folder
+        drop(after.landing.take());
+        if let Some(old) = after.old_folder.take()
             && matches!(
                 &result,
                 Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })

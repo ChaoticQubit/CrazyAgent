@@ -374,9 +374,13 @@ impl Case {
         overrides: &[AddOverride],
     ) -> Result<Finished, EngineError> {
         let planned = self.plan(mode, overrides)?;
-        match planned.run_with(Duration::ZERO) {
-            Ok(placed) => {
+        match planned
+            .run_with(Duration::ZERO)
+            .map(super::Moved::into_parts)
+        {
+            Ok((placed, landing)) => {
                 let finished = self.finish(true).expect("the planned move is pending");
+                drop(landing);
                 if let Placed::Copied(old) = placed {
                     old.clear().unwrap();
                 }
@@ -394,7 +398,8 @@ impl Case {
     /// the whole old folder still to clear.
     fn copied(&self) -> OldSource {
         let planned = self.plan(AddMode::Move, &[]).unwrap();
-        let Placed::Copied(old) = planned.run_by_copy(Duration::ZERO).unwrap() else {
+        let moved = planned.run_by_copy(Duration::ZERO).unwrap();
+        let (Placed::Copied(old), _landing) = moved.into_parts() else {
             panic!("a move by copy leaves its source to clear");
         };
         assert_eq!(old.folder(), self.repo);
@@ -1019,4 +1024,33 @@ fn a_pending_project_move_refuses_a_master_working_copy_of_its_repository() {
             code: "repository_not_admitted".into()
         }
     );
+}
+
+#[test]
+fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_record() {
+    let case = Case::new();
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    let repositories = std::collections::BTreeSet::from([planned.source().to_path_buf()]);
+    let wait = Duration::from_millis(50);
+    let landing = crate::landing::hold_repositories(&repositories, Duration::ZERO).unwrap();
+    assert_eq!(
+        planned.clone().run_by_copy(wait).unwrap_err().0,
+        "move_project_busy"
+    );
+    assert!(case.repo.join("README").is_file());
+    assert!(std::fs::symlink_metadata(case.target()).is_err());
+    assert_eq!(case.stored_folder(), case.repo);
+    drop(landing);
+
+    let (placed, held) = planned.run_by_copy(wait).unwrap().into_parts();
+    assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_none());
+    assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
+    assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_none());
+    drop(held);
+    assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_some());
+    let Placed::Copied(old) = placed else {
+        panic!("a move by copy leaves its source to clear");
+    };
+    old.clear().unwrap();
+    assert_eq!(case.stored_folder(), case.target());
 }

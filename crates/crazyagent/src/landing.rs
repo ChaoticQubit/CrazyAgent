@@ -404,6 +404,32 @@ pub const BRANCH_BYTES_MAX: usize = 255;
 /// before it fails.
 pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 
+/// The landing holds on owner repositories that a project move keeps from its last check
+/// of the project's work until the move is recorded, so no landing work reads or writes
+/// the folder while it moves. Dropping it lets landing work start again.
+#[derive(Debug)]
+pub(crate) struct RepositoryHolds {
+    _held: Vec<flow::Held>,
+}
+
+/// Takes the landing hold on each repository, in path order, waiting no longer than
+/// `wait` in all for landing work already running there. Inputs: the repository roots and
+/// the wait. Output: the holds, or none (with nothing held) when the work did not end in
+/// time.
+pub(crate) fn hold_repositories(
+    repositories: &std::collections::BTreeSet<PathBuf>,
+    wait: Duration,
+) -> Option<RepositoryHolds> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut held = Vec::with_capacity(repositories.len());
+    for repository in repositories {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        held.push(flow::hold_within(repository, left)?);
+    }
+    assert_eq!(held.len(), repositories.len());
+    Some(RepositoryHolds { _held: held })
+}
+
 const SUBJECT_CHARS_MAX: usize = 48;
 const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
 
