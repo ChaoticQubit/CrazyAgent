@@ -13,7 +13,7 @@ export const SETUP_MS = 120000;
 export const BUILD_MS = 15 * 60 * 1000;
 export const WORKBENCH_MS = 120000;
 export const SETTLE_MS = 1500;
-export const KEYS = { F1: ["F1", 112], Enter: ["Enter", 13], Escape: ["Escape", 27], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39] };
+export const KEYS = { F1: ["F1", 112], Enter: ["Enter", 13, "\r"], Escape: ["Escape", 27], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39] };
 export const IDE_FAILED = /didn't match its published checksum|couldn't be downloaded|couldn't start|stopped while it started|unavailable on/;
 
 /** Runs git with no system or user config, so only the repository's own config counts.
@@ -87,17 +87,19 @@ export function workbenchUrl(server) {
   return address.toString();
 }
 
-/** Real keyboard and mouse input for a DevTools page: keys as the OS sends them, typed text as
- * one key press per character the way a keyboard types it (text with no keys is dropped by a
- * terminal still holding an earlier key down, IDE-TERM-FOCUS-TYPING), clicks and hovers at a
- * point. Input: the page. Output: the helpers; text() refuses control characters. */
+/** Real keyboard and mouse input for a DevTools page: keys as the OS sends them, a key that
+ * types a character (Enter) carrying it unless a modifier is held, since an editor adds a new
+ * line only from the typed character; typed text as one key press per character the way a
+ * keyboard types it (text with no keys is dropped by a terminal still holding an earlier key
+ * down, IDE-TERM-FOCUS-TYPING), clicks and hovers at a point. Input: the page. Output: the
+ * helpers; text() refuses control characters. */
 export function input({ send }) {
   const key = async (name, modifiers = 0) => {
-    const [code, keyCode] = KEYS[name] ?? [`Key${name}`, name.charCodeAt(0)];
+    const [code, keyCode, typed] = KEYS[name] ?? [`Key${name}`, name.charCodeAt(0)];
     const pressed = KEYS[name] ? name : name.toLowerCase();
-    for (const type of ["rawKeyDown", "keyUp"]) {
-      await send("Input.dispatchKeyEvent", { type, key: pressed, code, windowsVirtualKeyCode: keyCode, modifiers });
-    }
+    const carried = typed !== undefined && modifiers === 0 ? { text: typed, unmodifiedText: typed } : {};
+    await send("Input.dispatchKeyEvent", { type: carried.text ? "keyDown" : "rawKeyDown", key: pressed, code, windowsVirtualKeyCode: keyCode, modifiers, ...carried });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: pressed, code, windowsVirtualKeyCode: keyCode, modifiers });
   };
   const text = async (value) => {
     if (/[\x00-\x1f\x7f]/.test(value)) throw new Error("type control characters with key(), not text()");
