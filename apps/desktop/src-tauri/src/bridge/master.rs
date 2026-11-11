@@ -960,6 +960,7 @@ fallback_allowed = false
         let session_id = session.session_id.as_str();
         let count = u64::from(PAGE_SIZE) + 1;
         let mut ids = Vec::new();
+        let mut ended_alone = Vec::new();
         for round in 0..count {
             let sent = bridge
                 .submit_master(
@@ -980,8 +981,8 @@ fallback_allowed = false
                 )
                 .await
                 .map_err(|error| error.code)?;
-            match stopped.outcome {
-                ActionOutcome::Applied => {}
+            let alone = match stopped.outcome {
+                ActionOutcome::Applied => false,
                 ActionOutcome::Rejected => {
                     assert_eq!(
                         stopped.rejection.as_deref(),
@@ -1000,11 +1001,14 @@ fallback_allowed = false
                         Some(sent.intent.operation_id.as_str()),
                         "a refused cancel leaves no turn {round} running"
                     );
+                    true
                 }
                 other => panic!("the cancel of turn {round} ended {other:?}"),
-            }
+            };
+            ended_alone.push(alone);
             ids.push(sent.intent.operation_id);
         }
+        assert_eq!(ended_alone.len(), ids.len());
         let first = bridge
             .master_turns(&ticket, session_id, None)
             .await
@@ -1029,10 +1033,27 @@ fallback_allowed = false
             all.iter().map(|turn| turn.id.as_str()).collect::<Vec<_>>(),
             ids.iter().map(String::as_str).collect::<Vec<_>>()
         );
-        assert!(
-            all.iter()
-                .all(|turn| turn.phase == MasterTurnPhase::Cancelled)
-        );
+        assert_eq!(all.len(), ended_alone.len());
+        for (turn, alone) in all.iter().zip(&ended_alone) {
+            if *alone {
+                assert!(
+                    matches!(
+                        turn.phase,
+                        MasterTurnPhase::Blocked | MasterTurnPhase::Failed
+                    ),
+                    "turn {} ended on its own as {:?}",
+                    turn.ordinal,
+                    turn.phase
+                );
+            } else {
+                assert_eq!(
+                    turn.phase,
+                    MasterTurnPhase::Cancelled,
+                    "turn {} was cancelled",
+                    turn.ordinal
+                );
+            }
+        }
         let later = bridge
             .submit_master(
                 &ticket,
