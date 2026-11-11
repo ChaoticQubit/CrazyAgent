@@ -2416,8 +2416,10 @@ struct Changes {
 
 /// Makes every change of [`Changes`] under the profile of a fresh server holding `choice`,
 /// checks that what a refused change aimed at is still there with its content, and that the
-/// owner's own files outside the agents root stay changeable. Input: the choice. Output:
-/// what landed.
+/// owner's own files outside the agents root stay changeable. A folder at
+/// `<project>/worktrees/<name>` is where an older project keeps an agent's checkout, so the
+/// base profile never removes or moves it at any choice; only its files change. Input: the
+/// choice. Output: what landed.
 fn changes_under(choice: IdeAgentFiles) -> Changes {
     let s = server_with(AgentFilesRule {
         choice,
@@ -2470,8 +2472,10 @@ fn changes_under(choice: IdeAgentFiles) -> Changes {
     assert_eq!(move_agents_root, !move_agent && !f.agents.exists());
     assert!(sh(&s.profile, "printf changed > \"$1\"", &f.owner_file));
     assert_eq!(content(&f.owner_file), "changed");
-    assert!(sh(&s.profile, "rm -rf \"$1\"", &f.owner_worktrees));
-    assert!(!f.owner_worktrees.exists());
+    assert!(sh(&s.profile, "rm -f \"$1/own.txt\"", &f.owner_worktrees));
+    assert!(!f.owner_worktrees.join("own.txt").exists());
+    assert!(!sh(&s.profile, "rmdir \"$1\"", &f.owner_worktrees));
+    assert!(f.owner_worktrees.is_dir());
     assert!(sh(&s.profile, "rm -f \"$1\"", &f.owner_file));
     assert!(!f.owner_file.exists());
     Changes {
@@ -2490,7 +2494,8 @@ fn changes_under(choice: IdeAgentFiles) -> Changes {
 }
 
 /// DEC-124, Allow all changes: the IDE changes agent folders as before the setting, and the
-/// rule adds nothing to its profile.
+/// rule adds nothing to its profile. As before, the base profile never moves an agent's
+/// checkout or the agents root aside, at any choice, while files and folders inside land.
 #[test]
 fn allow_all_changes_lets_the_ide_delete_rename_and_edit_in_agent_folders() {
     assert_eq!(AgentFilesRule::default().choice, IdeAgentFiles::AllowAll);
@@ -2508,7 +2513,7 @@ fn allow_all_changes_lets_the_ide_delete_rename_and_edit_in_agent_folders() {
             delete_folder: true,
             rename: true,
             rename_folder: true,
-            move_agent: true,
+            move_agent: false,
             move_agents_root: false,
             delete_case_variant: false,
             edit_in_place: true,
