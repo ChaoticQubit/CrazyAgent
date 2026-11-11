@@ -4,3 +4,6 @@
 .markdown-commands { display: grid; gap: 8px; }
 .markdown-command { display: grid; gap: 4px; }
 .markdown-command > pre { padding: 8px 12px; }
+.ov-edit-row { display: flex; justify-content: flex-end; }
+.ov-edit-text { font: 12px/18px var(--mono); max-width: 760px; }
+.ov-current { padding-bottom: 12px; border-bottom: 1px solid var(--border); }

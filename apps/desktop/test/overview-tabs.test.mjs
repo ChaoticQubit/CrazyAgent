@@ -428,3 +428,79 @@ test("Project settings has an Overview section between General and Pool", () => 
   assert.match(html, />General<\/button><button[^>]*>Overview<\/button><button[^>]*>Pool<\/button>/);
   assert.match(html, /<h2[^>]*>Overview<\/h2>/);
 });
+
+test("a generated tab offers Edit, written or not; README, a blocked tab and a project outside the folder do not", () => {
+  const edit = /<button[^>]*>Edit<\/button>/;
+  assert.match(page({ selected: "features", overview: withTab(base(), "features", "- Search\n") }), edit);
+  assert.match(page({ selected: "features", overview: base() }), edit);
+  assert.match(page({ selected: "install_and_use", overview: withTab(base(), "install_and_use", "Run it.\n") }), edit);
+  assert.match(page({ selected: "competitors", overview: { ...withTab(base(), "competitors", "- Beta\n"), competitors: { kind: "report", path: "context/research/competitor_research.md" } } }), edit);
+  assert.doesNotMatch(page({ selected: "features", overview: blockedTab(base(), "features", "blank") }), edit);
+  assert.doesNotMatch(page({ selected: "features", overview: { ...base(), needs_home: true } }), edit);
+  assert.doesNotMatch(page({ selected: "readme", overview: { ...base(), readme: { path: "README.md", text: "# Alpha\n", cut: false } } }), edit);
+  assert.doesNotMatch(page({ selected: "activity", overview: base() }), edit);
+});
+
+function editor(props = {}) {
+  return renderToStaticMarkup(createElement(view.TabEditor, { label: "Features", text: "- Search\n", busy: false, note: "", onText: () => {}, onSave: () => {}, onCancel: () => {}, ...props }));
+}
+
+test("the editor is a labelled text box with the tab's text, Save and Cancel", () => {
+  const html = editor();
+  assert.match(html, /<label[^>]*for="ov-edit"[^>]*>Edit Features<\/label>/);
+  assert.match(html, /<textarea[^>]*id="ov-edit"[^>]*>- Search\n<\/textarea>/);
+  assert.match(html, /<button[^>]*>Save<\/button>/);
+  assert.match(html, /<button[^>]*>Cancel<\/button>/);
+  assert.doesNotMatch(html, /role="alert"/);
+});
+
+test("the editor shows why a save was refused and locks while a save is sent", () => {
+  assert.match(editor({ note: "This text is too long for a tab. Shorten it and save again." }), /role="alert"[^>]*>This text is too long for a tab\./);
+  const busy = editor({ busy: true });
+  assert.match(busy, /<button[^>]*disabled=""[^>]*>/);
+  assert.match(busy, /<textarea[^>]*readOnly=""/i);
+});
+
+test("Save sends the text with the version the editor opened at", async () => {
+  const sent = [];
+  const outcome = await view.saveTab("alpha", { tab: "features", version: "v7" }, "- typed\n", (projectId, tab, text, version) => { sent.push([projectId, tab, text, version]); return Promise.resolve({ kind: "ok", value: undefined }); });
+  assert.deepEqual(sent, [["alpha", "features", "- typed\n", "v7"]]);
+  assert.deepEqual(outcome, { saved: true, changed: false, kept: "", note: "" });
+});
+
+test("a tab changed since the editor opened keeps the typed text and says to compare", async () => {
+  const outcome = await view.saveTab("alpha", { tab: "features", version: "v7" }, "- typed\n", () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
+  assert.equal(outcome.saved, false);
+  assert.equal(outcome.changed, true);
+  assert.equal(outcome.kept, "- typed\n");
+  assert.match(outcome.note, /Someone changed this tab since you opened it\./);
+});
+
+test("any other refused save keeps the typed text and says why", async () => {
+  const blocked = await view.saveTab("alpha", { tab: "features", version: "v7" }, "- typed\n", () => Promise.resolve({ kind: "error", code: "overview_tab_blocked" }));
+  assert.deepEqual([blocked.saved, blocked.changed, blocked.kept], [false, false, "- typed\n"]);
+  assert.equal(blocked.note, api.overviewCopy("overview_tab_blocked"));
+  const early = await view.saveTab("alpha", { tab: "features", version: "v7" }, "- typed\n", () => Promise.resolve({ kind: "not_ready" }));
+  assert.deepEqual([early.saved, early.kept], [false, "- typed\n"]);
+  assert.notEqual(early.note, "");
+  const thrown = await view.saveTab("alpha", { tab: "features", version: "v7" }, "- typed\n", () => Promise.reject(new Error("bridge down")));
+  assert.deepEqual([thrown.saved, thrown.kept], [false, "- typed\n"]);
+  assert.notEqual(thrown.note, "");
+});
+
+test("the editor refuses a text over the tab bound or an empty one before sending", async () => {
+  let sent = 0;
+  const save = () => { sent += 1; return Promise.resolve({ kind: "ok", value: undefined }); };
+  assert.equal(view.TAB_BYTES_MAX, 64 * 1024);
+  const long = await view.saveTab("alpha", { tab: "features", version: "v7" }, "x".repeat(view.TAB_BYTES_MAX + 1), save);
+  assert.equal(long.saved, false);
+  assert.match(long.note, /too long/);
+  const wide = await view.saveTab("alpha", { tab: "features", version: "v7" }, String.fromCodePoint(0x1f600).repeat(view.TAB_BYTES_MAX / 4 + 1), save);
+  assert.match(wide.note, /too long/, "the bound counts UTF-8 bytes, as the engine does");
+  const empty = await view.saveTab("alpha", { tab: "features", version: "v7" }, " \n\t\n", save);
+  assert.equal(empty.note, api.overviewCopy("overview_tab_empty"));
+  assert.equal(sent, 0);
+  const full = await view.saveTab("alpha", { tab: "features", version: "v7" }, "x".repeat(view.TAB_BYTES_MAX), save);
+  assert.equal(full.saved, true);
+  assert.equal(sent, 1);
+});

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { loadRunMode } from "../../api-ide";
-import { loadOverview, overviewCopy, refreshOverview, OVERVIEW_POLL_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
+import { loadOverview, overviewCopy, refreshOverview, saveOverviewTab, OVERVIEW_POLL_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
 import { failureCopy, openLink, receiptState, updateProjectSetup, type JobKind, type ResearchJob } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
@@ -25,17 +25,30 @@ export const STRIP: { id: StripId; label: string }[] = [
   { id: "activity", label: "Activity" },
 ];
 
-/** What the strip can ask for: one writing run now, and a fresh read of the tabs. */
+/** What the strip can ask for: one writing run now, a save of the owner's text for a tab, and
+ * a fresh read of the tabs. */
 export interface OverviewActions {
   refresh: () => Promise<Result<void>>;
+  save: typeof saveOverviewTab;
   reload: () => void;
 }
+
+/** An open editor of one tab: the version it opened at, the typed text, whether a save is
+ * being sent, why the last save was refused, and whether the tab changed since it opened. */
+export interface TabDraft { version: string; text: string; busy: boolean; note: string; changed: boolean }
+
+/** How a save ended: saved, or refused with the typed text kept, why, and whether the tab
+ * changed since the editor opened. */
+export interface SaveOutcome { saved: boolean; changed: boolean; kept: string; note: string }
 
 /** Where the picked tab is kept: the two calls of the browser's session storage. */
 export interface TabStore {
   getItem: (key: string) => string | null;
   setItem: (key: string, value: string) => void;
 }
+
+/** The most UTF-8 bytes of one tab's text, as the engine counts them. */
+export const TAB_BYTES_MAX = 64 * 1024;
 
 /** The most command lines of one text that get Copy and Run. */
 export const COMMAND_LINES_MAX = 200;
@@ -44,6 +57,7 @@ const TAB_FILES: Record<OverviewTabId, string> = { quick_info: "quick-info", fea
 const BLOCKED: Record<string, string> = { blank: "its file is empty", too_large: "its file is larger than 64 KB", not_utf8: "its file is not plain text" };
 const COMPETITOR = "competitor_research";
 const LINKS_SHOWN = 5;
+const TAB_CHANGED = "overview_tab_changed";
 const TAB_KEY = "crazyagent.overview-tab.";
 const FIRST: StripId = "quick_info";
 const LOADING = "Loading the Overview tabs...";
@@ -171,6 +185,48 @@ function checked(overview: ProjectOverview, now: number): string | null {
   return `Checked ${said === "Just now" ? "just now" : said}`;
 }
 
+/** Saves the owner's text for a tab at the version the editor opened at. A text over the tab
+ * bound or an empty one is refused here, before anything is sent; a refused save keeps the
+ * typed text. Inputs: the project, the tab with that version, the text and the save call.
+ * Output: how the save ended. */
+export async function saveTab(projectId: string, opened: { tab: OverviewTabId; version: string }, text: string, save: typeof saveOverviewTab = saveOverviewTab): Promise<SaveOutcome> {
+  const refused = (note: string, changed = false): SaveOutcome => ({ saved: false, changed, kept: text, note });
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > TAB_BYTES_MAX) return refused(overviewCopy("overview_tab_too_large"));
+  if (text.trim() === "") return refused(overviewCopy("overview_tab_empty"));
+  assert(bytes > 0, "an empty text was about to be sent");
+  assert(bytes <= TAB_BYTES_MAX, "a text over the tab bound was about to be sent");
+  const result = await save(projectId, opened.tab, text, opened.version).catch((): Result<void> => ({ kind: "not_ready" }));
+  if (result.kind === "ok") return { saved: true, changed: false, kept: "", note: "" };
+  if (result.kind === "not_ready") return refused(`${NOT_READY} Your text is kept.`);
+  return refused(overviewCopy(result), result.code === TAB_CHANGED);
+}
+
+/** The editor of one tab: a labelled text box with Save and Cancel; Cmd or Ctrl with Enter
+ * saves. It is locked while a save is sent and shows why the last one was refused.
+ * Inputs: the tab's label, the typed text, whether a save is being sent, the refusal note and
+ * the text, save and cancel handlers. Output: the editor. */
+export function TabEditor({ label, text, busy, note, onText, onSave, onCancel }: {
+  label: string;
+  text: string;
+  busy: boolean;
+  note: string;
+  onText: (text: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  return <form className="pj-stack-s ov-editor" onSubmit={(event) => { event.preventDefault(); if (!busy) onSave(); }}>
+    <label className="pj-label" htmlFor="ov-edit">Edit {label}</label>
+    <textarea id="ov-edit" className="pj-input ov-edit-text" rows={18} value={text} readOnly={busy} spellCheck={false} aria-describedby="ov-edit-help"
+      onChange={(event) => onText(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !busy) { event.preventDefault(); onSave(); } }} />
+    <p className="pj-help" id="ov-edit-help">Markdown. The tab is saved to this project's .crazyagent folder; a later refresh proposes changes instead of replacing your text.</p>
+    {note && <p className="pj-error" role="alert">{note}</p>}
+    <div className="pj-row"><button type="submit" className="btn primary" disabled={busy}>Save</button>
+      <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button></div>
+  </form>;
+}
+
 /** The README tab: the project's own file rendered read only, with its path; its shell lines
  * get Copy only. Inputs: the project and the file or null. Output: the panel body. */
 function ReadmePanel({ projectId, readme }: { projectId: string; readme: Readme | null }) {
@@ -248,15 +304,40 @@ function CompetitorsPanel({ data, overview, state, onSelect }: { data: ProjectDa
   </>;
 }
 
+/** The body of one generated tab that can be shown: Competitors with its source, Quick info
+ * through the project's own description, else its Markdown or what will write it; Install &
+ * use gets Copy and Run on its command lines.
+ * Inputs: the project data, the overview, the tab's state, the Run mode, the tab pick handler
+ * and how Quick info renders a text. Output: the body. */
+function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
+  data: ProjectData;
+  overview: ProjectOverview;
+  state: TabState;
+  runMode: RunMode;
+  onSelect: (tab: StripId) => void;
+  quickInfo: (text: string | null) => ReactNode;
+}) {
+  const facts = state.tab === "quick_info";
+  if (state.tab === "competitors") return <CompetitorsPanel data={data} overview={overview} state={state} onSelect={onSelect} />;
+  if (state.text === null) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
+  if (facts) return <>{quickInfo(state.text)}</>;
+  return <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={state.tab === "install_and_use" ? commandAction(data.id, runMode) : undefined} />;
+}
+
 /** One generated tab: the move line for a project outside the CrazyAgent folder, why its file
- * can't be shown, or its Markdown or what will write it. Quick info keeps the project's own
- * description under any of those; Install & use gets Copy and Run on its command lines.
- * Inputs: the project data, the overview, the tab, the Run mode, the tab pick handler and how
- * Quick info renders a text. Output: the panel body. */
-function GeneratedPanel({ data, overview, tab, runMode, onSelect, quickInfo }: {
+ * can't be shown, or its body with Edit. An open editor takes the body's place; once the tab
+ * changed under it, the changed tab shows above the editor so the owner can compare, and the
+ * next Save is made against that shown version.
+ * Inputs: the project data, the overview, the tab, its open editor or null, the editor
+ * handler, the actions, the Run mode, the tab pick handler and how Quick info renders a text.
+ * Output: the panel body. */
+function GeneratedPanel({ data, overview, tab, draft, onDraft, actions, runMode, onSelect, quickInfo }: {
   data: ProjectData;
   overview: ProjectOverview;
   tab: OverviewTabId;
+  draft: TabDraft | null;
+  onDraft: (draft: TabDraft | null) => void;
+  actions: OverviewActions;
   runMode: RunMode;
   onSelect: (tab: StripId) => void;
   quickInfo: (text: string | null) => ReactNode;
@@ -264,11 +345,25 @@ function GeneratedPanel({ data, overview, tab, runMode, onSelect, quickInfo }: {
   const state = overview.tabs.find((item) => item.tab === tab);
   const facts = tab === "quick_info";
   if (overview.needs_home) return <><NeedsHome data={data} />{facts && quickInfo(null)}</>;
-  if (state?.blocked) return <><Blocked tab={tab} reason={state.blocked} />{facts && quickInfo(null)}</>;
-  if (state && tab === "competitors") return <CompetitorsPanel data={data} overview={overview} state={state} onSelect={onSelect} />;
-  if (!state || state.text === null) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
-  if (facts) return <>{quickInfo(state.text)}</>;
-  return <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={tab === "install_and_use" ? commandAction(data.id, runMode) : undefined} />;
+  if (!state) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
+  if (state.blocked) return <><Blocked tab={tab} reason={state.blocked} />{facts && quickInfo(null)}</>;
+  const body = <TabBody data={data} overview={overview} state={state} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />;
+  if (draft === null) return <>
+    <div className="ov-edit-row"><button type="button" className="btn" onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false })}>Edit</button></div>
+    {body}
+  </>;
+  const save = async () => {
+    assert(!draft.busy, "a save was started while another was still sent");
+    onDraft({ ...draft, busy: true, note: "" });
+    const outcome = await saveTab(data.id, { tab, version: draft.changed ? state.version : draft.version }, draft.text, actions.save);
+    onDraft(outcome.saved ? null : { ...draft, busy: false, note: outcome.note, changed: draft.changed || outcome.changed });
+    actions.reload();
+  };
+  const label = STRIP.find((item) => item.id === tab)?.label ?? "";
+  return <>
+    {draft.changed && <section className="pj-stack-s ov-current" aria-label={`${label} as it is now`}><p className="pj-small pj-muted">The tab as it is now:</p>{body}</section>}
+    <TabEditor label={label} text={draft.text} busy={draft.busy} note={draft.note} onText={(text) => onDraft({ ...draft, text })} onSave={() => void save()} onCancel={() => onDraft(null)} />
+  </>;
 }
 
 /** The Overview's tab strip and the picked tab: Quick info, Features, Competitors, Install &
@@ -290,6 +385,7 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   activity: ReactNode;
 }) {
   const [asking, setAsking] = useState(false);
+  const [drafts, setDrafts] = useState<Partial<Record<OverviewTabId, TabDraft>>>({});
   assert(STRIP.some((item) => item.id === selected), "the picked Overview tab is not in the strip");
   const status = overview === null ? null : checked(overview, now);
   const off = overview === null || overview.running || overview.refresh === "off" || overview.needs_home;
@@ -326,7 +422,8 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
       {selected === "activity" && activity}
       {overview === null && selected === "quick_info" && quickInfo(null)}
       {overview !== null && selected === "readme" && <ReadmePanel projectId={data.id} readme={overview.readme} />}
-      {overview !== null && selected !== "readme" && selected !== "activity" && <GeneratedPanel data={data} overview={overview} tab={selected} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />}
+      {overview !== null && selected !== "readme" && selected !== "activity" && <GeneratedPanel data={data} overview={overview} tab={selected} draft={drafts[selected] ?? null}
+        onDraft={(draft) => setDrafts((open) => ({ ...open, [selected]: draft ?? undefined }))} actions={actions} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />}
     </div>
   </section>;
 }
@@ -367,6 +464,6 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
     : read?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(read)}` : undefined;
   return <OverviewTabs data={data} overview={overview} problem={problem} now={data.now} selected={selected}
     onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); }}
-    actions={{ refresh: () => refreshOverview(data.id), reload: () => setRound((count) => count + 1) }}
+    actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, reload: () => setRound((count) => count + 1) }}
     runMode={runMode} quickInfo={quickInfo} activity={activity} />;
 }
