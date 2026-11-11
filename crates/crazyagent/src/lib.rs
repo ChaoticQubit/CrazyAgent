@@ -25,6 +25,9 @@ pub mod harnesses;
 /// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
 /// and environment.
 pub mod ide;
+/// Edit with AI for the owner's instructions: the prompt, the proposal read out of a
+/// model reply, the pool rule and the one confined model run.
+pub mod instruction_cleanup;
 pub mod instruction_files;
 #[cfg(unix)]
 pub mod isolation;
@@ -44,6 +47,7 @@ pub mod platform;
 pub mod plugins;
 pub mod pools;
 pub mod project_files;
+pub mod project_overview;
 pub mod project_setup;
 pub mod projects_home;
 pub mod protocol;
@@ -53,6 +57,7 @@ pub mod quit_settings;
 pub mod rcli_host;
 pub mod recovery;
 pub mod research;
+pub mod roadmap_status;
 pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;

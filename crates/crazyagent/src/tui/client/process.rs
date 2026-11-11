@@ -11,8 +11,10 @@ mod tests;
 /// its last launch (none for the newest master), reads or saves one project's agent
 /// instruction settings, reads its workflow adoption, lists or confirms the one-time
 /// import of its own instruction files, lists the moved files still waiting for a commit or
-/// commits that move (DEC-106 and its addendum). A save names the version it read and, only
-/// for "Keep mine" after a stale reply, the older version the owner opened.
+/// commits that move (DEC-106 and its addendum), asks a model for a cleaned text to review
+/// (Edit with AI: the app text names the pool the owner picked, a project names none), or
+/// reads or saves the app-wide Edit with AI choice. A save names the version it read and,
+/// only for "Keep mine" after a stale reply, the older version the owner opened.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -56,6 +58,14 @@ pub(in crate::tui) enum ProcessQuery {
     CommitImport {
         project: ProjectId,
     },
+    Propose {
+        project: Option<ProjectId>,
+        pool: Option<crate::protocol::CredentialRef>,
+    },
+    AppSettings,
+    SaveAppSettings {
+        settings: crate::engine::owner::AppInstructionSettings,
+    },
 }
 
 /// What one Process request returned: a seed text, the saved text with its version, what a
@@ -63,7 +73,8 @@ pub(in crate::tui) enum ProcessQuery {
 /// the newer text), what one team agent received at its last launch, one project's agent
 /// instruction settings as stored with their version, its workflow adoption, the
 /// instruction files an import would move or moved, the moved paths still waiting for a
-/// commit with the checked-out branch, or that commit.
+/// commit with the checked-out branch, that commit, a proposed text with the version it was
+/// made from, or the app-wide Edit with AI choice as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
@@ -75,6 +86,8 @@ pub(in crate::tui) enum ProcessReply {
     Files(Vec<crate::engine::owner::ImportFile>),
     Uncommitted(crate::engine::owner::UncommittedImport),
     Committed(crate::engine::owner::ImportCommit),
+    Proposal(crate::engine::owner::Proposal),
+    AppSettings(crate::engine::owner::AppInstructionSettings),
 }
 
 /// One Process reply for the screens.
@@ -200,6 +213,18 @@ impl NativeOwner {
                 .commit_instruction_import(project)
                 .await
                 .map(ProcessReply::Committed),
+            ProcessQuery::Propose { project, pool } => controller
+                .propose_process(project, pool)
+                .await
+                .map(ProcessReply::Proposal),
+            ProcessQuery::AppSettings => controller
+                .app_instruction_settings()
+                .await
+                .map(ProcessReply::AppSettings),
+            ProcessQuery::SaveAppSettings { settings } => controller
+                .save_app_instruction_settings(settings)
+                .await
+                .map(ProcessReply::AppSettings),
         }
         .map_err(problem)
     }

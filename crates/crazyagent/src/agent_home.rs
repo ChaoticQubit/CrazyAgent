@@ -1,4 +1,5 @@
 use crate::protocol::ProjectId;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -130,13 +131,43 @@ impl Harness {
 /// The project one agent launch serves: the engine data folder holding `engine.db` and
 /// the app-wide instructions, the project id, the project folder whose
 /// `.crazyagent/instructions.md` holds the project instructions, none when the project
-/// has no recorded folder, and which of the two texts the owner chose for its agents.
+/// has no recorded folder, which of the two texts the owner chose for its agents and
+/// whether project lines the app text already has are left out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProject {
     pub data: PathBuf,
     pub id: ProjectId,
     pub folder: Option<PathBuf>,
     pub mode: crate::instruction_files::Mode,
+    pub repeated: Repeated,
+}
+
+/// Whether the project part of a joined instruction text leaves out lines the app part
+/// already has (DEC-129 item 5, DEC-132 Q7). Leave out by default; Keep gives agents both
+/// texts whole, as before v2.2.1.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Repeated {
+    #[default]
+    LeaveOut,
+    Keep,
+}
+
+impl Repeated {
+    /// Returns the stored and wire name of this choice.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LeaveOut => "leave_out",
+            Self::Keep => "keep",
+        }
+    }
+
+    /// Reads a stored or wire name back. Input: the name. Output: the choice, or none.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::LeaveOut, Self::Keep]
+            .into_iter()
+            .find(|repeated| repeated.as_str() == name)
+    }
 }
 
 /// What every agent of one project receives at a launch: the owner's app and project
@@ -207,7 +238,8 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
 /// Builds what every agent of the project receives from the owner's two instruction texts
 /// by the project's mode: the app-wide instructions, the project instructions, or the app
 /// text with the project text appended, each under its heading; empty when the given texts
-/// are blank. No instruction file outside the app is read. Everything is given inline,
+/// are blank. Project lines the app text already has are left out unless the project keeps
+/// them. No instruction file outside the app is read. Everything is given inline,
 /// never moved to a file the agent must open. Input: the project. Output: at most
 /// `GIVEN_BYTES_MAX` bytes of markdown, or a code; past the limit it names the larger
 /// part, such as `agent_instructions_too_large_project`.
@@ -220,7 +252,7 @@ pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
         (Some(folder), true) => read_project(folder)?,
         _ => String::new(),
     };
-    let text = render(&app, &own);
+    let text = render(&app, &own, project.repeated);
     if text.len() > GIVEN_BYTES_MAX {
         let largest = match app.trim().len() >= own.trim().len() {
             true => "app",
@@ -260,11 +292,89 @@ fn too_large(part: &str) -> AgentHomeError {
     AgentHomeError(code)
 }
 
-/// Renders the app text then the project text under their headings, leaving out a blank
-/// part and returning empty when both are blank. Input: both texts, each at most
-/// `TEXT_BYTES_MAX` bytes. Output: at most `PROCESS_BYTES_MAX` bytes.
-pub fn render(app: &str, project: &str) -> String {
+/// Tells whether a line is a code fence marker, which opens or closes a block whose lines
+/// always stay. Input: the trimmed line. Output: the answer.
+fn fence(line: &str) -> bool {
+    line.starts_with("```") || line.starts_with("~~~")
+}
+
+/// Tells whether a line is a heading or a horizontal rule, which stay even when repeated
+/// yet give agents nothing on their own. Input: the trimmed line. Output: the answer.
+fn heading_or_rule(line: &str) -> bool {
+    line.starts_with('#') || matches!(line, "---" | "***" | "___")
+}
+
+/// Tells whether a line carries structure that must stay even when the app text has the
+/// same line: a heading, a rule, a code fence marker or a table row. Input: the trimmed
+/// line. Output: the answer.
+fn structural(line: &str) -> bool {
+    heading_or_rule(line) || fence(line) || line.starts_with('|')
+}
+
+/// Takes out of the project text each line whose trimmed text is also a line of the app
+/// text, keeping blank and structural lines and every line inside a code block, then folds
+/// the blank runs outside code blocks to one. A text with no such line comes back as it
+/// is; one left with only headings, rules and blank lines comes back empty. Inputs: both
+/// texts. Output: the kept text and how many lines were left out.
+fn without_repeats(app: &str, project: &str) -> (String, usize) {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
+    let known: std::collections::HashSet<&str> = app
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut kept = String::with_capacity(project.len());
+    let mut left_out = 0;
+    let mut blank = false;
+    let mut fenced = false;
+    let mut content = false;
+    for line in project.lines() {
+        let trimmed = line.trim();
+        let marker = fence(trimmed);
+        if !fenced && !trimmed.is_empty() && !structural(trimmed) && known.contains(trimmed) {
+            left_out += 1;
+            continue;
+        }
+        if !fenced && trimmed.is_empty() && blank {
+            continue;
+        }
+        blank = !fenced && trimmed.is_empty();
+        content |= fenced || marker || !(trimmed.is_empty() || heading_or_rule(trimmed));
+        fenced ^= marker;
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    assert!(kept.len() <= project.len() + 1);
+    assert!(left_out <= project.lines().count());
+    match (left_out, content) {
+        (0, _) => (project.to_owned(), 0),
+        (_, true) => (kept, left_out),
+        (_, false) => (String::new(), left_out),
+    }
+}
+
+/// Counts the project lines a joined text leaves out because the app text already has
+/// them, for the note beside the choice. Inputs: both texts, each at most `TEXT_BYTES_MAX`
+/// bytes. Output: the count, zero when the app text is blank.
+pub fn repeated_lines(app: &str, project: &str) -> usize {
+    let lines = without_repeats(app, project).1;
+    assert!(lines <= TEXT_BYTES_MAX);
+    assert!(lines == 0 || !app.trim().is_empty());
+    lines
+}
+
+/// Renders the app text then the project text under their headings, leaving out a blank
+/// part and returning empty when both are blank. Under `Repeated::LeaveOut` the project
+/// part leaves out the lines the app part already has. Inputs: both texts, each at most
+/// `TEXT_BYTES_MAX` bytes, and the choice. Output: at most `PROCESS_BYTES_MAX` bytes.
+pub fn render(app: &str, project: &str, repeated: Repeated) -> String {
+    assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
+    let own = match repeated {
+        Repeated::LeaveOut => without_repeats(app, project).0,
+        Repeated::Keep => project.to_owned(),
+    };
+    assert!(own.len() <= project.len() + 1);
+    let project = own.as_str();
     let mut text = String::new();
     for (heading, part) in [(APP_HEADING, app), (PROJECT_HEADING, project)] {
         let part = part.trim();

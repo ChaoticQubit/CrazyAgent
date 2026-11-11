@@ -257,6 +257,9 @@ fn main() {
         "desktop_ide_window_out",
         "desktop_instruction_settings",
         "desktop_save_instruction_settings",
+        "desktop_process_propose",
+        "desktop_app_instruction_settings",
+        "desktop_save_app_instruction_settings",
         "desktop_adoption",
         "desktop_usage_report",
         "desktop_usage_metrics",
@@ -288,6 +291,13 @@ fn main() {
         "desktop_ide_run",
         "desktop_ide_run_mode",
         "desktop_ide_set_run_mode",
+        "desktop_overview_read",
+        "desktop_overview_refresh",
+        "desktop_overview_save",
+        "desktop_overview_accept",
+        "desktop_overview_reject",
+        "desktop_overview_set_refresh",
+        "desktop_overview_set_apply",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

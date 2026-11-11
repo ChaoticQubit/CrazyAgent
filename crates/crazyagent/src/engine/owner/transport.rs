@@ -52,6 +52,7 @@ pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
+pub(crate) mod overview;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
@@ -2198,6 +2199,7 @@ enum Protocol {
     Agents,
     Changes,
     Cleanup,
+    Overview,
     Usage,
     IdeExtensions,
     Recovery,
@@ -2231,6 +2233,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
+        ("overview", Protocol::Overview),
         ("usage", Protocol::Usage),
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
@@ -2306,6 +2309,7 @@ async fn serve_admitted(
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
             Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
+            Protocol::Overview => return Ok(Some(Deferred::Overview(a))),
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
@@ -2313,6 +2317,9 @@ async fn serve_admitted(
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
                     .map(|()| None);
+            }
+            Protocol::Process if process::deferred(body) => {
+                return Ok(Some(Deferred::Process(a)));
             }
             Protocol::Process => {
                 return process::serve(stream, engine, authority, auth, &a, body)
@@ -2480,6 +2487,10 @@ async fn serve_admitted(
             let served = ide::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
         }
+        Deferred::Process(a) => {
+            let served = process::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(process::PROPOSE_TIMEOUT, served).await;
+        }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
@@ -2491,6 +2502,10 @@ async fn serve_admitted(
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+        }
+        Deferred::Overview(a) => {
+            let served = overview::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
         }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
@@ -2560,10 +2575,10 @@ struct Tasks {
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, Usage requests, which read and write the usage store, harness
 /// version, update and install requests, which wait for a harness, Homebrew, npm or a
-/// vendor's release pointer, and iCloud downloads, which wait for macOS to bring a
-/// folder's files to this Mac. Each
-/// carries the admission, and the projects home its validated request; the others read
-/// the request frame.
+/// vendor's release pointer, iCloud downloads, which wait for macOS to bring a folder's
+/// files to this Mac, and Process proposals, which wait for an Edit with AI model run.
+/// Each carries the admission, and the projects home its validated request; the others
+/// read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2573,9 +2588,11 @@ enum Deferred {
     IdeExtensions(Admission),
     Recovery(Admission),
     Ide(Admission),
+    Process(Admission),
     IdeTab(Admission),
     Questions(Admission),
     Cleanup(Admission),
+    Overview(Admission),
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
@@ -2617,6 +2634,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
+        Protocol::Overview => overview::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,

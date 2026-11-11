@@ -15,6 +15,7 @@ import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
 import { accessSummary } from "./access";
 import { MarkdownView } from "./markdown";
+import { ProjectOverviewTabs } from "./overview-tabs";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, ago, changeOutcome, goalPlacer, groupActivity, memoryGroups, newestActivity, pathWindow, phasePath, type ActivityFilter, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
@@ -317,8 +318,42 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
   </section>;
 }
 
-/** Overview tab: what needs the owner, research progress, recent activity and project facts.
- * Input: the project data. Output: the tab. */
+/** Today's activity of a project: recent activity, the research list with its reports and
+ * retries, and the planning line. Input: the project data. Output: the panel's sections. */
+export function ActivityPanel({ data }: { data: ProjectData }) {
+  const base = `/projects/${encodeURIComponent(data.id)}`;
+  const research = researchJobs(valueOf(data.research)?.jobs ?? []);
+  const rows = research.map((job) => ({ job, row: researchRow(job, data.now) }));
+  const allDone = research.length > 0 && research.every((job) => job.status === "done");
+  const [retrying, setRetrying] = useState<number | null>(null);
+  async function retry(job: ResearchJob) {
+    setRetrying(job.id);
+    const outcome = changeOutcome(await retryResearch(data.id, job.id, nextGeneration()), `${displayText(job.kind_label)} is queued again.`, "trying research again");
+    setRetrying(null);
+    data.notify(outcome.toast || outcome.note);
+    if (outcome.reload) data.reload();
+  }
+  return <>
+    <RecentActivity projectId={data.id} />
+    <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
+      {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
+      {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
+      {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research)}</p>}
+      {data.research?.kind === "ok" && research.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
+      {rows.length > 0 && <ul className="pj-rows" aria-label="Research">{rows.map(({ job, row }) => <li className="pj-research-row" key={job.id}>
+        <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
+        <Badge word={row.status} tone={row.tone} />
+        <span className="pj-secondary">{displayText(row.progress)}</span>
+        <span className="pj-small pj-muted">{row.elapsed}</span>
+        <span>{row.report && <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}
+          {job.status === "failed" && <button type="button" className="btn" disabled={retrying === job.id} onClick={() => void retry(job)}>Try again</button>}</span>
+      </li>)}</ul>}
+      {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
+    </section>
+    <PlanningLine data={data} />
+  </>;
+}
+
 /** The project's own description: the About text saved in its setup and the overview the mapping
  * agent wrote in `.crazyagent/overview.md`, each shown only when it has text.
  * Inputs: the About text and the overview Markdown or null. Output: the sections, or nothing. */
@@ -332,22 +367,21 @@ export function OverviewFacts({ about, overview }: { about: string; overview: st
   </>;
 }
 
+/** Overview tab: what needs the owner first, then the tab strip (Quick info with the project's
+ * own description, the generated tabs, README, and Activity with research progress and recent
+ * activity), beside the project facts. Input: the project data. Output: the tab. */
 export function OverviewTab({ data }: { data: ProjectData }) {
   const setup = valueOf(data.setup);
   const jobs = valueOf(data.research)?.jobs ?? [];
   const harnesses = valueOf(data.harnesses);
   const base = `/projects/${encodeURIComponent(data.id)}`;
   const waiting = jobs.some((job) => job.status === "needs_pool") || (setup !== null && !data.assigned && setup.research.length > 0 && data.pools?.kind === "ok");
-  const research = researchJobs(jobs);
-  const rows = research.map((job) => ({ job, row: researchRow(job, data.now) }));
-  const allDone = research.length > 0 && research.every((job) => job.status === "done");
   const [suggested, setSuggested] = useState(0);
   useEffect(() => {
     let live = true;
     void loadAllProjectMemories(data.id).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value.items).suggested.length : 0); });
     return () => { live = false; };
   }, [data.id, data.now]);
-  const [retrying, setRetrying] = useState<number | null>(null);
   const [skills] = useLoad(() => listSkills(data.id), [data.id], "skills");
   const [servers] = useLoad(() => listMcpServers(data.id), [data.id], "mcp-servers");
   const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
@@ -356,13 +390,6 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
   const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;
-  async function retry(job: ResearchJob) {
-    setRetrying(job.id);
-    const outcome = changeOutcome(await retryResearch(data.id, job.id, nextGeneration()), `${displayText(job.kind_label)} is queued again.`, "trying research again");
-    setRetrying(null);
-    data.notify(outcome.toast || outcome.note);
-    if (outcome.reload) data.reload();
-  }
   return <div className="pj-overview">
     <div className="pj-stack">
       {(waiting || suggested > 0 || signIn || teamWaiting) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
@@ -375,24 +402,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}
-      <OverviewFacts about={setup?.about ?? ""} overview={onboarding.kind === "ok" ? onboarding.value.overview : null} />
-      <RecentActivity projectId={data.id} />
-      <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
-        {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
-        {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
-        {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research)}</p>}
-        {data.research?.kind === "ok" && research.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
-        {rows.length > 0 && <ul className="pj-rows" aria-label="Research">{rows.map(({ job, row }) => <li className="pj-research-row" key={job.id}>
-          <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
-          <Badge word={row.status} tone={row.tone} />
-          <span className="pj-secondary">{displayText(row.progress)}</span>
-          <span className="pj-small pj-muted">{row.elapsed}</span>
-          <span>{row.report && <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=${encodeURIComponent(job.report_path)}`)}>Open report</button>}
-            {job.status === "failed" && <button type="button" className="btn" disabled={retrying === job.id} onClick={() => void retry(job)}>Try again</button>}</span>
-        </li>)}</ul>}
-        {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
-      </section>
-      <PlanningLine data={data} />
+      <ProjectOverviewTabs data={data} activity={<ActivityPanel data={data} />}
+        quickInfo={(text) => <OverviewFacts about={setup?.about ?? ""} overview={text ?? (onboarding.kind === "ok" ? onboarding.value.overview : null)} />} />
     </div>
     <aside className="pj-panel pj-facts" aria-label="Project facts">
       {data.setup?.kind === "not_ready" && <NotReady what="project details aren't in this build." />}

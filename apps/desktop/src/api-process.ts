@@ -12,6 +12,10 @@ const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const NAME_CHARACTER = /[A-Za-z0-9_.:-]/u;
 const WORD_CHARACTER = /[A-Za-z0-9_]/u;
 
+/** The plugin names the engine accepts before a skill name (`launch_context.rs:1514-1517`):
+ * `crazyagent:tdd` names the same skill as `tdd`. */
+const SKILL_NAMESPACES = ["crazyagent:", "superpowers:", "software-practices:"] as const;
+
 /** Tells whether a name that matched up to `end` stops there: the next character is not part
  * of a name, or is punctuation such as a sentence's full stop that no letter follows.
  * Inputs: the text and the index after the name. Output: true when the name is whole. */
@@ -46,6 +50,20 @@ const REFUSALS: Record<string, string> = {
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
   process_save_unavailable: "The engine couldn't save right now, so nothing was saved. Save again.",
+  instructions_cleanup_pool_needed: "Pick the pool that runs this edit first.",
+  instructions_cleanup_pool_not_asked: "A project's edit runs on the project's own pool, so nothing was sent. Try again.",
+  instructions_cleanup_pool_unknown: "That pool no longer exists, so nothing was sent. Pick another one.",
+  instructions_cleanup_project_pool_missing: "This project has no pool yet, so nothing was sent. Give it one under Pools, then try again.",
+  instructions_cleanup_no_account: "No account in the pool can run this edit, so nothing was sent. Sign one in under Pools, then try again.",
+  instructions_cleanup_paused: "Every account in the pool hit its limit, so nothing was sent. Try again later.",
+  instructions_cleanup_busy: "Another Edit with AI is still running. Wait for it, then try again.",
+  instructions_cleanup_empty: "There is nothing saved to clean up yet. Write the instructions first.",
+  instructions_cleanup_failed: "The model run failed, so nothing changed. Try again.",
+  instructions_cleanup_timed_out: "The model took longer than 5 minutes, so nothing changed. Try again.",
+  instructions_cleanup_no_proposal: "The model gave no file back, so nothing changed. Try again.",
+  instructions_cleanup_too_large: "The model's file is over 64 KB, so nothing changed. Try again.",
+  instructions_cleanup_off: "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.",
+  instructions_cleanup_unavailable: "Edit with AI can't run in this engine, so nothing was sent.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
   process_agent_unknown: "This agent isn't part of this project's team.",
   process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",
@@ -197,8 +215,23 @@ export interface SkillEntry {
 /** One piece of instructions text: plain text, or a skill name that matches the catalog. */
 export type ProcessSegment = { kind: "text"; text: string } | { kind: "skill"; id: string; name: string; description: string };
 
-/** Splits instructions text into plain text and skill tags: a whole skill name, not part of
- * a longer name, that matches the catalog. Longer names win over names they contain.
+/** Finds a catalog name written with an engine namespace at `at`, such as `crazyagent:tdd`.
+ * Inputs: the text, the position, catalog names by first character, longest first.
+ * Output: the qualified text and the bare name, or undefined when none starts there. */
+function qualifiedAt(text: string, at: number, byFirst: Map<string, string[]>): { written: string; bare: string } | undefined {
+  const namespace = SKILL_NAMESPACES.find((prefix) => text.startsWith(prefix, at));
+  if (namespace === undefined) return undefined;
+  const start = at + namespace.length;
+  const bare = byFirst.get(text[start] ?? "")?.find((candidate) => text.startsWith(candidate, start) && endsAt(text, start + candidate.length));
+  if (bare === undefined) return undefined;
+  const written = namespace + bare;
+  if (!text.startsWith(written, at)) throw new Error("A qualified skill name is not the text it was read from.");
+  return { written, bare };
+}
+
+/** Splits instructions text into plain text and skill tags: a whole skill name, bare or after
+ * an engine namespace (`crazyagent:`, `superpowers:`, `software-practices:`), not part of a
+ * longer name, that matches the catalog. Longer names win over names they contain.
  * Inputs: the text and the skill catalog. Output: the pieces, which join back to the text. */
 export function skillSegments(text: string, skills: readonly SkillEntry[]): ProcessSegment[] {
   const known = new Map<string, SkillEntry>();
@@ -214,19 +247,23 @@ export function skillSegments(text: string, skills: readonly SkillEntry[]): Proc
   let at = 0;
   while (at < text.length) {
     const before = at === 0 ? "" : text[at - 1];
-    const name = NAME_CHARACTER.test(before) ? undefined
+    const inName = NAME_CHARACTER.test(before);
+    const plainName = inName ? undefined
       : byFirst.get(text[at])?.find((candidate) => text.startsWith(candidate, at) && endsAt(text, at + candidate.length));
-    if (name === undefined) {
+    const match = plainName !== undefined ? { written: plainName, bare: plainName }
+      : inName ? undefined : qualifiedAt(text, at, byFirst);
+    if (match === undefined) {
       plain += text[at];
       at += 1;
       continue;
     }
     if (plain) segments.push({ kind: "text", text: plain });
     plain = "";
-    const skill = known.get(name);
+    const skill = known.get(match.bare);
     if (skill === undefined) throw new Error("A matched skill name is missing from the catalog.");
-    segments.push({ kind: "skill", id: skill.id, name, description: skill.description });
-    at += name.length;
+    if (match.written.length < match.bare.length) throw new Error("A written skill name is shorter than its catalog name.");
+    segments.push({ kind: "skill", id: skill.id, name: match.written, description: skill.description });
+    at += match.written.length;
   }
   if (plain) segments.push({ kind: "text", text: plain });
   return segments;
@@ -251,22 +288,49 @@ export type InstructionMode = "project_only" | "app_only" | "both";
 /** How an edit to the instructions reaches agents that already run (DEC-111 QR1). */
 export type EditDelivery = "next_message" | "restart" | "badge";
 
+/** What agents get of a project line the app instructions already have (DEC-132 Q7). */
+export type Repeated = "leave_out" | "keep";
+
 /** One project's agent settings: which instructions its agents get, whether headless
- * Claude runs keep their transcript and how an instruction edit reaches running agents. */
+ * Claude runs keep their transcript, how an instruction edit reaches running agents,
+ * whether project lines the app instructions already have are left out and whether the
+ * editor offers Edit with AI (on unless false). */
 export interface InstructionSettings {
   mode: InstructionMode;
   transcripts: boolean;
   edits?: EditDelivery;
+  repeated?: Repeated;
+  edit_with_ai?: boolean;
 }
 
-/** One project's agent settings and the version they were read at, which a save names. */
+/** One project's agent settings, the version they were read at, which a save names, and how
+ * many lines of the project's file repeat the app instructions. */
 export interface InstructionView {
   settings: InstructionSettings;
   version: number;
+  repeats?: number;
 }
 
 /** The settings of a project the owner never changed. */
 export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true, edits: "next_message" };
+
+/** Both answers to a project line the app instructions already have, the default first. */
+export const REPEATED_LINES: readonly { value: Repeated; label: string }[] = [
+  { value: "leave_out", label: "Leave out" },
+  { value: "keep", label: "Keep" },
+];
+
+/** What the page says beside the repeated lines choice: how many lines of the project's file
+ * repeat the app instructions and what agents get of them. Inputs: the project's settings and
+ * the count the engine gave. */
+export function repeatedNote(settings: InstructionSettings, repeats: number): string {
+  if (!Number.isInteger(repeats) || repeats < 0) throw new Error(`repeatedNote: ${repeats} repeated lines is not a count`);
+  if (settings.mode !== "both") return "Repeated lines only matter when agents get both the app and the project instructions.";
+  if (repeats === 0) return "No line of this project's file repeats the app instructions.";
+  const lines = repeats === 1 ? "1 line of this project's file repeats" : `${repeats} lines of this project's file repeat`;
+  if (settings.repeated === "keep") return `${lines} the app instructions, and agents get ${repeats === 1 ? "it" : "them"} twice.`;
+  return `${lines} the app instructions and ${repeats === 1 ? "is" : "are"} left out for agents. Headings, code blocks, tables and rules always stay.`;
+}
 
 /** Every way an instruction edit can reach running agents, in the order the page lists
  * them, with what each does. */
@@ -451,4 +515,75 @@ export interface Adoption {
 /** Reads one project's workflow adoption. Input: the project id. Output: the view. */
 export function loadAdoption(projectId: string): Promise<Result<Adoption>> {
   return call<Adoption>("desktop_adoption", { projectId });
+}
+
+/** The owner's app-wide instruction settings: whether Edit with AI may send the app
+ * instructions to a model. */
+export interface AppInstructionSettings {
+  edit_with_ai: boolean;
+}
+
+/** Reads the app-wide instruction settings. Output: the settings, on when never stored. */
+export function loadAppInstructionSettings(): Promise<Result<AppInstructionSettings>> {
+  return call<AppInstructionSettings>("desktop_app_instruction_settings");
+}
+
+/** Stores the app-wide instruction settings whole. Input: the settings. Output: the settings
+ * as stored. */
+export function saveAppInstructionSettings(settings: AppInstructionSettings): Promise<Result<AppInstructionSettings>> {
+  return call<AppInstructionSettings>("desktop_save_app_instruction_settings", { settings });
+}
+
+/** A cleaned instructions file a model proposes and the version of the saved file it was made
+ * from, which Accept names so a newer save is never lost. */
+export interface Proposal {
+  text: string;
+  base_version: number;
+}
+
+/** Asks the engine for a cleaned version of the saved instructions (DEC-132 Q6). Inputs: null
+ * for the app text or the project id, and the pool the owner picked for this run, which the
+ * app text needs and a project never takes. Output: the proposal; nothing is saved. */
+export function proposeProcess(projectId: string | null, pool: string | null): Promise<Result<Proposal>> {
+  if ((projectId === null) !== (pool !== null)) throw new Error("proposeProcess: the app text needs a picked pool and a project takes none");
+  return call<Proposal>("desktop_process_propose", { projectId, pool });
+}
+
+/** One line of a proposal beside the saved text: kept, added by the proposal or removed by it. */
+export type DiffRow = { kind: "same" | "added" | "removed"; text: string };
+
+/** The most lines either text may have for a line diff; past it the page shows both whole. */
+export const DIFF_LINES_MAX = 2000;
+
+/** Splits a text into its lines; a last line break ends the last line and adds none. */
+function linesOf(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** Compares two texts line by line with a longest common subsequence. Inputs: the saved text
+ * and the proposed one. Output: the rows in reading order, removed lines before the added
+ * ones that replace them, or null when either text has more than DIFF_LINES_MAX lines. */
+export function lineDiff(before: string, after: string): DiffRow[] | null {
+  const old = linesOf(before);
+  const next = linesOf(after);
+  if (old.length > DIFF_LINES_MAX || next.length > DIFF_LINES_MAX) return null;
+  const width = next.length + 1;
+  const common = new Uint16Array((old.length + 1) * width);
+  for (let a = old.length - 1; a >= 0; a -= 1) {
+    for (let b = next.length - 1; b >= 0; b -= 1) {
+      common[a * width + b] = old[a] === next[b] ? common[(a + 1) * width + b + 1] + 1 : Math.max(common[(a + 1) * width + b], common[a * width + b + 1]);
+    }
+  }
+  const rows: DiffRow[] = [];
+  let a = 0;
+  let b = 0;
+  while (a < old.length || b < next.length) {
+    if (a < old.length && b < next.length && old[a] === next[b]) { rows.push({ kind: "same", text: old[a] }); a += 1; b += 1; }
+    else if (a < old.length && (b === next.length || common[(a + 1) * width + b] >= common[a * width + b + 1])) { rows.push({ kind: "removed", text: old[a] }); a += 1; }
+    else { rows.push({ kind: "added", text: next[b] }); b += 1; }
+  }
+  if (rows.length < Math.max(old.length, next.length) || rows.length > old.length + next.length) throw new Error("lineDiff: the rows do not cover both texts");
+  return rows;
 }

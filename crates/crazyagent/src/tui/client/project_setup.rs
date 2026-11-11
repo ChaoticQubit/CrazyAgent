@@ -156,6 +156,16 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )),
+            SetupQuery::Overview { project } => SetupView::Overview(Box::new(
+                controller.overview_read(project).await.map_err(problem)?,
+            )),
+            SetupQuery::RefreshOverview { project } => {
+                controller
+                    .overview_refresh(project)
+                    .await
+                    .map_err(problem)?;
+                SetupView::OverviewAsked
+            }
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,

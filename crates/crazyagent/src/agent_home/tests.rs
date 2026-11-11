@@ -16,6 +16,7 @@ fn project(root: &Path) -> AgentProject {
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     }
 }
 
@@ -159,14 +160,111 @@ fn a_linked_instruction_file_or_state_folder_is_never_read() {
 
 #[test]
 fn render_puts_app_text_first_and_project_text_last_under_headings() {
-    assert_eq!(render("", " \n"), "");
+    assert_eq!(render("", " \n", Repeated::LeaveOut), "");
     assert_eq!(
-        render("Use TDD.\n", "Run make check.\n"),
+        render("Use TDD.\n", "Run make check.\n", Repeated::LeaveOut),
         "# Instructions from CrazyAgent\n\n## App instructions\n\nUse TDD.\n\n## Project instructions\n\nRun make check.\n"
     );
     assert_eq!(
-        render("", "Only project.\n"),
+        render("", "Only project.\n", Repeated::LeaveOut),
         "# Instructions from CrazyAgent\n\n## Project instructions\n\nOnly project.\n"
+    );
+}
+
+#[test]
+fn render_leaves_out_project_lines_the_app_text_already_has() {
+    let app = "## Rules\n\n- Use TDD.\n- No em dash.\n";
+    let project = "## Rules\n\n- Use TDD.\n- Run make check.\n";
+    assert_eq!(
+        render(app, project, Repeated::LeaveOut),
+        "# Instructions from CrazyAgent\n\n## App instructions\n\n## Rules\n\n- Use TDD.\n- No em dash.\n\n## Project instructions\n\n## Rules\n\n- Run make check.\n"
+    );
+    assert_eq!(repeated_lines(app, project), 1);
+}
+
+#[test]
+fn render_keeps_headings_fences_and_rules_even_when_repeated() {
+    let app = "## Build\n\n```\nmake\n```\n\n---\n";
+    let project = "## Build\n\n```\nmake test\n```\n\n---\n";
+    let joined = render(app, project, Repeated::LeaveOut);
+    assert!(
+        joined.ends_with("## Project instructions\n\n## Build\n\n```\nmake test\n```\n\n---\n")
+    );
+    assert_eq!(repeated_lines(app, project), 0);
+}
+
+#[test]
+fn render_keeps_every_line_when_the_setting_says_keep() {
+    let joined = render("- Use TDD.\n", "- Use TDD.\n", Repeated::Keep);
+    assert_eq!(joined.matches("- Use TDD.").count(), 2);
+}
+
+#[test]
+fn a_project_text_made_only_of_repeats_adds_no_project_heading() {
+    let joined = render("- Use TDD.\n", "- Use TDD.\n\n", Repeated::LeaveOut);
+    assert!(!joined.contains("## Project instructions"));
+    let headed = render(
+        "## Rules\n\n- Use TDD.\n",
+        "## Rules\n\n- Use TDD.\n\n---\n",
+        Repeated::LeaveOut,
+    );
+    assert!(!headed.contains("## Project instructions"), "{headed}");
+    assert_eq!(headed.matches("- Use TDD.").count(), 1);
+}
+
+#[test]
+fn render_keeps_every_line_of_a_code_block_and_every_table_row() {
+    let app = "Run it:\n\n```\nmake\n\n\nmake test\n```\n\n| Tool | Use |\n|---|---|\n| make | build |\n- Use TDD.\n";
+    let project = "- Use TDD.\n\n\n\nRun it:\n\n~~~sh\nmake\n\n\nmake test\n~~~\n\n| Tool | Use |\n|---|---|\n| make | build |\n";
+    let joined = render(app, project, Repeated::LeaveOut);
+    assert!(
+        joined.ends_with(
+            "## Project instructions\n\n~~~sh\nmake\n\n\nmake test\n~~~\n\n| Tool | Use |\n|---|---|\n| make | build |\n"
+        ),
+        "{joined}"
+    );
+    assert_eq!(repeated_lines(app, project), 2);
+}
+
+#[test]
+fn a_project_text_with_no_repeat_is_given_byte_for_byte() {
+    let project = "Run make check.\n\n\n\n  Indented stays.\n";
+    assert_eq!(
+        render("Use TDD.\n", project, Repeated::LeaveOut),
+        render("Use TDD.\n", project, Repeated::Keep)
+    );
+    assert_eq!(
+        render("", "- Use TDD.\n", Repeated::LeaveOut),
+        "# Instructions from CrazyAgent\n\n## Project instructions\n\n- Use TDD.\n",
+        "a blank app text has no line to repeat"
+    );
+    assert_eq!(repeated_lines("", "- Use TDD.\n"), 0);
+    assert_eq!(
+        repeated_lines("  - Use TDD.  \n", "- Use TDD.\n\t- Use TDD.\n"),
+        2
+    );
+}
+
+#[test]
+fn a_launch_follows_the_projects_repeated_lines_choice_and_never_dedupes_project_only() {
+    let (_directory, root) = folder();
+    let mut agent = project(&root);
+    save_app(&agent.data, "- Use TDD.\n- No em dash.\n").unwrap();
+    save_project(
+        agent.folder.as_ref().unwrap(),
+        "- Use TDD.\n- Run make check.\n",
+    )
+    .unwrap();
+    let left_out = text(&agent).unwrap().text;
+    assert_eq!(left_out.matches("- Use TDD.").count(), 1);
+    assert!(left_out.ends_with("## Project instructions\n\n- Run make check.\n"));
+    agent.repeated = Repeated::Keep;
+    assert_eq!(text(&agent).unwrap().text.matches("- Use TDD.").count(), 2);
+    agent.repeated = Repeated::LeaveOut;
+    agent.mode = crate::instruction_files::Mode::ProjectOnly;
+    assert_eq!(
+        text(&agent).unwrap().text,
+        "# Instructions from CrazyAgent\n\n## Project instructions\n\n- Use TDD.\n- Run make check.\n"
     );
 }
 

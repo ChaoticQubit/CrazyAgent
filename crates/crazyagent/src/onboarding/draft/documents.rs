@@ -597,7 +597,7 @@ fn text_beneath(root: &Folder, path: &str, max: usize) -> Option<String> {
 /// documents whose text is not read, or why none was read when the project's git could not
 /// say what it ignores. Takes the documents, the listed paths and whether git said nothing.
 /// Returns the text, empty when there are none.
-pub(super) fn section(
+pub(crate) fn section(
     documents: &[Document],
     unread: &[(String, u64)],
     ignores_unknown: bool,

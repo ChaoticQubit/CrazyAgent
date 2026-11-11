@@ -19,6 +19,7 @@ mod coord;
 mod ide;
 mod intake;
 mod memory;
+mod overview;
 mod owner_setup;
 mod plugins;
 mod process;

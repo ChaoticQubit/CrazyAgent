@@ -15,7 +15,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
 #[cfg(unix)]
-mod documents;
+pub(crate) mod documents;
 #[cfg(unix)]
 pub(crate) use documents::{kept_out, outside_git};
 pub(super) mod names;
@@ -264,19 +264,19 @@ fn open_text(path: &Path) -> std::io::Result<std::fs::File> {
 /// A real folder opened once, so every file read beneath it stays in that
 /// folder even when its path is later swapped for a link.
 #[cfg(unix)]
-type Folder = rustix::fd::OwnedFd;
+pub(crate) type Folder = rustix::fd::OwnedFd;
 
 /// A real folder checked by path, since std has no folder-relative open on Windows. Each
 /// later open goes by path again, so a local process that swaps a folder for a junction
 /// between the check and the open is not caught: a known Windows gap until a handle-based
 /// open that never follows a reparse point replaces it.
 #[cfg(windows)]
-type Folder = std::path::PathBuf;
+pub(crate) type Folder = std::path::PathBuf;
 
 /// Opens the real folder at `path`, never through a link in its last
 /// component. Takes the path. Returns the folder or `None`.
 #[cfg(unix)]
-fn open_folder(path: &Path) -> Option<Folder> {
+pub(crate) fn open_folder(path: &Path) -> Option<Folder> {
     use rustix::fs::{Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     rustix::fs::open(path, flags, Mode::empty()).ok()
@@ -286,7 +286,7 @@ fn open_folder(path: &Path) -> Option<Folder> {
 /// the known Windows gap described on [`Folder`]. Takes the path. Returns the folder path
 /// or `None`.
 #[cfg(windows)]
-fn open_folder(path: &Path) -> Option<Folder> {
+pub(crate) fn open_folder(path: &Path) -> Option<Folder> {
     real_dir(path).then(|| path.to_path_buf())
 }
 
@@ -333,7 +333,7 @@ fn setup_folder(layout: &Path, create: bool) -> std::io::Result<Folder> {
 /// Opens the file `name` in `folder` for reading without following a link or
 /// blocking on a FIFO. Takes the folder and the file name. Returns the file or `None`.
 #[cfg(unix)]
-fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
+pub(crate) fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
     use rustix::fs::{Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     rustix::fs::openat(folder, name, flags, Mode::empty())
@@ -345,7 +345,7 @@ fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
 /// path again: the known Windows gap described on [`Folder`]. Takes the folder and the
 /// file name. Returns the file or `None`.
 #[cfg(windows)]
-fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
+pub(crate) fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
     open_text(&folder.join(name)).ok()
 }
 
