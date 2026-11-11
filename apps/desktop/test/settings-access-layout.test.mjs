@@ -328,9 +328,9 @@ test("Profile then Appearance, each field on its own line", async () => {
   const sections = await onProfile({}, read);
   assert.deepEqual(sections.map((section) => section.heading), ["Profile", "Appearance"]);
   assert.deepEqual(sections[0].rows.map((row) => row.label), ["Name", "Role", "Short bio", "Preferred stack", "Replies", "Before acting"]);
-  assert.deepEqual(sections[1].rows.map((row) => row.label), ["Theme", "Terminal input"]);
+  assert.deepEqual(sections[1].rows.map((row) => row.label), ["Theme", "Terminal input", "Questions show"]);
   const by = Object.fromEntries(sections.flatMap((section) => section.rows).map((row) => [row.label, row]));
-  for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
+  for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input", "Questions show"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
   for (const label of ["Short bio", "Preferred stack"]) assert.ok(by[label].controlLeft < by[label].labelRight, `${label} stacks ${JSON.stringify(by[label])}`);
   assert.equal(by.Theme.help, "System follows your Mac. This choice is kept in this app only.");
   assert.match(by["Terminal input"].help, /Where you type to the master and every agent, on every screen/);
