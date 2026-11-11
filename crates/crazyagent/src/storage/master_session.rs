@@ -1099,6 +1099,7 @@ fn delete_session(
         "DELETE FROM master_turns WHERE session=?1",
         "DELETE FROM team_master_conversations WHERE session=?1",
         "DELETE FROM session_owner_turns WHERE session=?1",
+        "DELETE FROM session_messages WHERE session=?1",
         "DELETE FROM session_marks WHERE session=?1",
     ] {
         tx.execute(statement, [id.as_str()]).map_err(error)?;

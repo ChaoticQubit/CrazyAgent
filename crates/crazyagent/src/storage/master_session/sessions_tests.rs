@@ -260,8 +260,13 @@ impl Case {
     }
 
     fn used_in_terminal(&self, session: &SessionId) {
-        crate::master_sessions::mark_owner_turn(&self.db(), &self.project, session.as_str())
-            .unwrap();
+        crate::master_sessions::mark_owner_turn(
+            &self.db(),
+            &self.project,
+            session.as_str(),
+            "claude-code",
+        )
+        .unwrap();
     }
 
     async fn shown(&self) -> MasterSessionView {
@@ -1283,7 +1288,13 @@ async fn a_live_master_turn_holds_new_session_and_resume_until_the_owner_stops_i
     let first = case.shown().await;
     let db = case.db();
     crate::team::master::initialize(&db).unwrap();
-    crate::master_sessions::mark_owner_turn(&db, &case.project, first.session_id.as_str()).unwrap();
+    crate::master_sessions::mark_owner_turn(
+        &db,
+        &case.project,
+        first.session_id.as_str(),
+        "claude-code",
+    )
+    .unwrap();
     db.execute(
         "INSERT INTO team_live_masters(project,live,agent,turn_open) VALUES (?1,1,7,1)
          ON CONFLICT(project) DO UPDATE SET live=1, agent=7, turn_open=1",
@@ -1310,8 +1321,13 @@ async fn a_live_master_turn_holds_new_session_and_resume_until_the_owner_stops_i
     );
     let second = case.shown().await;
     assert_ne!(second.session_id, first.session_id);
-    crate::master_sessions::mark_owner_turn(&db, &case.project, second.session_id.as_str())
-        .unwrap();
+    crate::master_sessions::mark_owner_turn(
+        &db,
+        &case.project,
+        second.session_id.as_str(),
+        "claude-code",
+    )
+    .unwrap();
 
     let before = case.phases();
     assert_eq!(

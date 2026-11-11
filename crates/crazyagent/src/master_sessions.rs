@@ -55,6 +55,8 @@ const BACKFILL: &str = "backfill";
 const SWITCH: &str = "switch";
 /// The `source` of the rows of an engine-run turn.
 const TURN: &str = "turn";
+/// The `source` of the rows of a turn run in the live terminal.
+const TERMINAL: &str = "terminal";
 /// The `source` of rows read once from a harness record an older engine kept.
 const RECORD: &str = "record";
 /// The `source` of rows that stand for terminal turns an older engine only counted.
@@ -126,9 +128,22 @@ const OWNER_TURNS_COUNTED: &str =
      UPDATE session_owner_turns SET turns=0
      WHERE EXISTS(SELECT 1 FROM master_turns t WHERE t.session=session_owner_turns.session);";
 
-/// The SQL condition that the master session `s` holds an owner turn: a turn the engine ran
-/// for an owner message, or a turn its live master started in the terminal.
-const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.session=s.id) OR EXISTS(SELECT 1 FROM session_owner_turns o WHERE o.session=s.id))";
+/// The SQL condition that the master session `s` holds an owner turn: a stored message the
+/// owner or the engine opened a turn with, in either master mode, or a turn row the engine
+/// keeps as run state.
+const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.session=s.id) OR EXISTS(SELECT 1 FROM session_messages g WHERE g.session=s.id AND g.speaker IN ('owner','engine')))";
+/// The same condition for a database that has no message store yet.
+const HAS_TURN_ROW: &str = "EXISTS(SELECT 1 FROM master_turns t WHERE t.session=s.id)";
+
+/// The SQL condition that the master session `s` holds an owner turn, as this database can
+/// answer it. Takes the connection. Returns the condition.
+fn owner_turn_condition(connection: &Connection) -> Result<&'static str, EngineError> {
+    Ok(if table_exists(connection, "session_messages")? {
+        HAS_OWNER_TURN
+    } else {
+        HAS_TURN_ROW
+    })
+}
 
 /// One master session as the Sessions list shows it. `created` and `last_activity` are
 /// engine revisions; `started_ms` and `active_ms` are wall-clock times, absent for sessions
@@ -415,59 +430,193 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .map_err(error)
 }
 
-/// Counts one turn a project's master session ran in its live terminal, so the session is
-/// listed, New session may leave it and the list shows the turn as a message; a row another
-/// project holds is left as it is. Takes the engine database, the project and the session.
-/// Returns Ok, also when the session id cannot be one or the table does not exist.
+/// Stores the start of a turn a project's master session runs in its live terminal as an
+/// owner message of the session's one conversation, so the session is listed, New session
+/// may leave it and every view shows the turn. Its typed words are not known yet; the
+/// turn's end reads them. A session whose messages another project holds is left as it
+/// is. Takes the engine database, the project, the session and the harness in the
+/// terminal. Returns Ok, also when the session id cannot be one.
 pub(crate) fn mark_owner_turn(
     connection: &Connection,
     project: &ProjectId,
     session: &str,
+    harness: &str,
 ) -> Result<(), EngineError> {
-    if session.is_empty()
-        || session.len() > 128
-        || !table_exists(connection, "session_owner_turns")?
-    {
+    if session.is_empty() || session.len() > 128 {
         return Ok(());
     }
-    connection
-        .execute(
-            "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)
-             ON CONFLICT(session) DO UPDATE SET turns=turns+1 WHERE project=excluded.project",
-            params![session, project.as_str()],
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    if held_elsewhere(connection, project, session)? {
+        return Ok(());
+    }
+    let next: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM session_messages WHERE session=?1",
+            [session],
+            |row| row.get(0),
         )
         .map_err(error)?;
+    assert!(next > 0);
+    let added = append(
+        connection,
+        project.as_str(),
+        session,
+        &Draft {
+            speaker: MessageSpeaker::Owner,
+            mode: MasterMode::Live,
+            harness: Some(harness),
+            text: None,
+            source: TERMINAL,
+            key: &format!("t{next}"),
+        },
+    )?;
+    assert!(added);
     Ok(())
 }
 
-/// Keeps the reply of a turn a project's master session ran in its live terminal as the
-/// session's newest line in the Sessions list, counting the turn when its start was not
-/// seen; a row another project holds is left as it is. Takes the engine database, the
-/// project, the session and the reply. Returns Ok, also when the reply shows no words, the
-/// session id cannot be one or the table does not exist.
+/// Stores the end of a turn a project's master session ran in its live terminal: the
+/// reply as the master's message after the turn's owner message, and that message's typed
+/// words when the record the session kept shows them. A turn whose start was not seen is
+/// stored whole. A session whose messages another project holds is left as it is. Takes
+/// the engine database, the project, the session, the harness in the terminal and the
+/// reply. Returns Ok, also when the reply shows no words or the session id cannot be one.
 pub(crate) fn mark_owner_reply(
     connection: &Connection,
     project: &ProjectId,
     session: &str,
+    harness: &str,
     reply: &str,
 ) -> Result<(), EngineError> {
-    let Some(line) = clip(reply, LINE_CHARS_MAX) else {
-        return Ok(());
-    };
-    if session.is_empty()
-        || session.len() > 128
-        || !table_exists(connection, "session_owner_turns")?
-    {
+    if session.is_empty() || session.len() > 128 {
         return Ok(());
     }
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    if held_elsewhere(connection, project, session)? {
+        return Ok(());
+    }
+    let words = clip(reply, LINE_CHARS_MAX).is_some();
+    let mut turn = open_turn(connection, session)?;
+    if turn.is_none() && words {
+        mark_owner_turn(connection, project, session, harness)?;
+        turn = open_turn(connection, session)?;
+        assert!(turn.is_some());
+    }
+    let Some((seq, key)) = turn else {
+        return Ok(());
+    };
+    fill_typed(connection, project, session, seq)?;
+    if words {
+        append(
+            connection,
+            project.as_str(),
+            session,
+            &Draft {
+                speaker: MessageSpeaker::Master,
+                mode: MasterMode::Live,
+                harness: Some(harness),
+                text: Some(reply),
+                source: TERMINAL,
+                key: &format!("{key}/reply"),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Tells whether a session's stored messages belong to another project. Takes the
+/// connection, project and session. Returns the answer.
+fn held_elsewhere(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+) -> Result<bool, EngineError> {
     connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_messages WHERE session=?1 AND project<>?2)",
+            params![session, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// The live terminal turn a session's newest stored message opened and no reply closed
+/// yet. Takes the connection and session. Returns its seq and key, or None when the
+/// newest message is anything else.
+fn open_turn(connection: &Connection, session: &str) -> Result<Option<(i64, String)>, EngineError> {
+    let newest: Option<(i64, String, String, String, String)> = connection
+        .query_row(
+            "SELECT seq,source_key,speaker,mode,source FROM session_messages
+             WHERE session=?1 ORDER BY seq DESC LIMIT 1",
+            [session],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(newest.and_then(|(seq, key, speaker, mode, source)| {
+        (speaker == MessageSpeaker::Owner.name()
+            && mode == MasterMode::Live.name()
+            && source == TERMINAL)
+            .then_some((seq, key))
+    }))
+}
+
+/// Gives a live terminal turn's owner message its typed words from the record the session
+/// kept: the record's newest typed input, unless the engine typed it to carry a
+/// conversation over or it is the previous turn's, which a record not written yet still
+/// shows. Takes the connection, project, session and the message's seq. Returns any SQLite
+/// failure; a record that cannot be read leaves the message without text.
+fn fill_typed(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    seq: i64,
+) -> Result<(), EngineError> {
+    use crate::harnesses::transcript::{Speaker, conversation_messages};
+    if !table_exists(connection, "team_master_conversations")? {
+        return Ok(());
+    }
+    let Some(kept) = crate::team::master::session_conversation(connection, project, session)?
+        .filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
+    else {
+        return Ok(());
+    };
+    let typed = conversation_messages(&kept.harness, &kept.resume.record)
+        .into_iter()
+        .rev()
+        .find_map(|(speaker, text)| matches!(speaker, Speaker::Input).then_some(text))
+        .filter(|text| !text.is_empty() && !seeded(text))
+        .map(|text| marked(&text, MESSAGE_BYTES_MAX));
+    let Some(typed) = typed else {
+        return Ok(());
+    };
+    let previous: Option<String> = connection
+        .query_row(
+            "SELECT text FROM session_messages
+             WHERE session=?1 AND seq<?2 AND speaker='owner' AND mode='live' AND text IS NOT NULL
+             ORDER BY seq DESC LIMIT 1",
+            params![session, seq],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if previous.as_deref() == Some(typed.as_str()) {
+        return Ok(());
+    }
+    let filled = connection
         .execute(
-            "INSERT INTO session_owner_turns(session,project,last_line) VALUES (?1,?2,?3)
-             ON CONFLICT(session) DO UPDATE SET last_line=excluded.last_line
-             WHERE project=excluded.project",
-            params![session, project.as_str(), line],
+            "UPDATE session_messages SET text=?1 WHERE session=?2 AND seq=?3 AND text IS NULL",
+            params![typed, session, seq],
         )
         .map_err(error)?;
+    assert!(filled <= 1);
     Ok(())
 }
 
@@ -479,7 +628,10 @@ pub(crate) fn has_owner_turn(
 ) -> Result<bool, EngineError> {
     connection
         .query_row(
-            &format!("SELECT {HAS_OWNER_TURN} FROM master_sessions s WHERE s.id=?1"),
+            &format!(
+                "SELECT {} FROM master_sessions s WHERE s.id=?1",
+                owner_turn_condition(connection)?
+            ),
             [session.as_str()],
             |row| row.get::<_, bool>(0),
         )
@@ -599,8 +751,9 @@ pub(crate) fn list(
                     MAX(s.version,COALESCE((SELECT MAX(t.input) FROM master_turns t WHERE t.session=s.id),0)) AS active,
                     m.started_ms,m.active_ms
              FROM master_sessions s LEFT JOIN session_marks m ON m.session=s.id
-             WHERE s.project=?1 AND {HAS_OWNER_TURN}
-             ORDER BY s.phase='configured' DESC, active DESC, s.created DESC LIMIT ?2"
+             WHERE s.project=?1 AND {}
+             ORDER BY s.phase='configured' DESC, active DESC, s.created DESC LIMIT ?2",
+            owner_turn_condition(connection)?
         ))
         .map_err(error)?;
     type Row = (
@@ -3928,6 +4081,102 @@ mod tests {
         assert_eq!(
             exchanges[0].entry,
             "Owner, in the Codex terminal: Said later\n(No reply was kept.)"
+        );
+    }
+    /// A turn run in the live terminal is stored like any other master's: the owner's
+    /// message when it starts, the master's reply when it ends, under the harness that ran
+    /// in the terminal, one pair per turn.
+    #[test]
+    fn a_live_terminal_turn_is_stored_as_an_owner_message_then_the_reply() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let project = crate::protocol::ProjectId::new("p").unwrap();
+
+        super::mark_owner_turn(&connection, &project, "s", "codex").unwrap();
+        super::mark_owner_reply(&connection, &project, "s", "codex", "Done.").unwrap();
+        super::mark_owner_turn(&connection, &project, "s", "codex").unwrap();
+        super::mark_owner_reply(&connection, &project, "s", "codex", "Done again.").unwrap();
+
+        assert_eq!(
+            shown(&connection, "s"),
+            [
+                "owner/live/terminal: -",
+                "master/live/terminal: Done.",
+                "owner/live/terminal: -",
+                "master/live/terminal: Done again.",
+            ]
+        );
+        let stored = super::stored(&connection, "s").unwrap();
+        assert_eq!(stored[3].message.harness.as_deref(), Some("codex"));
+    }
+
+    /// A reply whose turn start the engine did not see still stores the whole turn, and a
+    /// reply that shows no words stores nothing on its own.
+    #[test]
+    fn a_reply_without_a_seen_start_stores_the_turn_and_an_empty_one_stores_nothing() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let project = crate::protocol::ProjectId::new("p").unwrap();
+
+        super::mark_owner_reply(&connection, &project, "s", "claude-code", " \n ").unwrap();
+        let after_empty = shown(&connection, "s");
+        super::mark_owner_reply(&connection, &project, "s", "claude-code", "Shipped").unwrap();
+
+        assert!(after_empty.is_empty(), "{after_empty:?}");
+        assert_eq!(
+            shown(&connection, "s"),
+            ["owner/live/terminal: -", "master/live/terminal: Shipped"]
+        );
+    }
+
+    /// A session whose messages another project holds takes no terminal turn of this one.
+    #[test]
+    fn a_terminal_turn_never_lands_in_another_project_s_session() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let holder = crate::protocol::ProjectId::new("holder").unwrap();
+        let other = crate::protocol::ProjectId::new("other").unwrap();
+        super::mark_owner_turn(&connection, &holder, "s", "codex").unwrap();
+
+        super::mark_owner_turn(&connection, &other, "s", "codex").unwrap();
+        super::mark_owner_reply(&connection, &other, "s", "codex", "Not here").unwrap();
+
+        assert_eq!(shown(&connection, "s"), ["owner/live/terminal: -"]);
+    }
+
+    /// The words the owner typed in the terminal are read from the record the session kept
+    /// when the turn ends. A record that still shows the previous turn's input gives the
+    /// next turn no words, so nothing is stored twice as said.
+    #[cfg(unix)]
+    #[test]
+    fn the_typed_words_of_a_terminal_turn_come_from_the_kept_record() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        old_record(
+            &folder,
+            &connection,
+            "s-typed",
+            &[("Fix the footer", "Footer fixed")],
+        );
+
+        super::mark_owner_turn(&connection, &project, "s-typed", "claude-code").unwrap();
+        super::mark_owner_reply(
+            &connection,
+            &project,
+            "s-typed",
+            "claude-code",
+            "Footer fixed",
+        )
+        .unwrap();
+        super::mark_owner_turn(&connection, &project, "s-typed", "claude-code").unwrap();
+        super::mark_owner_reply(&connection, &project, "s-typed", "claude-code", "And more")
+            .unwrap();
+
+        assert_eq!(
+            shown(&connection, "s-typed"),
+            [
+                "owner/live/terminal: Fix the footer",
+                "master/live/terminal: Footer fixed",
+                "owner/live/terminal: -",
+                "master/live/terminal: And more",
+            ]
         );
     }
 }

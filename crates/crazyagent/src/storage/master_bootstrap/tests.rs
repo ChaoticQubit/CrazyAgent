@@ -608,6 +608,7 @@ fn a_conversation_started_with_new_session_passes_the_bootstrap_scope_check() {
         &case.db,
         &case.session.project_id,
         case.session.session_id.as_str(),
+        "claude-code",
     )
     .unwrap();
     assert!(

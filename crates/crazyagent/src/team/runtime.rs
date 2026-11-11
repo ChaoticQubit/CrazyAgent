@@ -8259,10 +8259,15 @@ impl TeamRuntime {
                     .session
                     .clone()
                     .filter(|_| worker.live)
-                    .map(|session| (worker.project.clone(), session));
+                    .map(|session| (worker.project.clone(), session, worker.harness.clone()));
                 super::master::turn_started(&self.connection, id)?;
-                if let Some((project, session)) = live_session {
-                    crate::master_sessions::mark_owner_turn(&self.connection, &project, &session)?;
+                if let Some((project, session, harness)) = live_session {
+                    crate::master_sessions::mark_owner_turn(
+                        &self.connection,
+                        &project,
+                        &session,
+                        &harness,
+                    )?;
                 }
                 self.mark_agent(id, AgentStatus::Working, None)?;
                 Ok(false)
@@ -8287,6 +8292,7 @@ impl TeamRuntime {
                 );
                 let master = worker.role == AgentRole::Master;
                 let live_session = worker.session.clone().filter(|_| worker.live);
+                let harness = worker.harness.clone();
                 if end == TurnEnd::RateLimited {
                     self.pause(&project, &connection)?;
                     self.workers.get_mut(&id).expect("worker exists").stopping = true;
@@ -8304,6 +8310,7 @@ impl TeamRuntime {
                         &self.connection,
                         &project,
                         session,
+                        &harness,
                         &text,
                     )?;
                 }
