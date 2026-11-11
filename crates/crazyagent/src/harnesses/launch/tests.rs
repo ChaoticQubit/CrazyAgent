@@ -19,7 +19,7 @@ fn claude_driver() -> Driver {
         git_identity: None,
         limits: LaunchLimits::default(),
     };
-    let (mut driver, startup) = Driver::new(&request).unwrap();
+    let (mut driver, startup) = Driver::new(&request, false).unwrap();
     assert!(startup.is_empty());
     driver
         .send("Reply with one short greeting.")
@@ -499,11 +499,19 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
             key: None,
         },
         model: None,
-        tools: false,
+        tools: native_threads,
         sandbox_profile: None,
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+    };
+    let (approval, sandbox) = if native_threads {
+        ("never", json!({"type":"dangerFullAccess"}))
+    } else {
+        (
+            "on-request",
+            json!({"type":"readOnly","networkAccess":false}),
+        )
     };
     let (mut driver, startup) = Driver::new(&request, native_threads).unwrap();
     assert_eq!(startup.len(), 1);
@@ -524,8 +532,8 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
                 "status":{"type":"idle"}, "turns":[]
             },
             "cwd":cwd, "model":"unit-model", "modelProvider":"unit-provider",
-            "approvalPolicy":"on-request", "approvalsReviewer":"user",
-            "sandbox":{"type":"readOnly","networkAccess":false}
+            "approvalPolicy":approval, "approvalsReviewer":"user",
+            "sandbox":sandbox
         }})))
         .unwrap();
     assert!(matches!(events.as_slice(), [LaunchEvent::Ready { .. }]));
