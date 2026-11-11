@@ -12110,6 +12110,21 @@ struct LevelRun {
     codes: BTreeMap<String, i32>,
 }
 
+/// The exit code the agent's `cargo build` must end with on this machine: 0 where the
+/// owner account's home holds a Rust toolchain for the engine to hand to agents, else 127,
+/// the shell's code for a command it cannot find, as on a CI runner whose account has no
+/// rustup. Takes nothing. Returns the code.
+#[cfg(target_os = "macos")]
+fn built() -> i32 {
+    use crate::sandbox::toolchains::{ToolHomes, Toolchain};
+    let homes = ToolHomes::owner().expect("the owner account has a home");
+    if Toolchain::Rust.installed(&homes) {
+        0
+    } else {
+        127
+    }
+}
+
 /// Starts one tools-on sub-agent of a project saved at `access`, through `TeamRuntime`
 /// and real sandbox-exec (none at Full access). The project is a committed tiny crate; the
 /// stand-in codex script edits a file, builds the crate offline with the owner's
@@ -12426,7 +12441,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
 
     let (next, _, codes) = requeued_run(&mut run.fixture, &mut run.team, member);
     run.member = next;
-    assert_eq!(codes["build"], 0, "{codes:?}");
+    assert_eq!(codes["build"], built(), "{codes:?}");
     assert_eq!(
         codes["told"], 0,
         "the next start is told the Own branch rules"
@@ -12884,8 +12899,8 @@ fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_th
     for name in ["home_flags", "skills_flags", "system_flags"] {
         assert_ne!(run.code(name), 0, "{name}: {:?}", run.codes);
     }
+    assert_eq!(run.code("build"), built(), "build: {:?}", run.codes);
     for name in [
-        "build",
         "home_files",
         "work_files",
         "mkdir_roots",
@@ -12941,8 +12956,8 @@ fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_the
     assert!(!config.contains("planted"), "{config}");
     assert_ne!(run.code("clone_away"), 0, "{:?}", run.codes);
     assert!(!store.contains("planted"), "{store}");
+    assert_eq!(run.code("build"), built(), "build: {:?}", run.codes);
     for name in [
-        "build",
         "commit",
         "home_files",
         "work_files",
@@ -12961,7 +12976,7 @@ fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_the
 #[test]
 fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
-    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
         1,
@@ -12984,7 +12999,7 @@ fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets()
 #[test]
 fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
-    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
         0,
@@ -13035,7 +13050,7 @@ fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
 #[test]
 fn a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
-    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
         0,
