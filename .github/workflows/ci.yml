@@ -87,6 +87,7 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
       - name: Install Linux build packages
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           command -v dpkg >/dev/null || { echo "::error::this job needs a Debian or Ubuntu runner with dpkg"; exit 1; }
@@ -103,8 +104,8 @@ jobs:
             echo "::error::missing packages: ${missing[*]}. This runner has no passwordless sudo; provision it with: sudo apt-get install -y --no-install-recommends ${missing[*]}"
             exit 1
           fi
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update --error-on=any
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y --no-install-recommends "${missing[@]}"
       - name: Install tmux
         run: |
           set -euo pipefail
