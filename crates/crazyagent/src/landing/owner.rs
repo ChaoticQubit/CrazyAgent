@@ -1210,7 +1210,7 @@ pub(super) fn accept_to(
     let edited = message.map(edited).transpose()?;
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
-    let _held = hold(&repository);
+    let _held = flow::hold_unmoved(db, &repository)?;
     accept_held(db, home, id, expected_head, edited, target, by, stopped)
 }
 
@@ -1371,7 +1371,7 @@ pub(super) fn undo(
 ) -> Result<AcceptOutcome, EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
-    let _held = hold(&repository);
+    let _held = flow::hold_unmoved(db, &repository)?;
     let mut record = settled(db, id)?;
     let unavailable = || failure("changes_undo_unavailable");
     let (landed, named) = match (&record.landed, &record.landed_on) {
@@ -1598,7 +1598,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
         )),
         None => None,
     };
-    let _held = hold(&repository);
+    let _held = flow::hold_unmoved(db, &repository)?;
     let mut record = settled(db, id)?;
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict)
         || record.intent.is_some()
@@ -2485,7 +2485,9 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
         let tips = against(db, &records);
         let ids: Vec<ChangeSetId> = records.iter().map(|record| record.id.clone()).collect();
         let heads: Vec<&str> = records.iter().map(|record| record.head.as_str()).collect();
-        let _held = hold(&repository);
+        let Ok(_held) = flow::hold_unmoved(db, &repository) else {
+            continue;
+        };
         if let Err(error) = super::subagent::close_orphaned(db, &ids) {
             eprintln!(
                 "landing_settle_failed cause={}",
@@ -2526,7 +2528,7 @@ pub(super) fn observe_for_diff(
 ) -> Result<Option<(String, String)>, EngineError> {
     let record = store::load(db, id)?;
     let tips = against(db, std::slice::from_ref(&record));
-    let _held = hold(&record.repository);
+    let _held = flow::hold_unmoved(db, &record.repository)?;
     let owner = owner_tip(db, &record.repository, &record.project);
     observe_one(db, id, owner.as_ref(), &tips[0], &BTreeSet::new())
 }

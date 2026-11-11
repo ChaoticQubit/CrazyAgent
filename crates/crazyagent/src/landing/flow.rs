@@ -57,6 +57,20 @@ pub(super) fn hold(repository: &Path) -> Held {
     Held(repository.to_path_buf())
 }
 
+/// Takes the engine's hold on one owner repository for an owner's action, refusing at
+/// once while a project move is pending for it: the move keeps this hold for as long as
+/// its folder moves, and an action that waited that long would answer after its client
+/// gave up. Inputs: the store and the repository root. Output: the hold, or
+/// `move_project_in_progress`.
+pub(super) fn hold_unmoved(db: &Connection, repository: &Path) -> Result<Held, EngineError> {
+    if crate::projects_home::project_move_holds(db, repository)
+        .map_err(|_| failure("changes_unavailable"))?
+    {
+        return Err(failure("move_project_in_progress"));
+    }
+    Ok(hold(repository))
+}
+
 /// Takes the engine's hold on one owner repository, waiting no longer than `wait` for
 /// landing work that has it. Inputs: the repository root and the wait. Output: the hold,
 /// or none when the work did not end within the wait.
@@ -2346,7 +2360,7 @@ pub(super) fn discard(
 ) -> Result<u64, EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
-    let _held = hold(&repository);
+    let _held = hold_unmoved(db, &repository)?;
     let mut record = super::owner::settled(db, id)?;
     if !record.is_open() || record.head != expected_head || record.intent.is_some() {
         return Err(failure("changes_stale"));
@@ -2548,7 +2562,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         None
     };
     let repository = loaded.repository;
-    let _held = hold(&repository);
+    let _held = hold_unmoved(db, &repository)?;
     let mut record = super::owner::settled(db, id)?;
     if record.state != ChangeState::Discarded {
         return Err(failure("changes_stale"));
