@@ -12,8 +12,32 @@ const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 /// bytes for good off macOS. A write after that stamps a change time more than one clock tick
 /// and the coarsest file system time grain (2 s) past the seen one, so it cannot keep the
 /// identity, and from then on the identity check alone sees every write.
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(test, not(target_os = "macos")))]
 const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether a matching hash proves a harness's bytes for good: it started [`SETTLE_AFTER`]
+/// past the first look at the identity by the monotonic clock and past the identity's change
+/// time by the wall clock, so a change time ahead of the clock keeps the harness hashing.
+/// Inputs: the first look, the hash start on the monotonic and wall clocks, and the change
+/// time as (seconds, nanoseconds). Output: true when the harness settles.
+#[cfg(any(test, not(target_os = "macos")))]
+fn settles(
+    seen: std::time::Instant,
+    started: std::time::Instant,
+    wall: std::time::SystemTime,
+    changed: (i64, i64),
+) -> bool {
+    let after = i64::try_from(SETTLE_AFTER.as_secs()).unwrap();
+    started >= seen + SETTLE_AFTER
+        && wall
+            .duration_since(std::time::UNIX_EPOCH)
+            .is_ok_and(|wall| {
+                (
+                    i64::try_from(wall.as_secs()).unwrap_or(i64::MAX),
+                    i64::from(wall.subsec_nanos()),
+                ) >= (changed.0.saturating_add(after), changed.1)
+            })
+}
 
 pub async fn run_native_auth_custodian(
     runtime_dir: &Path,
@@ -157,8 +181,8 @@ impl RegisteredNativeAuthHost {
     /// fine clock, so equal identity means the hashed bytes without re-reading a harness of
     /// hundreds of MB. Linux moves file times by the coarse clock tick, so a same-size write
     /// in that tick keeps the identity: there the retained file is hashed again, off the
-    /// tokio worker, until one matching hash starts [`SETTLE_AFTER`] past the seen identity.
-    /// Input: none. Output: the path, or `native_auth_host_executable_changed`.
+    /// tokio worker, until a matching hash [`settles`] it. Input: none. Output: the path, or
+    /// `native_auth_host_executable_changed`.
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         let named = Self::open(&self.path)?;
         if ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
@@ -171,6 +195,7 @@ impl RegisteredNativeAuthHost {
         #[cfg(not(target_os = "macos"))]
         if !self.settled.load(std::sync::atomic::Ordering::Acquire) {
             let started = std::time::Instant::now();
+            let wall = std::time::SystemTime::now();
             #[cfg(test)]
             self.rehashes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -179,7 +204,7 @@ impl RegisteredNativeAuthHost {
             {
                 return Err(EngineError("native_auth_host_executable_changed".into()));
             }
-            if started >= self.seen + SETTLE_AFTER {
+            if settles(self.seen, started, wall, self.identity.changed) {
                 self.settled
                     .store(true, std::sync::atomic::Ordering::Release);
             }

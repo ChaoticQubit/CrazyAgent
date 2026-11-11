@@ -112,6 +112,32 @@ fn off_macos_a_request_hashes_each_harness_only_until_it_settles() {
     assert_eq!(request(&harnesses), settling);
 }
 
+/// A matching hash settles a harness only when it starts [`super::SETTLE_AFTER`] past the
+/// first look by the monotonic clock and past the recorded change time by the wall clock, so
+/// a change time ahead of the clock, as after the clock steps back, keeps the harness hashing.
+#[test]
+fn a_change_time_ahead_of_the_wall_clock_never_settles_a_harness() {
+    let started = std::time::Instant::now();
+    let seen = started.checked_sub(super::SETTLE_AFTER).unwrap();
+    let wall = std::time::SystemTime::now();
+    let since = wall.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let changed = |offset: i64| {
+        (
+            i64::try_from(since.as_secs()).unwrap() + offset,
+            i64::from(since.subsec_nanos()),
+        )
+    };
+    assert!(super::settles(seen, started, wall, changed(-3)));
+    assert!(!super::settles(seen, started, wall, changed(60)));
+    assert!(!super::settles(seen, started, wall, changed(-2)));
+    assert!(!super::settles(
+        seen + std::time::Duration::from_millis(1),
+        started,
+        wall,
+        changed(-60)
+    ));
+}
+
 /// Off macOS a same-size write before the identity settles is refused even when the hash
 /// that sees it starts past the settle time, and the harness never settles.
 #[cfg(not(target_os = "macos"))]
