@@ -1899,6 +1899,7 @@ fn with_prices_off_no_metric_carries_a_dollar() {
         MoneySettings {
             main_number: MainNumber::Dollars,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();
@@ -2185,6 +2186,7 @@ fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
         MoneySettings {
             main_number: MainNumber::Dollars,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();

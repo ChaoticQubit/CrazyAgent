@@ -92,3 +92,27 @@ test("the project Metrics tab shows this project's tokens with the headline from
     assert.ok(!words.includes("9.5K") && !words.includes("9.2K"), "no number adds the cache re-reads into the tokens");
   });
 });
+
+test("/usage in a project's console opens that project's own Metrics tab, not every project's page (DEC-132 item 1)", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-metrics-usage-command-", async ({ project, me, page, site, bridge }) => {
+    await pricesOff(bridge);
+    const prompt = 'textarea[aria-label="Message the master"]';
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/conversation` });
+    for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
+      if (await page.evaluate(`document.querySelector(${JSON.stringify(prompt)}) !== null`).catch(() => false)) break;
+      assert.ok(Date.now() < deadline, "the project's console never showed its prompt");
+    }
+    await me.type(prompt, "/usage");
+    await me.waitFor("the /usage command in the menu", (text) => text.includes("Open this project's Metrics"));
+    await me.enter();
+    let shown = null;
+    for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
+      shown = await metricsShown(page).catch(() => null);
+      if (/^This project only · /.test(shown?.line ?? "")) break;
+      assert.ok(Date.now() < deadline, `/usage never opened the project's Metrics tab: ${JSON.stringify(shown)}`);
+    }
+    await me.capture("metrics-usage-command");
+    assert.equal(await page.evaluate("location.hash"), `#/projects/${encodeURIComponent(project)}/metrics`);
+    assert.equal(shown.picker, false, "the project's own tab has no project picker");
+  });
+});

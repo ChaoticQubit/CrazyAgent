@@ -1124,6 +1124,7 @@ fn with_prices_off_no_report_row_carries_a_dollar() {
         MoneySettings {
             main_number: MainNumber::Dollars,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();
@@ -1197,6 +1198,7 @@ fn with_prices_off_no_model_row_carries_a_dollar() {
         MoneySettings {
             main_number: MainNumber::Dollars,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();
