@@ -3825,7 +3825,7 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
-    const SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
+    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -4516,4 +4516,22 @@ fn e_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
             mode: MasterLands::Merges,
         })
     );
+}
+
+/// PA-11 (DEC-141): every harness kind says what its Delivery choices do there, Native only
+/// included, in the sentences the app shows under its Messages to row. The match names every
+/// kind, so a new one fails to build until it has its sentence.
+#[test]
+fn every_harness_kind_says_what_its_delivery_choices_do() {
+    for kind in HarnessKind::ALL {
+        let said = delivery_scope(kind);
+        let native = match kind {
+            HarnessKind::ClaudeCode => "Native only uses the relay alone and never types.",
+            HarnessKind::Codex => {
+                "Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle."
+            }
+            HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
+        };
+        assert!(said.contains(native), "{kind:?}: {said}");
+    }
 }

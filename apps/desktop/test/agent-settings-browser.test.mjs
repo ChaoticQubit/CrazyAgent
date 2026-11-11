@@ -30,7 +30,7 @@ const GROUPS = [
 const MASTER = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
-  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
+  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
 const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];

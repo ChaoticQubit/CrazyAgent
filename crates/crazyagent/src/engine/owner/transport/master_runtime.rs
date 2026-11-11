@@ -845,20 +845,22 @@ impl OwnerRuntimeHandle {
                 .await?,
             ))
         } else {
-            MasterHost::Codex(Box::new(
-                CodexHost::spawn(
-                    launch.command,
-                    launch.sandbox,
-                    profile,
-                    launch.home,
-                    action,
-                    account_ref,
-                    prepared.time.run_time(),
-                    resources,
-                    &prepared.instructions,
-                )
-                .await?,
-            ))
+            let mut host = CodexHost::spawn(
+                launch.command,
+                launch.sandbox,
+                profile,
+                launch.home,
+                action,
+                account_ref,
+                prepared.time.run_time(),
+                resources,
+                &prepared.instructions,
+            )
+            .await?;
+            if prepared.tools {
+                host.limit_steps(prepared.steps);
+            }
+            MasterHost::Codex(Box::new(host))
         };
         let mut active = ActiveMaster {
             host,

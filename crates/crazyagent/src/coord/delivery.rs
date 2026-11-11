@@ -349,16 +349,18 @@ fn pane_of(reach: &Reach<'_>, agent: AgentId) -> Option<u32> {
     reach.host?.pane_pid(&pane).ok().flatten()
 }
 
-/// What the owner sees on an agent that the project's Delivery setting leaves with no way
-/// to get its team messages (owner 2026-11-05): a tools-off Codex app runs without the app
-/// server its bridge needs, and Native only never types into it.
-pub const NO_CHANNEL: &str = "Can't receive messages: Native only needs tools on for Codex.";
+/// What the owner sees on an agent that the project's Delivery setting leaves with no
+/// channel while it works: a tools-off Codex app runs without the app server its bridge
+/// needs, and Native only never types into it, so the engine brings its messages as a task
+/// of their own once it is idle (PA-11, DEC-141; supersedes the owner's 2026-11-05 sentence).
+pub const NO_CHANNEL: &str = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
 
-/// Tells whether a team agent can never get its messages under the project's Delivery
-/// setting: a tools-off Codex sub-agent in a kept session has no bridge and is never typed
-/// into under Native only, so its messages wait Sent until tools are on or the setting
-/// changes. Takes the database, the project, the agent's role, harness and tools switch,
-/// and whether it runs a kept session. Returns [`NO_CHANNEL`] for it, none otherwise.
+/// Tells whether a team agent has no channel for its messages while it works under the
+/// project's Delivery setting: a tools-off Codex sub-agent in a kept session has no bridge
+/// and is never typed into under Native only, so its messages wait Sent until the engine
+/// wakes it with a task of their own. Takes the database, the project, the agent's role,
+/// harness and tools switch, and whether it runs a kept session. Returns [`NO_CHANNEL`] for
+/// it, none otherwise.
 pub fn no_channel(
     db: &Connection,
     project: &ProjectId,

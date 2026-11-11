@@ -6,10 +6,11 @@ pub use protocol::{CodexHostBatch, CodexHostProtocol};
 
 use crate::adapters::NativeAction;
 use crate::adapters::codex::{AuthControl, State};
-use crate::adapters::events::ObservedEvent;
+use crate::adapters::events::{EventKind, ObservedEvent, TurnOutcome};
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::claude_host::diagnostic::StreamDiagnostic;
+use crate::master_step_limit::StepLimit;
 use crate::master_time_limit::START_TIME_MAX;
 use crate::protocol::{CredentialRef, RequestId};
 use crate::routing::ResourceBudget;
@@ -29,6 +30,15 @@ pub(in crate::engine) struct CodexHost {
     outbound: VecDeque<Vec<u8>>,
     disconnected: bool,
     diagnostic: StreamDiagnostic,
+    steps: StepStop,
+}
+
+/// The owner's master step limit on one Codex host (PA-9) and whether the host already
+/// interrupted the turn for it.
+#[derive(Clone, Copy, Debug, Default)]
+struct StepStop {
+    limit: StepLimit,
+    stopped: bool,
 }
 
 impl CodexHost {
@@ -77,6 +87,7 @@ impl CodexHost {
             outbound: VecDeque::new(),
             disconnected: false,
             diagnostic: StreamDiagnostic::default(),
+            steps: StepStop::default(),
         };
         let started = host.start(&cwd, instructions, tools);
         match run_time {
@@ -142,14 +153,60 @@ impl CodexHost {
         self.process.send(&bytes).await
     }
 
+    /// Gives a tools-on master the owner's master step limit, as Claude Code's --max-turns
+    /// does (PA-9): once the turn has taken that many steps, the host interrupts it before
+    /// its next model round, and the interrupted turn ends with the limit's cause,
+    /// `master_step_limit_<steps>`. No limit leaves the turn bounded by its run time only.
+    /// Input: the limit. Output: none.
+    pub(in crate::engine) fn limit_steps(&mut self, limit: StepLimit) {
+        assert!(!self.steps.stopped);
+        self.steps.limit = limit;
+    }
+
     pub(in crate::engine) async fn next_event(&mut self) -> Result<ObservedEvent, EngineError> {
         loop {
             self.flush_outbound().await?;
             if let Some(event) = self.events.pop_front() {
-                return Ok(event);
+                return self.step_end(event);
             }
             self.pump().await?;
+            self.stop_at_step_limit().await?;
         }
+    }
+
+    /// Interrupts the running turn once it has taken the steps its limit allows. Input: the
+    /// host. Output: Ok, or the send's plain code.
+    async fn stop_at_step_limit(&mut self) -> Result<(), EngineError> {
+        let reached = self
+            .steps
+            .limit
+            .steps()
+            .is_some_and(|steps| self.protocol.steps() >= steps);
+        if !reached || self.steps.stopped || self.protocol.state() != State::Active {
+            return Ok(());
+        }
+        let bytes = self.protocol.interrupt()?;
+        self.steps.stopped = true;
+        self.process.send(&bytes).await
+    }
+
+    /// Names the step limit in the end of a turn this host interrupted for it; a turn that
+    /// still completed on its own keeps its end. Input: the event. Output: the event, or
+    /// the limit's cause for the interrupted turn's end.
+    fn step_end(&self, event: ObservedEvent) -> Result<ObservedEvent, EngineError> {
+        let interrupted = matches!(
+            event.kind,
+            EventKind::TurnFinished {
+                outcome: TurnOutcome::Incomplete,
+                ..
+            }
+        );
+        if !(self.steps.stopped && interrupted) {
+            return Ok(event);
+        }
+        let cause = self.steps.limit.cause();
+        assert!(cause.is_some());
+        Err(EngineError(cause.unwrap_or_default()))
     }
 
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {

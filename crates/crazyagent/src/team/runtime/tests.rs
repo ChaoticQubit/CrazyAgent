@@ -16112,6 +16112,67 @@ fn asleep_lists_idle_per_turn_sub_agents_and_idle_kept_native_leads() {
     team.workers.clear();
 }
 
+/// PA-11 (DEC-141): Native only never types, and a tools-off Codex sub-agent in a kept
+/// session has no bridge, so the engine wakes it for its messages with a task of their own
+/// once it is idle, as it wakes a per-turn agent. Auto, Typing only, tools on, another
+/// harness, a per-turn agent, a busy or stopping agent and the master are left out.
+#[test]
+fn unreached_lists_idle_tools_off_codex_sub_agents_in_kept_sessions_under_native_only() {
+    use crate::coord::settings::{self, Delivery, HarnessKind};
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let kept = |role| {
+        let mut worker = between_turns(&project, role, false, false);
+        worker.tools = false;
+        worker
+    };
+    let quiet = 201;
+    team.workers.insert(quiet, kept(AgentRole::Sub));
+    let mut tools_on = kept(AgentRole::Sub);
+    tools_on.tools = true;
+    team.workers.insert(202, tools_on);
+    let mut claude = kept(AgentRole::Sub);
+    claude.harness = "claude-code".into();
+    team.workers.insert(203, claude);
+    let mut per_turn = kept(AgentRole::Sub);
+    per_turn.managed = true;
+    team.workers.insert(204, per_turn);
+    let mut busy = kept(AgentRole::Sub);
+    busy.busy = Some(Busy::Task(9));
+    team.workers.insert(205, busy);
+    let mut stopping = kept(AgentRole::Sub);
+    stopping.stopping = true;
+    team.workers.insert(206, stopping);
+    team.workers.insert(207, kept(AgentRole::Master));
+    for (delivery, expected) in [
+        (Delivery::Auto, BTreeSet::new()),
+        (Delivery::NativeOnly, BTreeSet::from([quiet])),
+        (Delivery::TypingOnly, BTreeSet::new()),
+    ] {
+        settings::set_delivery(&team.connection, &project, HarnessKind::Codex, delivery).unwrap();
+        assert_eq!(team.unreached(&project).unwrap(), expected, "{delivery:?}");
+    }
+    let walked = 300;
+    for kind in HarnessKind::ALL {
+        settings::set_delivery(&team.connection, &project, kind, Delivery::NativeOnly).unwrap();
+        let mut worker = kept(AgentRole::Sub);
+        worker.harness = kind.as_str().into();
+        team.workers.insert(walked, worker);
+        let woken = team.unreached(&project).unwrap().contains(&walked);
+        match kind {
+            HarnessKind::ClaudeCode => assert!(!woken, "its relay reaches it while it works"),
+            HarnessKind::Codex => assert!(woken, "only a task of its own reaches it"),
+            HarnessKind::Rcli => {
+                assert!(!woken);
+                assert_eq!(crate::team::launch_harness(kind.as_str()), None);
+            }
+        }
+        team.workers.remove(&walked);
+    }
+    team.workers.clear();
+}
+
 /// F2: an asleep agent with a waking message gets one `WAKE_TASK` task pinned to it, with
 /// its lead as the task's parent; with no pool for the project the task waits as
 /// needs_pool, with a usable account it is queued, and no second task is made while one

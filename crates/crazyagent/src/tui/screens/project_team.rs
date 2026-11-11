@@ -2425,9 +2425,10 @@ impl TeamView {
                         delivery,
                     },
                     format!(
-                        "Messages to {} agents: {}.",
+                        "Messages to {} agents: {}. {}",
                         harness_name(kind.as_str(), None),
-                        delivery_words(delivery)
+                        delivery_words(delivery),
+                        delivery_scope(kind)
                     ),
                 )
             }
@@ -3705,6 +3706,24 @@ fn delivery_words(delivery: Delivery) -> &'static str {
     }
 }
 
+/// What the Delivery choices do on one harness kind (PA-11, DEC-141): Native only never
+/// types, and a harness with no channel while its agent works says how its messages arrive
+/// instead. The app shows the same sentences under each Messages to row. Takes the kind.
+/// Returns the sentences.
+fn delivery_scope(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => {
+            "Auto hands a message to a Claude Code agent through its relay and types it in if the relay has not taken it after 60 seconds. Native only uses the relay alone and never types. Typing only types every message in."
+        }
+        HarnessKind::Codex => {
+            "Auto hands a message to a Codex agent with tools on through its app-server bridge and types it in when the bridge can't take it. Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle. Typing only types every message in."
+        }
+        HarnessKind::Rcli => {
+            "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice."
+        }
+    }
+}
+
 fn display_words(display: ClaudeDisplay) -> &'static str {
     match display {
         ClaudeDisplay::Classic => "Classic",
@@ -3841,9 +3860,10 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
 }
 
 /// Which agents Background commands at task end acts on, said with every choice in the
-/// TUI and the desktop alike: Wait and a grace time only where the engine sees background
-/// commands, a Claude Code pane, and turn-end stops only where it ends them (rv-code BHT-M1).
-const BACKGROUND_SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
+/// TUI and the desktop alike: every choice on Claude Code and Codex panes, whose records
+/// report their background commands (PA-10), a turn-end stop for agents run per turn, and
+/// none for rcli, which has no tools (rv-code BHT-M1).
+const BACKGROUND_SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.
