@@ -98,9 +98,6 @@ jobs:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             os: linux
-          - runner: windows-2022
-            target: x86_64-pc-windows-msvc
-            os: windows
     runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -530,7 +527,7 @@ jobs:
           done
           cat notes.txt
       - name: Write update manifests and checksums
-        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --notes "$(cat notes.txt)"
+        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --notes "$(cat notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
       - name: Publish dev prerelease
         if: needs.prepare.outputs.channel == 'dev'
         env:

@@ -120,6 +120,15 @@ test("release builds macOS on badal only for pushes, and every other release job
   assert.equal(release.split("\n").filter((line) => line.includes("self-hosted")).length, 2);
 });
 
+test("the update manifests cover exactly the targets the release matrix builds, and no Windows target ships until its sandbox holds", async () => {
+  const release = await workflow("release.yml");
+  const matrix = block(block(release, 2, "build").join("\n"), 6, "matrix").join("\n");
+  const built = [...matrix.matchAll(/^ {12}target: (\S+)$/gm)].map((match) => match[1]);
+  const manifest = steps(release, "publish").find((step) => step.includes("- name: Write update manifests and checksums"));
+  assert.deepEqual(manifest.match(/ --targets (\S+)/)[1].split(","), built);
+  assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]);
+});
+
 test("every badal job refuses to run under Rosetta before anything else", async () => {
   const [ci] = steps(await workflow("ci.yml"), "macos");
   assert.match(ci, new RegExp(`^ {6}- name: ${ROSETTA}\n {8}run: \\|`));
