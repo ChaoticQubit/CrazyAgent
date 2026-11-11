@@ -125,6 +125,40 @@ impl Case {
         receive.await.unwrap().unwrap()
     }
 
+    /// Reads one page of a session's conversation from the message store, or the code the
+    /// read was refused with.
+    async fn messages(
+        &self,
+        project: &ProjectId,
+        session: &SessionId,
+        before: Option<u64>,
+        limit: u8,
+    ) -> Result<crate::master_sessions::SessionMessagePage, String> {
+        let (send, receive) = oneshot::channel();
+        self.storage
+            .sender
+            .try_send(Job::OwnerRead(
+                self.started.owners[0].admission.clone(),
+                OwnerRead::ProjectMasterMessages {
+                    project_id: project.clone(),
+                    session_id: session.clone(),
+                    before,
+                    limit,
+                },
+                send,
+            ))
+            .unwrap_or_else(|_| panic!("owner read queue unavailable"));
+        match receive.await.unwrap() {
+            Ok(reply) => {
+                let OwnerData::ProjectMasterMessages { page } = reply.data else {
+                    panic!("the session's messages are read");
+                };
+                Ok(page)
+            }
+            Err(refused) => Err(refused.0),
+        }
+    }
+
     async fn apply(&self, id: &str, mutation: OwnerMutation) -> OwnerResult {
         let basis = self.read(OwnerRead::Capabilities).await;
         let (send, receive) = oneshot::channel();
@@ -1825,6 +1859,84 @@ async fn delete_removes_a_parked_session_and_its_transcript_inside_the_master_ho
         case.delete("delete-again", &kept.session_id).await,
         OwnerResult::Applied,
         "deleting a deleted session again finds nothing left to remove"
+    );
+    case.close().await;
+}
+
+/// OB-6: one owner read gives a session's conversation whatever master wrote it. A turn the
+/// one-turn master was asked and a turn run in the live terminal come back from the same
+/// read, newest first, with a cursor that walks back to the first message.
+#[tokio::test]
+async fn one_read_pages_a_session_s_conversation_whatever_master_wrote_it() {
+    use crate::master_sessions::{MasterMode, MessageSpeaker};
+    let case = Case::new().await;
+    assert_eq!(case.open("open-mixed").await, OwnerResult::Applied);
+    let live = case.shown().await;
+    assert_eq!(
+        case.submit("typed-line", &live.session_id, "Outline the export page")
+            .await,
+        OwnerResult::Applied
+    );
+    case.used_in_terminal(&live.session_id);
+
+    let newest = case
+        .messages(&case.project, &live.session_id, None, 1)
+        .await
+        .unwrap();
+    let older = case
+        .messages(&case.project, &live.session_id, newest.next, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(newest.count, 2);
+    assert_eq!(newest.messages.len(), 1);
+    assert_eq!(newest.messages[0].speaker, MessageSpeaker::Owner);
+    assert_eq!(newest.messages[0].mode, MasterMode::Live);
+    assert_eq!(newest.messages[0].harness.as_deref(), Some("claude-code"));
+    assert_eq!(newest.messages[0].text, None);
+    assert_eq!(newest.next, Some(newest.messages[0].seq));
+    assert_eq!(older.messages.len(), 1);
+    assert_eq!(older.messages[0].speaker, MessageSpeaker::Owner);
+    assert_eq!(older.messages[0].mode, MasterMode::OneTurn);
+    assert_eq!(
+        older.messages[0].text.as_deref(),
+        Some("Outline the export page")
+    );
+    assert_eq!(older.next, None);
+    case.close().await;
+}
+
+/// The conversation read answers only for a session of the named project and within its
+/// page bounds; a refused read leaves the stored messages as they are.
+#[tokio::test]
+async fn the_conversation_read_refuses_a_foreign_session_and_a_page_out_of_bounds() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-first").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(
+        case.submit("first-line", &first.session_id, "Draft the changelog")
+            .await,
+        OwnerResult::Applied
+    );
+    let other = ProjectId::new("no-such-project").unwrap();
+    let unknown = SessionId::new("no-such-session").unwrap();
+
+    let foreign = case.messages(&other, &first.session_id, None, 8).await;
+    let missing = case.messages(&case.project, &unknown, None, 8).await;
+    let unbounded = case
+        .messages(&case.project, &first.session_id, None, 0)
+        .await;
+
+    assert_eq!(foreign.unwrap_err(), "master_session_missing");
+    assert_eq!(missing.unwrap_err(), "master_session_missing");
+    assert_eq!(unbounded.unwrap_err(), "master_messages_page_limit");
+    assert_eq!(
+        count(
+            &case,
+            "SELECT COUNT(*) FROM session_messages WHERE session=?1",
+            &first.session_id
+        ),
+        1
     );
     case.close().await;
 }
