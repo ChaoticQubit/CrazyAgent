@@ -584,7 +584,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["capture_incomplete", "its reply was cut off"],
   ["no_reply", "it ended its turn without writing a reply"],
   ["step_limit", "it used every step its limit allows"],
-  ["time_limit", "it reached its time limit"],
+  ["time_limit", "it ran as long as one turn may run. Change this in Settings, Master"],
   ["output_limit", "this turn's output was too large to keep"],
   ["unsupported_capability", "it cannot lead a project yet"],
   ["instructions_too_large", "the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again"],
