@@ -1911,6 +1911,47 @@ fn a_graph_builds_when_source_imports_a_kept_out_file() {
     }
 }
 
+/// Pins what the code graph takes from a source file that a secret word in its name no
+/// longer keeps out (DEC-132 Q12, accepted): graphify 0.9.9 copies its docstrings and its
+/// NOTE and TODO comments into the graph, and never the value of a string. macOS only, as
+/// the graph build runs under Seatbelt alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_spared_source_files_docstrings_and_notes_reach_the_graph_but_its_string_values_do_not() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "web/src/lib/tokens.ts",
+        "export function design_token_scale() {\n  // NOTE: NOTE_CANARY_TS_52 rotate this value every quarter\n  const literal = \"LITERAL_CANARY_TS_63\";\n  return literal.length;\n}\n",
+    );
+    write_file(
+        &repo,
+        "config/secrets.py",
+        "API_KEY = \"LITERAL_CANARY_PY_85\"\n\n\ndef load_secret():\n    \"\"\"FUNC_DOC_CANARY_PY_96 returns the key read at import time.\"\"\"\n    return API_KEY\n",
+    );
+    assert_eq!(
+        draft::kept_out(&repo).unwrap(),
+        Vec::<String>::new(),
+        "both files are source, so neither is kept out"
+    );
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    for reached in ["NOTE_CANARY_TS_52", "FUNC_DOC_CANARY_PY_96"] {
+        assert!(graph.contains(reached), "{reached} is not in the graph");
+    }
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for value in ["LITERAL_CANARY_TS_63", "LITERAL_CANARY_PY_85"] {
+            assert!(!text.contains(value), "{value} reached {name}: {text}");
+        }
+    }
+}
+
 #[test]
 fn a_crazyagent_folder_swapped_for_a_link_is_never_read_or_written_through() {
     let dir = rust_repo();
