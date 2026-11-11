@@ -562,6 +562,16 @@ fn version_of(found: &Found) -> Result<String, EngineError> {
     }
 }
 
+/// The version an owner's write must name: as [`version_of`], with a blank file counted
+/// as no text, so the owner can put text back into a tab whose file was emptied. Input:
+/// what was found. Output: the version, or `overview_tab_blocked`.
+fn owner_version(found: &Found) -> Result<String, EngineError> {
+    match found {
+        Found::Blocked(BLOCKED_BLANK) => Ok(String::new()),
+        other => version_of(other),
+    }
+}
+
 /// The project's stored row. Inputs: the connection and the project. Output: the row, the
 /// defaults while there is none, or `overview_unavailable`.
 fn state(db: &Connection, project: &ProjectId) -> Result<State, EngineError> {
@@ -703,7 +713,7 @@ pub fn save(
     let _writing = writing();
     let place = place(folder)?;
     let found = found_in(&place, tab);
-    if version_of(&found)? != version {
+    if owner_version(&found)? != version {
         return Err(failure(TAB_CHANGED));
     }
     write_tab(&place, tab, text, matches!(found, Found::Missing))?;
@@ -733,7 +743,7 @@ pub fn accept(
     checked(&proposal)?;
     let place = place(folder)?;
     let found = found_in(&place, tab);
-    if version_of(&found)? != version {
+    if owner_version(&found)? != version {
         return Err(failure(TAB_CHANGED));
     }
     write_tab(&place, tab, &proposal, matches!(found, Found::Missing))?;
