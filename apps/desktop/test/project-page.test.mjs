@@ -283,6 +283,27 @@ test("research agents offer Stop while running, Cancel while waiting and Try aga
   assert.deepEqual(actions("cancelled"), { log: false, stop: null, retry: true });
 });
 
+test("the Overview keeps Needs you above the tabs and today's activity under the Activity tab", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const setup = { kind: "ok", value: {
+    project_id: "p-1", name: "Harbor Notes", about: "A notes app for harbor pilots.", tech_stack: [], platforms: [], research: ["market_research"],
+    pool: null, team: { master: "codex", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 }, documents: [], folder: "/Users/mira/CrazyAgent/harbor-notes", created_ms: 0, revision: 1,
+  } };
+  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: { ...tabData([job("needs_pool")]), setup } }));
+  const needs = markup.indexOf(">Needs you<");
+  const strip = markup.indexOf('role="tablist"');
+  assert.ok(needs >= 0, "Needs you is shown");
+  assert.ok(strip > needs, "the tab strip comes after Needs you");
+  for (const label of ["Quick info", "Features", "Competitors", "Install &amp; use", "README", "Activity"]) assert.match(markup, new RegExp(`role="tab"[^>]*>${label}<`), label);
+  assert.match(markup, /id="ov-tab-quick_info"[^>]*aria-selected="true"/, "Quick info is the first tab shown");
+  const about = markup.indexOf("A notes app for harbor pilots.");
+  assert.ok(about > markup.indexOf('role="tabpanel"'), "the About text is inside the Quick info panel");
+  assert.equal(markup.match(/A notes app for harbor pilots\./g).length, 1, "the About text is shown once");
+  assert.doesNotMatch(markup, /id="pj-research"/, "research progress waits under the Activity tab");
+  assert.doesNotMatch(markup, /Recent activity/, "recent activity waits under the Activity tab");
+  assert.match(markup, />Refresh</);
+});
+
 test("a failed research row shows its plain reason and Try again", async () => {
   const overview = await import("../src/screens/project/overview.tsx");
   const markup = renderToStaticMarkup(createElement(overview.ActivityPanel, { data: tabData([job("failed", { error: "This harness cannot run research yet", started_ms: 1_000, finished_ms: 2_000 }), job("done")]) }));

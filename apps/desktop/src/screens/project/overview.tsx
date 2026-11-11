@@ -15,6 +15,7 @@ import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
 import { accessSummary } from "./access";
 import { MarkdownView } from "./markdown";
+import { ProjectOverviewTabs } from "./overview-tabs";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, ago, changeOutcome, goalPlacer, groupActivity, memoryGroups, newestActivity, pathWindow, phasePath, type ActivityFilter, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
@@ -353,8 +354,6 @@ export function ActivityPanel({ data }: { data: ProjectData }) {
   </>;
 }
 
-/** Overview tab: what needs the owner, research progress, recent activity and project facts.
- * Input: the project data. Output: the tab. */
 /** The project's own description: the About text saved in its setup and the overview the mapping
  * agent wrote in `.crazyagent/overview.md`, each shown only when it has text.
  * Inputs: the About text and the overview Markdown or null. Output: the sections, or nothing. */
@@ -368,6 +367,9 @@ export function OverviewFacts({ about, overview }: { about: string; overview: st
   </>;
 }
 
+/** Overview tab: what needs the owner first, then the tab strip (Quick info with the project's
+ * own description, the generated tabs, README, and Activity with research progress and recent
+ * activity), beside the project facts. Input: the project data. Output: the tab. */
 export function OverviewTab({ data }: { data: ProjectData }) {
   const setup = valueOf(data.setup);
   const jobs = valueOf(data.research)?.jobs ?? [];
@@ -400,8 +402,8 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}
-      <OverviewFacts about={setup?.about ?? ""} overview={onboarding.kind === "ok" ? onboarding.value.overview : null} />
-      <ActivityPanel data={data} />
+      <ProjectOverviewTabs data={data} activity={<ActivityPanel data={data} />}
+        quickInfo={(text) => <OverviewFacts about={setup?.about ?? ""} overview={text ?? (onboarding.kind === "ok" ? onboarding.value.overview : null)} />} />
     </div>
     <aside className="pj-panel pj-facts" aria-label="Project facts">
       {data.setup?.kind === "not_ready" && <NotReady what="project details aren't in this build." />}
