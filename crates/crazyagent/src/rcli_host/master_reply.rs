@@ -98,7 +98,11 @@ impl TurnCapture {
                 }
                 message.finished = true;
             }
-            EventBody::Completed { turn_id, status } => {
+            EventBody::Completed {
+                turn_id,
+                status,
+                failure,
+            } => {
                 self.scope(turn_id)?;
                 let reply = if matches!(status, TurnStatus::Succeeded) {
                     Some(self.reply()?)
@@ -114,6 +118,7 @@ impl TurnCapture {
                     turn_id: turn_id.clone(),
                     status,
                     reply,
+                    failure: *failure,
                 }));
             }
             EventBody::Input { turn_id, .. } => {

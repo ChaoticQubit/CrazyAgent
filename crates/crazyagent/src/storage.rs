@@ -25,7 +25,7 @@ mod migrations;
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
-    close_master_for_removal, master_resolve_ready, native_sign_in,
+    close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
 pub(crate) mod agent_text;

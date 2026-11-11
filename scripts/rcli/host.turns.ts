@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { AgentEvent, TurnStatus } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
-import { FRAME_TEXT_MAX, identifier, type Control, type EventBody } from "./host.codec.ts";
+import { FRAME_TEXT_MAX, identifier, type Control, type EventBody, type ProviderFailure } from "./host.codec.ts";
 import { SdkMessageProjection } from "./host.messages.ts";
 import { normalizeSdkObservation, observationRecord } from "./host.observations.ts";
 type InputFrame = Extract<EventBody, { kind: "input" }>;
@@ -19,7 +19,25 @@ ended: boolean;
 cancelling: boolean;
 messages: SdkMessageProjection | null;
 input: PendingInput | null;
+failure: ProviderFailure | null;
 };
+const SDK_PROVIDER_ERROR = /^[A-Za-z][A-Za-z0-9 ._-]{0,63} request failed(?: \(HTTP (\d{3})\)|: HTTP (\d{3}))(?:: ([\s\S]*))?$/;
+/** Names the provider failure in an SDK turn error: the exact message the SDK's provider
+ * clients write for an HTTP refusal, never text that only contains one. Input: the error
+ * text. Output: the rate limit, spent quota or rejected key, or null for anything else. */
+export function providerFailure(message: unknown): ProviderFailure | null {
+if (typeof message !== "string" || message.length > FRAME_TEXT_MAX) return null;
+const match = SDK_PROVIDER_ERROR.exec(message);
+if (match === null) return null;
+const status = Number(match[1] ?? match[2]);
+const detail = match[3] ?? "";
+assert(Number.isInteger(status) && status >= 0 && status <= 999, "host_turn_state_invariant");
+if (status === 401 || status === 403) return "invalid_authentication";
+if (status === 402) return "quota_exhausted";
+if (status === 429) return /quota|credit|billing|balance|insufficient/i.test(detail) ? "quota_exhausted" : "rate_limited";
+if (status === 400 && /credit balance|quota|billing/i.test(detail)) return "quota_exhausted";
+return null;
+}
 export type HostAction =
 | { kind: "submit"; turnId: string; text: string; steer: boolean }
 | { kind: "cancel" | "shutdown" }
@@ -63,7 +81,7 @@ if (body.kind === "steer") {
 for (const turn of this.turns.values()) { turn.cancelling = true; this.cancelInput(turn); }
 }
 this.turnIds.add(body.turn_id);
-this.turns.set(body.turn_id, { id: body.turn_id, started: false, sdkId: null, ended: false, cancelling: false, messages: null, input: null });
+this.turns.set(body.turn_id, { id: body.turn_id, started: false, sdkId: null, ended: false, cancelling: false, messages: null, input: null, failure: null });
 action = { kind: "submit", turnId: body.turn_id, text: body.text, steer: body.kind === "steer" };
 break;
 }
@@ -171,6 +189,12 @@ if (!pending || !pending.awaitingResponse || event.response.id !== pending.id ||
 turn.input = null;
 return [];
 }
+case "run:error": {
+const live = [...this.turns.values()].filter((turn) => turn.sdkId !== null && !turn.ended);
+const failure = providerFailure(event.error);
+if (live.length === 1 && failure !== null) live[0]!.failure = failure;
+return [normalizeSdkObservation(event)];
+}
 default: return [normalizeSdkObservation(event)];
 }
 }
@@ -183,7 +207,10 @@ turn.messages?.close();
 turn.input = null;
 this.turns.delete(turnId);
 if (this.awaitingStart === turnId) this.awaitingStart = null;
-return [{ kind: "completed", turn_id: turnId, status: status !== "completed" ? status : overflowed ? "failed" : "succeeded" }];
+const completed: Extract<EventBody, { kind: "completed" }> = { kind: "completed", turn_id: turnId, status: status !== "completed" ? status : overflowed ? "failed" : "succeeded" };
+if (status === "failed" && turn.failure !== null) completed.failure = turn.failure;
+assert(completed.failure === undefined || completed.status === "failed", "host_turn_state_invariant");
+return [completed];
 }
 stop(): void {
 this.check();

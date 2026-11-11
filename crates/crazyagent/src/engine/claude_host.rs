@@ -12,6 +12,17 @@ use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 use crate::master_step_limit::StepLimit;
 #[cfg(unix)]
 use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
+
+/// The code a Claude master stops with when it has not started by its start bound: the
+/// run clock's end when the owner's time limit bounds it, as the other masters stop, else
+/// the start bound's own. Input: whether a run clock bounds the start. Output: the code.
+pub(crate) fn start_end_code(clocked: bool) -> &'static str {
+    if clocked {
+        "claude_host_deadline"
+    } else {
+        "claude_host_startup_timeout"
+    }
+}
 #[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
@@ -529,6 +540,7 @@ impl ClaudeHost {
                 );
             })
             .map_err(|_| failure("claude_host_custodian_unavailable"))?;
+        let clocked = host.expires.is_some();
         let started_by = host
             .expires
             .unwrap_or_else(|| tokio::time::Instant::now() + START_TIME_MAX);
@@ -545,7 +557,7 @@ impl ClaudeHost {
             }
             tokio::time::timeout_at(started_by, host.status.changed())
                 .await
-                .map_err(|_| failure("claude_host_startup_timeout"))?
+                .map_err(|_| failure(start_end_code(clocked)))?
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
         }
     }
