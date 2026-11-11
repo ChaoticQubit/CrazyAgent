@@ -7,7 +7,8 @@ use super::new_project_view::{
 use super::planning_line::{planning, planning_value};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, OVERVIEW_TAB_LABELS, Picks, ProjectScreen,
-    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, research_kind,
+    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, plain_problem,
+    research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render, sanitize};
@@ -15,7 +16,7 @@ use super::project_time::{clock, duration};
 use super::sessions::Sessions;
 use crate::project_overview::{
     BLOCKED_BLANK, BLOCKED_NOT_A_FILE, BLOCKED_NOT_A_FOLDER, BLOCKED_NOT_UTF8, BLOCKED_TOO_LARGE,
-    Overview, TAB_BYTES_MAX, Tab as OverviewTab,
+    NEEDS_HOME, Overview, TAB_BYTES_MAX, Tab as OverviewTab,
 };
 use crate::project_setup::{
     ContextItem, ContextKind, Platform, ResearchJob, ResearchKind, ResearchStatus,
@@ -672,9 +673,10 @@ type Drawn = (Vec<Row>, Option<(usize, usize)>, Help);
 const PICKER_ROWS: usize = 8;
 
 const TABS: (&str, &str) = ("Shift-\u{2190}\u{2192}", "Tabs");
-const OVERVIEW_TAB_KEYS: [(&str, &str); 2] = [
+const OVERVIEW_TAB_KEYS: [(&str, &str); 3] = [
     ("\u{2190}\u{2192}", "Overview tab"),
     ("PgUp/PgDn", "Scroll"),
+    ("Shift-R", "Refresh tabs"),
 ];
 
 /// Draws the status of one research job: glyph, word and time.
@@ -763,8 +765,6 @@ fn title(screen: &ProjectScreen, content: usize, look: &Look) -> Row {
 
 /// The fewest rows the picked Overview tab's text gets, however full the tab is.
 const OVERVIEW_TEXT_ROWS_MIN: usize = 4;
-/// The most bytes of a README the project view renders; the desktop app shows the whole file.
-const OVERVIEW_README_BYTES_MAX: usize = 64 * 1024;
 
 /// What a generated Overview tab with no text says, by what will write it.
 /// Takes the overview. Returns the line.
@@ -780,10 +780,6 @@ fn overview_unwritten(overview: &Overview) -> &'static str {
         }
     }
 }
-
-/// What every generated Overview tab says for a project kept outside the CrazyAgent folder.
-const OVERVIEW_NEEDS_HOME: &str = "Overview tabs need this project in the CrazyAgent folder. \
-                                   Move it there in the desktop app, in Project settings.";
 
 /// Why a tab's file can't be shown, where the trouble is and what to do about it: the tab's
 /// file, or the tabs' folder when that is what is wrong. An unknown code gets a plain line
@@ -823,19 +819,14 @@ fn overview_picked(overview: &Overview, picked: usize) -> (Vec<String>, Option<&
         let Some(readme) = &overview.readme else {
             return (vec!["This project has no README file.".to_owned()], None);
         };
-        let mut end = readme.text.len().min(OVERVIEW_README_BYTES_MAX);
-        while !readme.text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let cut = readme.cut || end < readme.text.len();
         let mut note = format!("{}  This is the project's own file.", readme.path);
-        if cut {
+        if readme.cut {
             note.push_str(" Showing the first part of a long file.");
         }
-        return (vec![note], Some(&readme.text[..end]));
+        return (vec![note], Some(&readme.text));
     };
     if overview.needs_home {
-        return (vec![OVERVIEW_NEEDS_HOME.to_owned()], None);
+        return (vec![plain_problem(NEEDS_HOME)], None);
     }
     let Some(state) = overview.tabs.iter().find(|state| state.tab == *tab) else {
         return (vec![overview_unwritten(overview).to_owned()], None);

@@ -159,6 +159,16 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
         SetupQuery::Removal { project } => SetupView::Removal(Box::new(
             controller.removal_preview(project).await.map_err(problem)?,
         )),
+        SetupQuery::Overview { project } => SetupView::Overview(Box::new(
+            controller.overview_read(project).await.map_err(problem)?,
+        )),
+        SetupQuery::RefreshOverview { project } => {
+            controller
+                .overview_refresh(project)
+                .await
+                .map_err(problem)?;
+            SetupView::OverviewAsked
+        }
         SetupQuery::Catalog { .. } => panic!("the project screen never reads the catalog"),
         SetupQuery::Team { .. }
         | SetupQuery::TeamChange { .. }
@@ -4082,5 +4092,221 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
             shown.contains("> Access      < Sandboxed >") && shown.contains("Saving..."),
             "{shown}"
         );
+    }
+}
+
+mod overview_read {
+    use super::*;
+    use crate::project_overview::{Apply, Competitors, Overview, Tab as OverviewTab, TabState};
+    use crate::roadmap_status::Refresh;
+
+    const STEP: i64 = super::super::project::REFRESH_MS;
+
+    fn overview() -> Overview {
+        Overview {
+            readme: None,
+            tabs: OverviewTab::ALL
+                .into_iter()
+                .map(|tab| TabState {
+                    tab,
+                    text: None,
+                    version: String::new(),
+                    edited: false,
+                    proposal: None,
+                    proposal_version: String::new(),
+                    blocked: None,
+                })
+                .collect(),
+            competitors: Competitors::Missing,
+            running: false,
+            stale: false,
+            checked_ms: None,
+            failure: None,
+            refresh: Refresh::AfterLanding,
+            apply: Apply::AlwaysAsk,
+            needs_home: false,
+        }
+    }
+
+    /// Answers every other read as failed until the screen asks for the Overview tabs.
+    fn overview_asked(screen: &mut ProjectScreen, now: i64) -> Option<SetupQuery> {
+        for _ in 0..16 {
+            let query = screen.next_query(now)?;
+            if matches!(query, SetupQuery::Overview { .. }) {
+                return Some(query);
+            }
+            screen.apply(&query, Err("engine_unavailable".into()));
+        }
+        panic!("reads never settled");
+    }
+
+    fn read(screen: &mut ProjectScreen, now: i64, overview: Overview) {
+        let query = overview_asked(screen, now).expect("the tabs are read");
+        screen.apply(&query, Ok(SetupView::Overview(Box::new(overview))));
+    }
+
+    #[test]
+    fn the_overview_tab_reads_the_tabs_once_and_again_only_while_something_is_pending() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        let asked = overview_asked(&mut screen, 100).unwrap();
+        assert_eq!(
+            asked,
+            SetupQuery::Overview {
+                project: project.clone()
+            }
+        );
+        screen.apply(&asked, Ok(SetupView::Overview(Box::new(overview()))));
+        assert!(screen.overview_tabs.is_some());
+        assert_eq!(
+            overview_asked(&mut screen, 100 + 10 * STEP),
+            None,
+            "nothing is pending"
+        );
+
+        let mut running = overview();
+        running.running = true;
+        let asked = SetupQuery::RefreshOverview {
+            project: project.clone(),
+        };
+        screen.apply(&asked, Ok(SetupView::OverviewAsked));
+        read(&mut screen, 200_000, running);
+        assert_eq!(
+            overview_asked(&mut screen, 200_000 + STEP - 1),
+            None,
+            "not before the wait"
+        );
+        assert!(
+            overview_asked(&mut screen, 200_000 + STEP).is_some(),
+            "a run is read again"
+        );
+
+        let mut waiting = overview();
+        waiting.stale = true;
+        screen.apply(
+            &SetupQuery::Overview {
+                project: project.clone(),
+            },
+            Ok(SetupView::Overview(Box::new(waiting.clone()))),
+        );
+        let later = 200_000 + 3 * STEP;
+        assert!(
+            overview_asked(&mut screen, later).is_some(),
+            "a landing waits for a run"
+        );
+
+        for (round, (off, needs_home)) in [(true, false), (false, true)].into_iter().enumerate() {
+            let checked = later + (round as i64 + 1) * 10 * STEP;
+            let mut held = waiting.clone();
+            held.needs_home = needs_home;
+            if off {
+                held.refresh = Refresh::Off;
+            }
+            screen.apply(
+                &SetupQuery::Overview {
+                    project: project.clone(),
+                },
+                Ok(SetupView::Overview(Box::new(held))),
+            );
+            assert_eq!(
+                overview_asked(&mut screen, checked),
+                None,
+                "no run can start"
+            );
+        }
+    }
+
+    #[test]
+    fn another_tab_does_not_read_the_overview_tabs() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        screen.open(Tab::Context);
+        assert_eq!(overview_asked(&mut screen, 100), None);
+        assert!(screen.overview_tabs.is_none());
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_tabs_and_is_tried_again_after_the_wait() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        let asked = overview_asked(&mut screen, 100).unwrap();
+        screen.apply(&asked, Err("overview_unavailable".into()));
+        assert!(screen.overview_tabs.is_none());
+        assert_eq!(
+            screen.problem.as_deref(),
+            Some("The Overview tabs can't be read right now. Try again in a moment.")
+        );
+        assert_eq!(overview_asked(&mut screen, 100 + STEP - 1), None);
+        let mut running = overview();
+        running.running = true;
+        read(&mut screen, 100 + STEP, running);
+        let again = overview_asked(&mut screen, 100 + 2 * STEP).unwrap();
+        screen.apply(&again, Err("overview_unavailable".into()));
+        assert!(
+            screen
+                .overview_tabs
+                .as_ref()
+                .is_some_and(|kept| kept.running)
+        );
+    }
+
+    #[test]
+    fn shift_r_asks_for_a_run_or_says_why_none_can_start() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        let refresh = shifted(KeyCode::Char('R'));
+        assert_ne!(
+            screen.key(refresh),
+            ProjectReply::RefreshOverview,
+            "not before the read"
+        );
+        read(&mut screen, 100, overview());
+        assert_eq!(screen.key(refresh), ProjectReply::RefreshOverview);
+
+        let asked = SetupQuery::RefreshOverview {
+            project: project.clone(),
+        };
+        screen.apply(&asked, Ok(SetupView::OverviewAsked));
+        assert!(
+            overview_asked(&mut screen, 101).is_some(),
+            "the ask is followed by a read"
+        );
+
+        let cases: [(fn(&mut Overview), &str); 3] = [
+            (
+                |o| o.running = true,
+                "A run is writing the tabs now. They fill in when it ends.",
+            ),
+            (
+                |o| o.refresh = Refresh::Off,
+                "Overview tabs are off for this project. Turn them on in Project settings.",
+            ),
+            (
+                |o| o.needs_home = true,
+                "Overview tabs need this project in the CrazyAgent folder. Move it there in the desktop app, in Project settings.",
+            ),
+        ];
+        for (change, line) in cases {
+            let mut held = overview();
+            change(&mut held);
+            screen.overview_tabs = Some(held);
+            screen.problem = None;
+            assert_eq!(screen.key(refresh), ProjectReply::Handled, "{line}");
+            assert_eq!(screen.problem.as_deref(), Some(line));
+        }
+    }
+
+    #[test]
+    fn a_refused_refresh_says_why_and_reads_the_tabs_again() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        read(&mut screen, 100, overview());
+        let asked = SetupQuery::RefreshOverview { project };
+        screen.apply(&asked, Err("overview_off".into()));
+        assert_eq!(
+            screen.problem.as_deref(),
+            Some("Overview tabs are off for this project. Turn them on in Project settings.")
+        );
+        assert!(overview_asked(&mut screen, 101).is_some());
     }
 }

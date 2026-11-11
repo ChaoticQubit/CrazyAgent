@@ -151,6 +151,8 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::AgentPolicy { .. } => "agent policy",
                         SetupQuery::CoordQuestions { .. } => "coord questions",
                         SetupQuery::OpenLiveSession { .. } => "live session open",
+                        SetupQuery::Overview { .. } => "overview",
+                        SetupQuery::RefreshOverview { .. } => "overview refresh",
                     });
                     connection.project_setup(query).unwrap();
                 }
@@ -5179,6 +5181,7 @@ mod overview_tabs {
                     version: String::new(),
                     edited: false,
                     proposal: None,
+                    proposal_version: String::new(),
                     blocked: None,
                 })
                 .collect(),
@@ -5402,6 +5405,7 @@ mod overview_tabs {
         let mut page = page_with_overview(empty());
         let help = project_screen(&mut page, 100, 40, &Look::plain()).help;
         assert!(help.iter().any(|(_, what)| *what == "Overview tab"));
+        assert!(help.contains(&("Shift-R", "Refresh tabs")));
         let project = ProjectId::new("alpha").unwrap();
         let mut unread = ProjectScreen::new(project, "Alpha".into(), None);
         let help = project_screen(&mut unread, 100, 40, &Look::plain()).help;

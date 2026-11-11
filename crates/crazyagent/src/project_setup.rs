@@ -743,6 +743,12 @@ pub enum SetupQuery {
         generation: u64,
     },
     Library(crate::memory::library::LibraryQuery),
+    Overview {
+        project: ProjectId,
+    },
+    RefreshOverview {
+        project: ProjectId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -766,6 +772,9 @@ pub enum SetupView {
     /// A live master switch that is on although the owner's default Open opened no session
     /// for it, with the engine's code or the plain reason, so the owner sees why (LMS-M1).
     LiveWithoutSession(String),
+    Overview(Box<crate::project_overview::Overview>),
+    /// The engine took the ask for one writing run of the Overview tabs.
+    OverviewAsked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

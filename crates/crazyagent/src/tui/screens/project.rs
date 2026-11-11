@@ -639,6 +639,7 @@ pub(in crate::tui) enum ProjectReply {
     Usage,
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
+    RefreshOverview,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -714,6 +715,7 @@ pub(in crate::tui) struct ProjectScreen {
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
     memories_read_ms: Option<i64>,
+    overview_read_ms: Option<i64>,
     removal_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     pub setup_due: bool,
@@ -795,6 +797,7 @@ impl ProjectScreen {
             agent_policy_read_ms: None,
             access_stale: false,
             memories_read_ms: None,
+            overview_read_ms: None,
             removal_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -844,6 +847,8 @@ impl ProjectScreen {
             return None;
         } else if self.jobs_read_ms.is_none() || (due(self.jobs_read_ms) && self.jobs_live()) {
             SetupQuery::Jobs { project }
+        } else if self.tab == Tab::Overview && self.overview_due(now_ms) {
+            SetupQuery::Overview { project }
         } else if let Some(job) = self.log_due(now_ms) {
             SetupQuery::Log { project, job }
         } else if due(self.context_read_ms)
@@ -895,6 +900,51 @@ impl ProjectScreen {
         };
         self.waiting = Some(query.clone());
         Some(query)
+    }
+
+    /// Says whether the Overview tabs are read now: at once before the first read and after
+    /// a refresh was asked, then every `REFRESH_MS` only until they are read once, while a
+    /// run writes them, or while a landed change set waits for a run that can start.
+    /// Takes the screen and the current time in milliseconds. Returns whether to read.
+    fn overview_due(&self, now_ms: i64) -> bool {
+        let Some(read_ms) = self.overview_read_ms else {
+            return true;
+        };
+        if now_ms.saturating_sub(read_ms) < REFRESH_MS {
+            return false;
+        }
+        self.overview_tabs.as_ref().is_none_or(|overview| {
+            let waits = overview.stale
+                && overview.refresh != crate::roadmap_status::Refresh::Off
+                && !overview.needs_home;
+            overview.running || waits
+        })
+    }
+
+    /// Answers Shift+R on the Overview: asks for one writing run of the tabs, or says why
+    /// none can start now. Takes the screen. Returns the ask, or handled with the reason
+    /// shown; ignored before the tabs were read.
+    fn refresh_overview(&mut self) -> ProjectReply {
+        let Some(overview) = &self.overview_tabs else {
+            return ProjectReply::Ignored;
+        };
+        let reason = if overview.needs_home {
+            Some(plain_problem(crate::project_overview::NEEDS_HOME))
+        } else if overview.refresh == crate::roadmap_status::Refresh::Off {
+            Some(plain_problem("overview_off"))
+        } else if overview.running {
+            Some("A run is writing the tabs now. They fill in when it ends.".to_owned())
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => {
+                assert!(!reason.is_empty());
+                self.problem = Some(reason);
+                ProjectReply::Handled
+            }
+            None => ProjectReply::RefreshOverview,
+        }
     }
 
     /// Forgets the read in flight after the engine connection dropped, so the next read is sent again.
@@ -991,6 +1041,8 @@ impl ProjectScreen {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
+                    SetupQuery::Overview { .. } => self.overview_read_ms = Some(self.now_ms),
+                    SetupQuery::RefreshOverview { .. } => self.overview_read_ms = None,
                     SetupQuery::Removal { .. } => self.removal_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, offset, .. } => {
                         if let Some(preview) = self
@@ -1109,6 +1161,11 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
+            SetupView::Overview(overview) => {
+                self.overview_tabs = Some(*overview);
+                self.overview_read_ms = Some(self.now_ms);
+            }
+            SetupView::OverviewAsked => self.overview_read_ms = None,
             SetupView::LiveWithoutSession(why) => {
                 self.changed(query, crate::engine::owner::OwnerResult::Applied);
                 self.problem = Some(format!(
@@ -1968,6 +2025,7 @@ impl ProjectScreen {
                 self.overview_tab = (self.overview_tab + step) % count;
                 self.overview_scroll = 0;
             }
+            KeyCode::Char('R') if tabs => return self.refresh_overview(),
             KeyCode::PageDown if tabs => {
                 let down = self.overview_scroll + OVERVIEW_PAGE_ROWS;
                 self.overview_scroll = down.min(OVERVIEW_SCROLL_MAX);
@@ -2876,6 +2934,12 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "This report isn't written yet. Try again when the research is done."
         }
         "research_section_missing" => "That part of the report is gone. Open the report again.",
+        "overview_off" => "Overview tabs are off for this project. Turn them on in Project settings.",
+        "overview_needs_project_home" => {
+            "Overview tabs need this project in the CrazyAgent folder. Move it there in the desktop app, in Project settings."
+        }
+        "overview_unavailable" => "The Overview tabs can't be read right now. Try again in a moment.",
+        "overview_project_unknown" => "CrazyAgent doesn't know this project any more.",
         "memory_entry_exists" => "This report is already saved to memory.",
         "memory_text_too_long" => "This report is too long to save to memory as one entry.",
         "memory_text_hidden" => {

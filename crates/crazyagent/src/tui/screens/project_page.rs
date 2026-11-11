@@ -1394,6 +1394,11 @@ impl ProjectPage {
                 self.retry_master(ctx);
                 Flow::Handled
             }
+            ProjectReply::RefreshOverview => {
+                let project = self.screen.project.clone();
+                self.send(SetupQuery::RefreshOverview { project }, ctx);
+                Flow::Handled
+            }
             ProjectReply::Team => Flow::Open(Place::Team {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
