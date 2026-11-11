@@ -604,10 +604,10 @@ fn evidence_keeps_its_bounds_when_the_tree_and_the_research_are_larger_than_the_
     assert!(!pack.contains("bad\nname"));
     assert!(!pack.contains(&"w".repeat(2000)));
     let listed = pack.lines().filter(|line| line.starts_with("ppp")).count();
-    assert!(listed >= 1 && listed <= TREE_PATHS_MAX);
+    assert!((1..=TREE_PATHS_MAX).contains(&listed));
     assert_eq!(pack.matches('@').count(), 20_000);
     let second = pack.matches('^').count();
-    assert!(second >= 1 && second <= RESEARCH_BYTES_MAX - 20_000);
+    assert!((1..=RESEARCH_BYTES_MAX - 20_000).contains(&second));
     assert!(pack.contains("docs/two.md"));
 }
 

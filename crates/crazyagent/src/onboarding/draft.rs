@@ -15,7 +15,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
 #[cfg(unix)]
-mod documents;
+pub(crate) mod documents;
 #[cfg(unix)]
 pub(crate) use documents::{kept_out, outside_git};
 pub(super) mod names;
