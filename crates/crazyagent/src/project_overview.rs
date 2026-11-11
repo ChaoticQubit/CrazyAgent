@@ -5,18 +5,25 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::{self, LinkKind};
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{QUIET_MS, Refresh};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+#[cfg(unix)]
+pub(crate) mod agent;
 mod pack;
+mod run;
 #[cfg(test)]
 mod tests;
 
 pub use pack::{
     EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, parse_reply, prompt,
+};
+pub use run::{
+    Ended, NO_ACCOUNT, NO_TABS, NOT_WRITTEN, REPLY_BYTES_MAX, REPLY_TOO_LONG, RUN_TIME,
+    STARTS_PER_TICK_MAX, UNFINISHED, brief, close_orphans, fail, finish, requeue, tick,
 };
 
 /// The folder inside a project's `.crazyagent` that holds the tab files.
@@ -775,17 +782,13 @@ pub fn reject(db: &Connection, project: &ProjectId, tab: Tab) -> Result<(), Engi
 
 /// Marks the project's Overview stale after a landed change set, due once the quiet period
 /// has passed, only while its tabs refresh after landings (the default with no row).
-/// Inputs: the landing's transaction, the project and the time. Output: unit, or
+/// Inputs: the landing's connection, the project and the time. Output: unit, or
 /// `overview_unavailable`.
-pub fn mark_stale(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-    now_ms: i64,
-) -> Result<(), EngineError> {
+pub fn mark_stale(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<(), EngineError> {
     assert!(now_ms >= 0);
     let due_ms = now_ms.saturating_add(QUIET_MS);
     assert!(due_ms >= now_ms);
-    tx.execute(
+    db.execute(
         "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,?2)
          ON CONFLICT(project) DO UPDATE SET stale=1, due_ms=excluded.due_ms
          WHERE refresh='after_landing'",
@@ -793,6 +796,20 @@ pub fn mark_stale(
     )
     .map_err(unavailable)?;
     Ok(())
+}
+
+/// Marks a project's tabs stale after one of its change sets landed, making the Overview
+/// tables first. A failure is logged by its plain code and never fails the landing. Inputs:
+/// the landing's connection and the project.
+pub fn mark_landed(db: &Connection, project: &ProjectId) {
+    let marked =
+        initialize(db).and_then(|()| mark_stale(db, project, crate::team::now_ms().max(0)));
+    if let Err(error) = marked {
+        eprintln!(
+            "project_overview_mark_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// Asks for a writing run at once (the Refresh button). Inputs: the connection and the
@@ -1025,7 +1042,9 @@ pub fn read(
         readme: readme(folder),
         tabs,
         competitors: competitors(db, project, folder)?,
-        running: state.running_ms.is_some(),
+        running: state
+            .running_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) < run::RUN_MS),
         stale: state.stale,
         checked_ms: state.checked_ms,
         failure,

@@ -997,3 +997,318 @@ fn accept_writes_only_the_proposal_the_owner_reviewed() {
     assert_eq!(done.text.as_deref(), Some("- C\n"));
     assert!(done.proposal.is_none() && done.proposal_version.is_empty());
 }
+
+const REPLY: &str = "~~~quick-info\nAlpha reads papers.\n~~~\n~~~features\n- Search\n~~~\n~~~install-and-use\n## Install\n\n```sh\ncargo install alpha\n```\n~~~\n";
+
+/// Counts the runs a tick starts and keeps each claim, as the real runs keep theirs.
+#[derive(Default)]
+struct FakeTabRuns {
+    started: usize,
+    claims: Vec<(ProjectId, crate::roadmap_status::Claim)>,
+}
+
+impl crate::roadmap_status::Runs for FakeTabRuns {
+    fn start(&mut self, project: &ProjectId, claim: crate::roadmap_status::Claim) {
+        self.started += 1;
+        self.claims.push((project.clone(), claim));
+    }
+}
+
+impl FakeTabRuns {
+    /// Ends every run started and not yet ended. Inputs: the connection, the project
+    /// folder, how each ended and now. Output: how many were the run in flight.
+    fn end(
+        &mut self,
+        db: &Connection,
+        folder: &std::path::Path,
+        ended: Ended<'_>,
+        now: i64,
+    ) -> usize {
+        self.claims
+            .drain(..)
+            .filter(|(project, claim)| finish(db, project, folder, *claim, ended, now).unwrap())
+            .count()
+    }
+}
+
+const REPLIED: Ended<'static> = Ended::Reply {
+    reply: REPLY,
+    with_competitors: false,
+};
+
+fn landed(db: &mut Connection, project: &ProjectId, now: i64) {
+    let tx = db.transaction().unwrap();
+    mark_stale(&tx, project, now).unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn the_first_read_of_a_project_asks_for_one_run_and_later_reads_do_not() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 1_000).unwrap();
+    assert_eq!(tick(&db, &mut runs, 1_000).unwrap(), 1);
+    assert!(read(&db, &project, folder.path(), 1_500).unwrap().running);
+    assert_eq!(tick(&db, &mut runs, 1_500).unwrap(), 0);
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 2_000), 1);
+    read(&db, &project, folder.path(), 2_000).unwrap();
+    assert_eq!(tick(&db, &mut runs, 2_000).unwrap(), 0);
+    let overview = read(&db, &project, folder.path(), 3_000).unwrap();
+    assert_eq!(
+        tab_of(&overview, Tab::QuickInfo).text.as_deref(),
+        Some("Alpha reads papers.\n")
+    );
+    assert_eq!(overview.checked_ms, Some(2_000));
+    assert!(!overview.running && !overview.stale);
+    assert!(overview.failure.is_none());
+}
+
+#[test]
+fn two_landed_sets_inside_the_quiet_period_cost_one_run() {
+    let (mut db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    tick(&db, &mut runs, 0).unwrap();
+    runs.end(&db, folder.path(), REPLIED, 1);
+    landed(&mut db, &project, 10_000);
+    landed(&mut db, &project, 20_000);
+    let quiet = crate::roadmap_status::QUIET_MS;
+    assert_eq!(tick(&db, &mut runs, 20_000 + quiet / 2).unwrap(), 0);
+    assert_eq!(tick(&db, &mut runs, 20_000 + quiet).unwrap(), 1);
+    assert_eq!(runs.started, 2);
+}
+
+#[test]
+fn a_refresh_runs_at_once_without_the_quiet_period() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    tick(&db, &mut runs, 0).unwrap();
+    runs.end(&db, folder.path(), REPLIED, 1);
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 2).unwrap(), 1);
+}
+
+#[test]
+fn refresh_only_never_runs_on_the_first_read_or_a_landing_and_off_never_runs() {
+    let (mut db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    let quiet = crate::roadmap_status::QUIET_MS;
+    set_refresh(&db, &project, Refresh::RefreshOnly).unwrap();
+    read(&db, &project, folder.path(), 0).unwrap();
+    landed(&mut db, &project, 1);
+    assert_eq!(tick(&db, &mut runs, quiet * 2).unwrap(), 0);
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, quiet * 2).unwrap(), 1);
+    runs.end(&db, folder.path(), REPLIED, quiet * 2 + 1);
+    set_refresh(&db, &project, Refresh::Off).unwrap();
+    assert_eq!(refresh(&db, &project).unwrap_err().0, "overview_off");
+    assert_eq!(tick(&db, &mut runs, quiet * 4).unwrap(), 0);
+}
+
+#[test]
+fn a_project_switched_off_after_it_was_listed_as_due_is_not_claimed() {
+    let (db, project, folder) = case();
+    read(&db, &project, folder.path(), 0).unwrap();
+    db.execute("UPDATE project_overview SET refresh='off'", [])
+        .unwrap();
+    assert!(run::claim(&db, &project, 5).unwrap().is_none());
+    db.execute("UPDATE project_overview SET refresh='after_landing'", [])
+        .unwrap();
+    assert!(run::claim(&db, &project, 5).unwrap().is_some());
+    assert!(run::claim(&db, &project, 6).unwrap().is_none());
+}
+
+#[test]
+fn a_run_without_competitor_research_never_asks_for_or_writes_the_competitors_tab() {
+    let (db, project, folder) = case();
+    offer(&db, &project, folder.path(), Tab::Competitors, "Old.\n").unwrap();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    tick(&db, &mut runs, 0).unwrap();
+    let (asked, with_competitors) = brief(&db, &project, folder.path(), &[], &[], 0).unwrap();
+    assert!(!with_competitors);
+    assert!(!asked.contains("~~~competitors"));
+    assert!(!asked.contains("Current competitors:"));
+    let ended = Ended::Reply {
+        reply: "~~~competitors\nMade up.\n~~~\n~~~features\n- Search\n~~~\n",
+        with_competitors,
+    };
+    assert_eq!(runs.end(&db, folder.path(), ended, 1), 1);
+    let overview = read(&db, &project, folder.path(), 2).unwrap();
+    let competitors = tab_of(&overview, Tab::Competitors);
+    assert_eq!(competitors.text.as_deref(), Some("Old.\n"));
+    assert!(competitors.proposal.is_none());
+    assert_eq!(
+        tab_of(&overview, Tab::Features).text.as_deref(),
+        Some("- Search\n")
+    );
+
+    let research = [Research {
+        path: "docs/research-competitors.md".into(),
+        text: "Beta is faster at search.\n".into(),
+    }];
+    let (asked, with_competitors) = brief(&db, &project, folder.path(), &research, &[], 3).unwrap();
+    assert!(with_competitors);
+    assert!(asked.contains("~~~competitors"));
+    assert!(asked.contains("Current competitors:"));
+    assert!(asked.contains("Beta is faster at search."));
+}
+
+#[test]
+fn a_failed_run_keeps_the_tabs_records_a_plain_reason_and_does_not_retry_on_its_own() {
+    let (db, project, folder) = case();
+    offer(&db, &project, folder.path(), Tab::Features, "- Search\n").unwrap();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let words = format!("The account is out\u{7} of usage\n{}", "x".repeat(400));
+    assert_eq!(runs.end(&db, folder.path(), Ended::Failed(&words), 1), 1);
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    assert_eq!(
+        tab_of(&overview, Tab::Features).text.as_deref(),
+        Some("- Search\n")
+    );
+    let failure = overview.failure.unwrap();
+    assert!(failure.starts_with("The account is out"));
+    assert!(failure.len() <= FAILURE_BYTES_MAX);
+    assert!(!failure.chars().any(char::is_control));
+    assert!(overview.checked_ms.is_none());
+    assert_eq!(tick(&db, &mut runs, 2).unwrap(), 0);
+
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 3).unwrap(), 1);
+    let empty = Ended::Reply {
+        reply: "No tabs here.\n",
+        with_competitors: false,
+    };
+    assert_eq!(runs.end(&db, folder.path(), empty, 4), 1);
+    let overview = read(&db, &project, folder.path(), 5).unwrap();
+    assert_eq!(overview.failure.as_deref(), Some(NO_TABS));
+    assert!(overview.checked_ms.is_none());
+}
+
+#[test]
+fn a_run_past_its_time_is_closed_and_its_late_reply_writes_nothing() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let late: Vec<_> = runs.claims.drain(..).collect();
+    refresh(&db, &project).unwrap();
+    let run_ms = RUN_TIME.as_millis() as i64;
+    assert_eq!(tick(&db, &mut runs, run_ms - 1).unwrap(), 0);
+    assert!(
+        read(&db, &project, folder.path(), run_ms - 1)
+            .unwrap()
+            .running
+    );
+    assert_eq!(tick(&db, &mut runs, run_ms).unwrap(), 1);
+    for (project, claim) in late {
+        assert!(!finish(&db, &project, folder.path(), claim, REPLIED, run_ms + 1).unwrap());
+    }
+    let overview = read(&db, &project, folder.path(), run_ms + 2).unwrap();
+    assert!(overview.running);
+    assert!(overview.tabs.iter().all(|tab| tab.text.is_none()));
+    assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, run_ms + 3), 1);
+    let overview = read(&db, &project, folder.path(), run_ms + 4).unwrap();
+    assert!(!overview.running);
+    assert!(overview.failure.is_none());
+    assert_eq!(
+        tab_of(&overview, Tab::Features).text.as_deref(),
+        Some("- Search\n")
+    );
+}
+
+#[test]
+fn a_set_that_lands_during_a_run_is_written_once_more_after_it() {
+    let (mut db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    let quiet = crate::roadmap_status::QUIET_MS;
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    landed(&mut db, &project, 1_000);
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 2_000), 1);
+    assert!(read(&db, &project, folder.path(), 2_000).unwrap().stale);
+    assert_eq!(tick(&db, &mut runs, 1_000 + quiet - 1).unwrap(), 0);
+    assert_eq!(tick(&db, &mut runs, 1_000 + quiet).unwrap(), 1);
+}
+
+#[test]
+fn a_run_for_a_project_outside_the_projects_home_is_skipped_and_leaves_no_failure() {
+    let (mut db, project, folder) = case();
+    std::fs::remove_dir(folder.path().join(".crazyagent")).unwrap();
+    let mut runs = FakeTabRuns::default();
+    landed(&mut db, &project, 0);
+    let quiet = crate::roadmap_status::QUIET_MS;
+    assert_eq!(tick(&db, &mut runs, quiet).unwrap(), 1);
+    assert!(needs_home(folder.path()));
+    assert_eq!(runs.end(&db, folder.path(), Ended::Skipped, quiet + 1), 1);
+    let overview = read(&db, &project, folder.path(), quiet + 2).unwrap();
+    assert!(overview.needs_home);
+    assert!(!overview.running && !overview.stale);
+    assert!(overview.failure.is_none() && overview.checked_ms.is_none());
+    assert_eq!(tick(&db, &mut runs, quiet * 3).unwrap(), 0);
+    assert!(std::fs::symlink_metadata(folder.path().join(".crazyagent")).is_err());
+}
+
+#[test]
+fn a_run_put_back_runs_again_when_its_time_comes_and_only_its_own_claim_counts() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let (_, claim) = runs.claims.pop().unwrap();
+    let other = crate::roadmap_status::Claim::at(5);
+    assert!(!requeue(&db, &project, other, 60_000).unwrap());
+    assert!(requeue(&db, &project, claim, 60_000).unwrap());
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    assert!(overview.stale && !overview.running && overview.failure.is_none());
+    assert_eq!(tick(&db, &mut runs, 59_999).unwrap(), 0);
+    assert_eq!(tick(&db, &mut runs, 60_000).unwrap(), 1);
+}
+
+#[test]
+fn runs_left_open_by_a_stopped_engine_are_closed_at_start_without_a_new_try() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    assert_eq!(close_orphans(&db).unwrap(), 1);
+    assert_eq!(close_orphans(&db).unwrap(), 0);
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    assert!(!overview.running && !overview.stale);
+    assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 2), 0);
+    assert_eq!(tick(&db, &mut runs, 2).unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_is_shown_the_job_report_else_the_linked_competitor_files() {
+    let (mut db, project, folder) = case();
+    assert!(
+        agent::research(&db, &project, folder.path())
+            .unwrap()
+            .is_empty()
+    );
+    link_competitor_research(&mut db, &project, folder.path(), "docs/competitors.md");
+    let linked = agent::research(&db, &project, folder.path()).unwrap();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].path, "docs/competitors.md");
+    assert_eq!(linked[0].text, "Beta is faster at search.\n");
+    std::fs::create_dir_all(folder.path().join("research")).unwrap();
+    std::fs::write(folder.path().join("research/new.md"), "Gamma leads.\n").unwrap();
+    db.execute_batch(
+        "CREATE TABLE research_jobs(id INTEGER PRIMARY KEY, project TEXT, kind TEXT,
+           status TEXT, report_path TEXT);
+         INSERT INTO research_jobs(project,kind,status,report_path) VALUES
+           ('alpha','competitor_research','done','research/new.md');",
+    )
+    .unwrap();
+    let report = agent::research(&db, &project, folder.path()).unwrap();
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].path, "research/new.md");
+    assert_eq!(report[0].text, "Gamma leads.\n");
+}

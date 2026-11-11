@@ -882,6 +882,7 @@ fn finish(
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
     crate::roadmap_status::mark_stale(db, &record.project);
+    crate::project_overview::mark_landed(db, &record.project);
     flow::release_agent_claims(db, record);
     if let Some(by) = by.named() {
         let closed = if record.agent.kind == AgentKind::Master {
