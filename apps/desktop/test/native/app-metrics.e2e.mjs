@@ -6,6 +6,7 @@ import { USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./co
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
 const RELOAD_MS = 10_000;
+const ALL_LINE = /^2 projects · Updated .+ · provider-reported usage per turn$/;
 const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Last used", "Share of tokens"];
 
 /** Reads what a Metrics page shows: the range line, the Tokens figure and each tile's lines,
@@ -44,6 +45,13 @@ function everyProject(shown) {
   const { parts, runs } = tileParts(shown?.tiles);
   return rows.length === 2 && rows.every((row) => row[6] === "2" && turnsOf(row.slice(1, 6), Number(row[7])))
     && turnsOf(parts, runs) && runs === rows.reduce((sum, row) => sum + Number(row[7]), 0);
+}
+
+/** Says whether an every-project reading has both projects added up and its line says when
+ * they were read. The page draws the tiles one render before it records the read time, so a
+ * reading can catch the tiles beside "Updating". Input: a reading. Output: true when both hold. */
+function everyProjectUpdated(shown) {
+  return everyProject(shown) && ALL_LINE.test(shown?.line ?? "");
 }
 
 /** Makes the check that a reading's tiles are one project's runs, one stand-in turn each.
@@ -99,14 +107,14 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     assert.equal(await handOff(me, page, second, runtime), "done", "the second project's Codex sub-agent finished");
 
     await me.click("Metrics", '.app-nav a[href="#/metrics"]');
-    let shown = await tilesShow(page, everyProject, "both projects added up", true);
+    let shown = await tilesShow(page, everyProjectUpdated, "both projects added up and the line updated", true);
     await me.capture("app-metrics-all");
     assert.equal(shown.tiles[1][2], CACHE_LINE);
     assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Merges", "Lines"], "Tokens leads, then the same five tiles as the project tab (mockup note 13)");
     assert.deepEqual(shown.tiles[4].slice(1), ["0", "0 into main, 0 undone"], "nothing was merged yet");
     assert.equal(shown.heading, "Metrics");
     assert.equal(shown.current, "#/metrics", "the sidebar marks Metrics as the open page");
-    assert.match(shown.line, /^2 projects · Updated .+ · provider-reported usage per turn$/);
+    assert.match(shown.line, ALL_LINE);
     assert.equal(shown.filter, "", "the page opens on every project");
     assert.deepEqual(shown.choices.map((choice) => choice[0]).sort(), ["", first, second].sort());
     assert.equal(shown.choices[0][1], "All projects");
