@@ -31,6 +31,10 @@ impl RegisteredNativeAuthHost {
         match **self {}
     }
 
+    pub(crate) fn entry(&self) -> Option<&Path> {
+        match *self {}
+    }
+
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         match *self {}
     }

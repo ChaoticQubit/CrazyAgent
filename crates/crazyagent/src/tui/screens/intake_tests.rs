@@ -1059,6 +1059,7 @@ async fn a_confirmed_setup_gives_the_chosen_pool_to_the_project_master() {
         &engine.root.path().join("project.toml"),
         None,
         None,
+        None,
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(120);

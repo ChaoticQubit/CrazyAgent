@@ -280,6 +280,7 @@ pub struct ResearchRunner {
     state: PathBuf,
     codex: Option<PathBuf>,
     claude: Option<PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
     limits: ResearchLimits,
     claimer: String,
     stopping: AtomicBool,
@@ -430,6 +431,7 @@ impl ResearchRunner {
             state: state.to_path_buf(),
             codex: codex.map(Path::to_path_buf),
             claude: None,
+            lookup: None,
             limits,
             claimer: format!("runner-{}-{nanos}", std::process::id()),
             stopping: AtomicBool::new(false),
@@ -491,12 +493,32 @@ impl ResearchRunner {
         Ok(self)
     }
 
+    /// Lets the runner find a harness the engine pinned after it started, as after an
+    /// install from the app. Only engine start sets it, so a runner built without it never
+    /// looks past the executables it was given. Takes the engine's lookup. Returns the runner.
+    pub fn with_harness_lookup(mut self, lookup: crate::paths::HarnessLookup) -> Self {
+        self.lookup = Some(lookup);
+        self
+    }
+
+    /// The entry of a harness: the one given at engine start, else the one the engine pinned
+    /// since, when the lookup is set. Takes the harness. Returns the entry, or none for a
+    /// harness that is not installed.
+    fn harness(&self, harness: ResearchHarness) -> Option<PathBuf> {
+        let given = match harness {
+            ResearchHarness::Codex => &self.codex,
+            ResearchHarness::ClaudeCode => &self.claude,
+        };
+        let entry = given
+            .clone()
+            .or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(harness.id())))?;
+        assert!(entry.is_absolute());
+        Some(entry)
+    }
+
     /// Whether this runner has the executable `harness` needs.
     pub fn can_run(&self, harness: ResearchHarness) -> bool {
-        match harness {
-            ResearchHarness::Codex => self.codex.is_some(),
-            ResearchHarness::ClaudeCode => self.claude.is_some(),
-        }
+        self.harness(harness).is_some()
     }
 
     /// The job store this runner claims from.
@@ -628,7 +650,7 @@ impl ResearchRunner {
             let status = jobs.needs_pool(&job)?;
             return Ok(run(status, None, None));
         };
-        if harness == ResearchHarness::ClaudeCode && self.claude.is_none() {
+        if self.harness(harness).is_none() {
             let status = jobs.fail(&job, "This harness is not installed on this computer", 1)?;
             return Ok(run(status, None, None));
         }
@@ -846,16 +868,12 @@ impl ResearchRunner {
             &format!("research-{name}"),
         );
         let harness = account.harness();
-        let executable = match harness {
-            ResearchHarness::Codex => self
-                .codex
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
-            ResearchHarness::ClaudeCode => self
-                .claude
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
-        };
+        let executable = &self.harness(harness).ok_or_else(|| {
+            RunError::Invalid(match harness {
+                ResearchHarness::Codex => "codex executable missing".into(),
+                ResearchHarness::ClaudeCode => "claude executable missing".into(),
+            })
+        })?;
         let credential = match &lease {
             Some((lease, _)) => Some(
                 lease
@@ -1489,16 +1507,12 @@ impl ResearchRunner {
             run.agent,
         );
         let harness = run.account.harness();
-        let executable = match harness {
-            ResearchHarness::Codex => self
-                .codex
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("codex executable missing".into()))?,
-            ResearchHarness::ClaudeCode => self
-                .claude
-                .as_deref()
-                .ok_or_else(|| RunError::Invalid("claude executable missing".into()))?,
-        };
+        let executable = &self.harness(harness).ok_or_else(|| {
+            RunError::Invalid(match harness {
+                ResearchHarness::Codex => "codex executable missing".into(),
+                ResearchHarness::ClaudeCode => "claude executable missing".into(),
+            })
+        })?;
         let credential = match &lease {
             Some(lease) => Some(
                 lease
@@ -3589,6 +3603,23 @@ mod tests {
 
     fn reference(value: &str) -> CredentialRef {
         CredentialRef::new(value).unwrap()
+    }
+
+    #[test]
+    fn a_harness_installed_after_engine_start_can_run_only_through_the_engines_lookup() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap();
+        assert!(!runner.can_run(ResearchHarness::Codex));
+        let pinned = codex.clone();
+        let runner = runner.with_harness_lookup(Arc::new(move |harness: &str| {
+            (harness == "codex").then(|| pinned.clone())
+        }));
+        assert!(runner.can_run(ResearchHarness::Codex));
+        assert_eq!(runner.harness(ResearchHarness::Codex), Some(codex));
+        assert!(!runner.can_run(ResearchHarness::ClaudeCode));
     }
 
     #[test]

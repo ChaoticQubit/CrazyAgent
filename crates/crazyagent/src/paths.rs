@@ -323,6 +323,13 @@ pub fn resolve_harnesses(
     }
 }
 
+/// How the team runtime, usage upkeep, research and onboarding find a harness the engine did
+/// not have when it started: the engine answers with the entry of a harness it has pinned
+/// since, so nothing is launched that did not pass the checks of a registration. Only engine
+/// start hands one out; a runtime built without it never looks past what it was given.
+/// Input: the launch harness id. Output: the entry, or none.
+pub type HarnessLookup = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
 /// Resolves a harness entry kept at engine start to the real file a launch runs and its
 /// sandbox grants, as the entry stands now. Inputs: the absolute entry and the PATH value.
 /// Output: the entry's real file; when an entry in a PATH folder is gone, the first PATH

@@ -2509,6 +2509,67 @@ fn a_prepared_agent_renews_its_credential_through_the_harness_entry_after_an_upd
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_harness_installed_after_engine_start_is_prepared_only_through_the_engines_lookup() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::new(),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let prepare = |runtime: &TeamRuntime| {
+        runtime.prepare(
+            &fixture.setup,
+            1,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        )
+    };
+    let runtime = open();
+    let Err(missing) = prepare(&runtime) else {
+        panic!("a runtime without the lookup found a harness it was not given");
+    };
+    assert_eq!(missing, "harness is not installed");
+    drop(runtime);
+    let pinned = codex.clone();
+    let runtime = open().with_harness_lookup(Arc::new(move |harness: &str| {
+        (harness == "codex").then(|| pinned.clone())
+    }));
+    let (_, plan, _) = match prepare(&runtime) {
+        Ok(prepared) => prepared,
+        Err(problem) => panic!("the agent was not prepared: {problem}"),
+    };
+    assert_eq!(plan.entry, codex);
+    assert_eq!(plan.executable, std::fs::canonicalize(&codex).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     let fixture = Fixture::new(1);
     let bin = fixture.base.join("bin");

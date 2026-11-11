@@ -176,6 +176,7 @@ pub struct Usage {
     custody: Result<NativeProfileCustody, EngineError>,
     access: AccessSource,
     executables: BTreeMap<&'static str, PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     polls: u64,
@@ -209,6 +210,7 @@ impl Usage {
             custody,
             access,
             executables,
+            lookup: None,
             endpoints: (
                 endpoint(CLAUDE_USAGE_URL)?,
                 endpoint(CODEX_USAGE_URL)?,
@@ -219,6 +221,27 @@ impl Usage {
             doing: UsageStep::Poll,
             unrecovered: BTreeSet::new(),
         })
+    }
+
+    /// Lets the upkeep find a harness the engine pinned after it started, as after an
+    /// install from the app. Only engine start sets it, so an upkeep built without it never
+    /// looks past the executables it was given. Takes the engine's lookup. Returns the upkeep.
+    pub fn with_harness_lookup(mut self, lookup: crate::paths::HarnessLookup) -> Self {
+        self.lookup = Some(lookup);
+        self
+    }
+
+    /// The entry of a harness: the one given at engine start, else the one the engine pinned
+    /// since, when the lookup is set. Input: the harness id. Output: the entry, or none for
+    /// a harness that is not installed.
+    fn harness(&self, harness: &str) -> Option<PathBuf> {
+        let entry = self
+            .executables
+            .get(harness)
+            .cloned()
+            .or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(harness)))?;
+        assert!(entry.is_absolute());
+        Some(entry)
     }
 
     /// Points the polls at other usage calls, such as a loopback server in a test.
@@ -506,7 +529,7 @@ impl Usage {
             MemberKind::Chatgpt => (Provider::Codex, "codex"),
             _ => return Ok(None),
         };
-        let Some(executable) = self.executables.get(harness).cloned() else {
+        let Some(executable) = self.harness(harness) else {
             return Ok(None);
         };
         let tx = self.db.unchecked_transaction().map_err(storage)?;
@@ -654,13 +677,15 @@ impl Pace {
 
 /// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, and less
 /// often while its steps keep panicking, reading the pools live from the engine's settings
-/// files. Inputs: the runtime folder, both settings files and the harness executables by
-/// harness id. Output: the service, or a reason.
+/// files. Inputs: the runtime folder, both settings files, the harness executables by
+/// harness id and the engine's lookup of a harness it pinned after it started.
+/// Output: the service, or a reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
     executables: BTreeMap<&'static str, PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<UsageService, String> {
     let runtime = runtime
         .canonicalize()
@@ -679,6 +704,9 @@ pub fn start_for_engine(
         executables,
     )
     .map_err(|e| e.0)?;
+    if let Some(lookup) = lookup {
+        usage = usage.with_harness_lookup(lookup);
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let thread = std::thread::Builder::new()
