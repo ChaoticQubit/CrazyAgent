@@ -68,7 +68,7 @@ pub(super) struct CodexHostProcess {
     shared: Arc<ProcessShared>,
     input: mpsc::Sender<WriteRequest>,
     worker: JoinHandle<()>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     close_time: Duration,
     pid: u32,
     pending_input: Option<PendingInput>,
@@ -85,23 +85,32 @@ impl CodexHostProcess {
         command: Command,
         budget: &ResourceBudget,
     ) -> Result<Self, EngineError> {
-        Self::spawn_guarded(command, budget, None, false).await
+        let run_time = Duration::from_millis(budget.wall_time_ms);
+        Self::spawn_guarded(command, budget, Some(run_time), None, false).await
     }
 
     /// Starts the harness under custody with its account lease. A Full access harness,
     /// `unconfined`, has what it left outside its group checked when it ends, which a close
-    /// waits `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the lease and
-    /// whether the harness runs unconfined. Output: the running process or a plain code.
+    /// waits `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the wall clock
+    /// the harness runs under, none for no clock, the lease and whether the harness runs
+    /// unconfined. Output: the running process or a plain code.
     pub(super) async fn spawn_guarded(
         command: Command,
         budget: &ResourceBudget,
+        run_time: Option<Duration>,
         profile: Option<NativeProfileUse>,
         unconfined: bool,
     ) -> Result<Self, EngineError> {
         budget.validate().map_err(EngineError)?;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(budget.wall_time_ms))
-            .ok_or_else(|| EngineError("codex_host_deadline_range".into()))?;
+        let deadline = match run_time {
+            Some(time) => Some(
+                Instant::now()
+                    .checked_add(time)
+                    .ok_or_else(|| EngineError("codex_host_deadline_range".into()))?,
+            ),
+            None => None,
+        };
+        assert_eq!(deadline.is_some(), run_time.is_some());
         let shared = Arc::new(ProcessShared {
             state: Mutex::new(ProcessState {
                 started: None,
@@ -223,13 +232,21 @@ impl CodexHostProcess {
             });
         }
         assert!(self.pending_input.is_some());
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        let deadline = self.deadline;
         let pending = self.pending_input.as_mut().expect("retained native input");
-        let observed = tokio::time::timeout(remaining, &mut pending.reply).await;
+        let observed = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::time::timeout(remaining, &mut pending.reply)
+                    .await
+                    .ok()
+            }
+            None => Some((&mut pending.reply).await),
+        };
         self.pending_input = None;
         match observed {
-            Ok(result) => result.map_err(|_| EngineError("codex_host_input_closed".into()))?,
-            Err(_) => {
+            Some(result) => result.map_err(|_| EngineError("codex_host_input_closed".into()))?,
+            None => {
                 self.shared.fail("codex_host_deadline");
                 Err(EngineError("codex_host_deadline".into()))
             }
@@ -300,8 +317,13 @@ impl CodexHostProcess {
         }
     }
 
+    /// Fails the process once its wall clock has run out; a process with no clock never
+    /// fails here. Input: the process. Output: Ok, or `codex_host_deadline`.
     fn check_deadline(&self) -> Result<(), EngineError> {
-        if Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             self.shared.fail("codex_host_deadline");
             return Err(EngineError("codex_host_deadline".into()));
         }

@@ -192,11 +192,22 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &claude,
         &connection,
         "Unit master instructions.",
-        Duration::from_secs(3600),
+        Some(Duration::from_secs(3600)),
         None,
         &[],
+        StepLimit::Steps50,
     )
     .unwrap();
+    let single: Vec<&str> = off_command
+        .get_args()
+        .map(|arg| arg.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        single.iter().filter(|arg| **arg == "--max-turns").count(),
+        1,
+        "a tools-off turn carries no master step limit"
+    );
+    assert!(single.windows(2).any(|pair| pair == ["--max-turns", "1"]));
     assert_eq!(
         home,
         runtime
@@ -255,9 +266,10 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &claude,
         &connection,
         &"x".repeat(host_limit + 1),
-        Duration::from_secs(3600),
+        Some(Duration::from_secs(3600)),
         None,
         &[],
+        StepLimit::NoLimit,
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -295,9 +307,10 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &claude,
         &connection,
         "Unit master instructions.",
-        Duration::from_secs(3600),
+        Some(Duration::from_secs(3600)),
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
+        StepLimit::Steps100,
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -310,6 +323,10 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     assert!(
         args.windows(2)
             .any(|pair| pair == ["--permission-mode", "bypassPermissions"])
+    );
+    assert!(
+        args.ends_with(&["--max-turns", "100"]),
+        "a tools-on turn ends with the owner's master step limit (OB-5b): {args:?}"
     );
     let config = args[args.iter().position(|arg| *arg == "--mcp-config").unwrap() + 1];
     let config: Value = serde_json::from_str(config).unwrap();

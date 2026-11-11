@@ -268,20 +268,19 @@ fn claude_launch_appends_only_a_private_engine_instruction_file() {
 #[test]
 fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
     let valid = ClaudeHostLimits {
-        run_time: Duration::from_secs(120),
+        run_time: Some(Duration::from_secs(120)),
         cleanup_time: Duration::from_secs(2),
         stdout_bytes: 262_144,
         stderr_bytes: 65_536,
-        events: 4096,
     };
     assert!(valid.validate().is_ok());
     for limits in [
         ClaudeHostLimits {
-            run_time: Duration::ZERO,
+            run_time: Some(Duration::ZERO),
             ..valid
         },
         ClaudeHostLimits {
-            run_time: Duration::from_secs(601),
+            run_time: Some(Duration::from_secs(3601)),
             ..valid
         },
         ClaudeHostLimits {
@@ -308,13 +307,37 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
             stderr_bytes: 262_145,
             ..valid
         },
-        ClaudeHostLimits { events: 0, ..valid },
-        ClaudeHostLimits {
-            events: 4097,
-            ..valid
-        },
     ] {
         assert!(limits.validate().is_err());
+    }
+    let unclocked = ClaudeHostLimits {
+        run_time: None,
+        ..valid
+    };
+    assert!(unclocked.validate().is_ok(), "no master time limit");
+    for limit in crate::master_time_limit::TimeLimit::ALL {
+        let limits = ClaudeHostLimits::from_budget(&ResourceBudget::unit(), limit.run_time());
+        let limits = limits.unwrap_or_else(|_| panic!("{limit:?} is a host clock"));
+        assert_eq!(limits.run_time, limit.run_time());
+        assert_eq!(limits.run_time.is_none(), limit.minutes().is_none());
+    }
+    let long = ResourceBudget {
+        wall_time_ms: 86_400_000,
+        ..ResourceBudget::unit()
+    };
+    for (budget, clock) in [
+        (ResourceBudget::unit(), Some(Duration::from_secs(3600))),
+        (long, Some(Duration::from_secs(600))),
+    ] {
+        let limits = ClaudeHostLimits::from_budget(&budget, clock).unwrap();
+        assert_eq!(
+            limits.run_time,
+            clock,
+            "the clock is the setting, not the budget"
+        );
+    }
+    for refused in [Duration::ZERO, Duration::from_secs(3601)] {
+        assert!(ClaudeHostLimits::from_budget(&ResourceBudget::unit(), Some(refused)).is_err());
     }
 }
 
@@ -492,6 +515,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
             worktree_lease: RequestId::new("claude-master-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -538,6 +562,19 @@ async fn stand_in_master_at(
     body: &str,
     unconfined: bool,
 ) -> ClaudeHost {
+    let clock = Some(Duration::from_secs(60));
+    stand_in_master_under(fixture, body, unconfined, clock).await
+}
+
+/// Starts a stand-in Claude Code master host running `body` under a wall clock, none for
+/// no clock. Takes the fixture, the script body, the access and the clock. Returns the
+/// host.
+async fn stand_in_master_under(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    unconfined: bool,
+    clock: Option<Duration>,
+) -> ClaudeHost {
     let profile = fixture.lease("claude-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", body);
@@ -561,6 +598,7 @@ async fn stand_in_master_at(
             worktree_lease: RequestId::new("claude-group-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        clock,
         ResourceBudget::unit(),
     )
     .await
@@ -944,9 +982,11 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "{\"disableAllHooks\":true}",
             "--disable-slash-commands",
             "--no-session-persistence",
-            "--max-turns",
-            "24",
         ]
+    );
+    assert!(
+        !args.iter().any(|arg| arg == "--max-turns"),
+        "a tools-on master names no step count, so a working turn is not ended at one (OB-5)"
     );
     let environment: Vec<(&str, &str)> = command
         .get_envs()
@@ -1056,10 +1096,11 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         "extra": {"type": "stdio", "command": "/bin/sh", "args": []},
     }})
     .to_string();
-    let steps = arguments(&on).len() - 1;
+    let mut capped = changed(&on, 0, "--print");
+    capped.args(["--max-turns", "24"]);
     for refused in [
         changed(&on, 12, &widened),
-        changed(&on, steps, "99"),
+        capped,
         changed(&on, 9, "default"),
         changed(&off, 7, "default"),
     ] {
@@ -1074,6 +1115,87 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
             arguments(&refused)
         );
     }
+}
+
+/// Each master step limit the owner can pick ends the engine's tools-on command with
+/// `--max-turns` and its steps, and the host runs it; No limit adds nothing. A step count
+/// the owner cannot pick, the flag twice, the flag with no count and a limit on a
+/// tools-off command are refused (OB-5b).
+#[test]
+fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-step-limit", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
+    let built = || {
+        let tools = MasterTools {
+            engine: &engine,
+            drop: &drop,
+            mailbox: &mailbox,
+            off: &[],
+        };
+        tools_launch_command(
+            Path::new("/approved/claude"),
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            tools,
+        )
+        .unwrap()
+    };
+    let refused = |command: &std::process::Command| {
+        matches!(
+            validate_command(command, &profile, &home),
+            Err(Fault::Host("claude_host_unapproved_command" | "claude_host_invalid_command"))
+        )
+    };
+    let plain = arguments(&built());
+    assert!(!plain.iter().any(|arg| arg == "--max-turns"));
+    for limit in StepLimit::ALL {
+        let mut command = built();
+        limit_steps(&mut command, limit);
+        let args = arguments(&command);
+        match limit.steps() {
+            Some(steps) => {
+                assert_eq!(args.len(), plain.len() + 2, "{limit:?}");
+                assert_eq!(
+                    args[plain.len()..],
+                    ["--max-turns".to_owned(), steps.to_string()]
+                );
+            }
+            None => assert_eq!(args, plain),
+        }
+        assert_eq!(args[..plain.len()], plain[..], "{limit:?}");
+        let ran = validate_command(&command, &profile, &home).ok();
+        assert_eq!(ran, Some(true), "{limit:?}");
+    }
+    for steps in ["", "0", "1", "24", "51", "050", "201", "no_limit"] {
+        let mut command = built();
+        command.args(["--max-turns", steps]);
+        assert!(refused(&command), "{steps:?}");
+    }
+    let mut twice = built();
+    limit_steps(&mut twice, StepLimit::Steps50);
+    limit_steps(&mut twice, StepLimit::Steps100);
+    assert!(refused(&twice));
+    let mut uncounted = built();
+    uncounted.arg("--max-turns");
+    assert!(refused(&uncounted));
+    let mut off = launch_command(
+        Path::new("/approved/claude"),
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+    )
+    .unwrap();
+    limit_steps(&mut off, StepLimit::Steps50);
+    assert!(refused(&off));
 }
 
 #[tokio::test]
@@ -1116,6 +1238,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             worktree_lease: RequestId::new("claude-tools-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -1155,6 +1278,19 @@ async fn tool_step_turn(
     tools: bool,
     body: &str,
 ) -> (Vec<crate::adapters::events::EventKind>, Option<String>) {
+    held_turn(fixture, (operation, sequence), tools, body, Duration::ZERO).await
+}
+
+/// Runs one turn as `tool_step_turn` does, but reads no event for the first `held` of it, so
+/// the host's event queue fills while the stand-in writes. Input: as `tool_step_turn`, with
+/// the lease operation and sequence as a pair, and the time to hold off. Output: the same.
+async fn held_turn(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    (operation, sequence): (&str, u64),
+    tools: bool,
+    body: &str,
+    held: Duration,
+) -> (Vec<crate::adapters::events::EventKind>, Option<String>) {
     use crate::adapters::events::EventKind;
 
     let profile = fixture.lease(operation, sequence).unwrap();
@@ -1193,6 +1329,7 @@ async fn tool_step_turn(
             worktree_lease: RequestId::new("claude-steps-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -1201,6 +1338,7 @@ async fn tool_step_turn(
         .start_turn(RequestId::new("claude-steps-turn").unwrap(), "Write a note")
         .await
         .unwrap();
+    tokio::time::sleep(held).await;
     let mut kinds = Vec::new();
     let error = loop {
         match claude.next_event().await {
@@ -1216,6 +1354,119 @@ async fn tool_step_turn(
     };
     let _ = claude.close().await;
     (kinds, error)
+}
+
+/// A stand-in Claude Code that writes 300 reply frames at once, more than the 128 events the
+/// host's queue to the turn's reader holds, then ends the turn.
+const BURST_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 300 ]; do
+  i=$((i+1))
+  printf '{"type":"assistant","uuid":"said-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"line"}]}}\n' "$i" "$i"
+done
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"line"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A burst of more frames than the host's event queue holds, written while the turn's reader
+/// is busy, waits for the reader and is delivered whole (OB-5b): it used to fail the turn
+/// with claude_host_event_delivery_failed at the 129th undelivered event.
+#[tokio::test]
+async fn a_burst_past_the_event_queue_waits_for_the_reader_and_is_not_a_failed_turn() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let (kinds, error) = held_turn(
+        &mut fixture,
+        ("claude-burst", 1),
+        true,
+        BURST_HARNESS,
+        Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(error, None, "{} events", kinds.len());
+    let said = kinds
+        .iter()
+        .filter(|kind| matches!(kind, EventKind::AssistantText { text, .. } if text == "line"))
+        .count();
+    assert_eq!(said, 300, "every frame of the burst reached the reader");
+    assert!(
+        matches!(
+            kinds.last(),
+            Some(EventKind::TurnFinished {
+                outcome: TurnOutcome::Success,
+                ..
+            })
+        ),
+        "{} events",
+        kinds.len()
+    );
+}
+
+/// A stand-in Claude Code whose turn writes 10,000 small frames, each with its own id, 9,500
+/// tool answers and 500 reply lines, then ends the turn with DONE.
+const MANY_EVENTS_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 10000 ]; do
+  i=$((i+1))
+  if [ "$((i % 20))" -eq 0 ]; then
+    printf '{"type":"assistant","uuid":"said-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"line"}]}}\n' "$i" "$i"
+  else
+    printf '{"type":"user","uuid":"answer-%s","session_id":"native-session"}\n' "$i"
+  fi
+done
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A turn of 10,000 small events ends with its reply (OB-5d): no count of events ends a
+/// turn. It used to fail with claude_host_event_limit at the 4,097th event, and the protocol
+/// refused the 4,097th message id as over capacity. Its frames stay under the stand-in
+/// host's 1 MiB of stdout, the bound that remains.
+#[tokio::test]
+async fn a_turn_of_ten_thousand_small_events_ends_with_its_reply() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let (kinds, error) =
+        tool_step_turn(&mut fixture, "claude-many", 1, true, MANY_EVENTS_HARNESS).await;
+    assert_eq!(error, None, "{} events", kinds.len());
+    let said = kinds
+        .iter()
+        .filter(|kind| matches!(kind, EventKind::AssistantText { text, .. } if text == "line"))
+        .count();
+    let answers = kinds
+        .iter()
+        .filter(|kind| {
+            matches!(kind, EventKind::Unsupported { message_type, .. } if message_type == "user")
+        })
+        .count();
+    assert_eq!(said, 500, "every reply line reached the reader");
+    assert_eq!(answers, 9_500, "every tool answer reached the reader");
+    assert!(kinds.len() > 10_000, "{} events", kinds.len());
+    let outcome = match kinds.last() {
+        Some(EventKind::TurnFinished { outcome, .. }) => Some(outcome),
+        _ => None,
+    };
+    let reply = match kinds.last() {
+        Some(EventKind::TurnFinished { result, .. }) => result.as_deref(),
+        _ => None,
+    };
+    assert_eq!(
+        outcome,
+        Some(&TurnOutcome::Success),
+        "{} events",
+        kinds.len()
+    );
+    assert_eq!(reply, Some("DONE"), "the turn ended with its reply");
 }
 
 #[tokio::test]
@@ -1409,6 +1660,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             worktree_lease: RequestId::new("claude-late-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget::unit(),
     )
     .await
@@ -1637,6 +1889,7 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
             worktree_lease: RequestId::new("claude-large-lease").unwrap(),
         },
         fixture.connection.account_ref.clone(),
+        Some(Duration::from_secs(60)),
         ResourceBudget {
             output_bytes: 64 * 1024 * 1024,
             ..ResourceBudget::unit()
@@ -1672,5 +1925,60 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
             })
         ),
         "{kinds:?}"
+    );
+}
+
+/// A stand-in Claude Code that reads a turn, works five seconds without a word and then
+/// replies DONE.
+const QUIET_THEN_DONE: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+/bin/sleep 5
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Runs one turn of `QUIET_THEN_DONE` on a host under a wall clock. Takes the clock, none
+/// for no clock. Returns the error that ended the turn, none for a turn that finished, and
+/// how long the turn took.
+async fn quiet_turn_under(clock: Option<Duration>) -> (Option<String>, Duration) {
+    use crate::adapters::events::EventKind;
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master_under(&mut fixture, QUIET_THEN_DONE, false, clock).await;
+    let started = std::time::Instant::now();
+    let turn = RequestId::new("claude-quiet-turn").unwrap();
+    let mut error = claude.start_turn(turn, "Work quietly").await.err();
+    while error.is_none() {
+        match claude.next_event().await {
+            Ok(event) if matches!(event.kind, EventKind::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(failed) => error = Some(failed),
+        }
+    }
+    let took = started.elapsed();
+    let _ = claude.close().await;
+    (error.map(|error| error.0), took)
+}
+
+/// A master host with no wall clock, the owner's choice of no master time limit, waits for
+/// a quiet turn however long it works (OB-5c): the turn that a two second clock ends with
+/// `claude_host_deadline` runs its five seconds to the reply under no clock.
+#[tokio::test]
+async fn a_claude_master_with_no_clock_outlasts_the_quiet_turn_a_clock_ends() {
+    let (error, took) = quiet_turn_under(Some(Duration::from_secs(2))).await;
+    assert_eq!(error.as_deref(), Some("claude_host_deadline"));
+    assert!(
+        took < Duration::from_secs(5),
+        "the clock ended it: {took:?}"
+    );
+    let (error, took) = quiet_turn_under(None).await;
+    assert_eq!(error, None, "no clock ends the turn");
+    assert!(
+        took >= Duration::from_secs(5),
+        "the turn ran whole: {took:?}"
     );
 }

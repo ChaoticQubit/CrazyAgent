@@ -119,6 +119,20 @@ impl NativeProfileUse {
 }
 
 impl NativeProfileUse {
+    /// Matches the Unix handoff of a credential copy to a master turn, whose time bound may be
+    /// none. No value is ever made here. Inputs: the agent home and the turn bound, unused.
+    /// Output: none.
+    pub(crate) fn hand_to_turn(
+        &self,
+        _agent_home: &Path,
+        _turn: Option<Duration>,
+        _executable: &Path,
+    ) -> Result<AgentCredential, EngineError> {
+        match *self {}
+    }
+}
+
+impl NativeProfileUse {
     /// Matches the Unix read of an account's access token for one engine usage poll. No
     /// value is ever made here. Input: the harness executable, unused. Output: none.
     pub(crate) fn usage_credential(

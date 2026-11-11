@@ -11,6 +11,8 @@ use crate::master_session::{
     MasterAccountState, MasterBootstrapAuth, MasterOwnerAction, MasterSelection, MasterSessionView,
     RcliConfiguredProfileProof,
 };
+use crate::master_step_limit::{MasterStepSettings, StepLimit};
+use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, PROTOCOL_VERSION, ProjectSpec};
 use crate::routing::{ResourceBudget, RouteRequest};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::Value};
@@ -1626,6 +1628,32 @@ async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission(
     case.finish().await;
 }
 
+/// An rcli master turn is prepared with the saved master time limit, as a Claude or Codex
+/// one is (OB-5d): one setting for every master harness. With No limit it names no run
+/// time, so its host gets no clock; with 30 min it names 30 minutes.
+#[tokio::test]
+async fn an_rcli_master_turn_is_prepared_with_the_saved_time_limit() {
+    for limit in [TimeLimit::NoLimit, TimeLimit::Minutes30] {
+        let case = Fixture::new(MasterBackend::Rcli, true).await;
+        case.register().await;
+        store_time_limit(&case, limit);
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(prepared.session.selection.backend, MasterBackend::Rcli);
+        assert_eq!(
+            prepared.time,
+            limit,
+            "the turn carries the saved time limit"
+        );
+        assert_eq!(prepared.time.run_time(), limit.run_time());
+        assert_eq!(
+            prepared.time.run_time().is_none(),
+            limit == TimeLimit::NoLimit
+        );
+        drop(prepared);
+        case.finish().await;
+    }
+}
+
 #[tokio::test]
 async fn a_repository_vs_code_and_the_codex_app_wrote_to_gets_a_master_worktree_lease() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
@@ -2464,14 +2492,19 @@ async fn call_waits(mailbox: &Path) {
     }
 }
 
-/// A real Claude host on the memory-turn stand-in for a case's prepared console turn, with
-/// the team server's drop record and mailbox in the stand-in's private tmp (OP-22).
-/// Inputs: the case, its prepared turn and the host's wall time in milliseconds. Outputs:
-/// the stand-in fixture, which owns the folders, the active master, the record and mailbox.
+/// The wall clock the stand-in hosts of rows about something other than time run under.
+const TEST_CLOCK: Option<Duration> = Some(Duration::from_secs(150));
+
+/// A real Claude host on a stand-in harness for a case's prepared console turn, with the
+/// team server's drop record and mailbox in the stand-in's private tmp (OP-22). Inputs: the
+/// case, its prepared turn, the host's wall clock, none for no clock, and the stand-in's
+/// script. Outputs: the stand-in fixture, which owns the folders, the active master, the
+/// record and mailbox.
 async fn console_claude_master(
     case: &Fixture,
     prepared: &PreparedMasterTurn,
-    wall_time_ms: u64,
+    clock: Option<Duration>,
+    script: &str,
 ) -> (
     crate::engine::master_host_fixture::MasterFixture,
     ActiveMaster,
@@ -2481,14 +2514,14 @@ async fn console_claude_master(
     let mut fixture = crate::engine::master_host_fixture::MasterFixture::new("claude");
     let lease = fixture.lease("console-memory-turn", 1).unwrap();
     let home = lease.profile_path().unwrap();
-    let harness = fixture.stand_in("claude", MEMORY_TURN_HARNESS);
+    let harness = fixture.stand_in("claude", script);
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
     let tmp = fixture.root.path().join("agent-tmp");
     let record = tmp.join(crate::team::tool::DROP_FILE);
     let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
     private_directory(&mailbox);
     let engine = fixture.root.path().join("crazyagent");
-    let command = crate::engine::claude_host::tools_launch_command(
+    let mut command = crate::engine::claude_host::tools_launch_command(
         &harness,
         &fixture.project,
         &home,
@@ -2502,6 +2535,7 @@ async fn console_claude_master(
         },
     )
     .unwrap();
+    crate::engine::claude_host::limit_steps(&mut command, prepared.steps);
     let profile_ref = CredentialRef::new("console-memory-profile").unwrap();
     let account_ref = fixture.connection.account_ref.clone();
     let claude = ClaudeHost::spawn(
@@ -2516,10 +2550,8 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         account_ref.clone(),
-        ResourceBudget {
-            wall_time_ms,
-            ..ResourceBudget::unit()
-        },
+        clock,
+        ResourceBudget::unit(),
     )
     .await
     .unwrap();
@@ -2580,7 +2612,8 @@ async fn a_console_master_turn_reads_its_harness_while_each_inspection_outlasts_
         .acquire_master_profile(&prepared, &case.turn.id)
         .await
         .unwrap();
-    let (fixture, mut active, _, mailbox) = console_claude_master(&case, &prepared, 150_000).await;
+    let (fixture, mut active, _, mailbox) =
+        console_claude_master(&case, &prepared, TEST_CLOCK, MEMORY_TURN_HARNESS).await;
     fs::write(fixture.project.join("memory-answered"), b"").unwrap();
     let engine = Arc::clone(&case.runtime().engine);
     let barrier = tokio::spawn(async move {
@@ -2643,7 +2676,7 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
         .await
         .unwrap();
     let (fixture, mut active, record, mailbox) =
-        console_claude_master(&case, &prepared, 150_000).await;
+        console_claude_master(&case, &prepared, TEST_CLOCK, MEMORY_TURN_HARNESS).await;
     let server = remember_server(
         &record,
         &mailbox,
@@ -2737,6 +2770,291 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
             }
         )]
     );
+}
+
+/// A stand-in Claude Code for a tools-on console master turn that takes 30 tool steps and
+/// then replies DONE. Like Claude Code, it ends the turn with `error_max_turns` once it has
+/// taken as many steps as a `--max-turns` argument allows.
+const THIRTY_STEP_HARNESS: &str = r#"#!/bin/sh
+cap=0
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--max-turns" ]; then cap=$2; fi
+  shift
+done
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i+1))
+  if [ "$cap" -gt 0 ] && [ "$i" -gt "$cap" ]; then
+    printf '%s\n' '{"type":"result","subtype":"error_max_turns","uuid":"result-1","session_id":"native-session","is_error":true}'
+    /bin/cat > /dev/null
+    exit 1
+  fi
+  printf '{"type":"assistant","uuid":"call-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-%s","name":"Read","input":{"file_path":"note.txt"}}]}}\n' "$i" "$i" "$i"
+  printf '{"type":"user","uuid":"answer-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-%s","content":"read"}]}}\n' "$i" "$i"
+done
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A stand-in Claude Code for a tools-on console master turn that says what it will do,
+/// takes one tool step and ends the turn as a success without writing anything after it.
+const SILENT_END_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"I will write the note."}]}}'
+printf '%s\n' '{"type":"assistant","uuid":"call-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-1","name":"Write","input":{"file_path":"note.txt"}}]}}'
+printf '%s\n' '{"type":"user","uuid":"answer-1","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"written"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":""}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Saves the owner's master step limit in a fixture's engine store, as the owner's Save in
+/// Settings does. Inputs: the fixture and the limit. Output: none.
+fn store_step_limit(case: &Fixture, limit: StepLimit) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let saved = crate::master_step_limit::save(&writer, &MasterStepSettings { limit }).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(
+        crate::master_step_limit::load(&writer).unwrap().limit,
+        limit
+    );
+}
+
+/// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
+/// Input: the number of steps. Output: the script.
+fn stepping_harness(steps: u16) -> String {
+    assert!((1..=400).contains(&steps));
+    let script = THIRTY_STEP_HARNESS.replace("-lt 30 ]", &format!("-lt {steps} ]"));
+    assert!(script.contains(&format!("\"$i\" -lt {steps} ]")));
+    script
+}
+
+/// Saves the owner's master time limit in a fixture's engine store, as the owner's Save in
+/// Settings does. Inputs: the fixture and the limit. Output: none.
+fn store_time_limit(case: &Fixture, limit: TimeLimit) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let saved = crate::master_time_limit::save(&writer, &MasterTimeSettings { limit }).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(
+        crate::master_time_limit::load(&writer).unwrap().limit,
+        limit
+    );
+}
+
+/// Collects one tools-on console master turn on a real Claude host running a stand-in
+/// script, built by the engine's own tools-on command under the saved master step limit.
+/// Inputs: the stand-in's script and the limit to save first. Outputs: how the turn ended,
+/// as `turn_end` names it, and the turn as stored after a failed end was observed with the
+/// reason its error maps to.
+async fn tools_turn_on(script: &str, limit: StepLimit) -> (String, Option<MasterTurnView>) {
+    limited_turn_on(script, limit, TimeLimit::NoLimit, TEST_CLOCK).await
+}
+
+/// Collects one tools-on console master turn on a real Claude host running a stand-in
+/// script under the saved master step and time limits. `clock` is the wall clock the
+/// stand-in host gets, so a row about a time limit of minutes ends in seconds. Inputs: the
+/// script, both limits to save first and the clock. Outputs: those of `tools_turn_on`.
+async fn limited_turn_on(
+    script: &str,
+    limit: StepLimit,
+    time: TimeLimit,
+    clock: Option<Duration>,
+) -> (String, Option<MasterTurnView>) {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    store_step_limit(&case, limit);
+    store_time_limit(&case, time);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    assert_eq!(
+        prepared.steps,
+        limit,
+        "the turn carries the saved step limit"
+    );
+    assert_eq!(prepared.time, time, "the turn carries the saved time limit");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (_fixture, mut active, _, mailbox) =
+        console_claude_master(&case, &prepared, clock, script).await;
+    let observed = tokio::time::timeout(
+        Duration::from_secs(60),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
+    )
+    .await;
+    let _ = active.host.close().await;
+    let ended = turn_end(&observed);
+    let stored = match &observed {
+        Ok(Err(error)) => Some(
+            case.runtime()
+                .observe_master_turn(
+                    &prepared,
+                    &case.turn.id,
+                    MasterRuntimeObservation::Failed {
+                        reason: reason_for_error(error),
+                        cause: error.0.clone(),
+                    },
+                )
+                .await
+                .unwrap(),
+        ),
+        _ => None,
+    };
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+    (ended, stored)
+}
+
+/// A tools-on Claude master turn that needs 30 tool steps ends with its reply (OB-5): the
+/// engine's command names no step count, so a harness that honours `--max-turns` as Claude
+/// Code does is not stopped at step 24 with `error_max_turns`, which the owner saw as "its
+/// reply was cut off" 92 s into a working turn.
+#[tokio::test]
+async fn a_tools_on_master_turn_of_thirty_tool_steps_ends_with_its_reply() {
+    let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS, StepLimit::NoLimit).await;
+    assert_eq!(ended, "reply DONE", "the turn ran past 24 tool steps");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// With the master step limit at No limit, the default, a tools-on Claude master turn of
+/// 210 tool steps ends with its reply (OB-5b): past every limit the owner could pick, only
+/// the host's run time and output limits bound it.
+#[tokio::test]
+async fn a_master_turn_with_no_step_limit_runs_past_two_hundred_steps_to_its_reply() {
+    let (ended, stored) = tools_turn_on(&stepping_harness(210), StepLimit::NoLimit).await;
+    assert_eq!(ended, "reply DONE", "no step count stopped the turn");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// Under each master step limit the owner can pick, a tools-on Claude master turn that
+/// needs more steps stops at the limit with the cause `master_step_limit_<steps>` and the
+/// reason step_limit, not as a cut-off capture, and a turn of 30 steps still ends with its
+/// reply (OB-5b).
+#[tokio::test]
+async fn a_master_turn_past_each_step_limit_stops_with_that_limit_named() {
+    let limits = [
+        (StepLimit::Steps50, 50_u16),
+        (StepLimit::Steps100, 100),
+        (StepLimit::Steps200, 200),
+    ];
+    for (limit, steps) in limits {
+        let cause = format!("master_step_limit_{steps}");
+        let (ended, stored) = tools_turn_on(&stepping_harness(steps + 5), limit).await;
+        assert_eq!(ended, format!("error {cause}"));
+        let stored = stored.expect("the stopped turn was stored");
+        assert_eq!(stored.phase, MasterTurnPhase::Failed);
+        assert_eq!(stored.reason, Some(MasterReason::StepLimit));
+        assert_eq!(stored.cause.as_deref(), Some(cause.as_str()));
+        assert!(stored.reply.is_none());
+        let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS, limit).await;
+        assert_eq!(ended, "reply DONE", "30 steps fit under {steps}");
+        assert!(stored.is_none(), "a replied turn is not stored as failed");
+    }
+}
+
+/// A stand-in Claude Code for a console master turn that works three seconds without a
+/// word and then replies DONE.
+const SLOW_REPLY_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+/bin/sleep 3
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// The stand-in of `SLOW_REPLY_HARNESS` working another number of seconds before DONE.
+/// Input: the seconds. Output: the script.
+fn slow_reply_harness(seconds: u16) -> String {
+    assert!((1..=120).contains(&seconds));
+    let script = SLOW_REPLY_HARNESS.replace("/bin/sleep 3\n", &format!("/bin/sleep {seconds}\n"));
+    assert!(script.contains(&format!("\n/bin/sleep {seconds}\n")));
+    script
+}
+
+/// With the master time limit at No limit, the default, the turn's host gets no wall clock
+/// (OB-5c): the prepared turn names no run time, the host is started with none, and a turn
+/// that works three seconds without a word ends with its reply.
+#[tokio::test]
+async fn a_master_turn_with_no_time_limit_runs_under_no_clock_to_its_reply() {
+    let limit = TimeLimit::NoLimit;
+    assert_eq!(limit.run_time(), None, "no limit gives the host no clock");
+    let (ended, stored) =
+        limited_turn_on(SLOW_REPLY_HARNESS, StepLimit::NoLimit, limit, limit.run_time()).await;
+    assert_eq!(ended, "reply DONE", "no clock stopped the turn");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// Under each master time limit the owner can pick, a turn its host's wall clock ends
+/// stops with the cause `master_time_limit_<minutes>` and the reason time_limit, not
+/// `claude_host_deadline` (OB-5c), and a turn of three seconds still ends with its reply.
+/// The stopped stand-in works 90 s under a host clock of 8 s, so each row ends in seconds;
+/// the clock the engine gives a real host is the limit's own minutes.
+#[tokio::test]
+async fn a_master_turn_its_clock_ends_under_each_time_limit_stops_with_that_limit_named() {
+    let limits = [
+        (TimeLimit::Minutes10, 10_u64),
+        (TimeLimit::Minutes30, 30),
+        (TimeLimit::Minutes60, 60),
+    ];
+    let long = slow_reply_harness(90);
+    for (limit, minutes) in limits {
+        assert_eq!(limit.run_time(), Some(Duration::from_secs(minutes * 60)));
+        let cause = format!("master_time_limit_{minutes}");
+        let clock = Some(Duration::from_secs(8));
+        let (ended, stored) = limited_turn_on(&long, StepLimit::NoLimit, limit, clock).await;
+        assert_eq!(ended, format!("error {cause}"));
+        let stored = stored.expect("the stopped turn was stored");
+        assert_eq!(stored.phase, MasterTurnPhase::Failed);
+        assert_eq!(stored.reason, Some(MasterReason::TimeLimit));
+        assert_eq!(stored.cause.as_deref(), Some(cause.as_str()));
+        assert!(stored.reply.is_none());
+        let (ended, stored) =
+            limited_turn_on(SLOW_REPLY_HARNESS, StepLimit::NoLimit, limit, TEST_CLOCK).await;
+        assert_eq!(
+            ended,
+            "reply DONE",
+            "a three second turn fits in {minutes} minutes"
+        );
+        assert!(stored.is_none(), "a replied turn is not stored as failed");
+    }
+}
+
+/// A tools-on master turn its harness ends as a success with no text after its last tool
+/// step fails as a turn without a reply, not as a cut-off capture (OB-5): the cause is
+/// master_empty_reply and the stored reason is no_reply.
+#[tokio::test]
+async fn a_tools_on_master_turn_that_ends_without_reply_text_says_so_and_is_not_cut_off() {
+    let (ended, stored) = tools_turn_on(SILENT_END_HARNESS, StepLimit::NoLimit).await;
+    assert_eq!(ended, "error master_empty_reply");
+    let stored = stored.expect("the failed end was stored");
+    assert_eq!(stored.phase, MasterTurnPhase::Failed);
+    assert_eq!(stored.reason, Some(MasterReason::NoReply));
+    assert_eq!(stored.cause.as_deref(), Some("master_empty_reply"));
+    assert!(stored.reply.is_none());
 }
 
 /// ServeMemory answers a console master's mailbox only while its own turn runs with tools on

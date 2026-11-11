@@ -1,6 +1,8 @@
 use super::*;
 use crate::cleanup_settings::{CleanupMode, CleanupSettings};
 use crate::github::GitHubMethod;
+use crate::master_step_limit::{MasterStepSettings, StepLimit};
+use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
@@ -178,7 +180,9 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
             AppSetupJob::GitHub,
             AppSetupJob::Sandbox,
             AppSetupJob::Cleanup,
-            AppSetupJob::Quit
+            AppSetupJob::Quit,
+            AppSetupJob::MasterSteps,
+            AppSetupJob::MasterTime
         ]
     ));
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
@@ -191,6 +195,10 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
         Ok(CleanupSettings::default()),
     )));
     shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings::default()))));
+    let steps = MasterStepSettings::default();
+    shell.arrive(event(AppSetupEvent::MasterSteps(Ok(steps))));
+    let time = MasterTimeSettings::default();
+    shell.arrive(event(AppSetupEvent::MasterTime(Ok(time))));
     shell
 }
 
@@ -1247,4 +1255,228 @@ fn a_stored_quitting_setting_this_version_does_not_know_is_not_offered() {
     shell.key(Key::Char('q'));
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(lead(&shell), "The quitting setting is not known yet.");
+}
+
+fn flat(rows: &[String]) -> String {
+    rows.iter()
+        .map(|row| row.trim_matches(|c: char| !(c.is_alphanumeric() || c.is_ascii_punctuation())))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn steps_chosen(shell: &mut Shell) -> StepLimit {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetMasterSteps { settings, .. }] = sent.as_slice() else {
+        panic!("one master step limit change required, got {} jobs", sent.len())
+    };
+    settings.limit
+}
+
+#[test]
+fn settings_show_no_master_step_limit_by_default_with_the_four_options() {
+    let mut shell = settings(200, 80);
+    let rows = render(&mut shell, 200, 80);
+    assert!(find(&rows, "Master steps  ").contains("No limit"));
+    let shown = flat(&rows);
+    assert!(
+        shown.contains("Stopped after N steps; reply with 'continue' to go on."),
+        "{shown}"
+    );
+    assert!(rows.last().unwrap().contains("m Master steps"));
+    shell.key(Key::Char('m'));
+    let rows = render(&mut shell, 200, 80);
+    find(&rows, "the most steps a project's master takes in one turn");
+    find(&rows, "> No limit");
+    find(
+        &rows,
+        "A turn runs until the master replies or its time is up.",
+    );
+    for steps in [50, 100, 200] {
+        find(&rows, &format!("  {steps} steps"));
+        find(&rows, &format!("A turn stops after {steps} steps."));
+    }
+    let shown = flat(&rows);
+    assert!(shown.contains("a Codex master counts no steps."), "{shown}");
+    assert!(rows.last().unwrap().contains("Enter Save"));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the stored setting saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn each_master_step_limit_is_saved_when_picked_and_shown_once_stored() {
+    let mut shell = settings(200, 80);
+    let picks = [
+        (StepLimit::Steps50, Key::Down, 1, "50 steps"),
+        (StepLimit::Steps100, Key::Down, 1, "100 steps"),
+        (StepLimit::Steps200, Key::Down, 1, "200 steps"),
+        (StepLimit::NoLimit, Key::Up, 3, "No limit"),
+    ];
+    for (limit, key, presses, title) in picks {
+        shell.key(Key::Char('m'));
+        for _ in 0..presses {
+            shell.key(key.clone());
+        }
+        find(&render(&mut shell, 200, 80), &format!("> {title}"));
+        shell.key(Key::Enter);
+        assert_eq!(steps_chosen(&mut shell), limit);
+        shell.arrive(event(AppSetupEvent::MasterStepsSet(Ok(()))));
+        assert_eq!(lead(&shell), format!("Master step limit: {title}."));
+        assert!(
+            jobs(&mut shell)
+                .iter()
+                .any(|job| matches!(job, AppSetupJob::MasterSteps)),
+            "the saved limit is read back"
+        );
+        let stored = MasterStepSettings { limit };
+        shell.arrive(event(AppSetupEvent::MasterSteps(Ok(stored))));
+        assert!(find(&render(&mut shell, 200, 80), "Master steps  ").contains(title));
+    }
+}
+
+#[test]
+fn esc_and_a_refused_save_leave_the_master_step_limit_as_it_was() {
+    let mut shell = settings(200, 80);
+    shell.key(Key::Char('m'));
+    shell.key(Key::Down);
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+    shell.key(Key::Char('m'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert_eq!(steps_chosen(&mut shell), StepLimit::Steps50);
+    shell.arrive(event(AppSetupEvent::MasterStepsSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Master step limit: 50 steps.");
+    assert!(!lead(&shell).is_empty());
+    assert!(find(&render(&mut shell, 200, 80), "Master steps  ").contains("No limit"));
+}
+
+#[test]
+fn a_stored_master_step_limit_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(200, 80);
+    shell.arrive(event(AppSetupEvent::MasterSteps(Err(
+        "master_step_settings_invalid".into(),
+    ))));
+    let rows = render(&mut shell, 200, 80);
+    let row = find(&rows, "Master steps  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    shell.key(Key::Char('m'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The master step limit is not known yet.");
+}
+
+fn time_chosen(shell: &mut Shell) -> TimeLimit {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetMasterTime { settings, .. }] = sent.as_slice() else {
+        panic!("one master time limit change required, got {} jobs", sent.len())
+    };
+    settings.limit
+}
+
+#[test]
+fn settings_show_no_master_time_limit_by_default_with_the_four_options() {
+    let mut shell = settings(200, 80);
+    let rows = render(&mut shell, 200, 80);
+    assert!(find(&rows, "Master time  ").contains("No limit"));
+    let shown = flat(&rows);
+    assert!(
+        shown.contains("Stopped after N minutes; reply with 'continue' to go on."),
+        "{shown}"
+    );
+    assert!(!shown.contains("ran out of time"), "{shown}");
+    assert!(rows.last().unwrap().contains("t Master time"));
+    shell.key(Key::Char('t'));
+    let rows = render(&mut shell, 200, 80);
+    find(&rows, "the longest a project's master works on one turn");
+    find(&rows, "> No limit");
+    find(
+        &rows,
+        "A turn runs until the master replies or you stop it.",
+    );
+    for minutes in [10, 30, 60] {
+        find(&rows, &format!("  {minutes} min"));
+        find(&rows, &format!("A turn stops after {minutes} minutes."));
+    }
+    let shown = flat(&rows);
+    assert!(shown.contains("The limit covers every master:"), "{shown}");
+    assert!(shown.contains("Claude, Codex and rcli."), "{shown}");
+    assert!(!shown.contains("still stops after"), "{shown}");
+    assert!(rows.last().unwrap().contains("Enter Save"));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the stored setting saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn each_master_time_limit_is_saved_when_picked_and_shown_once_stored() {
+    let mut shell = settings(200, 80);
+    let picks = [
+        (TimeLimit::Minutes10, Key::Down, 1, "10 min"),
+        (TimeLimit::Minutes30, Key::Down, 1, "30 min"),
+        (TimeLimit::Minutes60, Key::Down, 1, "60 min"),
+        (TimeLimit::NoLimit, Key::Up, 3, "No limit"),
+    ];
+    for (limit, key, presses, title) in picks {
+        shell.key(Key::Char('t'));
+        for _ in 0..presses {
+            shell.key(key.clone());
+        }
+        find(&render(&mut shell, 200, 80), &format!("> {title}"));
+        shell.key(Key::Enter);
+        assert_eq!(time_chosen(&mut shell), limit);
+        shell.arrive(event(AppSetupEvent::MasterTimeSet(Ok(()))));
+        assert_eq!(lead(&shell), format!("Master time limit: {title}."));
+        assert!(
+            jobs(&mut shell)
+                .iter()
+                .any(|job| matches!(job, AppSetupJob::MasterTime)),
+            "the saved limit is read back"
+        );
+        let stored = MasterTimeSettings { limit };
+        shell.arrive(event(AppSetupEvent::MasterTime(Ok(stored))));
+        assert!(find(&render(&mut shell, 200, 80), "Master time  ").contains(title));
+        assert!(
+            find(&render(&mut shell, 200, 80), "Master steps  ").contains("No limit"),
+            "the step limit is its own setting"
+        );
+    }
+}
+
+#[test]
+fn esc_and_a_refused_save_leave_the_master_time_limit_as_it_was() {
+    let mut shell = settings(200, 80);
+    shell.key(Key::Char('t'));
+    shell.key(Key::Down);
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+    shell.key(Key::Char('t'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert_eq!(time_chosen(&mut shell), TimeLimit::Minutes10);
+    shell.arrive(event(AppSetupEvent::MasterTimeSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Master time limit: 10 min.");
+    assert!(!lead(&shell).is_empty());
+    assert!(find(&render(&mut shell, 200, 80), "Master time  ").contains("No limit"));
+}
+
+#[test]
+fn a_stored_master_time_limit_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(200, 80);
+    shell.arrive(event(AppSetupEvent::MasterTime(Err(
+        "master_time_settings_invalid".into(),
+    ))));
+    let rows = render(&mut shell, 200, 80);
+    let row = find(&rows, "Master time  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    shell.key(Key::Char('t'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The master time limit is not known yet.");
 }

@@ -398,8 +398,8 @@
     },
     {
       "path": "scripts/rcli/host.messages.ts",
-      "sha256": "e253176a555593df126d0b886ac9b1c9bd2c93e3135cc609500d51cd0e981aa3",
-      "bytes": 6852
+      "sha256": "45f3889f53c39850e9609a560f36236734199aa9f6e55a58741a5ef9b68959b6",
+      "bytes": 8136
     },
     {
       "path": "scripts/rcli/host.observations.ts",
