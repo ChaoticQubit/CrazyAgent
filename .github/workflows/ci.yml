@@ -114,6 +114,10 @@ jobs:
           }
           lost=$(unresolved)
           if [ -n "$lost" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::the runner DNS does not resolve ${lost}and CI changes no DNS setting on a self-hosted runner; fix the runner's DNS"
+              exit 1
+            fi
             link=$(ip route show default | awk '{print $5; exit}')
             [ -n "$link" ] || { echo "::error::the runner DNS does not resolve ${lost}and the runner has no default route"; exit 1; }
             echo "::warning::the runner DNS does not resolve ${lost% }; asking 1.1.1.1 and 8.8.8.8 on $link instead"
@@ -123,6 +127,10 @@ jobs:
             [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
           fi
           if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
+              exit 1
+            fi
             echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
             printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
             sudo apt-get "${apt_options[@]}" update --error-on=any
@@ -361,9 +369,10 @@ jobs:
             exit 1
           fi
           rm -rf "$home"
-          mkdir -p "$home" "$target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
+          mkdir -p "$home" "$RUNNER_TEMP/tmp" "$target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
           {
             echo "HOME=$home"
+            echo "TMPDIR=$RUNNER_TEMP/tmp"
             echo "CARGO_HOME=$state/cargo-home"
             echo "CARGO_TARGET_DIR=$target"
             echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
@@ -715,7 +724,7 @@ jobs:
             du -sk "$target" | awk '{ printf "Rust target: %.1f GiB\n", $1 / 1048576 }'
           fi
           tools=(crazyagent-ci claude-code codex uv vscodium-reh-web)
-          temp=(home node-arm64 bun-arm64 rust claude-code codex vscodium-reh-web uv uv-cache uv-python uv-python-bin graphify context-mode)
+          temp=(home tmp node-arm64 bun-arm64 rust claude-code codex vscodium-reh-web uv uv-cache uv-python uv-python-bin graphify context-mode)
           made=()
           for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
           for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done

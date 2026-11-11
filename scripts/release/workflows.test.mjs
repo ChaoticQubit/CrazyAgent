@@ -97,7 +97,7 @@ test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no wor
   for (const [job, runner] of Object.entries(RUNNERS)) assert(block(jobs, 2, job).includes(`    runs-on: ${runner}`), job);
   for (const name of ["ci.yml", "release.yml"]) {
     const text = await workflow(name);
-    assert.doesNotMatch(text, /pull_request_target|head\.repo|self-hosted/, name);
+    assert.doesNotMatch(text, /pull_request_target|head\.repo/, name);
     for (const line of text.split("\n").filter((line) => /^\s+runs-on:/.test(line))) {
       assert.match(line.trim(), /^runs-on: (?:ubuntu-22\.04|macos-15|windows-2022|\$\{\{ matrix\.runner \}\})$/, `${name}: ${line.trim()}`);
     }
@@ -228,7 +228,7 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
   for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "linux", "Install Codex"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
     ["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
     ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
-    ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
+    ["release.yml", "build", "Install pinned arm64 bun for macOS"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
     assert(step, `${job}: ${title}`);
     assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
@@ -336,27 +336,35 @@ test("macOS CI runs a Codex release in codex::VERSIONS, from the pinned, checksu
   assert.doesNotMatch(ci, /codex[^\n]*latest/i, "no unpinned Codex");
 });
 
-test("a release on the owner's runner signs with pinned, checksum-checked Node, bun and Rust, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
+test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every macOS runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
   const release = await workflow("release.yml");
   for (const pin of ["BUN_DARWIN_ARM64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
     assert.match(release, new RegExp(`^ {2}${pin}: [0-9a-f]{64}$`, "m"), pin);
   }
   const all = steps(release, "build");
   const at = (pattern) => all.findIndex((step) => pattern.test(step));
-  for (const shared of [/uses: actions\/setup-node@/, /uses: oven-sh\/setup-bun@/, /rustup toolchain install/]) {
+  for (const shared of [/uses: actions\/setup-node@/, /rustup toolchain install/]) {
     const step = all[at(shared)];
     assert(step, String(shared));
     assert.match(step, /^ {6}- (?:id: \S+\n {8})?(?:name: [^\n]+\n {8})?if: runner\.environment == 'github-hosted'\n/, `${shared} runs only on GitHub's fresh runners`);
   }
+  assert.match(all[at(/uses: oven-sh\/setup-bun@/)], /^ {6}- id: bun\n {8}if: runner\.environment == 'github-hosted' && matrix\.os != 'macos'\n/, "setup-bun's unchecked bun runs only on a GitHub-hosted Linux runner");
   const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
   assert(rust, "the release on the owner's runner installs its own Rust");
   assertPinnedRust(rust, "release");
   assert(rust.includes("$RUST_STD_DARWIN_X64_SHA256"), "RUST_STD_DARWIN_X64_SHA256");
   const node = at(/name: Install pinned Node on the owner's runner/);
   const bun = at(/id: bun-arm64\n/);
-  for (const index of [node, bun]) assert.match(all[index], /\n {8}if: runner\.environment != 'github-hosted'\n/);
+  assert.match(all[node], /\n {8}if: runner\.environment != 'github-hosted'\n/);
+  assert.match(all[bun], /^ {6}- id: bun-arm64\n {8}name: [^\n]+\n {8}if: matrix\.os == 'macos'\n/, "every macOS runner, GitHub-hosted included, runs the pinned arm64 bun");
   assert.match(all[node], /node-v\$NODE_VERSION-darwin-arm64\.tar\.gz/);
   assert.match(all[bun], /bun-darwin-aarch64\.zip/);
+  assert.match(all[bun], /\n\s+echo "\$BUN_DARWIN_ARM64_SHA256  \$work\/bun\.zip" \| shasum -a 256 -c -\n/, "a downloaded arm64 bun that does not match its pin fails the job");
+  for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
+    const index = at(new RegExp(`name: ${name}\n`));
+    assert.equal(all[index].match(/\n\s+BUN_PATH: (.+)\n/)[1], "${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}", name);
+    assert(bun < index && at(/id: bun-x64\n/) < index, `${name}: a macOS rcli gets the checksum-checked x86_64 or arm64 bun, never setup-bun's`);
+  }
   assert(node < at(/\bnode scripts\//) && node < at(/\bnpm ci\b/), "no node or npm run comes before the pinned Node");
   assert(at(/name: Install pinned Rust/) < at(/\bcargo build\b/), "no cargo run comes before the pinned Rust");
   const clean = all[at(/name: Use a clean Rust build folder/)];
@@ -439,12 +447,14 @@ test("macOS CI on the owner's runner builds with the release's pinned, checksum-
 
 test("nothing macOS CI runs on the owner's runner installs globally or reads or writes the runner user's home", async () => {
   const all = steps(await workflow("ci.yml"), "macos");
-  const home = all[1];
-  assert.match(home, /^ {6}- name: Keep CI state out of the runner user's home\n {8}if: runner\.environment != 'github-hosted'\n/, "the second step, right after the Rosetta check");
+  const index = all.findIndex((step) => /^ {6}- name: Keep CI state out of the runner user's home\n/.test(step));
+  const home = all[index];
+  assert.match(home, /^ {6}- name: Keep CI state out of the runner user's home\n {8}if: runner\.environment != 'github-hosted'\n/, "only on the owner's runner");
+  assert(index > 0 && index < all.findIndex((step) => step.includes("uses: actions/checkout@")), "it moves HOME and TMPDIR before the checkout or any tool runs");
   assert.match(home, /\n\s+state="\$RUNNER_TOOL_CACHE\/crazyagent-ci"\n/);
   assert.match(home, /\n\s+home="\$RUNNER_TEMP\/home"\n/);
   assert.match(home, /\n\s+rm -rf "\$state"\n\s+mkdir -p "\$state"\n/, "nothing an earlier job left is kept");
-  for (const line of ['echo "HOME=$home"', 'echo "CARGO_HOME=$state/cargo-home"', 'echo "CARGO_TARGET_DIR=$target"',
+  for (const line of ['echo "HOME=$home"', 'echo "TMPDIR=$RUNNER_TEMP/tmp"', 'echo "CARGO_HOME=$state/cargo-home"', 'echo "CARGO_TARGET_DIR=$target"',
     'echo "npm_config_cache=$state/npm-cache"', 'echo "BUN_INSTALL_CACHE_DIR=$state/bun-cache"']) {
     assert(home.includes(`\n            ${line}\n`), line);
   }
@@ -497,7 +507,8 @@ function assertDeletesEverything(all, label) {
 test("macOS CI on the owner's runner builds with line tables only, starts with nothing kept, refuses below 10 GiB free and deletes every file it made at the end", async () => {
   const ci = await workflow("ci.yml");
   const all = steps(ci, "macos");
-  const home = all[1];
+  const home = all.find((step) => /^ {6}- name: Keep CI state out of the runner user's home\n/.test(step));
+  assert(home, "the owner's runner sets up its own state");
   assert.match(block(ci, 0, "env").join("\n"), /\n  CARGO_INCREMENTAL: "0"\n/, "no incremental state in a CI target");
   for (const line of ['echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"', 'echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"', 'echo "CARGO_TARGET_DIR=$target"']) {
     assert(home.includes(`\n            ${line}\n`), line);

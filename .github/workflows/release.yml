@@ -130,7 +130,7 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - id: bun
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && matrix.os != 'macos'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -157,11 +157,11 @@ jobs:
           test "$("$work/bin/node" -p process.arch)" = arm64
           echo "$work/bin" >> "$GITHUB_PATH"
       - id: bun-arm64
-        name: Install pinned arm64 bun on the owner's runner
-        if: runner.environment != 'github-hosted'
+        name: Install pinned arm64 bun for macOS
+        if: matrix.os == 'macos'
         run: |
           set -euo pipefail
-          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the release runner on badal must be native macOS arm64"; exit 1; }
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the macOS release runner must be native macOS arm64"; exit 1; }
           prefix="$RUNNER_TOOL_CACHE/crazyagent-release/bun/$BUN_VERSION/arm64"
           work="$RUNNER_TEMP/bun-arm64"
           rm -rf "$work"
@@ -282,6 +282,10 @@ jobs:
           }
           lost=$(unresolved)
           if [ -n "$lost" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::the runner DNS does not resolve ${lost}and CI changes no DNS setting on a self-hosted runner; fix the runner's DNS"
+              exit 1
+            fi
             link=$(ip route show default | awk '{print $5; exit}')
             [ -n "$link" ] || { echo "::error::the runner DNS does not resolve ${lost}and the runner has no default route"; exit 1; }
             echo "::warning::the runner DNS does not resolve ${lost% }; asking 1.1.1.1 and 8.8.8.8 on $link instead"
@@ -291,6 +295,10 @@ jobs:
             [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
           fi
           if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
+              exit 1
+            fi
             echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
             printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
             sudo apt-get "${apt_options[@]}" update --error-on=any
