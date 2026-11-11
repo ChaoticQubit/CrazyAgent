@@ -606,7 +606,8 @@ impl EngineService {
             return Err(fail("engine_service_closed"));
         }
         self.live()?;
-        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
+        let host =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         self.owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?
@@ -618,7 +619,8 @@ impl EngineService {
             return Err(fail("engine_service_closed"));
         }
         self.live()?;
-        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
+        let host =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         self.owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?

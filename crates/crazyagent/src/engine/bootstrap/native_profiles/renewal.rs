@@ -206,9 +206,8 @@ impl Renewal {
 /// Inputs: the harness entry and the managed home. Output: the command for the install
 /// the entry leads to now, or the error when the harness is not installed.
 fn managed_command(executable: &Path, managed: &Path) -> Result<Command, EngineError> {
-    let program =
-        crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
-            .map_err(crate::engine::io_error)?;
+    let program = crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
+        .map_err(crate::engine::io_error)?;
     let mut command = Command::new(program);
     command
         .env_clear()
