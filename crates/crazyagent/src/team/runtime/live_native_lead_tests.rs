@@ -127,7 +127,7 @@ fn live_native_lead_managed_adopted_gets_credential() {
         .find_map(|report| match report {
             Report::Ready {
                 pane: Some(record), ..
-            } => Some(record),
+            } => Some(*record),
             _ => None,
         })
         .expect("the lead's pane record");

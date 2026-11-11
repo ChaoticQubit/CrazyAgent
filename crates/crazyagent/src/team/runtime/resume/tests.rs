@@ -1330,7 +1330,7 @@ mod live {
             match reported.recv_timeout(Duration::from_millis(200)) {
                 Ok(Report::Ready {
                     pane: Some(pane), ..
-                }) => record = Some(pane),
+                }) => record = Some(*pane),
                 Ok(Report::Finished { end, cause, .. }) => {
                     panic!("the first turn ended before it was cut short: {end:?} {cause:?}")
                 }
@@ -1390,7 +1390,7 @@ mod live {
             match reported.recv_timeout(Duration::from_secs(1)) {
                 Ok(Report::Ready {
                     pane: Some(pane), ..
-                }) => resumed = Some(pane),
+                }) => resumed = Some(*pane),
                 Ok(Report::Finished { end, cause, .. }) => finished = Some((end, cause)),
                 Err(RecvTimeoutError::Disconnected) => {
                     panic!("the resumed turn stopped without finishing")

@@ -415,7 +415,7 @@ impl TurnEnd {
 enum Report {
     Ready {
         group: u32,
-        pane: Option<PaneRecord>,
+        pane: Option<Box<PaneRecord>>,
     },
     Progress {
         bytes: usize,
@@ -8053,7 +8053,7 @@ impl TeamRuntime {
                     access,
                     toolchains,
                     network,
-                    ..record
+                    ..*record
                 });
                 if let Some(record) = pane
                     .as_ref()
@@ -9409,7 +9409,7 @@ fn live_serve(
     session.follow_every_turn();
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
-        pane: session.record().filter(|_| keep).cloned(),
+        pane: session.record().filter(|_| keep).cloned().map(Box::new),
     });
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
@@ -9998,7 +9998,7 @@ fn serve(
     }
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
-        pane: session.pane_record(),
+        pane: session.pane_record().map(Box::new),
     });
     let mut problem = None;
     let mut named = false;
@@ -10140,7 +10140,7 @@ fn per_turn(
         }
         let _ = reports.send(Report::Ready {
             group: session.process_group(),
-            pane: session.pane_record(),
+            pane: session.pane_record().map(Box::new),
         });
         let prompt = told(prompt, rules, true);
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);

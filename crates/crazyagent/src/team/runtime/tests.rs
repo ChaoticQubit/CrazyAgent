@@ -20871,7 +20871,7 @@ fn wiring_a_kept_native_lead_s_ready_pane_names_its_calls_and_registers_its_team
         lead,
         Report::Ready {
             group: record.pid,
-            pane: Some(record.clone()),
+            pane: Some(Box::new(record.clone())),
         },
     )
     .unwrap();
@@ -20936,7 +20936,7 @@ fn wiring_a_kept_native_lead_being_stopped_is_not_left_running_at_engine_stop() 
         lead,
         Report::Ready {
             group: record.pid,
-            pane: Some(record.clone()),
+            pane: Some(Box::new(record.clone())),
         },
     )
     .unwrap();
@@ -20975,7 +20975,7 @@ fn wiring_a_per_turn_agent_s_ready_pane_stays_with_recovery() {
         agent,
         Report::Ready {
             group: record.pid,
-            pane: Some(record.clone()),
+            pane: Some(Box::new(record.clone())),
         },
     )
     .unwrap();
