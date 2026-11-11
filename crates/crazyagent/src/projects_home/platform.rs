@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The environment variable naming the signed-in user's home folder.
 #[cfg(unix)]
@@ -50,6 +51,23 @@ pub(super) struct Stamp {
     inode: u64,
     bytes: u64,
     modified: (i64, i64),
+}
+
+impl Stamp {
+    /// Tells whether the entry was last modified less than `window` before `now`, or after
+    /// it. Such a stamp proves nothing: a file system that stamps from a coarse clock, or in
+    /// whole seconds, gives a later same-size write the same modify time. Inputs: the time
+    /// of the check and the window. Output: the answer.
+    pub(super) fn modified_since(&self, now: std::time::SystemTime, window: Duration) -> bool {
+        const SECOND_NS: i128 = 1_000_000_000;
+        let Ok(now) = now.duration_since(std::time::UNIX_EPOCH) else {
+            return true;
+        };
+        let modified = i128::from(self.modified.0) * SECOND_NS + i128::from(self.modified.1);
+        let (now, window) = (now.as_nanos() as i128, window.as_nanos() as i128);
+        assert!(now >= 0 && window >= 0);
+        modified + window > now
+    }
 }
 
 /// The stamp of an entry. Unix: its device, inode, size and modify time to the nanosecond.

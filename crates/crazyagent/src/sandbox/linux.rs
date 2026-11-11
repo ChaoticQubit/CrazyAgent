@@ -1,7 +1,7 @@
 use super::{
-    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets,
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
-    clean_absolute, invalid,
+    KEPT_PORTS_NEED_SEATBELT, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
+    LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
+    SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -551,10 +551,14 @@ impl LinuxSandbox {
     }
 }
 
-/// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
-/// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
-/// plain `Unavailable` reason.
+/// Refuses a policy neither Linux backend starts: one confined to its own worktree, a
+/// limited network under [`LinuxSockets::Refuse`], or an open network that must keep the
+/// owner's local model ports free, which neither backend can (DEC-137 G3). Input: the
+/// policy. Output: Ok, or the plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
+    if sandbox.keeps_ports_free() {
+        return Err(SandboxError::Unavailable(KEPT_PORTS_NEED_SEATBELT.into()));
+    }
     if sandbox.checkout.is_some() || sandbox.clone.is_some() {
         return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
     }
@@ -808,6 +812,37 @@ mod tests {
         assert!(!accepted(&RulesetStatus::NotEnforced, true));
         assert!(!accepted(&RulesetStatus::FullyEnforced, false));
         assert!(!accepted(&RulesetStatus::PartiallyEnforced, false));
+    }
+
+    #[test]
+    fn an_open_network_that_must_keep_local_model_ports_free_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let sandbox = |network: SandboxNetwork| {
+            ProjectSandbox::new(
+                &root.join("project"),
+                &root.join("home"),
+                &root.join("tmp"),
+                network,
+            )
+            .unwrap()
+        };
+        let kept = sandbox(SandboxNetwork::Open).keep_ports(&[20_000]).unwrap();
+        assert!(matches!(
+            admitted(&kept),
+            Err(SandboxError::Unavailable(reason)) if reason == KEPT_PORTS_NEED_SEATBELT
+        ));
+        assert!(admitted(&sandbox(SandboxNetwork::Open)).is_ok());
+        let fixed = sandbox(SandboxNetwork::Open)
+            .keep_ports(&crate::sandbox::OWNER_PORTS)
+            .unwrap();
+        assert!(
+            admitted(&fixed).is_ok(),
+            "the fixed owner ports are not kept ports, so an open network still starts"
+        );
     }
 
     #[test]

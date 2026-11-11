@@ -1565,7 +1565,14 @@ fn boundary_check(
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
         .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
-        .map_err(|error| refused(&error))?;
+        .map_err(|error| match &error {
+            crate::sandbox::SandboxError::Unavailable(reason)
+                if reason == crate::sandbox::KEPT_PORTS_NEED_SEATBELT =>
+            {
+                "server_check_ports_not_kept"
+            }
+            _ => refused(&error),
+        })?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);
     let mut process = sandbox.wrap(&server).map_err(|error| refused(&error))?;
