@@ -66,7 +66,10 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
 }
 
 fn owner_home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap())
+    crazyagent::sandbox::toolchains::ToolHomes::owner()
+        .unwrap()
+        .home()
+        .to_path_buf()
 }
 
 fn quoted(path: &Path) -> String {
@@ -528,6 +531,16 @@ fn sandboxed_child_cannot_read_outside_files_or_the_owner_codex_and_claude_dirs(
     assert!(!String::from_utf8_lossy(&output.stderr).contains("outside fixture"));
     let home = owner_home();
     for private in [home.join(".codex"), home.join(".claude")] {
+        assert!(
+            sandbox
+                .profile()
+                .contains(&format!("(subpath \"{}\")", private.display())),
+            "{}",
+            private.display()
+        );
+        if !private.exists() {
+            continue;
+        }
         let script = format!(
             "ls -d {dir} > /dev/null 2>&1 && exit 10; cat {dir}/config.toml > /dev/null 2>&1 && exit 11; ls {dir} > /dev/null 2>&1 && exit 12; ls -d {dir} 2>&1 >/dev/null; exit 0",
             dir = quoted(&private)
