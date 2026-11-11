@@ -1379,6 +1379,7 @@ export interface OnboardingView {
   folder_overview: string | null;
   finished: boolean;
   imported?: ImportFile[];
+  proposed?: ProjectSetup | null;
 }
 
 export interface GitHubDeviceCode {
