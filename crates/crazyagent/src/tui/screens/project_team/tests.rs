@@ -771,8 +771,14 @@ fn titles_and_plain_reasons() {
     );
     assert_eq!(short_path("/a/b/worktrees/agent-3/"), "worktrees/agent-3");
     assert_eq!(
+        account_name(Some("acct-002"), &accounts()),
+        "Claude Max - work",
+        "a listed account goes by the name Accounts shows (OB-4)"
+    );
+    assert_eq!(
         account_name(Some("acct-404"), &accounts()),
-        "A pool account"
+        "acct-404",
+        "an account with no name known falls back to its id"
     );
     assert_eq!(account_name(None, &accounts()), "-");
 }

@@ -1935,6 +1935,10 @@ pub(crate) fn turn_holds(current: Option<&RequestId>, turns: &[MasterTurnView]) 
     })
 }
 
+/// Adds one master turn's lines: its phase with why and the account it runs on, each account
+/// of the pool a blocked turn could not use, the engine's detail and the reply. An account
+/// goes by its id, the one Accounts lists beside its name, never by its sign-in reference.
+/// Takes the turn and the lines to add to. Returns nothing.
 fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
     let phase = match turn.phase {
         MasterTurnPhase::Queued => "Queued",
@@ -1960,19 +1964,15 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
     }
     if let Some(attempt) = &turn.attempt {
         line.push_str(" | on account ");
-        line.push_str(attempt.connection.account_ref.as_str());
+        line.push_str(attempt.connection.id.as_str());
     }
     lines.push(line);
     for account in &turn.accounts {
         lines.push(match &account.reason {
-            Some(reason) => format!(
-                "  {}: {}",
-                account.account_ref.as_str(),
-                reason_text(reason)
-            ),
+            Some(reason) => format!("  {}: {}", account.connection.as_str(), reason_text(reason)),
             None => format!(
                 "  {} is ready on {}: open a {} master to use it",
-                account.account_ref.as_str(),
+                account.connection.as_str(),
                 account.harness.as_str(),
                 account.harness.as_str()
             ),
@@ -3277,10 +3277,11 @@ mod turn_line_tests {
         turn_lines(&running, &mut lines);
         assert_eq!(
             lines,
-            vec!["Turn 2: Running | on account claude-account-b".to_string()]
+            vec!["Turn 2: Running | on account claude-b".to_string()],
+            "the account goes by the id Accounts lists, not by its sign-in reference (OB-4)"
         );
         let state = |account: &str, harness: &str, reason| MasterAccountState {
-            account_ref: CredentialRef::new(account).unwrap(),
+            account_ref: CredentialRef::new(format!("login-of-{account}")).unwrap(),
             connection: CredentialRef::new(account).unwrap(),
             harness: CredentialRef::new(harness).unwrap(),
             reason,
@@ -3314,6 +3315,10 @@ mod turn_line_tests {
                 "  claude-account-b: Rate limited; try again shortly".to_string(),
                 "  codex-account-c is ready on codex: open a codex master to use it".to_string(),
             ]
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("login-of-")),
+            "no line shows a sign-in reference: {lines:?}"
         );
     }
 }
