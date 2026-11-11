@@ -129,6 +129,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/overview` });
+        await me.waitFor("the Overview tab strip", (text) => text.includes("Install & use") && text.includes("Activity"));
+        await me.click("Activity", "[role=tab]");
         await me.waitFor("Recent activity read from the engine", (text) => /Recent activity/.test(text) && !/Loading activity\.\.\./.test(text));
         await me.capture("overview-before");
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the page is visible, so Overview keeps reading");

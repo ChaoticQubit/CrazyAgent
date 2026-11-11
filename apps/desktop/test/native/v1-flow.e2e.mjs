@@ -238,6 +238,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
   });
 
   it("shows research progress on the project page", async () => {
+    await click("#ov-tab-activity");
     const row = await researchSettledIn(["Running", "Done", "Failed"], 300000, "research never started");
     assert.equal(row.title, "Market research");
     assert.ok(RESEARCH_WORDS.includes(row.status));
@@ -263,6 +264,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
 
   it("finishes the research and opens its report", async () => {
     await click("#tab-overview");
+    await click("#ov-tab-activity");
     const row = await researchSettledIn(["Done", "Failed"], 900000, "research did not finish");
     assert.equal(row.status, "Done", `research failed: ${row.progress}`);
     await click("button=Open report");

@@ -175,7 +175,9 @@ test("Undo merge on Overview asks naming the branch, reverts the master's merge 
     assert.ok(!(await changes()).some((set) => set.id === id && set.state === "pending"), "nothing waits in Changes");
 
     const words = "Master merged change set #";
-    await open("overview", words);
+    await open("overview", "Install & use");
+    await me.click("Activity", "[role=tab]");
+    await me.waitFor(words, (text) => text.includes(words));
     assert.equal((await mergeRow(page, words))?.button, "Undo merge", "the master's merge row offers Undo merge");
     assert.match((await mergeRow(page, words))?.text ?? "", new RegExp(`^Master merged change set #\\d+ \\(Master: ${escaped(PROMPT)}, \\d+ files?\\) into main`),
       "the merge row names the master's set by its number");
