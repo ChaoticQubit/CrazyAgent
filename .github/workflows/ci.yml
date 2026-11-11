@@ -353,6 +353,9 @@ jobs:
             if [ "$dir" = / ]; then break; fi
             dir="$(dirname "$dir")"
           done
+          for config in "$CARGO_HOME/config.toml" "$CARGO_HOME/config"; do
+            [ ! -e "$config" ] || { echo "::error::Cargo reads $config from the Cargo home CI keeps across runs; remove it, CI never builds with Cargo settings left in its cache"; exit 1; }
+          done
           prefix="$RUNNER_TOOL_CACHE/crazyagent-ci/rust/$RUST_TOOLCHAIN"
           work="$RUNNER_TEMP/rust"
           rm -rf "$work"

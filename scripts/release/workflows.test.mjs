@@ -340,6 +340,9 @@ test("macOS CI on the owner's runner builds with the release's pinned, checksum-
   assert.match(rust, /\n\s+prefix="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/rust\/\$RUST_TOOLCHAIN"\n/);
   assert.match(rust, /\n\s+test "\$\(command -v cargo-clippy\)" = "\$work\/bin\/cargo-clippy"\n/);
   assert.match(rust, /\n\s+test -d "\$\(rustc --print sysroot\)\/lib\/rustlib\/aarch64-apple-darwin\/lib"\n/);
+  assert.match(rust, /\n\s+for config in "\$CARGO_HOME\/config\.toml" "\$CARGO_HOME\/config"; do\n\s+\[ ! -e "\$config" \] \|\| \{ echo "::error::[^\n]+"; exit 1; \}\n\s+done\n/,
+    "Cargo settings left in the Cargo home CI keeps across runs stop the job");
+  assert(all.findIndex((step) => step.includes('echo "CARGO_HOME=')) < at(/name: Install pinned Rust/), "the Rust step checks the Cargo home CI set");
   const node = at(/name: Install pinned Node on the owner's runner/);
   const bun = at(/id: bun-arm64\n/);
   for (const index of [node, bun]) assert.match(all[index], /\n {8}if: runner\.environment != 'github-hosted'\n/);
