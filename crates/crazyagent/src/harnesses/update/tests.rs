@@ -1071,3 +1071,526 @@ fn a_pointer_url_that_is_not_https_or_loopback_is_refused_before_any_request() {
         LOOKUP_FAILED
     );
 }
+
+use crate::harnesses::{HarnessEntry, Search};
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
+
+const WAIT_STEPS: usize = 400;
+const WAIT_STEP: Duration = Duration::from_millis(25);
+
+fn db() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    db
+}
+
+fn entry(id: &str, executable: Option<PathBuf>) -> HarnessEntry {
+    let mut entry = crate::harnesses::catalog(&Search::new(Vec::new(), None, Vec::new()))
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .unwrap();
+    assert!(entry.executable.is_none());
+    entry.executable = executable;
+    entry
+}
+
+fn found_in(folder: &Path, id: &str) -> Option<PathBuf> {
+    crate::harnesses::catalog(&Search::new(vec![folder.to_path_buf()], None, Vec::new()))
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .and_then(|entry| entry.executable)
+}
+
+struct Case {
+    machine: Machine,
+    db: Connection,
+    updates: Arc<Updates>,
+    entry: HarnessEntry,
+    asked: Arc<Mutex<Vec<String>>>,
+    gate: Option<PathBuf>,
+}
+
+impl Case {
+    fn new(machine: Machine, entry: HarnessEntry, gate: Option<PathBuf>) -> Self {
+        let case = Self {
+            machine,
+            db: db(),
+            updates: Updates::new(),
+            entry,
+            asked: Arc::default(),
+            gate,
+        };
+        case.reading(Err(LOOKUP_FAILED))
+    }
+    fn reading(mut self, reply: Result<&'static [u8], &'static str>) -> Self {
+        let asked = self.asked.clone();
+        self.updates = Updates::with_reader(Box::new(move |pointer| {
+            asked.lock().unwrap().push(pointer.url.to_owned());
+            reply.map(<[u8]>::to_vec)
+        }));
+        self
+    }
+    fn pointer_body(self, body: &'static [u8]) -> Self {
+        self.reading(Ok(body))
+    }
+    fn pointer_failure(self) -> Self {
+        self.reading(Err(LOOKUP_FAILED))
+    }
+    fn pointer_reads(&self) -> usize {
+        self.asked.lock().unwrap().len()
+    }
+    fn pointer_urls(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+    fn versions(&self, look: bool) -> HarnessVersions {
+        self.updates
+            .versions(&self.db, &self.entry, &self.machine.roots(), look)
+    }
+    fn start(&self) -> Result<(), &'static str> {
+        self.updates
+            .start(&self.db, &self.entry, &self.machine.roots(), || {})
+    }
+    fn bin(&self) -> PathBuf {
+        self.machine.root.path().join("brew/bin")
+    }
+    fn install(&self) -> Result<(), &'static str> {
+        let (bin, id) = (self.bin(), self.entry.id.clone());
+        self.updates
+            .install(&self.db, &self.entry, &self.machine.roots(), move || {
+                found_in(&bin, &id)
+            })
+    }
+    fn found_after(&self) -> Option<PathBuf> {
+        found_in(&self.bin(), &self.entry.id)
+    }
+    fn tool_arguments(&self) -> Vec<String> {
+        let seen = std::fs::read_to_string(self.machine.root.path().join("tool.args")).unwrap();
+        seen.lines().map(str::to_owned).collect()
+    }
+    fn finish(&self) {
+        if let Some(gate) = &self.gate {
+            std::fs::write(gate, "go\n").unwrap();
+        }
+        let idle = (0..WAIT_STEPS).any(|_| {
+            std::thread::sleep(WAIT_STEP);
+            self.updates.idle()
+        });
+        assert!(idle);
+    }
+}
+
+fn gate(machine: &Machine) -> PathBuf {
+    machine.root.path().join("gate")
+}
+
+fn wait_for(gate: &Option<PathBuf>) -> String {
+    gate.as_ref().map_or(String::new(), |gate| {
+        format!(
+            "i=0\nwhile [ ! -e {} ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n",
+            gate.display()
+        )
+    })
+}
+
+fn native_case(id: &str, update: &str, gated: bool) -> Case {
+    let machine = Machine::new();
+    let root = machine.root.path().to_path_buf();
+    let versions = root.join("home/.local/share/claude/versions");
+    let launcher = root.join("home/.local/bin/claude");
+    let gate = gated.then(|| gate(&machine));
+    let wait = wait_for(&gate);
+    let update = update.replace(
+        "{swap}",
+        &format!(
+            "ln -sfn {} {}",
+            versions.join("B").display(),
+            launcher.display()
+        ),
+    );
+    executable(
+        &versions.join("A"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n--version) echo '1.0.0 (Claude Code)';;\nupdate) {wait}{update};;\nesac\n"
+        ),
+    );
+    executable(
+        &versions.join("B"),
+        "#!/bin/sh\necho '2.0.0 (Claude Code)'\n",
+    );
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(versions.join("A"), &launcher).unwrap();
+    Case::new(machine, entry(id, Some(launcher)), gate)
+}
+
+fn update_case(id: &str) -> Case {
+    native_case(id, "{swap}", false)
+}
+
+fn slow_update_case(id: &str) -> Case {
+    native_case(id, "{swap}", true)
+}
+
+fn failing_update_case(id: &str) -> Case {
+    native_case(id, "echo 'Error: could not update' >&2; exit 3", false)
+}
+
+fn update_case_at(id: &str, relative: &str) -> Case {
+    let machine = Machine::new();
+    let path = machine.root.path().join(relative);
+    let ran = machine.root.path().join("ran");
+    executable(
+        &path,
+        &format!(
+            "#!/bin/sh\necho ran > {}\necho '1.0.0 (Claude Code)'\n",
+            ran.display()
+        ),
+    );
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    Case::new(machine, entry(id, Some(path)), None)
+}
+
+fn update_case_missing(id: &str) -> Case {
+    Case::new(Machine::new(), entry(id, None), None)
+}
+
+fn brew_case(id: &str, install: Option<&str>, gated: bool) -> Case {
+    let machine = Machine::new();
+    let root = machine.root.path().to_path_buf();
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let gate = gated.then(|| gate(&machine));
+    if let Some(install) = install {
+        let wait = wait_for(&gate);
+        let binary = root.join("brew/bin").join(id);
+        let write = format!(
+            "printf '#!/bin/sh\\necho \"{id} 3.0.0\"\\n' > {0}\nchmod 755 {0}",
+            binary.display()
+        );
+        let install = install.replace("{write}", &write);
+        executable(
+            &root.join("brew/bin/brew"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n{wait}{install}\n",
+                root.join("tool.args").display()
+            ),
+        );
+    }
+    Case::new(machine, entry(id, None), gate)
+}
+
+fn install_case(id: &str) -> Case {
+    brew_case(id, Some("{write}"), false)
+}
+
+fn slow_install_case(id: &str) -> Case {
+    brew_case(id, Some("{write}"), true)
+}
+
+fn install_case_without_tools(id: &str) -> Case {
+    brew_case(id, None, false)
+}
+
+fn install_case_that_writes_nothing(id: &str) -> Case {
+    brew_case(id, Some("true"), false)
+}
+
+fn failing_install_case(id: &str) -> Case {
+    brew_case(id, Some("echo 'Error: no formula' >&2; exit 1"), false)
+}
+
+#[test]
+fn the_settings_default_to_check_and_update_on_the_button_with_online_lookup_and_keep_each_option()
+{
+    let db = db();
+    assert_eq!(
+        settings(&db).unwrap(),
+        UpdateSettings {
+            mode: UpdateMode::CheckAndUpdate,
+            when: CheckWhen::OnButton,
+            online: OnlineLookup::On,
+            install: InstallFromApp::On
+        }
+    );
+    set_settings(
+        &db,
+        UpdateSettings {
+            install: InstallFromApp::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(settings(&db).unwrap().install, InstallFromApp::Off);
+    for mode in [
+        UpdateMode::CheckOnly,
+        UpdateMode::Off,
+        UpdateMode::CheckAndUpdate,
+    ] {
+        for when in [CheckWhen::OnOpen, CheckWhen::OnButton] {
+            for online in [OnlineLookup::Off, OnlineLookup::On] {
+                let wanted = UpdateSettings {
+                    mode,
+                    when,
+                    online,
+                    install: InstallFromApp::On,
+                };
+                set_settings(&db, wanted).unwrap();
+                assert_eq!(settings(&db).unwrap(), wanted);
+            }
+        }
+    }
+}
+
+fn with_mode(mode: UpdateMode) -> UpdateSettings {
+    UpdateSettings {
+        mode,
+        ..UpdateSettings::default()
+    }
+}
+
+#[test]
+fn a_self_updating_install_reads_its_vendor_pointer_only_on_a_look_and_only_with_online_lookup_on()
+{
+    let case = update_case("claude-code").pointer_body(b"2.0.0\n");
+    assert_eq!(case.versions(false).latest, Latest::NotChecked);
+    assert_eq!(case.pointer_reads(), 0);
+    assert_eq!(
+        case.versions(true).latest,
+        Latest::Newer {
+            version: "2.0.0".into()
+        }
+    );
+    assert_eq!(case.pointer_reads(), 1);
+    assert_eq!(
+        case.pointer_urls(),
+        vec!["https://downloads.claude.ai/claude-code-releases/latest"]
+    );
+    assert_eq!(
+        case.versions(false).latest,
+        Latest::Newer {
+            version: "2.0.0".into()
+        }
+    );
+    assert_eq!(case.pointer_reads(), 1);
+    set_settings(
+        &case.db,
+        UpdateSettings {
+            online: OnlineLookup::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(case.versions(true).latest, Latest::NoCheck);
+    assert_eq!(case.pointer_reads(), 1);
+}
+
+#[test]
+fn a_failed_or_unreadable_pointer_says_could_not_check_and_update_stays_offered() {
+    let failed = update_case("claude-code").pointer_failure().versions(true);
+    assert_eq!(
+        failed.latest,
+        Latest::Failed {
+            code: "harness_update_lookup_failed".into()
+        }
+    );
+    assert!(failed.command.is_some());
+    let unreadable = update_case("claude-code")
+        .pointer_body(b"<html>Sign in</html>")
+        .versions(true);
+    assert_eq!(
+        unreadable.latest,
+        Latest::Failed {
+            code: "harness_update_check_unreadable".into()
+        }
+    );
+}
+
+#[test]
+fn a_package_manager_install_an_unknown_install_and_updates_off_never_read_a_vendor_pointer() {
+    let brew = update_case_at("claude-code", "brew/Caskroom/claude-code/1.0.0/claude")
+        .pointer_body(b"2.0.0\n");
+    brew.versions(true);
+    assert_eq!(brew.pointer_reads(), 0);
+    let unknown = update_case_at("claude-code", "usr/bin/claude").pointer_body(b"2.0.0\n");
+    unknown.versions(true);
+    assert_eq!(unknown.pointer_reads(), 0);
+    let off = update_case("claude-code").pointer_body(b"2.0.0\n");
+    set_settings(&off.db, with_mode(UpdateMode::Off)).unwrap();
+    off.versions(true);
+    assert_eq!(off.pointer_reads(), 0);
+}
+
+#[test]
+fn off_refuses_a_look_and_an_update_and_check_only_refuses_only_the_update() {
+    let case = update_case("claude-code");
+    set_settings(&case.db, with_mode(UpdateMode::Off)).unwrap();
+    assert_eq!(case.versions(true).latest, Latest::NotChecked);
+    assert_eq!(case.start().unwrap_err(), "harness_update_off");
+    set_settings(&case.db, with_mode(UpdateMode::CheckOnly)).unwrap();
+    assert_eq!(case.start().unwrap_err(), "harness_update_check_only");
+    assert!(case.versions(true).installed.is_some());
+}
+
+#[test]
+fn versions_name_the_method_the_exact_update_line_and_why_update_is_not_offered() {
+    let known = update_case("claude-code").versions(false);
+    assert_eq!(known.method, Method::SelfUpdate);
+    assert!(
+        known
+            .command
+            .as_deref()
+            .unwrap()
+            .ends_with("/claude update")
+    );
+    assert_eq!(known.refusal, None);
+    let unknown = update_case_at("claude-code", "usr/bin/claude").versions(false);
+    assert_eq!(unknown.command, None);
+    assert_eq!(unknown.refusal.as_deref(), Some(UNKNOWN_INSTALL));
+    assert_eq!(
+        unknown.guide.as_deref(),
+        Some("https://code.claude.com/docs/en/setup")
+    );
+}
+
+#[test]
+fn a_second_update_while_one_runs_is_refused_and_the_first_reports_running_then_its_outcome() {
+    let case = slow_update_case("claude-code");
+    case.start().unwrap();
+    assert!(case.versions(false).running);
+    assert_eq!(case.start().unwrap_err(), "harness_update_busy");
+    case.finish();
+    let done = case.versions(false);
+    assert!(!done.running);
+    let last = done.last.unwrap();
+    assert!(last.ok);
+    assert_eq!(
+        (last.from.as_deref(), last.to.as_deref()),
+        (Some("1.0.0"), Some("2.0.0"))
+    );
+}
+
+#[test]
+fn a_failed_update_keeps_its_masked_last_lines_and_the_old_version() {
+    let case = failing_update_case("claude-code");
+    case.start().unwrap();
+    case.finish();
+    let last = case.versions(false).last.unwrap();
+    assert!(!last.ok);
+    assert_eq!(last.code.as_deref(), Some("harness_update_failed"));
+    assert!(last.output.contains("Error:"));
+    assert_eq!(last.to.as_deref(), Some("1.0.0"));
+}
+
+#[test]
+fn a_harness_that_is_not_installed_or_not_in_the_catalog_is_refused() {
+    assert_eq!(
+        update_case_missing("codex").start().unwrap_err(),
+        "harness_update_not_installed"
+    );
+}
+
+#[test]
+fn versions_of_a_missing_harness_name_the_exact_install_line_and_always_the_guide() {
+    let case = install_case("aider");
+    let versions = case.versions(false);
+    assert!(
+        versions
+            .install
+            .as_deref()
+            .unwrap()
+            .ends_with("/brew install --formula aider")
+    );
+    assert_eq!(versions.command, None);
+    assert_eq!(
+        versions.guide.as_deref(),
+        Some("https://aider.chat/docs/install.html")
+    );
+    let none = install_case_without_tools("aider").versions(false);
+    assert_eq!(none.install, None);
+    assert_eq!(none.refusal.as_deref(), Some(NO_INSTALLER));
+    assert_eq!(
+        none.guide.as_deref(),
+        Some("https://aider.chat/docs/install.html")
+    );
+}
+
+#[test]
+fn an_install_runs_the_fixed_line_and_the_harness_is_found_right_after() {
+    let case = install_case("aider");
+    case.install().unwrap();
+    case.finish();
+    assert_eq!(case.tool_arguments(), vec!["install", "--formula", "aider"]);
+    let last = case.versions(false).last.unwrap();
+    assert!(last.ok);
+    assert_eq!((last.from, last.to.as_deref()), (None, Some("3.0.0")));
+    assert!(case.found_after().is_some());
+}
+
+#[test]
+fn an_install_is_refused_when_installed_when_the_setting_is_off_and_while_another_job_runs() {
+    assert_eq!(
+        update_case("claude-code").install().unwrap_err(),
+        "harness_install_already"
+    );
+    let off = install_case("aider");
+    set_settings(
+        &off.db,
+        UpdateSettings {
+            install: InstallFromApp::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(off.install().unwrap_err(), "harness_install_off");
+    assert_eq!(off.versions(false).install, None);
+    assert!(off.versions(false).guide.is_some());
+    let busy = slow_install_case("aider");
+    busy.install().unwrap();
+    assert_eq!(busy.install().unwrap_err(), "harness_update_busy");
+    busy.finish();
+}
+
+#[test]
+fn updates_off_does_not_turn_install_off_and_install_off_does_not_turn_updates_off() {
+    let case = install_case("aider");
+    set_settings(&case.db, with_mode(UpdateMode::Off)).unwrap();
+    assert!(case.versions(false).install.is_some());
+    let installed = update_case("claude-code");
+    set_settings(
+        &installed.db,
+        UpdateSettings {
+            install: InstallFromApp::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert!(installed.versions(false).command.is_some());
+}
+
+#[test]
+fn an_install_that_ends_well_but_leaves_no_binary_says_so_and_a_failed_one_keeps_its_last_lines() {
+    let nothing = install_case_that_writes_nothing("aider");
+    nothing.install().unwrap();
+    nothing.finish();
+    let last = nothing.versions(false).last.unwrap();
+    assert!(!last.ok);
+    assert_eq!(last.code.as_deref(), Some("harness_install_not_found"));
+    let failing = failing_install_case("aider");
+    failing.install().unwrap();
+    failing.finish();
+    let last = failing.versions(false).last.unwrap();
+    assert_eq!(last.code.as_deref(), Some("harness_install_failed"));
+    assert!(last.output.contains("Error:"));
+}
+
+#[test]
+fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
+    let look_alike = update_case_at("fx", "brew/Cellar/fx/40.0.1/bin/fx");
+    let versions = look_alike.versions(true);
+    assert_eq!(versions.method, Method::Unknown);
+    assert_eq!(versions.installed, None);
+    assert_eq!(versions.latest, Latest::NotChecked);
+    assert!(!look_alike.machine.root.path().join("ran").exists());
+    let system = update_case_at("claude-code", "usr/bin/claude");
+    assert_eq!(system.versions(false).installed.as_deref(), Some("1.0.0"));
+    assert!(system.machine.root.path().join("ran").exists());
+}

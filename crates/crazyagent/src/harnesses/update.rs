@@ -1,10 +1,16 @@
 mod run;
+mod state;
 #[cfg(all(test, unix))]
 mod tests;
 
 pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
+};
+pub use state::{
+    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_NOT_FOUND,
+    INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS, UPDATE_FAILED, UPDATE_OFF,
+    Updates, initialize, set_settings, settings,
 };
 
 use crate::harnesses;

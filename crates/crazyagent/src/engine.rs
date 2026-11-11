@@ -475,6 +475,7 @@ pub struct Engine {
     #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
+    harness_updates: std::sync::Arc<crate::harnesses::update::Updates>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
@@ -581,6 +582,7 @@ impl Engine {
                 #[cfg(unix)]
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+                harness_updates: crate::harnesses::update::Updates::new(),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
             },
             config,
@@ -600,6 +602,7 @@ impl Engine {
             #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
         })
     }
@@ -617,6 +620,7 @@ impl Engine {
             #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
         })
     }

@@ -1,6 +1,12 @@
 use super::*;
+use crate::harnesses::update::{
+    CheckWhen, HarnessVersions, InstallFromApp, OnlineLookup, UpdateMode,
+};
 use crate::harnesses::{HarnessEntry, Search};
 use serde::{Deserialize, Serialize};
+
+mod updates;
+pub(super) use updates::{UPDATES_TIMEOUT, slow};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -8,18 +14,49 @@ struct Envelope {
     harness_catalog: Action,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
     List,
     Check,
+    Versions {
+        id: String,
+        look: bool,
+    },
+    Update {
+        id: String,
+    },
+    Install {
+        id: String,
+    },
+    Settings,
+    SetSettings {
+        mode: UpdateMode,
+        when: CheckWhen,
+        online: OnlineLookup,
+        install: InstallFromApp,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireReply {
-    Catalog { entries: Vec<HarnessEntry> },
-    Rejected { code: String },
+    Catalog {
+        entries: Vec<HarnessEntry>,
+    },
+    Rejected {
+        code: String,
+    },
+    Versions {
+        versions: Box<HarnessVersions>,
+    },
+    Started,
+    Settings {
+        mode: UpdateMode,
+        when: CheckWhen,
+        online: OnlineLookup,
+        install: InstallFromApp,
+    },
 }
 
 impl OwnerClient {
@@ -70,8 +107,8 @@ impl OwnerClient {
                 })
             })? {
                 WireReply::Catalog { entries } if !entries.is_empty() => Ok(entries),
-                WireReply::Catalog { .. } => Err(failure("harness_catalog_reply_invalid")),
                 WireReply::Rejected { code } => Err(EngineError(code)),
+                _ => Err(failure("harness_catalog_reply_invalid")),
             }
         })
         .await
@@ -115,6 +152,9 @@ pub(super) async fn serve(
         {
             search = search.with_registered(id, path.to_path_buf());
         }
+    }
+    if !matches!(action, Action::List | Action::Check) {
+        return updates::serve(stream, engine, authority, packet, admission, search, action).await;
     }
     let entries = engine
         .harness_probe
