@@ -304,6 +304,7 @@ mod tests {
             project: ProjectId::new("p-1").unwrap(),
             asker: asker.into(),
             question: text.into(),
+            kind: crazyagent::questions::QuestionKind::Single,
             options: vec!["Postgres".into(), "SQLite".into()],
             recommended: Some("SQLite".into()),
             context: Some("The app runs on one laptop.".into()),

@@ -12,6 +12,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
     use crazyagent::engine::owner::NativeAuthMethod;
+    use crazyagent::ide::bridge::run_command::RunMode;
     use crazyagent::memory::ReviewDecision;
     use crazyagent::owner_profile::OwnerProfile;
     use crazyagent::plugins::Scope;
@@ -2649,6 +2650,47 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_decide_recount(use_new)?; call.await }.await;
             routed(result)
         }
+        "desktop_ide_run" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                command: String,
+            }
+            let Args { project_id, command } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.ide_run(project_id, command)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_ide_run_mode" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.ide_run_mode(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_ide_set_run_mode" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                mode: RunMode,
+            }
+            let Args { project_id, mode } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.ide_set_run_mode(project_id, mode)?; call.await }.await;
+            routed(result)
+        }
         "desktop_usage_set_reset" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -2851,14 +2893,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: u64,
                 version: u64,
-                option: Option<u8>,
-                text: Option<String>,
+                picks: Vec<u8>,
+                comment: Option<String>,
             }
-            let Args { id, version, option, text } = match parse(args) {
+            let Args { id, version, picks, comment } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option, text)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, picks, comment)?; call.await }.await;
             routed(result)
         }
         "desktop_dismiss_question" => {

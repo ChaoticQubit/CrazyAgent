@@ -1,6 +1,7 @@
 use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::sandbox::policy::LevelView;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -504,6 +505,8 @@ pub struct ProjectCatalog {
     pub default_team: TeamPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_team_status: Option<String>,
+    #[serde(default)]
+    pub agent_access: Vec<LevelView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1022,6 +1025,7 @@ pub fn catalog(
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, research, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
+        agent_access: LevelView::all(),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -1380,8 +1384,8 @@ fn copy_each(
     Ok(())
 }
 
-/// Creates the setup and research job tables when the engine database opens.
-/// Takes the engine connection; the job columns match the research runner's queue.
+/// Creates the setup, research job and repository doc link tables when the engine database
+/// opens. Takes the engine connection; the job columns match the research runner's queue.
 /// Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -1408,7 +1412,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS research_jobs_project_status
                 ON research_jobs(project, status, id);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    links::initialize(connection)
 }
 
 /// Queues one research job per toggle for a project.
@@ -2406,7 +2411,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 44] = [
+const REMOVED_WITH_PROJECT: [&str; 45] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2451,6 +2456,7 @@ const REMOVED_WITH_PROJECT: [&str; 44] = [
     "agent_instruction_settings",
     "instruction_imports",
     "project_setups",
+    "project_doc_links",
 ];
 
 /// Saves a project's extra read-only folders once each passes
@@ -2604,6 +2610,7 @@ fn remove(
     crate::coord::forget_project(tx, project_id)?;
     crate::activity::forget_project(tx, project_id)?;
     crate::usage::forget_project(tx, project_id.as_str())?;
+    crate::ide::bridge::run_command::forget_project(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -3590,5 +3597,6 @@ fn credential_path(word: &str) -> bool {
 
 #[cfg(all(test, unix))]
 mod engine_tests;
+pub mod links;
 #[cfg(all(test, unix))]
 mod tests;

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { ABOVE_PROJECT, ACCESS_ENV, type Level, SandboxedPty, accessOf, gitFirstOnPath } from "./pty.js";
+import { ABOVE_PROJECT, ACCESS_ENV, type Access, type Level, SandboxedPty, accessOf, gitFirstOnPath } from "./pty.js";
 
 /** The id of the Sandboxed terminal profile `package.json` contributes. */
 export const PROFILE = "crazyagent.sandboxed";
@@ -34,10 +34,24 @@ const ABOVE: readonly string[] = ["crazyagent.terminal.ownBranchAbove", "crazyag
 
 /**
  * What an engine-hosted terminal opens with. Inputs: the bridge, the terminal's name and its
- * level. Output: the terminal options, whose pty relays the engine's shell.
+ * level. Output: the terminal options, whose pty relays the engine's shell and says when it
+ * attached.
  */
-function engineTerminal(engine: Engine, name: string, level: Level): vscode.ExtensionTerminalOptions {
+export function engineTerminal(
+  engine: Engine,
+  name: string,
+  level: Level,
+): vscode.ExtensionTerminalOptions & { pty: SandboxedPty } {
   return { name, pty: new SandboxedPty((call, args) => engine.stream(call, args), level) };
+}
+
+/**
+ * The level a terminal opens at when the owner picked none: the project's access level, which
+ * the engine named when it started this IDE and which its default terminal profile follows.
+ * Output: the level, the narrowest when the engine named none.
+ */
+export function defaultLevel(): Access {
+  return accessOf(process.env[ACCESS_ENV]);
 }
 
 /**

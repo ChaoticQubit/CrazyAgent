@@ -293,8 +293,19 @@ fn status_output_is_read_per_manager() {
     );
 }
 
+/// The service PATH keeps the shell's absolute folders in order, then adds the user's and the
+/// system folders once each, and leaves out any folder another user can change on this host
+/// (on a CI runner `/usr/local/bin` can be one).
 #[test]
 fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
+    let kept = |folders: &[&str]| {
+        std::env::join_paths(
+            folders
+                .iter()
+                .filter(|folder| changeable_by_others(Path::new(folder)).is_none()),
+        )
+        .unwrap()
+    };
     let path = service_path(
         Some(OsStr::new(
             "/opt/homebrew/bin:relative:/Users/owner/bin:/usr/bin",
@@ -304,13 +315,27 @@ fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
     );
     assert_eq!(
         path,
-        OsString::from(
-            "/opt/homebrew/bin:/Users/owner/bin:/usr/bin:/Users/owner/.local/bin:/usr/local/bin:/bin:/usr/sbin:/sbin"
-        )
+        kept(&[
+            "/opt/homebrew/bin",
+            "/Users/owner/bin",
+            "/usr/bin",
+            "/Users/owner/.local/bin",
+            "/usr/local/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ])
     );
     assert_eq!(
         service_path(None, None, None),
-        OsString::from("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        kept(&[
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ])
     );
 }
 

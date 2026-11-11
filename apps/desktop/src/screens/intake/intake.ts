@@ -507,11 +507,12 @@ export function inRepo(facts: MappingFacts): { research: Partial<Record<Research
   return { research, documents: (facts.documents ?? []).map(displayText) };
 }
 
-/** Tells whether the graph and mapping steps have stopped changing or the setup is already saved.
+/** Tells whether the mapping step has stopped changing or the setup is already saved. A failed
+ * graph does not settle it: the mapping agent still runs after it.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
   const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
-  return view.finished || done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
+  return view.finished || done(view.mapping);
 }
 
 /** Says whether the owner can confirm yet and what to do.
@@ -520,9 +521,26 @@ export function confirmReady(view: OnboardingView): { ready: boolean; line: stri
   if (view.finished) return { ready: true, line: "This project is set up. Change anything below, then save." };
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
-  if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
+  if (view.graph.kind === "failed") return { ready: false, line: "The code graph couldn't be built. The mapping agent still reads the project; the form fills in when it finishes." };
   if (!["done", "off", "not_installed"].includes(view.graph.kind)) return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
+}
+
+/** Whether the review offers the mapping's answers for a setup saved without them: the setup is
+ * saved and the engine kept the mapping's draft as `proposed` with an About or a tech stack.
+ * Input: the onboarding view. Output: true when "Use the mapping's answers" shows. */
+export function offerProposed(view: OnboardingView): boolean {
+  const proposed = view.proposed ?? null;
+  return view.finished && proposed !== null && (proposed.about.trim() !== "" || proposed.tech_stack.length > 0);
+}
+
+/** The form's draft with the mapping's About, tech stack and platforms when the review offers
+ * them, every other answer the owner gave, saved or not, kept; any other draft as it is.
+ * Input: the draft on screen and the onboarding view. Output: the draft the form shows. */
+export function withProposed(draft: ProjectDraft, view: OnboardingView): ProjectDraft {
+  if (!offerProposed(view) || !view.proposed) return draft;
+  const { about, tech_stack, platforms } = view.proposed;
+  return { ...draft, about, stack: [...tech_stack], platforms: [...platforms] };
 }
 
 /** Reads a Start setup receipt. Input: the receipt. Output: started with the project id, rejected

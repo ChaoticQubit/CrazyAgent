@@ -5,6 +5,9 @@ import { displayText } from "./screens/conversation";
 
 export type QuestionStatus = "pending" | "answered" | "dismissed" | "answered_in_terminal";
 
+/** How the owner answers a question: pick one option, pick any options, or write free text. */
+export type QuestionKind = "single" | "multi" | "text";
+
 /** One question an agent or an engine step asked the owner, as the engine recorded it. The
  * `version` goes back with an answer or a dismissal, so a question that changed since the
  * owner read it is refused as stale. */
@@ -13,6 +16,7 @@ export interface OwnerQuestion {
   project_id: string;
   asker: string;
   question: string;
+  kind: QuestionKind;
   options: string[];
   recommended: string | null;
   context: string | null;
@@ -35,10 +39,17 @@ export interface QuestionCount {
   pending: number;
 }
 
-/** The owner's answer: one of the question's options by position, or typed text. */
-export type QuestionChoice = { option: number } | { text: string };
+/** The owner's answer: the picked options by position, in option order, and a comment. A
+ * pick, a comment or both are given; a text question takes the comment only. */
+export interface QuestionChoice {
+  picks: number[];
+  comment: string | null;
+}
 
+/** The last choice of every single and multi question; it opens the comment box. */
+export const COMMENT_LABEL = "Add a comment";
 export const ANSWER_BYTES_MAX = 4096;
+export const COMMENT_BYTES_MAX = 2048;
 export const OPTIONS_MAX = 6;
 
 /** What the owner reads when a question changed since it was shown. */
@@ -47,7 +58,7 @@ export const STALE_LINE = "This question changed. Review it again.";
 const REFUSALS: Record<string, string> = {
   questions_stale: STALE_LINE,
   questions_not_found: "This question is no longer there. The list shows what is left.",
-  questions_answer_invalid: `Pick one of the options, or write an answer of up to ${ANSWER_BYTES_MAX} bytes.`,
+  questions_answer_invalid: `Pick an option or add a comment. A comment can be up to ${COMMENT_BYTES_MAX} bytes with a pick, ${ANSWER_BYTES_MAX} on its own.`,
   questions_option_invalid: "That option isn't on this question. Review it again.",
   questions_text_invalid: "The answer has hidden characters CrazyAgent can't keep. Remove them, then answer again.",
   questions_project_missing: "This project is no longer in CrazyAgent.",
@@ -128,11 +139,12 @@ export function orderQuestions(questions: readonly OwnerQuestion[]): OwnerQuesti
   return [...pending, ...settled];
 }
 
-/** The typed answer as it is sent: trimmed, not blank and at most `ANSWER_BYTES_MAX` bytes.
- * Input: the field text. Output: the answer, or null when it cannot be sent. */
-export function typedAnswer(text: string): string | null {
+/** The typed answer as it is sent: trimmed, not blank and at most `max` bytes, by default
+ * `ANSWER_BYTES_MAX`. Inputs: the field text and the bound. Output: the answer, or null when
+ * it cannot be sent. */
+export function typedAnswer(text: string, max: number = ANSWER_BYTES_MAX): string | null {
   const answer = text.trim();
-  if (answer.length === 0 || new TextEncoder().encode(answer).length > ANSWER_BYTES_MAX) return null;
+  if (answer.length === 0 || new TextEncoder().encode(answer).length > max) return null;
   return answer;
 }
 
@@ -172,13 +184,11 @@ export function loadQuestions(projectId: string, after: number | null): Promise<
   return call<QuestionPage>("desktop_questions", { projectId, after });
 }
 
-/** Answers a pending question with one option or typed text. Inputs: the question id, the
+/** Answers a pending question with picks, a comment or both. Inputs: the question id, the
  * version the owner read and the choice. Output: ok once recorded, or the refusal; a
  * question that changed is `questions_stale`. */
 export function answerQuestion(id: number, version: number, choice: QuestionChoice): Promise<Result<void>> {
-  const option = "option" in choice ? choice.option : null;
-  const text = "text" in choice ? choice.text : null;
-  return call<void>("desktop_answer_question", { id, version, option, text });
+  return call<void>("desktop_answer_question", { id, version, picks: choice.picks, comment: choice.comment });
 }
 
 /** Dismisses a pending question; the asker is told once. Inputs: the question id and the

@@ -10,7 +10,7 @@ use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
 use crate::project_setup::{Platform, ProjectSetup};
 use crate::protocol::{ProjectId, ProjectSpec};
-use crate::questions::{Answer, Ask, Asker, QuestionStatus, Settlement};
+use crate::questions::{Answer, Ask, Asker, QuestionKind, QuestionStatus, Settlement};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use crate::tui::ctx::Load;
@@ -93,6 +93,18 @@ impl Engine {
     /// Logs one question from the project's master, as its ask tool does. Inputs: the
     /// question, its options and the recommended one. Output: the question id.
     fn ask(&self, question: &str, options: &[&str], recommended: &str) -> u64 {
+        self.ask_of(QuestionKind::Single, question, options, Some(recommended))
+    }
+
+    /// Logs one question of a kind from the project's master. Inputs: the kind, the
+    /// question, its options and the recommended answer. Output: the question id.
+    fn ask_of(
+        &self,
+        kind: QuestionKind,
+        question: &str,
+        options: &[&str],
+        recommended: Option<&str>,
+    ) -> u64 {
         let db = crate::questions::open(self.root.path()).unwrap();
         crate::questions::ask(
             &db,
@@ -100,8 +112,9 @@ impl Engine {
             &Asker::Master(1),
             &Ask {
                 question: question.into(),
+                kind,
                 options: options.iter().map(|option| (*option).to_owned()).collect(),
-                recommended: Some(recommended.into()),
+                recommended: recommended.map(str::to_owned),
                 context: Some("The shop keeps orders and stock.".into()),
             },
         )
@@ -270,11 +283,24 @@ async fn answer_sends_the_version_read() {
 
     assert!(screen.questions.key(key(KeyCode::Char('a'))));
     assert!(screen.questions.editing());
+    typed(&mut screen, "x");
+    assert!(
+        !shown(&mut screen, 80, 24).contains("[ x"),
+        "letters type only once the comment line is open"
+    );
+    assert!(screen.questions.key(key(KeyCode::Char('c'))));
     typed(&mut screen, "Europe, close to the owner.");
     assert_eq!(
         engine
             .controller
-            .questions_answer(region, 0, Answer::Option(1))
+            .questions_answer(
+                region,
+                0,
+                Answer {
+                    picks: vec![1],
+                    comment: None
+                }
+            )
             .await
             .unwrap(),
         Settlement::Settled,
@@ -289,7 +315,10 @@ async fn answer_sends_the_version_read() {
             project: engine.project.clone(),
             id: region,
             version: 0,
-            answer: Answer::Text("Europe, close to the owner.".into()),
+            answer: Answer {
+                picks: Vec::new(),
+                comment: Some("Europe, close to the owner.".into())
+            },
         }
     );
     assert_eq!(
@@ -318,15 +347,25 @@ async fn answer_sends_the_version_read() {
     );
     assert!(screen.questions.key(key(KeyCode::Char('a'))));
     assert!(screen.questions.key(key(KeyCode::Enter)));
+    assert!(
+        shown(&mut screen, 80, 24).contains("Pick an option or add a comment."),
+        "Enter with nothing picked sends nothing"
+    );
+    assert!(screen.questions.editing());
+    assert!(screen.questions.key(key(KeyCode::Char(' '))));
+    assert!(screen.questions.key(key(KeyCode::Enter)));
     assert_eq!(
         engine.pump(&mut screen, NOW + 3).await.unwrap(),
         QuestionsQuery::Answer {
             project: engine.project.clone(),
             id: payment,
             version: 0,
-            answer: Answer::Option(0),
+            answer: Answer {
+                picks: vec![0],
+                comment: None
+            },
         },
-        "Enter with nothing typed sends the recommended option"
+        "the box starts on the recommended option, and Space picks it"
     );
     assert_eq!(
         engine.status(payment).await,
@@ -446,6 +485,7 @@ async fn a_long_question_is_marked_cut_reads_whole_on_v_and_keeps_its_options_in
         &Asker::Master(2),
         &Ask {
             question,
+            kind: crate::questions::QuestionKind::Single,
             options: vec![
                 "Keep it".into(),
                 "Change it".into(),
@@ -475,14 +515,23 @@ async fn a_long_question_is_marked_cut_reads_whole_on_v_and_keeps_its_options_in
     assert!(screen.questions.key(key(KeyCode::Char('a'))));
     let answering = shown(&mut screen, 80, 24);
     for option in [
-        "1. Keep it (recommended)",
-        "2. Change it",
-        "3. Ask again later",
-        "Your answer",
+        "( ) 1. Keep it (recommended)",
+        "( ) 2. Change it",
+        "( ) 3. Ask again later",
+        "( ) Add a comment",
+        "Space picks an option",
     ] {
         assert!(
             answering.contains(option),
             "{option} stays in view while answering:\n{answering}"
+        );
+    }
+    assert!(screen.questions.key(key(KeyCode::Char('c'))));
+    let commenting = shown(&mut screen, 80, 24);
+    for part in ["3. Ask again later", "(o) Add a comment", "Comment"] {
+        assert!(
+            commenting.contains(part),
+            "{part} stays in view while commenting:\n{commenting}"
         );
     }
     assert!(screen.questions.key(key(KeyCode::Esc)));
@@ -508,4 +557,144 @@ async fn a_long_question_is_marked_cut_reads_whole_on_v_and_keeps_its_options_in
     assert_ne!(back, end, "one line up from the end moves at once");
     assert!(screen.questions.key(key(KeyCode::Esc)));
     assert!(shown(&mut screen, 80, 24).contains("... v reads all of it"));
+}
+
+#[tokio::test]
+async fn space_picks_two_options_of_a_multi_question_and_enter_sends_them_with_the_comment() {
+    let mut engine = Engine::start().await;
+    let platforms = engine.ask_of(
+        QuestionKind::Multi,
+        "Which platforms ship in V1?",
+        &["Web", "Desktop", "Mobile"],
+        Some("Web"),
+    );
+    let mut screen = screen(&engine);
+    engine.pump(&mut screen, NOW).await.unwrap();
+    for code in [
+        KeyCode::Char('a'),
+        KeyCode::Char(' '),
+        KeyCode::Down,
+        KeyCode::Down,
+        KeyCode::Char(' '),
+        KeyCode::Char('c'),
+    ] {
+        assert!(screen.questions.key(key(code)));
+    }
+    typed(&mut screen, "later");
+    let drawn = shown(&mut screen, 80, 24);
+    for part in [
+        "[x] 1. Web (recommended)",
+        "[ ] 2. Desktop",
+        "[x] 3. Mobile",
+        "[x] Add a comment",
+        "[ later",
+    ] {
+        assert!(drawn.contains(part), "{part}:\n{drawn}");
+    }
+    assert!(screen.questions.key(key(KeyCode::Enter)));
+    assert_eq!(
+        engine.pump(&mut screen, NOW + 1).await.unwrap(),
+        QuestionsQuery::Answer {
+            project: engine.project.clone(),
+            id: platforms,
+            version: 0,
+            answer: Answer {
+                picks: vec![0, 2],
+                comment: Some("later".into()),
+            },
+        }
+    );
+    assert_eq!(
+        engine.status(platforms).await,
+        (
+            QuestionStatus::Answered,
+            Some("Web; Mobile\nComment: later".into()),
+            1
+        )
+    );
+}
+
+#[tokio::test]
+async fn space_replaces_the_pick_of_a_single_question_and_a_comment_can_stand_alone() {
+    let mut engine = Engine::start().await;
+    let region = engine.ask(
+        "Which hosting region should the shop use?",
+        &["Europe", "North America"],
+        "Europe",
+    );
+    let mut screen = screen(&engine);
+    engine.pump(&mut screen, NOW).await.unwrap();
+    for code in [
+        KeyCode::Char('a'),
+        KeyCode::Char(' '),
+        KeyCode::Down,
+        KeyCode::Char(' '),
+    ] {
+        assert!(screen.questions.key(key(code)));
+    }
+    let drawn = shown(&mut screen, 80, 24);
+    assert!(
+        drawn.contains("( ) 1. Europe (recommended)") && drawn.contains("(o) 2. North America"),
+        "one pick at a time:\n{drawn}"
+    );
+    assert!(screen.questions.key(key(KeyCode::Char(' '))));
+    assert!(screen.questions.key(key(KeyCode::Down)));
+    assert!(screen.questions.key(key(KeyCode::Char(' '))));
+    typed(&mut screen, "Neither, a CDN first.");
+    assert!(screen.questions.key(key(KeyCode::Enter)));
+    assert_eq!(
+        engine.pump(&mut screen, NOW + 1).await.unwrap(),
+        QuestionsQuery::Answer {
+            project: engine.project.clone(),
+            id: region,
+            version: 0,
+            answer: Answer {
+                picks: Vec::new(),
+                comment: Some("Neither, a CDN first.".into()),
+            },
+        }
+    );
+    assert_eq!(
+        engine.status(region).await,
+        (
+            QuestionStatus::Answered,
+            Some("Neither, a CDN first.".into()),
+            1
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_text_question_opens_its_answer_line_at_once() {
+    let mut engine = Engine::start().await;
+    let name = engine.ask_of(
+        QuestionKind::Text,
+        "What should the shop be called?",
+        &[],
+        Some("Fern and Co"),
+    );
+    let mut screen = screen(&engine);
+    engine.pump(&mut screen, NOW).await.unwrap();
+    assert!(screen.questions.key(key(KeyCode::Char('a'))));
+    let drawn = shown(&mut screen, 80, 24);
+    assert!(
+        drawn.contains("Your answer") && !drawn.contains("Add a comment"),
+        "{drawn}"
+    );
+    assert!(screen.questions.key(key(KeyCode::Enter)));
+    assert!(screen.questions.editing(), "nothing typed sends nothing");
+    typed(&mut screen, "Leaf c and co");
+    assert!(screen.questions.key(key(KeyCode::Enter)));
+    assert_eq!(
+        engine.pump(&mut screen, NOW + 1).await.unwrap(),
+        QuestionsQuery::Answer {
+            project: engine.project.clone(),
+            id: name,
+            version: 0,
+            answer: Answer {
+                picks: Vec::new(),
+                comment: Some("Leaf c and co".into()),
+            },
+        }
+    );
 }

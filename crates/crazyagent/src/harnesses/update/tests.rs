@@ -1145,15 +1145,8 @@ fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npm
     assert!(!elsewhere.join("installed").exists());
 }
 
-#[test]
-fn a_tool_folder_that_another_group_can_write_is_refused() {
-    let machine = Machine::new();
-    let brew = machine.program("brew/bin/brew", 0o755);
-    let real = machine.program("brew/Caskroom/codex/0.167.1/bin/codex", 0o755);
-    let folder = brew.parent().unwrap();
-    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o775)).unwrap();
-    assert!(update_command("codex", &real, &real, &machine.roots()).is_ok());
-    let own = rustix::process::getegid().as_raw();
+/// The groups this user is in, as `/usr/bin/id -G` lists them.
+fn user_groups() -> Vec<u32> {
     let listed = crate::spawn_gate::output(
         std::process::Command::new("/usr/bin/id")
             .arg("-G")
@@ -1162,18 +1155,81 @@ fn a_tool_folder_that_another_group_can_write_is_refused() {
             .stderr(std::process::Stdio::null()),
     )
     .unwrap();
-    let other = String::from_utf8_lossy(&listed.stdout)
+    assert!(listed.status.success());
+    String::from_utf8_lossy(&listed.stdout)
         .split_whitespace()
         .filter_map(|group| group.parse::<u32>().ok())
+        .collect()
+}
+
+#[test]
+fn a_tool_folder_that_another_group_can_write_is_refused() {
+    let machine = Machine::new();
+    let brew = machine.program("brew/bin/brew", 0o755);
+    let real = machine.program("brew/Caskroom/codex/0.167.1/bin/codex", 0o755);
+    let folder = brew.parent().unwrap();
+    assert!(update_command("codex", &real, &real, &machine.roots()).is_ok());
+    let own = rustix::process::getegid().as_raw();
+    let other = user_groups()
+        .into_iter()
         .find(|group| *group != own && *group != ADMIN_GROUP);
     let Some(other) = other else {
         return;
     };
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o775)).unwrap();
     std::os::unix::fs::chown(folder, None, Some(other)).unwrap();
     assert_eq!(
         update_command("codex", &real, &real, &machine.roots()).unwrap_err(),
         TOOL_UNSAFE
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_folder_the_users_own_group_can_write_is_refused_on_macos() {
+    let machine = Machine::new();
+    let brew = machine.program("brew/bin/brew", 0o755);
+    let real = machine.program("brew/Caskroom/codex/0.167.1/bin/codex", 0o755);
+    let folder = brew.parent().unwrap();
+    let own = rustix::process::getegid().as_raw();
+    if own == ADMIN_GROUP {
+        return;
+    }
+    std::os::unix::fs::chown(folder, None, Some(own)).unwrap();
+    assert!(update_command("codex", &real, &real, &machine.roots()).is_ok());
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o775)).unwrap();
+    assert_eq!(
+        update_command("codex", &real, &real, &machine.roots()).unwrap_err(),
+        TOOL_UNSAFE
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_folder_the_macos_administrators_can_write_is_accepted() {
+    let machine = Machine::new();
+    let brew = machine.program("brew/bin/brew", 0o755);
+    let real = machine.program("brew/Caskroom/codex/0.167.1/bin/codex", 0o755);
+    let folder = brew.parent().unwrap();
+    if !user_groups().contains(&ADMIN_GROUP) {
+        return;
+    }
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o775)).unwrap();
+    std::os::unix::fs::chown(folder, None, Some(ADMIN_GROUP)).unwrap();
+    assert!(update_command("codex", &real, &real, &machine.roots()).is_ok());
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_tool_folder_the_users_own_group_can_write_is_accepted_off_macos() {
+    let machine = Machine::new();
+    let brew = machine.program("brew/bin/brew", 0o755);
+    let real = machine.program("brew/Caskroom/codex/0.167.1/bin/codex", 0o755);
+    let folder = brew.parent().unwrap();
+    let own = rustix::process::getegid().as_raw();
+    std::os::unix::fs::chown(folder, None, Some(own)).unwrap();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o775)).unwrap();
+    assert!(update_command("codex", &real, &real, &machine.roots()).is_ok());
 }
 
 use crate::harnesses::{HarnessEntry, Search};
@@ -1253,7 +1309,16 @@ impl Case {
     }
     fn start(&self) -> Result<(), &'static str> {
         self.updates
-            .start(&self.db, &self.entry, &self.machine.roots(), || {})
+            .start(&self.db, &self.entry, &self.machine.roots(), |_| {})
+    }
+    fn start_telling(&self) -> std::sync::mpsc::Receiver<bool> {
+        let (ended, told) = std::sync::mpsc::channel();
+        self.updates
+            .start(&self.db, &self.entry, &self.machine.roots(), move |ok| {
+                ended.send(ok).unwrap();
+            })
+            .unwrap();
+        told
     }
     fn bin(&self) -> PathBuf {
         self.machine.root.path().join("brew/bin")
@@ -1582,6 +1647,17 @@ fn a_failed_update_keeps_its_masked_last_lines_and_the_old_version() {
     assert_eq!(last.code.as_deref(), Some("harness_update_failed"));
     assert!(last.output.contains("Error:"));
     assert_eq!(last.to.as_deref(), Some("1.0.0"));
+}
+
+#[test]
+fn the_follow_up_of_an_update_is_told_whether_the_update_ended_well() {
+    let wait = Duration::from_secs(30);
+    let failing = failing_update_case("claude-code");
+    let told = failing.start_telling();
+    assert_eq!(told.recv_timeout(wait), Ok(false));
+    let working = update_case("claude-code");
+    let told = working.start_telling();
+    assert_eq!(told.recv_timeout(wait), Ok(true));
 }
 
 #[test]

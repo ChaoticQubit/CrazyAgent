@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { POLL_MS, STEP_MS, bridgeCall, start as launch, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, bridgeCall, start as launch, owner, value } from "./e2e-harness.mjs";
 
 export const GIT = "/usr/bin/git";
 export const FOLDER = "Project";
@@ -230,4 +230,45 @@ export function terminalRunner({ ide, keys, me, repo }) {
     }
     return readFileSync(path, "utf8");
   };
+}
+
+/** Saves a project's level the way the owner's Save does, keeping its other choices. Inputs:
+ * the bridge, the project, the level and the generation counter. Output: none. */
+export async function setLevel(bridge, project, access, next) {
+  const view = await value(bridge, "desktop_project_agent_policy", { id: project });
+  const policy = { access, network: view.network, toolchains: [], ide_git_hooks: view.ide_git_hooks };
+  const receipt = await value(bridge, "desktop_set_project_agent_policy", { id: project, version: view.version, policy, generation: next() });
+  assert.equal(receipt.outcome, "applied", `the level is saved: ${JSON.stringify(receipt)}`);
+  assert.equal((await value(bridge, "desktop_project_agent_policy", { id: project })).access, access);
+}
+
+/** Opens a project's IDE tab, downloading the build if this engine has none yet, and waits for
+ * the engine to open its server. Inputs: the page and the stage. Output: none. */
+export async function openTab(page, { site, project, opened, evidence }) {
+  const me = owner(page, evidence);
+  const known = opened.length;
+  const tabs = () => page.evaluate(`[...document.querySelectorAll("[role=tab]")].map((item) => item.id)`);
+  await page.send("Page.enable");
+  await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
+  await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}` });
+  for (const deadline = Date.now() + STEP_MS; !(await tabs()).includes("tab-overview"); await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, "the project page never showed its tabs");
+  }
+  await pause(SETTLE_MS);
+  if ((await me.seen()).includes("The IDE isn't downloaded yet.")) {
+    await me.click("Download", ".pj-ide-unavailable button");
+    await me.waitFor("the download under way", (text) => !text.includes("The IDE isn't downloaded yet."));
+  }
+  for (const deadline = Date.now() + BUILD_MS; !(await tabs()).includes("tab-ide"); await pause(POLL_MS * 10)) {
+    const text = await me.seen();
+    assert.ok(!IDE_FAILED.test(text), `the IDE download reports a failure: ${text.slice(0, 600)}`);
+    assert.ok(Date.now() < deadline, "the IDE build never became Ready");
+  }
+  await me.click("IDE", "[role=tab]");
+  for (const deadline = Date.now() + BUILD_MS; opened.length === known; await pause(POLL_MS * 10)) {
+    const text = await me.seen();
+    assert.ok(!IDE_FAILED.test(text), `the IDE tab reports a failure: ${text.slice(0, 600)}`);
+    assert.ok(Date.now() < deadline, `the IDE never opened: ${text.slice(0, 600)}`);
+  }
 }

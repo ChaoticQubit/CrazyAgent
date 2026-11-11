@@ -79,6 +79,7 @@ export interface AccountLimits {
 export interface MoneySettings {
   main_number: "dollars" | "tokens";
   prices: "bundled" | "off";
+  project_limits?: "hidden" | "shown";
 }
 
 export interface MoneyView {

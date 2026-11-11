@@ -494,6 +494,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
+  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null }[];
 }
 
 export interface StoredSetup {
@@ -1380,6 +1381,7 @@ export interface OnboardingView {
   folder_overview: string | null;
   finished: boolean;
   imported?: ImportFile[];
+  proposed?: ProjectSetup | null;
 }
 
 export interface GitHubDeviceCode {

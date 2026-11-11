@@ -215,6 +215,41 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
     }
 }
 
+/// The catalog names every access level with the reason it cannot run on this computer, as
+/// a project's policy does, so a New Project form preselects and offers only what runs
+/// here: every level on macOS, Sandboxed alone on Linux.
+#[test]
+fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
+    use crate::sandbox::policy::{AgentAccess, LevelView};
+    let catalog = catalog(&config(), None, &[], &BTreeSet::new()).unwrap();
+    assert_eq!(catalog.agent_access, LevelView::all());
+    let runs: Vec<(AgentAccess, bool)> = catalog
+        .agent_access
+        .iter()
+        .map(|level| (level.access, level.unavailable.is_none()))
+        .collect();
+    #[cfg(target_os = "macos")]
+    assert_eq!(runs, AgentAccess::ALL.map(|access| (access, true)));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        runs,
+        [
+            (AgentAccess::Sandboxed, true),
+            (AgentAccess::OwnBranch, false),
+            (AgentAccess::Full, false)
+        ]
+    );
+    let wire = serde_json::to_value(&catalog).unwrap();
+    assert_eq!(wire["agent_access"][1]["access"], "own_branch");
+    let mut older = wire.clone();
+    older.as_object_mut().unwrap().remove("agent_access");
+    let read: ProjectCatalog = serde_json::from_value(older).unwrap();
+    assert!(
+        read.agent_access.is_empty(),
+        "a catalog without the levels still reads"
+    );
+}
+
 #[test]
 fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
     let config = config();

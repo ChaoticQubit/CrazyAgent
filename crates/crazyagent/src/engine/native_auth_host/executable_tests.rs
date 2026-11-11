@@ -62,6 +62,103 @@ fn native_auth_registered_executable_verified_sha256_rejects_replacement() {
     );
 }
 
+/// Off macOS a request that verifies the claude and codex harnesses, the way a harness catalog
+/// or a launch does, hashes each one again only until one matching hash starts
+/// [`super::SETTLE_AFTER`] past its seen identity; after that a request hashes nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_a_request_hashes_each_harness_only_until_it_settles() {
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let mut harnesses = ["claude", "codex"]
+        .map(|name| RegisteredNativeAuthHost::capture(&executable(root.path(), name)).unwrap());
+    let request = |harnesses: &[RegisteredNativeAuthHost; 2]| {
+        for registered in harnesses {
+            registered.verified_path().unwrap();
+            let digest = registered.verified_sha256().unwrap();
+            assert_eq!(
+                digest,
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(&registered.path).unwrap())
+                )
+            );
+        }
+        harnesses
+            .iter()
+            .map(|registered| registered.rehashes.load(Ordering::Relaxed))
+            .sum::<usize>()
+    };
+    let fresh = request(&harnesses);
+    if harnesses
+        .iter()
+        .all(|registered| registered.seen.elapsed() < super::SETTLE_AFTER)
+    {
+        assert_eq!(fresh, 4);
+    }
+    let unsettled = harnesses
+        .iter()
+        .filter(|registered| !registered.settled.load(Ordering::Acquire))
+        .count();
+    for registered in &mut harnesses {
+        registered.seen = registered.seen.checked_sub(super::SETTLE_AFTER).unwrap();
+    }
+    let settling = request(&harnesses);
+    assert_eq!(settling, fresh + unsettled);
+    assert!(
+        harnesses
+            .iter()
+            .all(|registered| registered.settled.load(Ordering::Acquire))
+    );
+    assert_eq!(request(&harnesses), settling);
+}
+
+/// A matching hash settles a harness only when it starts [`super::SETTLE_AFTER`] past the
+/// first look by the monotonic clock and past the recorded change time by the wall clock, so
+/// a change time ahead of the clock, as after the clock steps back, keeps the harness hashing.
+#[test]
+fn a_change_time_ahead_of_the_wall_clock_never_settles_a_harness() {
+    let started = std::time::Instant::now();
+    let seen = started.checked_sub(super::SETTLE_AFTER).unwrap();
+    let wall = std::time::SystemTime::now();
+    let since = wall.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let changed = |offset: i64| {
+        (
+            i64::try_from(since.as_secs()).unwrap() + offset,
+            i64::from(since.subsec_nanos()),
+        )
+    };
+    assert!(super::settles(seen, started, wall, changed(-3)));
+    assert!(!super::settles(seen, started, wall, changed(60)));
+    assert!(!super::settles(seen, started, wall, changed(-2)));
+    assert!(!super::settles(
+        seen + std::time::Duration::from_millis(1),
+        started,
+        wall,
+        changed(-60)
+    ));
+}
+
+/// Off macOS a same-size write before the identity settles is refused even when the hash
+/// that sees it starts past the settle time, and the harness never settles.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_a_same_size_write_never_settles_the_harness() {
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "codex");
+    let mut registered = RegisteredNativeAuthHost::capture(&path).unwrap();
+    let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all(b"REGISTERED-HOST-BYTES").unwrap();
+    drop(file);
+    registered.seen = registered.seen.checked_sub(super::SETTLE_AFTER).unwrap();
+    assert_eq!(
+        registered.verified_path().unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+    assert!(!registered.settled.load(Ordering::Acquire));
+}
+
 #[test]
 fn native_auth_custodian_command_keeps_self_and_codex_pins_distinct() {
     let root = tempfile::tempdir().unwrap();
@@ -159,6 +256,38 @@ fn native_auth_registered_entry_refuses_a_rewrite_of_its_pinned_file_in_place() 
     assert_eq!(
         registered.current().map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_changed"
+    );
+}
+
+#[test]
+fn native_auth_registered_entry_keeps_a_pinned_file_whose_metadata_alone_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(registered.verified_path().is_err());
+    let current = registered.current().unwrap();
+    assert_eq!(
+        current.verified_path().unwrap(),
+        std::fs::canonicalize(&real).unwrap()
+    );
+    assert_eq!(current.digest, registered.digest);
+    assert!(Arc::ptr_eq(&current, &current.current().unwrap()));
+}
+
+#[test]
+fn native_auth_registered_entry_refuses_a_pinned_file_whose_metadata_turned_unsafe() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o720)).unwrap();
+    assert_eq!(
+        registered.current().map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_unsafe"
     );
 }
 

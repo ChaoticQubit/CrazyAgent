@@ -9,6 +9,9 @@ engine::owner::transport::master_host_launch::live_codex_tests::a_real_codex_mas
 engine::owner::transport::master_host_launch::live_codex_tests::a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates
 team::runtime::live_codex_tests::a_real_codex_team_agent_turn_is_signed_in_inside_the_agent_sandbox
 research::runner::live_codex_tests::a_real_codex_research_run_is_signed_in_inside_the_research_sandbox"
+ollama_tests="tui::client::accounts::tests::tui_accounts_requests_reach_the_real_engine
+tui::screens::settings_accounts::tests::lost_engine::a_check_against_a_stopped_engine_shows_the_lost_connection_and_recovers"
+ollama_model="qwen2.5:0.5b"
 log=$(mktemp -d "${TMPDIR:-/tmp}/crazyagent-qualify.XXXXXX") || exit 1
 trap 'rm -rf "$log"' EXIT
 if ! cargo "$@" build --locked --offline -p crazyagent --bin crazyagent >"$log/build" 2>&1 ||
@@ -19,9 +22,22 @@ if ! cargo "$@" build --locked --offline -p crazyagent --bin crazyagent >"$log/b
 fi
 failed=0
 blocked=0
-for test in $tests; do
+ollama=0
+if curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null | grep -qF "\"$ollama_model\""; then
+    ollama=1
+fi
+for test in $tests $ollama_tests; do
     name=${test##*::}
     out="$log/$name"
+    case "$ollama_tests" in
+    *"$test"*)
+        if [ "$ollama" -eq 0 ]; then
+            echo "BLOCKED $name: no Ollama at 127.0.0.1:11434 serving $ollama_model"
+            blocked=1
+            continue
+        fi
+        ;;
+    esac
     cargo "$@" test --locked --offline -p crazyagent --lib -- --ignored --exact "$test" --nocapture >"$out" 2>&1
     status=$?
     if grep -q "BLOCKED:" "$out"; then

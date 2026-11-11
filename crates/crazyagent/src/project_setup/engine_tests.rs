@@ -1,9 +1,7 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{
-    OwnerClientKind, OwnerMutation, OwnerOperation, OwnerRequest, OwnerResponse, OwnerResult,
-};
+use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -1550,6 +1548,7 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         &crate::questions::Asker::Master(1),
         &crate::questions::Ask {
             question: "Ship on Friday?".into(),
+            kind: crate::questions::QuestionKind::Text,
             options: Vec::new(),
             recommended: None,
             context: None,
@@ -2281,6 +2280,87 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
     );
 }
 
+/// A removed project takes its linked repository files with it, so a project added again
+/// under the same id starts with no links into a folder it may no longer have.
+#[tokio::test]
+async fn a_removed_project_forgets_its_doc_links() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let mut db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    let tx = db.transaction().unwrap();
+    crate::project_setup::links::set(
+        &tx,
+        &project,
+        &[crate::project_setup::links::DocLink {
+            path: "docs/plan.md".into(),
+            kind: crate::project_setup::links::LinkKind::Roadmap,
+        }],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(db);
+    let links = "SELECT COUNT(*) FROM project_doc_links WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(links), 1);
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(engine.rows(links), 0);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn a_removed_projects_run_in_project_terminal_setting_goes_with_it() {
+    use crate::ide::bridge::run_command::{RunMode, mode, set_mode};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let other = ProjectId::new("another-project").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    set_mode(&db, &project, RunMode::Off).unwrap();
+    set_mode(&db, &other, RunMode::TypeOnly).unwrap();
+    assert_eq!(mode(&db, &project).unwrap(), RunMode::Off);
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT COUNT(*) FROM ide_run_settings WHERE project='setup-pooled'"),
+        0,
+        "the Run setting goes with the project"
+    );
+    assert_eq!(
+        mode(&db, &project).unwrap(),
+        RunMode::TypeAndRun,
+        "the project added again starts on Type and run"
+    );
+    assert_eq!(
+        mode(&db, &other).unwrap(),
+        RunMode::TypeOnly,
+        "another project's setting stays"
+    );
+}
+
 #[tokio::test]
 async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_stays_gone() {
     let engine = Engine::start().await;
@@ -2320,6 +2400,176 @@ async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_
     engine.stop().await;
 }
 
+/// On Linux, where agents run Sandboxed alone in this version, the owner is shown why Own
+/// branch and Full access cannot run, and saving either is rejected with
+/// `agent_access_unavailable`, which leaves the project's policy as it was.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_rejected() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(fresh.access, AgentAccess::Sandboxed);
+    let line = Some("On Linux, agents run Sandboxed in this version.");
+    let levels: Vec<(AgentAccess, Option<&str>)> = fresh
+        .levels
+        .iter()
+        .map(|level| (level.access, level.unavailable.as_deref()))
+        .collect();
+    assert_eq!(
+        levels,
+        [
+            (AgentAccess::Sandboxed, None),
+            (AgentAccess::OwnBranch, line),
+            (AgentAccess::Full, line)
+        ]
+    );
+    for (access, request) in [(AgentAccess::OwnBranch, 2), (AgentAccess::Full, 3)] {
+        let saved = owner
+            .set_project_agent_policy(
+                project.clone(),
+                fresh.version,
+                AgentPolicy {
+                    access,
+                    network: crate::sandbox::policy::AgentNetwork::default(),
+                    toolchains: Vec::new(),
+                    ide_git_hooks: false,
+                    tool_cache: Default::default(),
+                    ide_agent_files: Default::default(),
+                },
+                request,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result(saved), rejected("agent_access_unavailable"));
+    }
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        fresh,
+        "a refused level leaves the policy and its version"
+    );
+    engine.stop().await;
+}
+
+/// The half of the agent policy that runs on every system, Linux included, at the level every
+/// system offers: a Sandboxed save with toolchain choices and the IDE hooks switch lands at
+/// version 1, a save from the version before it is refused as `stale_revision` and changes
+/// nothing, and a toolchain named twice is `agent_policy_invalid` before it is sent.
+#[tokio::test]
+async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refused() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
+    use crate::sandbox::toolchains::Toolchain;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!((fresh.access, fresh.version), (AgentAccess::Sandboxed, 0));
+    assert!(!fresh.ide_git_hooks);
+
+    let sandboxed = |toolchains: Vec<ToolchainChoice>, ide_git_hooks: bool| AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        network: crate::sandbox::policy::AgentNetwork::default(),
+        toolchains,
+        ide_git_hooks,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
+    };
+    let choice = |toolchain: Toolchain, allowed: bool| ToolchainChoice { toolchain, allowed };
+    let chosen = |view: &crate::sandbox::policy::PolicyView, toolchain: Toolchain| {
+        view.toolchains
+            .iter()
+            .find(|row| row.toolchain == toolchain)
+            .map(|row| row.allowed)
+    };
+    let policy = sandboxed(
+        vec![
+            choice(Toolchain::Rust, true),
+            choice(Toolchain::Node, false),
+        ],
+        true,
+    );
+    let saved = owner
+        .set_project_agent_policy(project.clone(), fresh.version, policy, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!((view.access, view.version), (AgentAccess::Sandboxed, 1));
+    assert!(view.ide_git_hooks);
+    assert_eq!(chosen(&view, Toolchain::Rust), Some(true));
+    assert_eq!(chosen(&view, Toolchain::Node), Some(false));
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_agent_policy WHERE project='setup-pooled'"),
+        1
+    );
+
+    let stale = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            sandboxed(vec![choice(Toolchain::Rust, false)], false),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(stale),
+        rejected("stale_revision"),
+        "a save from the policy another window replaced never lands"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        view,
+        "the refused save left the saved policy and its version"
+    );
+
+    let twice = sandboxed(
+        vec![
+            choice(Toolchain::Node, true),
+            choice(Toolchain::Node, false),
+        ],
+        false,
+    );
+    assert_eq!(twice.validate(), Err("agent_policy_invalid"));
+    let action = SetupAction::SetAgentPolicy {
+        project_id: project.clone(),
+        version: view.version,
+        policy: twice,
+    };
+    assert_eq!(action.validate().unwrap_err().0, "agent_policy_invalid");
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        view
+    );
+    engine.stop().await;
+}
+
+/// macOS only: Linux runs agents Sandboxed alone in this version, so Own branch and Full
+/// access are refused there (`LINUX_UNAVAILABLE`, asserted in `sandbox::policy::tests`).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};

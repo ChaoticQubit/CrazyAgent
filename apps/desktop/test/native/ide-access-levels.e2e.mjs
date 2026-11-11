@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
-import { BUILD_MS, FOLDER, IDE_FAILED, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
+import { POLL_MS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, stop, value } from "./e2e-harness.mjs";
+import { FOLDER, OWNER_EMAIL, OWNER_NAME, SETTLE_MS, WORKBENCH_MS, git, ideAnswers, input, onboard, openTab, setLevel, stack, terminalRunner, workbench, workbenchUrl } from "./ide-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const PANEL_TERMINAL = `document.querySelectorAll(".part.panel .xterm").length > 0`;
@@ -76,16 +76,6 @@ function seedRepo(folder) {
   git(folder, "config", "--unset", "user.email");
 }
 
-/** Saves a project's level the way the owner's Save does, keeping its other choices. Inputs:
- * the bridge, the project, the level and the generation counter. Output: none. */
-async function setLevel(bridge, project, access, next) {
-  const view = await value(bridge, "desktop_project_agent_policy", { id: project });
-  const policy = { access, network: view.network, toolchains: [], ide_git_hooks: view.ide_git_hooks };
-  const receipt = await value(bridge, "desktop_set_project_agent_policy", { id: project, version: view.version, policy, generation: next() });
-  assert.equal(receipt.outcome, "applied", `the level is saved: ${JSON.stringify(receipt)}`);
-  assert.equal((await value(bridge, "desktop_project_agent_policy", { id: project })).access, access);
-}
-
 /** The first process running an opened server, found by its private token file. Input: the
  * opened server. Output: its pid. */
 function serverPid(server) {
@@ -115,37 +105,6 @@ function probe(port, outside) {
     `echo x >> .git/config && echo config-yes || echo config-no`,
     `echo x >> .git/hooks/pre-commit && echo hooks-yes || echo hooks-no`,
   ].join("; ");
-}
-
-/** Opens a project's IDE tab, downloading the build if this engine has none yet, and waits for
- * the engine to open its server. Inputs: the page and the stage. Output: none. */
-async function openTab(page, { site, project, opened, evidence }) {
-  const me = owner(page, evidence);
-  const known = opened.length;
-  const tabs = () => page.evaluate(`[...document.querySelectorAll("[role=tab]")].map((item) => item.id)`);
-  await page.send("Page.enable");
-  await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
-  await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-  await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}` });
-  for (const deadline = Date.now() + STEP_MS; !(await tabs()).includes("tab-overview"); await pause(POLL_MS)) {
-    assert.ok(Date.now() < deadline, "the project page never showed its tabs");
-  }
-  await pause(SETTLE_MS);
-  if ((await me.seen()).includes("The IDE isn't downloaded yet.")) {
-    await me.click("Download", ".pj-ide-unavailable button");
-    await me.waitFor("the download under way", (text) => !text.includes("The IDE isn't downloaded yet."));
-  }
-  for (const deadline = Date.now() + BUILD_MS; !(await tabs()).includes("tab-ide"); await pause(POLL_MS * 10)) {
-    const text = await me.seen();
-    assert.ok(!IDE_FAILED.test(text), `the IDE download reports a failure: ${text.slice(0, 600)}`);
-    assert.ok(Date.now() < deadline, "the IDE build never became Ready");
-  }
-  await me.click("IDE", "[role=tab]");
-  for (const deadline = Date.now() + BUILD_MS; opened.length === known; await pause(POLL_MS * 10)) {
-    const text = await me.seen();
-    assert.ok(!IDE_FAILED.test(text), `the IDE tab reports a failure: ${text.slice(0, 600)}`);
-    assert.ok(Date.now() < deadline, `the IDE never opened: ${text.slice(0, 600)}`);
-  }
 }
 
 /** One level: a project saved at it, its IDE opened, then the server, workspace trust, the

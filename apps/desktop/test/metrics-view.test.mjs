@@ -399,3 +399,83 @@ test("a readout asked for a bar past the drawn ones is a programming error", asy
   const bars = [{ start_ms: SINCE, tokens: tokens({ input: 5 }) }];
   assert.throws(() => chart.chartReadout(bars, DAY, 0, 1), /a readout names a drawn bar/);
 });
+
+const NEXT_ACCOUNTS = createElement("section", { className: "next-accounts" }, "Next accounts");
+const appFilter = { projects: [{ id: "alpha", name: "Alpha" }], onProject: forbidden, limits: { pools: new Map(), failure: "", busy: null, next: NEXT_ACCOUNTS, revision: 0, onRefresh: forbidden, onSetReset: forbidden } };
+const moneyWith = (settings) => ({ settings: { main_number: "tokens", prices: "off", ...settings }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 });
+const withProjectLimits = (project_limits, patch = {}) => ({ kind: "ok", value: usage({ money: moneyWith({ project_limits }), ...patch }) });
+const FAILED_READ = { kind: "error", code: "usage_unavailable", message: "The engine could not read usage." };
+
+test("the app Metrics page with a project picked hides account-wide blocks unless the setting says Shown", () => {
+  const hidden = render({ projectId: "alpha", filter: appFilter, usage: withProjectLimits("hidden") });
+  const shown = render({ projectId: "alpha", filter: appFilter, usage: withProjectLimits("shown") });
+  const everyProject = render({ projectId: null, filter: appFilter, usage: withProjectLimits("hidden") });
+  assert.doesNotMatch(hidden, /usage-limits/);
+  assert.match(hidden, /Limits belong to accounts, not projects/);
+  assert.match(shown, /usage-limits/);
+  assert.match(everyProject, /usage-limits/);
+});
+
+test("Hidden: a picked project on the app page shows no account limits, no next accounts and says where they went", () => {
+  const hidden = render({ projectId: "alpha", filter: appFilter, usage: withProjectLimits("hidden") });
+  assert.doesNotMatch(hidden, /usage-limits|next-accounts|Account limits<|each account's limits/);
+  assert.match(text(hidden), /Tokens this project's agents used\./);
+  assert.match(text(hidden), /Limits belong to accounts, not projects\. Pick All projects to see them, or show them here\./);
+  assert.match(hidden, /aria-checked="true"[^>]*>Hidden</);
+});
+
+test("Shown: a picked project on the app page shows every account's limits and the next accounts, with no note", () => {
+  const shown = render({ projectId: "alpha", filter: appFilter, usage: withProjectLimits("shown") });
+  assert.match(shown, /usage-limits/);
+  assert.match(shown, /next-accounts/);
+  assert.match(text(shown), /each account's limits/);
+  assert.doesNotMatch(shown, /Limits belong to accounts, not projects/);
+  assert.match(shown, /aria-checked="true"[^>]*>Shown</);
+});
+
+test("a report from an engine that sends no account limits setting reads as Hidden", () => {
+  const older = render({ projectId: "alpha", filter: appFilter, usage: { kind: "ok", value: usage({ money: moneyWith({}) }) } });
+  assert.doesNotMatch(older, /usage-limits/);
+  assert.match(older, /aria-checked="true"[^>]*>Hidden</);
+});
+
+test("All projects shows account limits under either option and offers no switch for them", () => {
+  for (const option of ["hidden", "shown"]) {
+    const every = render({ projectId: null, filter: appFilter, usage: withProjectLimits(option) });
+    assert.match(every, /usage-limits/, option);
+    assert.match(every, /next-accounts/, option);
+    assert.doesNotMatch(every, /Account limits here|Limits belong to accounts/, option);
+  }
+});
+
+test("the project tab offers no account limits switch under either option", () => {
+  for (const option of ["hidden", "shown"]) {
+    const tab = render({ projectId: "alpha", usage: withProjectLimits(option) });
+    assert.doesNotMatch(tab, /Account limits here|usage-limits|Limits belong to accounts/, option);
+  }
+});
+
+test("Hidden keeps the warnings about the numbers themselves for a picked project", () => {
+  const hidden = render({ projectId: "alpha", filter: { ...appFilter, limits: { ...appFilter.limits, failure: "The reset time was not saved." } },
+    usage: withProjectLimits("hidden", { counting_notice: "These numbers still use the old counting.", partial_homes: 2 }) });
+  assert.match(text(hidden), /These numbers still use the old counting\./);
+  assert.match(text(hidden), /The reset time was not saved\./);
+  assert.match(text(hidden), /Some usage may be missing: 2 agent homes/);
+});
+
+test("Hidden holds while the metrics read fails or is not ready; Shown keeps the limits there", () => {
+  for (const metricsRead of [FAILED_READ, { kind: "not_ready" }]) {
+    const hidden = render({ projectId: "alpha", filter: appFilter, usage: withProjectLimits("hidden"), metrics: metricsRead });
+    const shown = render({ projectId: "alpha", filter: appFilter, usage: withProjectLimits("shown"), metrics: metricsRead });
+    assert.doesNotMatch(hidden, /usage-limits|next-accounts/, metricsRead.kind);
+    assert.match(shown, /usage-limits/, metricsRead.kind);
+    assert.match(shown, /next-accounts/, metricsRead.kind);
+  }
+});
+
+test("an account limits choice that is neither Hidden nor Shown is a programming error", () => {
+  assert.equal(view.showsAccountLimits(null, null), true);
+  assert.equal(view.showsAccountLimits("alpha", null), false);
+  assert.equal(view.showsAccountLimits("alpha", moneyWith({ project_limits: "shown" })), true);
+  assert.throws(() => view.showsAccountLimits("alpha", moneyWith({ project_limits: "sometimes" })), /the account limits choice is Hidden or Shown/);
+});

@@ -960,14 +960,16 @@ fn the_money_keys_flip_one_setting_and_send_it() {
         sent('m', &mut page, &mut ctx),
         MoneySettings {
             main_number: MainNumber::Tokens,
-            prices: PriceSource::Bundled
+            prices: PriceSource::Bundled,
+            ..MoneySettings::default()
         }
     );
     assert_eq!(
         sent('p', &mut page, &mut ctx),
         MoneySettings {
             main_number: MainNumber::Dollars,
-            prices: PriceSource::Off
+            prices: PriceSource::Off,
+            ..MoneySettings::default()
         }
     );
 }

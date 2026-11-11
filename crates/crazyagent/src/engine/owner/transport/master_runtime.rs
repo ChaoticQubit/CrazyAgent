@@ -1509,6 +1509,17 @@ mod tests {
         assert_eq!(reply.finish(), "DONE");
     }
 
+    /// An unlinked temp file only this user can read and write (mode 0600), as the engine
+    /// makes capture files; `tempfile::tempfile` gives mode 0644 on Linux, where it opens
+    /// with `O_TMPFILE`. Output: the open file.
+    fn private_file() -> std::fs::File {
+        let file = tempfile::tempfile().unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+        file
+    }
+
     fn protocol_input() -> ObservedEvent {
         ObservedEvent {
             provenance: Provenance {
@@ -1530,7 +1541,7 @@ mod tests {
 
     #[test]
     fn capture_records_actual_file_bytes_and_syncs_before_reply_provenance() {
-        let file = tempfile::tempfile().unwrap();
+        let file = private_file();
         let readback = file.try_clone().unwrap();
         let mut capture = Capture::new(file, 8192).unwrap();
         let event = protocol_input();
@@ -1547,12 +1558,12 @@ mod tests {
 
     #[test]
     fn capture_rejects_preexisting_data_and_public_permissions() {
-        let mut existing = tempfile::tempfile().unwrap();
+        let mut existing = private_file();
         existing.write_all(b"existing").unwrap();
         assert!(
             matches!(Capture::new(existing, 8192), Err(EngineError(code)) if code == "master_capture_identity")
         );
-        let public = tempfile::tempfile().unwrap();
+        let public = private_file();
         public
             .set_permissions(std::fs::Permissions::from_mode(0o644))
             .unwrap();
@@ -1563,7 +1574,7 @@ mod tests {
 
     #[test]
     fn capture_rejects_over_limit_input_without_partial_file_or_sequence() {
-        let file = tempfile::tempfile().unwrap();
+        let file = private_file();
         let readback = file.try_clone().unwrap();
         let mut capture = Capture::new(file, 1).unwrap();
         let error = capture.record(&protocol_input()).unwrap_err();
@@ -1576,13 +1587,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "limit > 0")]
     fn capture_zero_budget_trips_internal_invariant() {
-        let _ = Capture::new(tempfile::tempfile().unwrap(), 0);
+        let _ = Capture::new(private_file(), 0);
     }
 
     #[test]
     #[should_panic(expected = "self.sequence > 0")]
     fn capture_without_an_observed_event_cannot_finish() {
-        let capture = Capture::new(tempfile::tempfile().unwrap(), 8192).unwrap();
+        let capture = Capture::new(private_file(), 8192).unwrap();
         let _ = capture.finish();
     }
 

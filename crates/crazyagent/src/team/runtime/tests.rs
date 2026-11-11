@@ -254,10 +254,14 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn names(ids: &[i64]) -> Vec<AgentId> {
     ids.iter().map(|id| AgentId::team(*id).unwrap()).collect()
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
     let fixture = Fixture::new(1);
@@ -331,6 +335,9 @@ fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
 /// FBTMUX-P1, Stop: with team agents set to stop when CrazyAgent quits, an engine stop ends
 /// an agent's live pane as an owner Stop would and leaves no pane for a next engine, while
 /// keeping them running stays the default.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
     let fixture = Fixture::new(1);
@@ -366,6 +373,9 @@ fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
     assert_eq!(again.shutdown().unwrap(), Vec::<AgentId>::new());
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_stopped() {
     let fixture = Fixture::new(1);
@@ -465,6 +475,9 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
     host.close(&[]).unwrap();
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_is_stopped() {
     use crate::sandbox::toolchains::Toolchain;
@@ -595,6 +608,9 @@ fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
 /// An agent holding a toolchain is stopped under a reason that says what happened: a
 /// policy the engine cannot read is named as unreadable, and a toolchain the saved policy
 /// no longer allows without an owner choice turning it off is never called turned off.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why() {
     use crate::sandbox::toolchains::Toolchain;
@@ -658,6 +674,9 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
     assert!(again.shutdown().unwrap().is_empty());
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_project_never_runs_more_than_fifteen_agent_terminals() {
     let fixture = Fixture::new(14);
@@ -725,6 +744,9 @@ fn a_project_never_runs_more_than_fifteen_agent_terminals() {
     host.close(&[]).unwrap();
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_removed_project_stops_its_agents_and_their_panes() {
     let fixture = Fixture::new(1);
@@ -761,6 +783,9 @@ fn count(connection: &Connection, sql: &str) -> i64 {
 /// (WK-R5): its framing lists the finished sub-agents and says how once there is one, the
 /// line pins the text to that agent, and the master hears, under the name the engine
 /// settled, what was woken and what was not.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_a_reply_line() {
     let mut fixture = Fixture::new(1);
@@ -5353,6 +5378,7 @@ fn dispatch_interrupted_after_send_is_not_handed_out_again_and_one_before_send_w
 /// Reads everything typed into the pane of an agent `asking_team` started, from the log its
 /// `cat` appends to. Only those panes write it; read pastes into a harness stand-in with
 /// `pasted`.
+#[cfg(target_os = "macos")]
 fn asking_pane_log(fixture: &Fixture, id: i64) -> String {
     std::fs::read_to_string(fixture.base.join(format!("typed-{id}.txt"))).unwrap_or_default()
 }
@@ -5361,6 +5387,7 @@ fn asking_pane_log(fixture: &Fixture, id: i64) -> String {
 /// tools, one per id, each taken over from a pane that writes what is typed into it to the
 /// file `asking_pane_log` reads. Takes the fixture, whose plan must have room for the ids, and the
 /// ids. Returns the terminal host and the runtime once every agent is idle.
+#[cfg(target_os = "macos")]
 fn asking_team(fixture: &mut Fixture, ids: &[i64]) -> (Arc<dyn Host>, TeamRuntime) {
     fixture.setup.team.sub_harnesses[0].tools = true;
     fixture
@@ -5407,6 +5434,7 @@ fn asking_team(fixture: &mut Fixture, ids: &[i64]) -> (Arc<dyn Host>, TeamRuntim
 /// Waits until an answer was typed into an agent's terminal, lets the runtime tick on, and
 /// requires it was typed exactly once. Takes the fixture, the runtime, the agent and the
 /// answer.
+#[cfg(target_os = "macos")]
 fn typed_once(fixture: &Fixture, team: &mut TeamRuntime, id: i64, answer: &str) {
     let deadline = Instant::now() + WAIT;
     while !asking_pane_log(fixture, id).contains(answer) {
@@ -5431,6 +5459,9 @@ fn typed_once(fixture: &Fixture, team: &mut TeamRuntime, id: i64, answer: &str) 
 /// given it. Agent 7's Messages timeline keeps it once as the engine's notice and agent 8's
 /// keeps nothing of it (V2PB-L2). Each pane writes what it is given to a file, so the count
 /// does not depend on how the screen echoes or wraps.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds_its_id_as_a_handle()
  {
@@ -5449,6 +5480,7 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
 
     let ask = crate::questions::Ask {
         question: "Which database should the service use?".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: vec![],
         recommended: None,
         context: None,
@@ -5466,7 +5498,10 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
             &fixture.connection,
             question,
             0,
-            &crate::questions::Answer::Text(answer.into()),
+            &crate::questions::Answer {
+                picks: Vec::new(),
+                comment: Some(answer.into())
+            },
         )
         .unwrap(),
         crate::questions::Settlement::Settled
@@ -5505,6 +5540,9 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
 /// through a runtime tick into the questions log under that agent, the server hands the
 /// agent the question's id, and the owner's answer is typed into that agent's terminal
 /// exactly once.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_sub_agent_s_question_is_logged_on_a_tick_and_the_owner_s_answer_is_typed_back_once() {
     let mut fixture = Fixture::new(1);
@@ -5555,7 +5593,10 @@ fn a_sub_agent_s_question_is_logged_on_a_tick_and_the_owner_s_answer_is_typed_ba
             &fixture.connection,
             pending[0].id,
             pending[0].version,
-            &crate::questions::Answer::Text(answer.into()),
+            &crate::questions::Answer {
+                picks: Vec::new(),
+                comment: Some(answer.into())
+            },
         )
         .unwrap(),
         crate::questions::Settlement::Settled
@@ -5589,6 +5630,7 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
     for earlier in 1..crate::questions::PENDING_PER_ASKER_MAX {
         let ask = Ask {
             question: format!("Earlier question {earlier}?"),
+            kind: crate::questions::QuestionKind::Text,
             options: vec![],
             recommended: None,
             context: None,
@@ -21534,6 +21576,7 @@ fn nc_under_profile(runtime: &TeamRuntime, id: i64, plan: &Plan, port: u16) -> S
 /// Asks a model proxy for a tunnel to `target` and reads its status line. Inputs: the
 /// proxy's port and the `host:port` target. Output: the status line, or why nothing
 /// listens on the port.
+#[cfg(target_os = "macos")]
 fn proxy_status(port: u16, target: &str) -> String {
     use std::io::{BufRead, Write};
     let mut client = match crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)) {
@@ -21913,6 +21956,9 @@ fn an_endpoint_agent_under_no_network_gets_a_proxy_only_for_its_named_https_endp
 /// record and profile name, with its account's hosts, and closes with the engine; a pane
 /// whose saved port another process took ends with the reason, since its profile reaches
 /// no other port (S4b).
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     let fixture = Fixture::new(1);
@@ -22056,6 +22102,9 @@ fn a_kept_pane_with_tools_started_under_a_wider_network_is_not_taken_over() {
 
 /// A running agent with tools whose launch network is wider than the one the owner saves
 /// now is stopped with the reason, as a lowered access level stops it (CS-2, AL-2).
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_agent_with_tools_running_under_a_wider_network_than_the_saved_one_is_stopped() {
     use crate::sandbox::policy::{AgentNetwork, AgentPolicy};

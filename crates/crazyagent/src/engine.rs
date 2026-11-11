@@ -349,6 +349,20 @@ fn io_error(error: impl std::fmt::Display) -> EngineError {
     EngineError(error.to_string())
 }
 
+/// Runs blocking work, such as an account renewal of up to two minutes or a harness hash of
+/// hundreds of MB, so it never stalls the async runtime: on a multi-thread tokio runtime the
+/// worker first hands its other tasks to another thread; anywhere else the work runs in place.
+/// Input: the work. Output: its result.
+#[cfg(unix)]
+fn off_worker<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 #[cfg(unix)]
 fn verify_directory(path: &Path) -> Result<(), EngineError> {
     let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;

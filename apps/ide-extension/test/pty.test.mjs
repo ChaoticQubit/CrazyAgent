@@ -162,3 +162,35 @@ test("a terminal asks the engine for its profile's level and shows a refusal to 
   assert.deepEqual(asked, [["ide.terminal", { cols: 80, rows: 24, level: "own_branch" }]]);
   assert.ok(seen.shown.join("").includes("Raise project access to use this"), seen.shown.join(""));
 });
+
+test("a terminal says when the engine attached it, and that it stopped or closed first", LIMIT, async () => {
+  await withSession(async (engine, server, socket) => {
+    const attached = await opened(engine, server, undefined);
+    await attached.peer.frame();
+    const early = await Promise.race([attached.pty.ready, new Promise((resolve) => setTimeout(() => resolve("waiting"), 20))]);
+    assert.equal(early, "waiting", "a terminal is not ready before the engine's ok");
+    attached.connection.write(bytes(terminal.frames[0]));
+    assert.equal(await attached.pty.ready, true);
+    attached.pty.close();
+    assert.equal(await attached.pty.ready, true, "a terminal that attached stays so after it closes");
+    await attached.gone;
+
+    const refused = await opened(engine, server, undefined);
+    await refused.peer.frame();
+    refused.connection.write(encodeFrame({ kind: "rejected", code: "ide_terminals_busy" }));
+    assert.equal(await refused.pty.ready, false);
+    assert.deepEqual(refused.seen.shown, [`\r\n${BUSY}\r\n`]);
+    await refused.gone;
+
+    const closed = await opened(engine, server, undefined);
+    await closed.peer.frame();
+    closed.pty.close();
+    assert.equal(await closed.pty.ready, false);
+    await closed.gone;
+
+    const unready = new Engine(socket, join(socket, "missing"), memoryStore());
+    const sessionless = new SandboxedPty((name, args) => unready.stream(name, args), "sandboxed");
+    sessionless.open(undefined);
+    assert.equal(await sessionless.ready, false);
+  });
+});

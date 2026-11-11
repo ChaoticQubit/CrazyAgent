@@ -311,11 +311,14 @@ test("a refused Check limits says why on the failed-read page (r1 L2)", () => {
   assert.match(text(render({ metrics: failed, filter })), /The check failed\./);
 });
 
-test("a picked project keeps the app page's notice and Account limits (r1 L3)", () => {
-  const words = text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()], counting_notice: "These numbers still use the old counting." }) }));
-  assert.match(words, /These numbers still use the old counting\./);
-  assert.match(words, /Account limits/);
-  assert.match(words, /Set reset time/);
+test("a picked project keeps the app page's notice, and Account limits once the owner shows them (r1 L3, DEC-132)", () => {
+  const picked = (project_limits) => text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()], counting_notice: "These numbers still use the old counting.", money: { ...usage.money, settings: { ...usage.money.settings, project_limits } } }) }));
+  assert.match(picked("shown"), /These numbers still use the old counting\./);
+  assert.match(picked("shown"), /Account limits/);
+  assert.match(picked("shown"), /Set reset time/);
+  assert.match(picked("hidden"), /These numbers still use the old counting\./);
+  assert.doesNotMatch(picked("hidden"), /Set reset time/);
+  assert.match(picked("hidden"), /Limits belong to accounts, not projects\./);
 });
 
 test("the page has a panel by project, agent, run, account, pool and harness, then lines changed, in the mockup's order", () => {

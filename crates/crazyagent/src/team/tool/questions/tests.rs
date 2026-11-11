@@ -89,6 +89,7 @@ fn shipping() -> Value {
 fn shipped() -> Call {
     Call::Ask {
         question: "Ship the release on Friday?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Friday".into(), "Monday".into()],
         recommended: Some("Friday".into()),
         context: Some("Every check passes today.".into()),
@@ -195,6 +196,7 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
     planted.push(b'\n');
     let unchecked = Call::Ask {
         question: "Which day?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Friday".into()],
         recommended: Some("Sunday".into()),
         context: None,
@@ -253,6 +255,7 @@ fn a_sub_agent_hears_why_its_question_was_not_logged() {
     let asker = Asker::Agent(AGENT);
     let ask = crate::questions::Ask {
         question: "Ship the release on Friday?".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: None,
@@ -324,6 +327,7 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
 fn asked(case: &Case, asker: &Asker, question: &str) -> u64 {
     let ask = crate::questions::Ask {
         question: question.into(),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: None,
@@ -402,6 +406,25 @@ fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owne
         ]
     );
     assert!(apply_master_calls(&case.db, &case.project, 41, &drop).is_empty());
+}
+
+#[test]
+fn a_question_outside_the_kind_rules_hears_those_rules_and_is_not_logged() {
+    let case = Case::new();
+    let call = Call::Ask {
+        question: "Which database?".into(),
+        kind: crate::questions::QuestionKind::Single,
+        options: vec!["Postgres".into()],
+        recommended: Some("Postgres".into()),
+        context: None,
+    };
+    assert_eq!(
+        logged_ask(&case.db, &case.project, &Asker::Master(41), call).as_deref(),
+        Some(
+            "Your question \"Which database?\" was not logged for the owner: it is not one plain question of kind single or multi with 2 to 6 one-line options and one of them recommended, or of kind text with no options."
+        )
+    );
+    assert!(open_ids(&case).is_empty());
 }
 
 #[test]

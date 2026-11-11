@@ -392,6 +392,7 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
         &Asker::Master(master),
         &Ask {
             question: "Ship on Friday?".into(),
+            kind: crazyagent::questions::QuestionKind::Text,
             options: vec![],
             recommended: Some("Ship it".into()),
             context: None,
@@ -420,7 +421,14 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
                 .await
                 .unwrap();
             let settled = owner
-                .questions_answer(question, 0, Answer::Text(marker.clone()))
+                .questions_answer(
+                    question,
+                    0,
+                    Answer {
+                        picks: Vec::new(),
+                        comment: Some(marker.clone()),
+                    },
+                )
                 .await;
             owner.detach();
             settled
