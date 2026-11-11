@@ -673,6 +673,12 @@ pub enum OwnerRead {
     ProjectMasterSessions {
         project_id: ProjectId,
     },
+    ProjectMasterMessages {
+        project_id: ProjectId,
+        session_id: SessionId,
+        before: Option<u64>,
+        limit: u8,
+    },
     ProjectMasterInputs {
         project_id: ProjectId,
         session_id: SessionId,
@@ -840,6 +846,7 @@ impl OwnerRead {
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
             | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterMessages { .. }
             | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
@@ -1050,6 +1057,9 @@ impl OwnerRequest {
                 if let OwnerRead::ProjectMasterTurns { cursor, limit, .. } = query {
                     crate::master_session::validate_page(cursor.as_ref(), *limit)?;
                 }
+                if let OwnerRead::ProjectMasterMessages { before, limit, .. } = query {
+                    crate::master_sessions::validate_messages_page(*before, *limit)?;
+                }
                 if let OwnerRead::ModelAccessPage { limit, cursor, .. } = query {
                     if !(1..=16).contains(limit) {
                         return Err(failure("model_access_page_limit"));
@@ -1196,6 +1206,9 @@ pub enum OwnerData {
     },
     ProjectMasterSessions {
         sessions: Vec<crate::master_sessions::MasterSessionSummary>,
+    },
+    ProjectMasterMessages {
+        page: crate::master_sessions::SessionMessagePage,
     },
     ProjectMasterInputs {
         entries: Vec<crate::conversation::ConversationEntry>,

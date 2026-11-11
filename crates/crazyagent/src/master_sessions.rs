@@ -12,6 +12,36 @@ use std::path::PathBuf;
 pub const SESSIONS_LISTED_MAX: usize = 50;
 /// The most characters a session's first or last line keeps in the list.
 pub const LINE_CHARS_MAX: usize = 80;
+/// The most bytes of one stored message of a master conversation; longer text is cut with
+/// "..." at the end.
+pub const MESSAGE_BYTES_MAX: usize = 8192;
+/// The most messages one page of a session's conversation carries.
+pub const MESSAGES_PAGE_MAX: u8 = 64;
+/// The most bytes one page of a session's conversation serializes to, so it fits a frame.
+const MESSAGES_PAGE_BYTES_MAX: usize = crate::master_session::PAGE_BYTES_MAX;
+/// The one store of every master conversation: one row per message, whatever harness ran
+/// the master and whether the engine ran the turn itself or the master's own app ran it in
+/// the live terminal. `seq` orders a session's rows; `speaker` is who said it, with `switch`
+/// for the divider where another master took over; `mode` and `harness` say which master
+/// the row belongs to, or for a divider which one took over; `text` is absent for a
+/// terminal turn whose typed words were not read. `source` and `source_key` name the turn
+/// or record line a row came from, so writing one twice keeps one row.
+const MESSAGES: &str = "CREATE TABLE IF NOT EXISTS session_messages (
+    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
+    seq INTEGER NOT NULL CHECK(seq > 0),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    speaker TEXT NOT NULL CHECK(speaker IN ('owner','engine','master','switch')),
+    mode TEXT NOT NULL CHECK(mode IN ('one_turn','live')),
+    harness TEXT CHECK(harness IS NULL OR length(harness) BETWEEN 1 AND 64),
+    text TEXT CHECK(text IS NULL OR length(CAST(text AS BLOB)) BETWEEN 1 AND 8192),
+    at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
+    source TEXT NOT NULL CHECK(source IN ('turn','terminal','record','counter','switch','backfill')),
+    source_key TEXT NOT NULL CHECK(length(source_key) BETWEEN 1 AND 192),
+    PRIMARY KEY(session,seq),
+    UNIQUE(session,source,source_key)
+)";
+const _: () = assert!(MESSAGE_BYTES_MAX == 8192);
+const _: () = assert!(MESSAGES_PAGE_BYTES_MAX < crate::protocol::FRAME_BYTES_MAX);
 /// The most agent names one listed session carries.
 pub const LISTED_AGENTS_MAX: usize = 6;
 /// The most bytes the encoded session list may take, under the owner frame bound.
@@ -79,6 +109,8 @@ const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.sessi
 /// live terminal; `last_line` is the newest engine-run line, else the newest terminal reply
 /// kept. `agents` names the session's own sub-agents, newest first;
 /// `results_waiting` counts finished sub-agent results queued for this session's master.
+/// `mode` and `harness` name the master that ran the session's newest stored message, or
+/// took the conversation over last; both are absent for a session with no stored message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterSessionSummary {
@@ -93,6 +125,94 @@ pub struct MasterSessionSummary {
     pub last_line: Option<String>,
     pub agents: Vec<String>,
     pub results_waiting: u64,
+    pub mode: Option<MasterMode>,
+    pub harness: Option<String>,
+}
+
+/// Who said one message of a master conversation: the owner, the engine on its own
+/// behalf, the master, or `Switch` for the divider where another master took over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageSpeaker {
+    Owner,
+    Engine,
+    Master,
+    Switch,
+}
+
+impl MessageSpeaker {
+    /// The stored name. Takes the speaker. Returns the name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Engine => "engine",
+            Self::Master => "master",
+            Self::Switch => "switch",
+        }
+    }
+
+    /// The speaker a stored name means. Takes the name. Returns None for any other text.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Owner, Self::Engine, Self::Master, Self::Switch]
+            .into_iter()
+            .find(|speaker| speaker.name() == name)
+    }
+}
+
+/// How a master runs: the engine runs each turn itself (`OneTurn`), or the master's own app
+/// runs in the live terminal (`Live`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterMode {
+    OneTurn,
+    Live,
+}
+
+impl MasterMode {
+    /// The stored name. Takes the mode. Returns the name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OneTurn => "one_turn",
+            Self::Live => "live",
+        }
+    }
+
+    /// The mode a stored name means. Takes the name. Returns None for any other text.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::OneTurn, Self::Live]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// One message of a master conversation as the store keeps it and every view reads it.
+/// `seq` orders a session's messages from 1. `harness` is the catalog id of a live master's
+/// harness, or the backend name of a one-turn master (`rcli`, `codex`, `claude`). `text` is
+/// absent for a terminal turn whose typed words were not read; for a `switch` it is the
+/// divider line. `at_ms` is the wall-clock time the row was stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMessage {
+    pub seq: u64,
+    pub speaker: MessageSpeaker,
+    pub mode: MasterMode,
+    pub harness: Option<String>,
+    pub text: Option<String>,
+    pub at_ms: u64,
+}
+
+/// One page of a session's conversation: `messages` oldest first, ending just before the
+/// `before` the read named, or at the session's newest message. `next` is the `before` of
+/// the page of older messages, absent once the page holds the session's first message.
+/// `count` is every stored message of the session, dividers included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMessagePage {
+    pub project_id: ProjectId,
+    pub session_id: SessionId,
+    pub messages: Vec<SessionMessage>,
+    pub next: Option<u64>,
+    pub count: u64,
 }
 
 /// How the live master runs a project's live session. `Resume` continues the harness
@@ -130,6 +250,14 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 /// with the table left as it was.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    initialize_owner_turns(connection)?;
+    connection.execute_batch(MESSAGES).map_err(error)
+}
+
+/// Creates the marks table and the table of sessions with an owner turn as older engines
+/// kept them. Takes the engine connection. Returns any SQLite failure.
+#[cfg(unix)]
+fn initialize_owner_turns(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
     if table_exists(connection, "session_owner_turns")? {
         if !owner_turns_column(connection, "turns")? {
@@ -495,6 +623,7 @@ pub(crate) fn list(
             return Err(error("master_session_record"));
         }
         let (terminal_turns, terminal_line) = terminal(connection, &session_id)?;
+        let (mode, harness) = newest_runner(connection, &session_id)?.unzip();
         let summary = MasterSessionSummary {
             phase,
             created: Cursor::new(created),
@@ -508,6 +637,8 @@ pub(crate) fn list(
             last_line: last_line(connection, &session_id)?.or(terminal_line),
             agents: agent_names(connection, project, &session_id)?,
             results_waiting: results_waiting(connection, &session_id)?,
+            mode,
+            harness: harness.flatten(),
             session_id,
         };
         let size = serde_json::to_vec(&summary).map_err(error)?.len() + 1;
@@ -1307,6 +1438,189 @@ fn fit(mut text: String, max: usize) -> String {
     text
 }
 
+/// The master that ran a session's newest stored message, or took its conversation over
+/// last. Takes the connection and session. Returns its mode and harness, or None for a
+/// session with no stored message; `session_message_record` for a mode no writer stores.
+fn newest_runner(
+    connection: &Connection,
+    session: &SessionId,
+) -> Result<Option<(MasterMode, Option<String>)>, EngineError> {
+    if !table_exists(connection, "session_messages")? {
+        return Ok(None);
+    }
+    let row: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT mode,CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END
+             FROM session_messages WHERE session=?1 ORDER BY seq DESC LIMIT 1",
+            [session.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    row.map(|(mode, harness)| {
+        let mode = MasterMode::named(&mode).ok_or_else(|| error("session_message_record"))?;
+        Ok((mode, harness))
+    })
+    .transpose()
+}
+
+/// Checks the bounds of a conversation page read. Takes the `before` cursor and the
+/// limit. Returns `master_messages_page_limit` or `master_messages_cursor_bounds`.
+pub(crate) fn validate_messages_page(before: Option<u64>, limit: u8) -> Result<(), EngineError> {
+    if !(1..=MESSAGES_PAGE_MAX).contains(&limit) {
+        return Err(error("master_messages_page_limit"));
+    }
+    if before.is_some_and(|before| before == 0 || before > i64::MAX.unsigned_abs()) {
+        return Err(error("master_messages_cursor_bounds"));
+    }
+    Ok(())
+}
+
+/// Reads one page of a session's conversation from the store: the newest messages before
+/// `before`, or the session's newest when it is absent, at most `limit` and as many as one
+/// reply holds, oldest first. A lone message too large for a reply has its text cut. Takes
+/// the connection, project, session, cursor and limit. Returns the page; a database
+/// without the store gives an empty one.
+pub(crate) fn page(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    before: Option<u64>,
+    limit: u8,
+) -> Result<SessionMessagePage, EngineError> {
+    validate_messages_page(before, limit)?;
+    let mut page = SessionMessagePage {
+        project_id: project.clone(),
+        session_id: session.clone(),
+        messages: Vec::new(),
+        next: None,
+        count: 0,
+    };
+    if !table_exists(connection, "session_messages")? {
+        return Ok(page);
+    }
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_messages WHERE session=?1 AND project=?2",
+            params![session.as_str(), project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    page.count = u64::try_from(count).map_err(error)?;
+    let mut older = false;
+    for (index, message) in page_rows(connection, project, session, before, limit)?
+        .into_iter()
+        .enumerate()
+    {
+        if index == usize::from(limit) {
+            older = true;
+            break;
+        }
+        let previous = page.next.replace(message.seq);
+        page.messages.push(message);
+        if page_fits(&page)? {
+            continue;
+        }
+        if page.messages.len() > 1 {
+            page.messages.pop();
+            page.next = previous;
+            older = true;
+            break;
+        }
+        cut_to_fit(&mut page)?;
+    }
+    if !older {
+        page.next = None;
+    }
+    page.messages.reverse();
+    assert!(page.messages.len() <= usize::from(limit));
+    assert!(page_fits(&page)?);
+    Ok(page)
+}
+
+/// Reads the stored messages a page is built from, newest first, one more than `limit` so
+/// the page knows whether older ones exist. Takes the connection, project, session, cursor
+/// and limit. Returns them, or `session_message_record` for a row no writer stores.
+fn page_rows(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    before: Option<u64>,
+    limit: u8,
+) -> Result<Vec<SessionMessage>, EngineError> {
+    let before = i64::try_from(before.unwrap_or(i64::MAX.unsigned_abs())).map_err(error)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT seq,speaker,mode,
+                    CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END,
+                    CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END,at_ms
+             FROM session_messages WHERE session=?1 AND project=?2 AND seq<?3
+             ORDER BY seq DESC LIMIT ?4",
+        )
+        .map_err(error)?;
+    type Row = (i64, String, String, Option<String>, Option<String>, i64);
+    let rows = statement
+        .query_map(
+            params![
+                session.as_str(),
+                project.as_str(),
+                before,
+                i64::from(limit) + 1
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= usize::from(limit) + 1);
+    let record = || error("session_message_record");
+    rows.into_iter()
+        .map(|(seq, speaker, mode, harness, text, at_ms)| {
+            Ok(SessionMessage {
+                seq: u64::try_from(seq).map_err(error)?,
+                speaker: MessageSpeaker::named(&speaker).ok_or_else(record)?,
+                mode: MasterMode::named(&mode).ok_or_else(record)?,
+                harness,
+                text,
+                at_ms: u64::try_from(at_ms).map_err(error)?,
+            })
+        })
+        .collect()
+}
+
+/// Tells whether a conversation page serializes inside its byte bound. Takes the page.
+/// Returns the answer, or the serializer's failure.
+fn page_fits(page: &SessionMessagePage) -> Result<bool, EngineError> {
+    Ok(serde_json::to_vec(page).map_err(error)?.len() <= MESSAGES_PAGE_BYTES_MAX)
+}
+
+/// Halves the text of a page's only message, marked as cut, until the page fits one
+/// reply; text made of characters that serialize long can need it. Takes the page. Returns
+/// the serializer's failure.
+fn cut_to_fit(page: &mut SessionMessagePage) -> Result<(), EngineError> {
+    assert!(page.messages.len() == 1);
+    for _ in 0..16 {
+        if page_fits(page)? {
+            return Ok(());
+        }
+        let message = &mut page.messages[0];
+        let text = message.text.take().unwrap_or_default();
+        let keep = text.len() / 2;
+        message.text = (keep > 3).then(|| marked(&text, keep));
+    }
+    assert!(page_fits(page)?);
+    Ok(())
+}
+
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
@@ -1808,5 +2122,202 @@ mod tests {
             !matches!(plan, ResumePlan::Resume { .. }),
             "another harness never resumes the kept conversation: {plan:?}"
         );
+    }
+    /// A connection holding only the conversation store, with the given rows of one
+    /// session: speaker, mode, harness and text, stored in that order from seq 1.
+    fn stored_messages(
+        project: &str,
+        session: &str,
+        rows: &[(&str, &str, Option<&str>, Option<&str>)],
+    ) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(super::MESSAGES).unwrap();
+        for (index, (speaker, mode, harness, text)) in rows.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO session_messages(session,seq,project,speaker,mode,harness,text,at_ms,source,source_key)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'turn',?9)",
+                    rusqlite::params![
+                        session,
+                        i64::try_from(index).unwrap() + 1,
+                        project,
+                        speaker,
+                        mode,
+                        harness,
+                        text,
+                        1_000 + i64::try_from(index).unwrap(),
+                        index.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+    }
+
+    /// A conversation page holds the session's newest messages oldest first, whatever
+    /// master said them, and its cursor walks back to the first message: an engine-run
+    /// turn, the divider where the live terminal took over, and a terminal turn whose typed
+    /// words were not read all come back as rows of the one store.
+    #[test]
+    fn a_message_page_reads_newest_first_and_walks_back_to_the_first_message() {
+        let project = crate::protocol::ProjectId::new("page-project").unwrap();
+        let session = crate::protocol::SessionId::new("page-session").unwrap();
+        let connection = stored_messages(
+            "page-project",
+            "page-session",
+            &[
+                ("owner", "one_turn", Some("claude"), Some("plan the launch")),
+                ("master", "one_turn", Some("claude"), Some("launch planned")),
+                (
+                    "switch",
+                    "live",
+                    Some("claude-code"),
+                    Some("Switched to Claude Code."),
+                ),
+                ("owner", "live", Some("claude-code"), None),
+                (
+                    "master",
+                    "live",
+                    Some("claude-code"),
+                    Some("launch shipped"),
+                ),
+            ],
+        );
+
+        let newest = super::page(&connection, &project, &session, None, 2).unwrap();
+        let middle = super::page(&connection, &project, &session, newest.next, 2).unwrap();
+        let oldest = super::page(&connection, &project, &session, middle.next, 2).unwrap();
+
+        let seqs = |page: &super::SessionMessagePage| {
+            page.messages
+                .iter()
+                .map(|message| message.seq)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seqs(&newest), [4, 5]);
+        assert_eq!(newest.next, Some(4));
+        assert_eq!(newest.count, 5);
+        assert_eq!(seqs(&middle), [2, 3]);
+        assert_eq!(middle.next, Some(2));
+        assert_eq!(seqs(&oldest), [1]);
+        assert_eq!(oldest.next, None);
+        assert_eq!(
+            newest.messages[0],
+            super::SessionMessage {
+                seq: 4,
+                speaker: super::MessageSpeaker::Owner,
+                mode: super::MasterMode::Live,
+                harness: Some("claude-code".into()),
+                text: None,
+                at_ms: 1_003,
+            }
+        );
+        assert_eq!(
+            middle.messages[1],
+            super::SessionMessage {
+                seq: 3,
+                speaker: super::MessageSpeaker::Switch,
+                mode: super::MasterMode::Live,
+                harness: Some("claude-code".into()),
+                text: Some("Switched to Claude Code.".into()),
+                at_ms: 1_002,
+            }
+        );
+        assert_eq!(oldest.messages[0].text.as_deref(), Some("plan the launch"));
+    }
+
+    /// A page stops before the message that would push it past one reply and names the
+    /// cursor of the rest, so a session of long messages is read in several pages and none
+    /// is dropped.
+    #[test]
+    fn a_message_page_of_long_messages_stops_inside_one_reply() {
+        let project = crate::protocol::ProjectId::new("page-project").unwrap();
+        let session = crate::protocol::SessionId::new("page-session").unwrap();
+        let long = "\"".repeat(super::MESSAGE_BYTES_MAX);
+        let connection = stored_messages(
+            "page-project",
+            "page-session",
+            &[
+                ("owner", "one_turn", Some("rcli"), Some(long.as_str())),
+                ("master", "one_turn", Some("rcli"), Some(long.as_str())),
+                ("owner", "one_turn", Some("rcli"), Some(long.as_str())),
+            ],
+        );
+
+        let page = super::page(&connection, &project, &session, None, 64).unwrap();
+
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].seq, 3);
+        assert_eq!(page.messages[0].text.as_deref(), Some(long.as_str()));
+        assert_eq!(page.next, Some(3));
+        assert_eq!(page.count, 3);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= super::MESSAGES_PAGE_BYTES_MAX);
+    }
+
+    /// One message whose text serializes larger than a reply is cut and marked as cut, so
+    /// the session still opens.
+    #[test]
+    fn a_lone_message_too_large_for_a_reply_is_cut_not_refused() {
+        let project = crate::protocol::ProjectId::new("page-project").unwrap();
+        let session = crate::protocol::SessionId::new("page-session").unwrap();
+        let long = "\u{1}".repeat(super::MESSAGE_BYTES_MAX);
+        let connection = stored_messages(
+            "page-project",
+            "page-session",
+            &[("master", "live", Some("codex"), Some(long.as_str()))],
+        );
+
+        let page = super::page(&connection, &project, &session, None, 64).unwrap();
+
+        let text = page.messages[0].text.as_deref().unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert!(text.len() < long.len(), "{}", text.len());
+        assert!(text.ends_with("..."), "{}", text.len());
+        assert_eq!(page.next, None);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= super::MESSAGES_PAGE_BYTES_MAX);
+    }
+
+    /// A page read names its bounds: no page of zero or of more than the page maximum, and
+    /// no cursor before the first message.
+    #[test]
+    fn a_message_page_refuses_a_limit_or_cursor_out_of_bounds() {
+        let project = crate::protocol::ProjectId::new("page-project").unwrap();
+        let session = crate::protocol::SessionId::new("page-session").unwrap();
+        let connection = stored_messages("page-project", "page-session", &[]);
+        let refused = |before, limit| {
+            super::page(&connection, &project, &session, before, limit)
+                .unwrap_err()
+                .0
+        };
+
+        assert_eq!(refused(None, 0), "master_messages_page_limit");
+        assert_eq!(
+            refused(None, super::MESSAGES_PAGE_MAX + 1),
+            "master_messages_page_limit"
+        );
+        assert_eq!(refused(Some(0), 1), "master_messages_cursor_bounds");
+        assert_eq!(refused(Some(u64::MAX), 1), "master_messages_cursor_bounds");
+    }
+
+    /// A session's messages are read only under the project that holds them, and a database
+    /// an older engine made, with no store yet, gives an empty page.
+    #[test]
+    fn a_message_page_holds_only_the_named_project_and_is_empty_without_the_store() {
+        let session = crate::protocol::SessionId::new("page-session").unwrap();
+        let other = crate::protocol::ProjectId::new("other-project").unwrap();
+        let connection = stored_messages(
+            "page-project",
+            "page-session",
+            &[("owner", "live", Some("codex"), Some("hello"))],
+        );
+        let bare = rusqlite::Connection::open_in_memory().unwrap();
+
+        let foreign = super::page(&connection, &other, &session, None, 8).unwrap();
+        let unstored = super::page(&bare, &other, &session, None, 8).unwrap();
+
+        assert!(foreign.messages.is_empty());
+        assert_eq!(foreign.count, 0);
+        assert!(unstored.messages.is_empty());
+        assert_eq!(unstored.next, None);
     }
 }

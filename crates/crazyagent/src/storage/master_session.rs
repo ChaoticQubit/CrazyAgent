@@ -5028,6 +5028,21 @@ pub(super) fn read(
         OwnerRead::ProjectMasterSessions { project_id } => OwnerData::ProjectMasterSessions {
             sessions: crate::master_sessions::list(&tx, project_id)?,
         },
+        OwnerRead::ProjectMasterMessages {
+            project_id,
+            session_id,
+            before,
+            limit,
+        } => {
+            if load_session(&tx, session_id, revision)?
+                .is_none_or(|session| &session.project_id != project_id)
+            {
+                return Err(error("master_session_missing"));
+            }
+            OwnerData::ProjectMasterMessages {
+                page: crate::master_sessions::page(&tx, project_id, session_id, *before, *limit)?,
+            }
+        }
         OwnerRead::ProjectMasterInputs {
             project_id,
             session_id,
