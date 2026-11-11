@@ -211,11 +211,11 @@ impl Repo {
             confinement: Vec::new(),
         };
         repo.check_version()?;
-        let listing = repo.capture(
-            &["config", "--list", "--name-only", "-z"],
-            LISTING_BYTES_MAX,
-        )?;
-        repo.overrides = crate::research::runner::filter_overrides(&listing)
+        let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
+        let keys = crate::research::runner::listed_filter_keys(&listing)
+            .ok_or_else(|| failure("changes_git_failed"))?;
+        assert!(keys.len() < listing.len());
+        repo.overrides = crate::research::runner::filter_overrides(keys)
             .map_err(|_| failure("changes_git_unsupported"))?;
         assert!(repo.overrides.len().is_multiple_of(8));
         Ok(repo)
