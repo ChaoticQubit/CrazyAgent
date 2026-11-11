@@ -62,7 +62,8 @@ export interface TabStore {
   setItem: (key: string, value: string) => void;
 }
 
-/** The most UTF-8 bytes of one tab's text, as the engine counts them. */
+/** The most UTF-8 bytes of one tab's text: the engine's `TAB_BYTES_MAX`, which a test compares
+ * with the engine source. The limit an owner reads is this number in KB. */
 export const TAB_BYTES_MAX = 64 * 1024;
 
 /** The most command lines of one text that get Copy and Run. */
@@ -70,7 +71,7 @@ export const COMMAND_LINES_MAX = 200;
 
 const TAB_FILES: Record<OverviewTabId, string> = { quick_info: "quick-info", features: "features", competitors: "competitors", install_and_use: "install-and-use" };
 const BLOCKED: Record<string, string> = {
-  blank: "its file is empty", too_large: "its file is larger than 64 KB", not_utf8: "its file is not plain text",
+  blank: "its file is empty", too_large: `its file is larger than ${TAB_BYTES_MAX / 1024} KB`, not_utf8: "its file is not plain text",
   not_a_file: "a link or folder is where its file goes", not_a_folder: "the folder for the tabs is a link or a file",
 };
 const BLOCKED_BY_ENTRY = new Set(["not_a_file", "not_a_folder"]);

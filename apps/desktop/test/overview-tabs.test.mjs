@@ -298,7 +298,7 @@ test("a blocked tab says why in plain words, names its file and what to do", () 
   assert.match(blank, /CrazyAgent can&#x27;t show this tab: its file is empty\./);
   assert.match(blank, /\.crazyagent\/overview\/features\.md/);
   assert.match(blank, /Fix or delete the file, then choose Refresh\./);
-  assert.match(page({ selected: "features", overview: blockedTab(base(), "features", "too_large") }), /CrazyAgent can&#x27;t show this tab: its file is larger than 64 KB\./);
+  assert.match(page({ selected: "features", overview: blockedTab(base(), "features", "too_large") }), new RegExp(`CrazyAgent can&#x27;t show this tab: its file is larger than ${view.TAB_BYTES_MAX / 1024} KB\\.`));
   assert.match(page({ selected: "install_and_use", overview: blockedTab(base(), "install_and_use", "not_utf8") }), /CrazyAgent can&#x27;t show this tab: its file is not plain text\./);
   assert.match(page({ selected: "install_and_use", overview: blockedTab(base(), "install_and_use", "not_utf8") }), /\.crazyagent\/overview\/install-and-use\.md/);
   const unknown = page({ selected: "features", overview: blockedTab(base(), "features", "something_new") });
@@ -337,7 +337,7 @@ test("a blocked Quick info keeps the About and the mapping's overview under the 
 
 test("a blocked Competitors tab says why and does not offer Run research in its place", () => {
   const html = page({ selected: "competitors", overview: blockedTab({ ...base(), competitors: { kind: "report", path: "context/research/competitor_research.md" } }, "competitors", "too_large") });
-  assert.match(html, /CrazyAgent can&#x27;t show this tab: its file is larger than 64 KB\./);
+  assert.match(html, new RegExp(`CrazyAgent can&#x27;t show this tab: its file is larger than ${view.TAB_BYTES_MAX / 1024} KB\\.`));
   assert.doesNotMatch(html, /Choose Refresh to write this tab from it\./);
 });
 
@@ -510,10 +510,19 @@ test("any other refused save keeps the typed text and says why", async () => {
   assert.notEqual(thrown.note, "");
 });
 
+test("the tab bound is the engine's, in whole KB, and the limit an owner reads follows it", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/project_overview.rs", import.meta.url), "utf8");
+  const bound = /^pub const TAB_BYTES_MAX: usize = (\d+) \* 1024;$/m.exec(engine);
+  assert.ok(bound, "the engine names its tab bound in KiB");
+  assert.equal(view.TAB_BYTES_MAX, Number(bound[1]) * 1024);
+  assert.equal(view.TAB_BYTES_MAX % 1024, 0);
+  const html = page({ selected: "features", overview: blockedTab(base(), "features", "too_large") });
+  assert.ok(html.includes(`its file is larger than ${bound[1]} KB.`), "the blocked line names the engine's limit");
+});
+
 test("the editor refuses a text over the tab bound or an empty one before sending", async () => {
   let sent = 0;
   const save = () => { sent += 1; return Promise.resolve({ kind: "ok", value: undefined }); };
-  assert.equal(view.TAB_BYTES_MAX, 64 * 1024);
   const long = await view.saveTab("alpha", { tab: "features", version: "v7" }, "x".repeat(view.TAB_BYTES_MAX + 1), save);
   assert.equal(long.saved, false);
   assert.match(long.note, /too long/);
