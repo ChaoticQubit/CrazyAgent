@@ -1089,6 +1089,9 @@ fn only_a_linked_item_carries_the_linked_field_on_the_wire() {
 fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for_them() {
     const ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
     const RIVALS: &str = "docs/research-competitors.md";
+    let long = format!("docs/{}market.md", "deep/".repeat(120));
+    assert!(long.len() > links::LINK_PATH_BYTES_MAX);
+    assert!(long.len() <= DOCUMENT_PATH_BYTES_MAX);
     let root = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
     let folder = base.join("project");
@@ -1099,7 +1102,7 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
     let found = serde_json::json!({
         "research": [
             {"kind": "competitor_research", "files": [RIVALS, ".crazyagent/context/brief.md"]},
-            {"kind": "market_research", "files": ["docs/market.md"]}
+            {"kind": "market_research", "files": ["docs/market.md", long]}
         ],
         "documents": [],
         "roadmap": [ROADMAP]
@@ -1165,7 +1168,9 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
         ROADMAP.to_owned(),
         RIVALS.to_owned(),
         ".crazyagent/context/brief.md".to_owned(),
+        long.clone(),
     ];
+    assert_eq!(confirm(2, Some(kept.clone())).validate(), Ok(()));
     let tx = connection.transaction().unwrap();
     assert_eq!(
         execute(&tx, &config(), &confirm(2, Some(kept)), 1).unwrap(),
@@ -1217,4 +1222,8 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
     );
     let too_many = confirm(5, Some(vec!["docs/a.md".to_owned(); links::LINKS_MAX + 1]));
     assert_eq!(too_many.validate().unwrap_err().0, "project_setup_bounds");
+    let widest = confirm(5, Some(vec!["a".repeat(DOCUMENT_PATH_BYTES_MAX)]));
+    assert_eq!(widest.validate(), Ok(()));
+    let too_wide = confirm(5, Some(vec!["a".repeat(DOCUMENT_PATH_BYTES_MAX + 1)]));
+    assert_eq!(too_wide.validate().unwrap_err().0, "project_setup_bounds");
 }

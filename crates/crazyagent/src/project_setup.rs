@@ -923,9 +923,7 @@ impl SetupAction {
                 }
                 if kept.as_ref().is_some_and(|kept| {
                     kept.len() > links::LINKS_MAX
-                        || kept
-                            .iter()
-                            .any(|path| path.len() > links::LINK_PATH_BYTES_MAX)
+                        || kept.iter().any(|path| path.len() > DOCUMENT_PATH_BYTES_MAX)
                 }) {
                     return Err(failure("project_setup_bounds"));
                 }
