@@ -174,6 +174,131 @@ fn a_link_is_allowed_only_when_it_leads_to_a_read_root_already_granted() {
     );
 }
 
+/// Makes a read root with one note in it beside the project, for the rows that link to it.
+/// Takes the case. Returns the folder that holds the root and the root.
+fn linked_root(case: &Case) -> (PathBuf, PathBuf) {
+    let pythons = case.project.parent().unwrap().join("python");
+    let real = pythons.join("cpython-3.12.16");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("note.txt"), "through the link\n").unwrap();
+    (pythons, real)
+}
+
+#[test]
+fn a_link_below_a_hidden_or_kept_out_path_is_not_allowed() {
+    let case = case();
+    let (_, real) = linked_root(&case);
+    let (hidden, kept) = (case.project.join("tools"), case.project.join("vendor"));
+    for folder in [&hidden, &kept] {
+        fs::create_dir_all(folder.join("python")).unwrap();
+        std::os::unix::fs::symlink(&real, folder.join("python").join("cpython")).unwrap();
+    }
+    let open = case.project.join("cpython");
+    std::os::unix::fs::symlink(&real, &open).unwrap();
+    let sandbox = || {
+        sandbox_with_hidden(&case, std::slice::from_ref(&hidden))
+            .allow_read(&real)
+            .unwrap()
+            .keep_out(&kept)
+            .unwrap()
+    };
+    assert!(sandbox().allow_read_link(&open).is_ok());
+    let in_hidden = hidden.join("python").join("cpython");
+    assert!(sandbox().allow_read_link(&in_hidden).is_err());
+    let in_kept = kept.join("python").join("cpython");
+    assert!(sandbox().allow_read_link(&in_kept).is_err());
+    assert!(
+        sandbox()
+            .keep_out(&open)
+            .unwrap()
+            .allow_read_link(&open)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_link_allowed_before_its_folder_is_hidden_or_kept_out_stays_out_of_reach() {
+    let case = case();
+    let (_, real) = linked_root(&case);
+    let tools = case.project.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    let link = tools.join("cpython");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let allowed = sandbox_with_hidden(&case, &[])
+        .allow_read(&real)
+        .unwrap()
+        .allow_read_link(&link)
+        .unwrap();
+    let through = format!("cat '{}/note.txt'", link.display());
+    let followed = run(&allowed, &case.profile, &through);
+    assert_eq!(followed.stdout, b"through the link\n", "{followed:?}");
+    let hidden = allowed.clone().hide(&tools).unwrap();
+    let refused = run(&hidden, &case.profile, &through);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(refused.stdout, b"");
+    let kept_out = allowed.keep_out(&tools).unwrap();
+    let grant = format!("(allow file-read* (literal \"{}\"))", link.display());
+    let deny = format!("(subpath \"{}\")", tools.display());
+    for narrowed in [&hidden, &kept_out] {
+        let profile = narrowed.profile();
+        assert_eq!(profile.matches(&grant).count(), 1, "{profile}");
+        let (granted, denied) = (profile.find(&grant).unwrap(), profile.rfind(&deny).unwrap());
+        assert!(granted < denied, "the deny is written after the grant");
+        let secrets = profile.find("(deny file-read* file-write*").unwrap();
+        assert!(granted < secrets, "every deny is written after the grant");
+    }
+}
+
+#[test]
+fn a_link_in_a_folder_reached_through_a_link_is_not_allowed() {
+    let case = case();
+    let (pythons, real) = linked_root(&case);
+    std::os::unix::fs::symlink(&real, pythons.join("cpython-3.12")).unwrap();
+    let alias = case.project.parent().unwrap().join("alias");
+    std::os::unix::fs::symlink(&pythons, &alias).unwrap();
+    let sandbox = || sandbox_with_hidden(&case, &[]).allow_read(&real).unwrap();
+    assert!(
+        sandbox()
+            .allow_read_link(&pythons.join("cpython-3.12"))
+            .is_ok()
+    );
+    let spelled = alias.join("cpython-3.12");
+    assert!(fs::symlink_metadata(&spelled).unwrap().is_symlink());
+    assert!(sandbox().allow_read_link(&spelled).is_err());
+}
+
+#[test]
+fn an_allowed_link_opens_nothing_beside_it_and_a_fifth_link_is_refused() {
+    let case = case();
+    let (pythons, real) = linked_root(&case);
+    fs::write(pythons.join("beside.txt"), "beside the link\n").unwrap();
+    let links: Vec<PathBuf> = (0..5)
+        .map(|index| pythons.join(format!("link-{index}")))
+        .collect();
+    let mut sandbox = sandbox_with_hidden(&case, &[]).allow_read(&real).unwrap();
+    for link in &links {
+        std::os::unix::fs::symlink(&real, link).unwrap();
+    }
+    for link in &links[..4] {
+        sandbox = sandbox.allow_read_link(link).unwrap();
+    }
+    assert!(sandbox.clone().allow_read_link(&links[4]).is_err());
+    let beside = run(
+        &sandbox,
+        &case.profile,
+        &format!("cat '{}/beside.txt'", pythons.display()),
+    );
+    assert!(!beside.status.success(), "{beside:?}");
+    assert_eq!(beside.stdout, b"");
+    let unlisted = run(
+        &sandbox,
+        &case.profile,
+        &format!("cat '{}/note.txt'", links[4].display()),
+    );
+    assert!(!unlisted.status.success(), "{unlisted:?}");
+    assert_eq!(unlisted.stdout, b"");
+}
+
 #[test]
 fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
     let case = case();

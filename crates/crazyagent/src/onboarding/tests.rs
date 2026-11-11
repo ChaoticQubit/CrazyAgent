@@ -1188,6 +1188,75 @@ fn a_graph_is_built_by_a_graphify_whose_python_sits_behind_a_version_link() {
     );
 }
 
+/// Runs the graph build of a one-file project with a stand-in graphify whose Python sits
+/// behind a version link, after `relaid` changed the stand-in's layout. Takes the change,
+/// given the uv folder. Returns how the build ended.
+#[cfg(target_os = "macos")]
+fn graph_ending_with_python_relaid(relaid: &dyn Fn(&Path)) -> graph::GraphEnding {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let repo = root.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    let uv = root.join("uv");
+    let graphify = graphify_behind_a_version_link(&uv);
+    relaid(&uv);
+    run_graph(&repo, &graphify, &[])
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_python_link_the_sandbox_refuses_does_not_end_the_graph_build_with_an_error() {
+    let ending = graph_ending_with_python_relaid(&|uv| {
+        let home = uv.join("python/../python/cpython-3.12/bin");
+        assert!(home.join("python3.12").is_file());
+        std::fs::write(
+            uv.join("tool/pyvenv.cfg"),
+            format!("home = {}\nimplementation = CPython\n", home.display()),
+        )
+        .unwrap();
+    });
+    assert!(
+        matches!(
+            ending,
+            graph::GraphEnding::Built | graph::GraphEnding::Failed(_)
+        ),
+        "{ending:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_python_folder_reached_through_a_link_ends_the_graph_build_without_an_error() {
+    let ending = graph_ending_with_python_relaid(&|uv| {
+        symlink(uv.join("python"), uv.join("alias")).unwrap();
+        let home = uv.join("alias/cpython-3.12/bin");
+        let python = uv.join("tool/bin/python");
+        std::fs::remove_file(&python).unwrap();
+        symlink(home.join("python3.12"), &python).unwrap();
+        std::fs::write(
+            uv.join("tool/pyvenv.cfg"),
+            format!("home = {}\nimplementation = CPython\n", home.display()),
+        )
+        .unwrap();
+    });
+    assert!(
+        matches!(
+            ending,
+            graph::GraphEnding::Built | graph::GraphEnding::Failed(_)
+        ),
+        "{ending:?}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_leaves_out_the_engine_files_in_the_project() {
