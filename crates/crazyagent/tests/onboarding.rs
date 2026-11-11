@@ -1082,6 +1082,7 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
@@ -1118,6 +1119,7 @@ async fn a_mapping_try_that_runs_out_of_time_starts_a_fresh_try_and_the_step_nam
     let endpoint = |port: u16, model: &str| ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: model.into(),
+        key: None,
     };
     let accounts = [
         endpoint(hanging, "hanging-model"),
@@ -1196,6 +1198,7 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
@@ -1401,6 +1404,7 @@ async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     };
     let asked = Arc::new(Mutex::new(0_usize));
     let (runner, agents) = bench.runner_without_codex(false);
@@ -1480,6 +1484,7 @@ async fn with_only_claude_code_installed_mapping_asks_for_a_claude_code_account(
                 picked(&ResearchAccount::Endpoint {
                     base_url: "http://127.0.0.1:9/v1".into(),
                     model: "codex-only-model".into(),
+                    key: None,
                 })
             },
             || None,
@@ -1512,6 +1517,7 @@ async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
     let local = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:11434/v1".into(),
         model: MODEL.into(),
+        key: None,
     };
     let local = AccountPick::Account {
         connection: CredentialRef::new("local-connection").unwrap(),
@@ -1846,6 +1852,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "closed-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
@@ -1891,6 +1898,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "closed-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let earlier = [
@@ -1953,6 +1961,7 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "never-asked-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let created = onboarding_created_ms(&bench.root);
@@ -1995,6 +2004,7 @@ async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "linux-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
