@@ -184,6 +184,8 @@ pub enum MasterReason {
     RuntimeUnavailable,
     CaptureIncomplete,
     NoReply,
+    StepLimit,
+    TimeLimit,
     OutputLimit,
     UnsupportedCapability,
     RepositoryMissing,

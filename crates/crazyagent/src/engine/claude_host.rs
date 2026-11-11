@@ -9,6 +9,7 @@ use crate::adapters::events::ObservedEvent;
 #[cfg(unix)]
 use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
 use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
+use crate::master_step_limit::StepLimit;
 #[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
@@ -201,6 +202,23 @@ pub(in crate::engine) fn tools_launch_command(
     )
 }
 
+/// The Claude Code flag that ends a turn once it has taken this many steps.
+const STEP_FLAG: &str = "--max-turns";
+
+/// Ends a tools-on master command with the owner's master step limit, the last thing the
+/// engine adds to it; no limit adds nothing, so a working turn is bounded by its run time
+/// only (OB-5). Inputs: the command the engine built with tools on and the limit.
+/// Output: none.
+pub(in crate::engine) fn limit_steps(command: &mut Command, limit: StepLimit) {
+    let before = command.get_args().count();
+    if let Some(steps) = limit.steps() {
+        command.arg(STEP_FLAG).arg(steps.to_string());
+    }
+    let added = command.get_args().count() - before;
+    assert_eq!(added == 2, limit != StepLimit::NoLimit);
+    assert!(added == 0 || added == 2);
+}
+
 /// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
 /// executable serving `team-mcp` on the drop file and mailbox with the tools switched off.
 /// Input: the tools. Output: the JSON text, or `claude_host_invalid_launch` for a relative
@@ -304,7 +322,7 @@ fn command_for(
         "--no-session-persistence",
     ]);
     if tools.is_none() {
-        command.args(["--max-turns", "1"]);
+        command.args([STEP_FLAG, "1"]);
     }
     if let Some(file) = instructions {
         command.arg(INSTRUCTIONS_FLAG).arg(file);
@@ -829,7 +847,15 @@ fn validate_command(
     } else {
         None
     };
-    let expected = command_for(
+    let steps = match args.iter().position(|arg| *arg == OsStr::new(STEP_FLAG)) {
+        Some(index) if tools => args
+            .get(index + 1)
+            .and_then(|steps| steps.to_str())
+            .and_then(StepLimit::of_steps)
+            .ok_or(Fault::Host("claude_host_invalid_command"))?,
+        _ => StepLimit::NoLimit,
+    };
+    let mut expected = command_for(
         Path::new(command.get_program()),
         directory,
         home,
@@ -845,6 +871,9 @@ fn validate_command(
             }),
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
+    if tools {
+        limit_steps(&mut expected, steps);
+    }
     if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {
         return Err(Fault::Host("claude_host_unapproved_command"));
     }

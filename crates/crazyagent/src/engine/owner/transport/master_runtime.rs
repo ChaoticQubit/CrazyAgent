@@ -12,6 +12,7 @@ use crate::master_session::{
     MasterBackend, MasterReason, MasterReply, MasterReplyProvenance, MasterRuntimeView,
     MasterTurnPhase, MasterTurnView, REPLY_BYTES_MAX, fitted_reply,
 };
+use crate::master_step_limit::steps_of_cause;
 use crate::protocol::{ProjectId, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::storage::{
@@ -48,6 +49,8 @@ const NOTE_FILES_MAX: usize = 10;
 /// The cause of a master turn its harness ended as a success with no reply text, as when its
 /// last step was a tool call: the stream was read whole, so nothing was cut off (OB-5).
 const EMPTY_REPLY: &str = "master_empty_reply";
+/// The result Claude Code ends a turn with once it took every step `--max-turns` allows.
+const STEPS_USED: &str = "error_max_turns";
 
 /// Lands the change set a master turn made when the project lets the master merge into main
 /// itself (DEC-117 Q2), and says what happened in the note under the turn; None when the set
@@ -1223,6 +1226,10 @@ impl OwnerRuntimeHandle {
                         delegations: Vec::new(),
                     });
                 }
+                EventKind::TurnFinished { subtype, .. } if subtype == STEPS_USED => {
+                    let cause = prepared.steps.cause();
+                    return Err(failure(cause.as_deref().unwrap_or("master_capture_incomplete")));
+                }
                 EventKind::TurnFinished { .. }
                 | EventKind::Disconnected
                 | EventKind::ProtocolFailure { .. } => {
@@ -1406,6 +1413,8 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit" => MasterReason::OutputLimit,
         EMPTY_REPLY => MasterReason::NoReply,
+        "claude_host_deadline" | "codex_host_deadline" => MasterReason::TimeLimit,
+        code if steps_of_cause(code).is_some() => MasterReason::StepLimit,
         "codex_host_capture_incomplete"
         | "master_capture_incomplete"
         | "master_capture_identity"
@@ -1885,6 +1894,13 @@ mod tests {
             ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
             ("codex_host_output_limit", MasterReason::OutputLimit),
             ("master_empty_reply", MasterReason::NoReply),
+            ("claude_host_deadline", MasterReason::TimeLimit),
+            ("codex_host_deadline", MasterReason::TimeLimit),
+            ("master_step_limit_50", MasterReason::StepLimit),
+            ("master_step_limit_100", MasterReason::StepLimit),
+            ("master_step_limit_200", MasterReason::StepLimit),
+            ("master_step_limit_24", MasterReason::Unknown),
+            ("master_step_limit_", MasterReason::Unknown),
             ("master_capture_incomplete", MasterReason::CaptureIncomplete),
             (
                 "codex_host_capture_incomplete",

@@ -1079,6 +1079,84 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
     }
 }
 
+/// Each master step limit the owner can pick ends the engine's tools-on command with
+/// `--max-turns` and its steps, and the host runs it; No limit adds nothing. A step count
+/// the owner cannot pick, the flag twice, the flag with no count and a limit on a
+/// tools-off command are refused (OB-5b).
+#[test]
+fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-step-limit", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
+    let built = || {
+        let tools = MasterTools {
+            engine: &engine,
+            drop: &drop,
+            mailbox: &mailbox,
+            off: &[],
+        };
+        tools_launch_command(
+            Path::new("/approved/claude"),
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            tools,
+        )
+        .unwrap()
+    };
+    let refused = |command: &std::process::Command| {
+        matches!(
+            validate_command(command, &profile, &home),
+            Err(Fault::Host("claude_host_unapproved_command" | "claude_host_invalid_command"))
+        )
+    };
+    let plain = arguments(&built());
+    assert!(!plain.iter().any(|arg| arg == "--max-turns"));
+    for limit in StepLimit::ALL {
+        let mut command = built();
+        limit_steps(&mut command, limit);
+        let args = arguments(&command);
+        match limit.steps() {
+            Some(steps) => {
+                assert_eq!(args.len(), plain.len() + 2, "{limit:?}");
+                assert_eq!(args[plain.len()..], ["--max-turns".to_owned(), steps.to_string()]);
+            }
+            None => assert_eq!(args, plain),
+        }
+        assert_eq!(args[..plain.len()], plain[..], "{limit:?}");
+        let ran = validate_command(&command, &profile, &home).ok();
+        assert_eq!(ran, Some(true), "{limit:?}");
+    }
+    for steps in ["", "0", "1", "24", "51", "050", "201", "no_limit"] {
+        let mut command = built();
+        command.args(["--max-turns", steps]);
+        assert!(refused(&command), "{steps:?}");
+    }
+    let mut twice = built();
+    limit_steps(&mut twice, StepLimit::Steps50);
+    limit_steps(&mut twice, StepLimit::Steps100);
+    assert!(refused(&twice));
+    let mut uncounted = built();
+    uncounted.arg("--max-turns");
+    assert!(refused(&uncounted));
+    let mut off = launch_command(
+        Path::new("/approved/claude"),
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+    )
+    .unwrap();
+    limit_steps(&mut off, StepLimit::Steps50);
+    assert!(refused(&off));
+}
+
 #[tokio::test]
 async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
     use crate::engine::master_host_fixture::MasterFixture;
@@ -1158,6 +1236,19 @@ async fn tool_step_turn(
     tools: bool,
     body: &str,
 ) -> (Vec<crate::adapters::events::EventKind>, Option<String>) {
+    held_turn(fixture, (operation, sequence), tools, body, Duration::ZERO).await
+}
+
+/// Runs one turn as `tool_step_turn` does, but reads no event for the first `held` of it, so
+/// the host's event queue fills while the stand-in writes. Input: as `tool_step_turn`, with
+/// the lease operation and sequence as a pair, and the time to hold off. Output: the same.
+async fn held_turn(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    (operation, sequence): (&str, u64),
+    tools: bool,
+    body: &str,
+    held: Duration,
+) -> (Vec<crate::adapters::events::EventKind>, Option<String>) {
     use crate::adapters::events::EventKind;
 
     let profile = fixture.lease(operation, sequence).unwrap();
@@ -1204,6 +1295,7 @@ async fn tool_step_turn(
         .start_turn(RequestId::new("claude-steps-turn").unwrap(), "Write a note")
         .await
         .unwrap();
+    tokio::time::sleep(held).await;
     let mut kinds = Vec::new();
     let error = loop {
         match claude.next_event().await {
@@ -1219,6 +1311,57 @@ async fn tool_step_turn(
     };
     let _ = claude.close().await;
     (kinds, error)
+}
+
+/// A stand-in Claude Code that writes 300 reply frames at once, more than the 128 events the
+/// host's queue to the turn's reader holds, then ends the turn.
+const BURST_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 300 ]; do
+  i=$((i+1))
+  printf '{"type":"assistant","uuid":"said-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"line"}]}}\n' "$i" "$i"
+done
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"line"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A burst of more frames than the host's event queue holds, written while the turn's reader
+/// is busy, waits for the reader and is delivered whole (OB-5b): it used to fail the turn
+/// with claude_host_event_delivery_failed at the 129th undelivered event.
+#[tokio::test]
+async fn a_burst_past_the_event_queue_waits_for_the_reader_and_is_not_a_failed_turn() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let (kinds, error) = held_turn(
+        &mut fixture,
+        ("claude-burst", 1),
+        true,
+        BURST_HARNESS,
+        Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(error, None, "{} events", kinds.len());
+    let said = kinds
+        .iter()
+        .filter(|kind| matches!(kind, EventKind::AssistantText { text, .. } if text == "line"))
+        .count();
+    assert_eq!(said, 300, "every frame of the burst reached the reader");
+    assert!(
+        matches!(
+            kinds.last(),
+            Some(EventKind::TurnFinished {
+                outcome: TurnOutcome::Success,
+                ..
+            })
+        ),
+        "{} events",
+        kinds.len()
+    );
 }
 
 #[tokio::test]

@@ -582,6 +582,8 @@ const STOPPED_WHY = new Map<string, string>([
   ["runtime_unavailable", "it could not start. Check it in Settings, Harnesses"],
   ["capture_incomplete", "its reply was cut off"],
   ["no_reply", "it ended its turn without writing a reply"],
+  ["step_limit", "it used every step its limit allows"],
+  ["time_limit", "it ran out of time; a turn may run for 10 minutes at most"],
   ["output_limit", "its reply was longer than the limit"],
   ["unsupported_capability", "it cannot lead a project yet"],
   ["instructions_too_large", "the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again"],
@@ -595,10 +597,19 @@ export function stopCode(turn: MasterTurn): string {
   return turn.reason && turn.reason !== "unknown" ? turn.reason : turn.phase;
 }
 
+/** The steps a turn stopped by the master step limit names in its cause, the engine's
+ * `steps_of_cause`. Input: the cause. Output: 50, 100 or 200, or null for any other cause. */
+export function stepsOfCause(cause: string | null | undefined): number | null {
+  const found = /^master_step_limit_(50|100|200)$/.exec(cause ?? "");
+  return found ? Number(found[1]) : null;
+}
+
 /** One plain line for a master turn that has no reply yet or ended without one; a stopped
  * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
   const code = ` (${stopCode(turn)})`;
+  const steps = turn.reason === "step_limit" ? stepsOfCause(turn.cause) : null;
+  if (steps !== null) return `Stopped after ${steps} steps; reply with 'continue' to go on.${code}`;
   if (turn.phase === "blocked" && (turn.accounts ?? []).length > 0) return `No account in this master's pool can run it now.${code}`;
   if (turn.phase === "blocked" && turn.reason === "readiness_unknown") return `Not signed in. Sign in again in Settings, Accounts, then send again.${code}`;
   if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;

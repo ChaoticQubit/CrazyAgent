@@ -314,7 +314,18 @@ test("a stopped or failed master turn offers its own message to send again", () 
   assert.equal(research.turnLine(crashed), "The master stopped: its reply was cut off. (capture_incomplete)", "the line names what happened");
   const silent = { ...turn(1, "failed"), reason: "no_reply", cause: "master_empty_reply" };
   assert.equal(research.turnLine(silent), "The master stopped: it ended its turn without writing a reply. (master_empty_reply)", "a turn that ended with no reply text is not called cut off (OB-5)");
-  assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
+  for (const steps of [50, 100, 200]) {
+    const limited = { ...turn(1, "failed"), reason: "step_limit", cause: `master_step_limit_${steps}` };
+    assert.equal(research.turnLine(limited), `Stopped after ${steps} steps; reply with 'continue' to go on. (master_step_limit_${steps})`, "a turn stopped at its step limit names the steps and how to go on (OB-5b)");
+    assert.equal(research.stepsOfCause(limited.cause), steps);
+  }
+  for (const cause of ["master_step_limit_24", "master_step_limit_", "master_step_limit_500", "master_capture_incomplete", null, undefined]) {
+    assert.equal(research.stepsOfCause(cause), null, `${cause} names no step limit`);
+  }
+  const unnamed = { ...turn(1, "failed"), reason: "step_limit", cause: null };
+  assert.equal(research.turnLine(unnamed), "The master stopped: it used every step its limit allows. (step_limit)", "a step limit stop with no cause still reads plainly");
+  const late = { ...turn(1, "failed"), reason: "time_limit", cause: "claude_host_deadline" };
+  assert.equal(research.turnLine(late), "The master stopped: it ran out of time; a turn may run for 10 minutes at most. (claude_host_deadline)", "a turn that ran out of time is not called cut off (OB-5b)");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
 

@@ -3029,6 +3029,8 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::RuntimeUnavailable => "Model runtime unavailable",
         MasterReason::CaptureIncomplete => "Reply was incomplete",
         MasterReason::NoReply => "Ended without a reply",
+        MasterReason::StepLimit => "Stopped at its step limit; reply with 'continue' to go on",
+        MasterReason::TimeLimit => "Ran out of time (10 minutes at most)",
         MasterReason::OutputLimit => "Reply was too long",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
         MasterReason::RepositoryMissing => "This project has no repository yet",

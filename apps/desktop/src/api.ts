@@ -338,6 +338,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   sandbox_settings: "changing the sandbox setting",
   cleanup_settings: "changing when finished agents' worktrees go",
   quit_settings: "changing what quitting does to team agents",
+  master_step_settings: "changing the master step limit",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -464,6 +465,24 @@ export function getQuitSettings(): Promise<Result<QuitSettings>> {
 /** Saves what quitting does to team agents. Input: the full setting. Output: ok once saved. */
 export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> {
   return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
+}
+
+/** The most steps a master takes in one turn, the engine's `StepLimit`. */
+export type StepLimit = "no_limit" | "steps50" | "steps100" | "steps200";
+
+/** The owner's master step limit setting, the engine's `MasterStepSettings`. */
+export interface MasterStepSettings {
+  limit: StepLimit;
+}
+
+/** Reads the master step limit. Output: the stored setting, or No limit before the first save. */
+export function getMasterStepSettings(): Promise<Result<MasterStepSettings>> {
+  return call<MasterStepSettings>("desktop_master_step_settings");
+}
+
+/** Saves the master step limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterStepSettings(settings: MasterStepSettings): Promise<Result<void>> {
+  return change("desktop_set_master_step_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";

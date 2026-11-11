@@ -1,6 +1,7 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
+use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
 use crazyagent::quit_settings::QuitSettings;
@@ -170,6 +171,44 @@ impl NativeBridge {
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::SetQuitSettings { settings }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads how many steps a master with its tools on may take for one message. Input:
+    /// none. Output: the stored setting, or the default before the first save.
+    pub async fn master_step_settings(&mut self) -> Result<MasterStepSettings, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .master_step_settings()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves how many steps a master with its tools on may take for one message, as one
+    /// retained owner intent. Inputs: the full setting and a fresh draft generation.
+    /// Output: the intent receipt.
+    pub async fn set_master_step_settings(
+        &mut self,
+        settings: MasterStepSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::MasterStepSettings)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetMasterStepSettings { settings }, generation)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await

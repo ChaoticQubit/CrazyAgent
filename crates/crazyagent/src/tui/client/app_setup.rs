@@ -2,6 +2,7 @@ use super::settings::{applied, problem};
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
+use crate::master_step_limit::MasterStepSettings;
 use crate::projects_home::ProjectsHome;
 use crate::quit_settings::QuitSettings;
 use crate::sandbox_settings::SandboxSettings;
@@ -9,7 +10,7 @@ use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, default-pack changes,
 /// the projects home folder, the GitHub account, the sandbox settings, when finished
-/// agents' worktrees go and what quitting does to team agents.
+/// agents' worktrees go, what quitting does to team agents and the master step limit.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -48,6 +49,11 @@ pub(in crate::tui) enum AppSetupJob {
         settings: QuitSettings,
         generation: u64,
     },
+    MasterSteps,
+    SetMasterSteps {
+        settings: MasterStepSettings,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -74,6 +80,8 @@ pub(in crate::tui) enum AppSetupEvent {
     CleanupSet(Result<(), String>),
     Quit(Result<QuitSettings, String>),
     QuitSet(Result<(), String>),
+    MasterSteps(Result<MasterStepSettings, String>),
+    MasterStepsSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -95,6 +103,8 @@ impl AppSetupJob {
             Self::SetCleanup { .. } => "SetCleanup",
             Self::Quit => "Quit",
             Self::SetQuit { .. } => "SetQuit",
+            Self::MasterSteps => "MasterSteps",
+            Self::SetMasterSteps { .. } => "SetMasterSteps",
         }
     }
 }
@@ -118,6 +128,8 @@ impl AppSetupEvent {
             AppSetupJob::SetCleanup { .. } => Self::CleanupSet(Err(problem)),
             AppSetupJob::Quit => Self::Quit(Err(problem)),
             AppSetupJob::SetQuit { .. } => Self::QuitSet(Err(problem)),
+            AppSetupJob::MasterSteps => Self::MasterSteps(Err(problem)),
+            AppSetupJob::SetMasterSteps { .. } => Self::MasterStepsSet(Err(problem)),
         }
     }
 }
@@ -231,6 +243,22 @@ impl NativeOwner {
             } => AppSetupEvent::QuitSet(applied(
                 controller.set_quit_settings(settings, generation).await,
                 "quit_settings_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::MasterSteps => AppSetupEvent::MasterSteps(
+                controller
+                    .master_step_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetMasterSteps {
+                settings,
+                generation,
+            } => AppSetupEvent::MasterStepsSet(applied(
+                controller
+                    .set_master_step_settings(settings, generation)
+                    .await,
+                "master_step_settings_outcome_unknown",
                 lost,
             )),
         }
@@ -435,6 +463,31 @@ mod tests {
             matches!(&refused, AppSetupEvent::QuitSet(Err(code)) if code == "quit_settings_invalid"),
             "hours outside 1 to 168 keep the engine's own code"
         );
+
+        let read_steps = AppSetupJob::MasterSteps;
+        let AppSetupEvent::MasterSteps(Ok(steps)) = ask(&mut native, read_steps).await else {
+            panic!("master step limit required")
+        };
+        assert_eq!(steps, MasterStepSettings::default());
+        assert_eq!(steps.limit, crate::master_step_limit::StepLimit::NoLimit);
+        let limits = crate::master_step_limit::StepLimit::ALL;
+        for (generation, limit) in (9..).zip(limits.into_iter().rev()) {
+            let settings = MasterStepSettings { limit };
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetMasterSteps {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::MasterStepsSet(Ok(()))));
+            let read_steps = AppSetupJob::MasterSteps;
+            let AppSetupEvent::MasterSteps(Ok(read)) = ask(&mut native, read_steps).await else {
+                panic!("master step limit required")
+            };
+            assert_eq!(read, settings, "{limit:?} is stored as picked");
+        }
 
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())

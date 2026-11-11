@@ -173,6 +173,8 @@ fn main() {
         "desktop_set_cleanup_settings",
         "desktop_quit_settings",
         "desktop_set_quit_settings",
+        "desktop_master_step_settings",
+        "desktop_set_master_step_settings",
         "desktop_pool_summaries",
         "desktop_account_schedule",
         "desktop_account_ranking",

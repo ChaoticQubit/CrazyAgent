@@ -216,6 +216,10 @@ pub enum Command {
         settings: crate::quit_settings::QuitSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerMasterSteps {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

@@ -11,6 +11,7 @@ use crate::master_session::{
     MasterAccountState, MasterBootstrapAuth, MasterOwnerAction, MasterSelection, MasterSessionView,
     RcliConfiguredProfileProof,
 };
+use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, PROTOCOL_VERSION, ProjectSpec};
 use crate::routing::{ResourceBudget, RouteRequest};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::Value};
@@ -2490,7 +2491,7 @@ async fn console_claude_master(
     let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
     private_directory(&mailbox);
     let engine = fixture.root.path().join("crazyagent");
-    let command = crate::engine::claude_host::tools_launch_command(
+    let mut command = crate::engine::claude_host::tools_launch_command(
         &harness,
         &fixture.project,
         &home,
@@ -2504,6 +2505,7 @@ async fn console_claude_master(
         },
     )
     .unwrap();
+    crate::engine::claude_host::limit_steps(&mut command, prepared.steps);
     let profile_ref = CredentialRef::new("console-memory-profile").unwrap();
     let account_ref = fixture.connection.account_ref.clone();
     let claude = ClaudeHost::spawn(
@@ -2783,16 +2785,40 @@ printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_i
 exit 1
 "#;
 
+/// Saves the owner's master step limit in a fixture's engine store, as the owner's Save in
+/// Settings does. Inputs: the fixture and the limit. Output: none.
+fn store_step_limit(case: &Fixture, limit: StepLimit) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let saved = crate::master_step_limit::save(&writer, &MasterStepSettings { limit }).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(crate::master_step_limit::load(&writer).unwrap().limit, limit);
+}
+
+/// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
+/// Input: the number of steps. Output: the script.
+fn stepping_harness(steps: u16) -> String {
+    assert!((1..=400).contains(&steps));
+    let script = THIRTY_STEP_HARNESS.replace("-lt 30 ]", &format!("-lt {steps} ]"));
+    assert!(script.contains(&format!("\"$i\" -lt {steps} ]")));
+    script
+}
+
 /// Collects one tools-on console master turn on a real Claude host running a stand-in
-/// script, built by the engine's own tools-on command. Inputs: the stand-in's script.
-/// Outputs: how the turn ended, as `turn_end` names it, and the turn as stored after a
-/// failed end was observed with the reason its error maps to.
-async fn tools_turn_on(script: &str) -> (String, Option<MasterTurnView>) {
+/// script, built by the engine's own tools-on command under the saved master step limit.
+/// Inputs: the stand-in's script and the limit to save first. Outputs: how the turn ended,
+/// as `turn_end` names it, and the turn as stored after a failed end was observed with the
+/// reason its error maps to.
+async fn tools_turn_on(script: &str, limit: StepLimit) -> (String, Option<MasterTurnView>) {
     let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
     store_master_tools(&case, true);
+    store_step_limit(&case, limit);
     case.sign_in("codex-c", true).await;
     let prepared = case.prepared(&case.turn.id).await;
     assert!(prepared.tools, "the project's master tools switch is on");
+    assert_eq!(prepared.steps, limit, "the turn carries the saved step limit");
     let (profile, hold) = case
         .runtime()
         .acquire_master_profile(&prepared, &case.turn.id)
@@ -2842,9 +2868,45 @@ async fn tools_turn_on(script: &str) -> (String, Option<MasterTurnView>) {
 /// reply was cut off" 92 s into a working turn.
 #[tokio::test]
 async fn a_tools_on_master_turn_of_thirty_tool_steps_ends_with_its_reply() {
-    let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS).await;
+    let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS, StepLimit::NoLimit).await;
     assert_eq!(ended, "reply DONE", "the turn ran past 24 tool steps");
     assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// With the master step limit at No limit, the default, a tools-on Claude master turn of
+/// 210 tool steps ends with its reply (OB-5b): past every limit the owner could pick, only
+/// the host's run time, event and output limits bound it.
+#[tokio::test]
+async fn a_master_turn_with_no_step_limit_runs_past_two_hundred_steps_to_its_reply() {
+    let (ended, stored) = tools_turn_on(&stepping_harness(210), StepLimit::NoLimit).await;
+    assert_eq!(ended, "reply DONE", "no step count stopped the turn");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// Under each master step limit the owner can pick, a tools-on Claude master turn that
+/// needs more steps stops at the limit with the cause `master_step_limit_<steps>` and the
+/// reason step_limit, not as a cut-off capture, and a turn of 30 steps still ends with its
+/// reply (OB-5b).
+#[tokio::test]
+async fn a_master_turn_past_each_step_limit_stops_with_that_limit_named() {
+    let limits = [
+        (StepLimit::Steps50, 50_u16),
+        (StepLimit::Steps100, 100),
+        (StepLimit::Steps200, 200),
+    ];
+    for (limit, steps) in limits {
+        let cause = format!("master_step_limit_{steps}");
+        let (ended, stored) = tools_turn_on(&stepping_harness(steps + 5), limit).await;
+        assert_eq!(ended, format!("error {cause}"));
+        let stored = stored.expect("the stopped turn was stored");
+        assert_eq!(stored.phase, MasterTurnPhase::Failed);
+        assert_eq!(stored.reason, Some(MasterReason::StepLimit));
+        assert_eq!(stored.cause.as_deref(), Some(cause.as_str()));
+        assert!(stored.reply.is_none());
+        let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS, limit).await;
+        assert_eq!(ended, "reply DONE", "30 steps fit under {steps}");
+        assert!(stored.is_none(), "a replied turn is not stored as failed");
+    }
 }
 
 /// A tools-on master turn its harness ends as a success with no text after its last tool
@@ -2852,7 +2914,7 @@ async fn a_tools_on_master_turn_of_thirty_tool_steps_ends_with_its_reply() {
 /// master_empty_reply and the stored reason is no_reply.
 #[tokio::test]
 async fn a_tools_on_master_turn_that_ends_without_reply_text_says_so_and_is_not_cut_off() {
-    let (ended, stored) = tools_turn_on(SILENT_END_HARNESS).await;
+    let (ended, stored) = tools_turn_on(SILENT_END_HARNESS, StepLimit::NoLimit).await;
     assert_eq!(ended, "error master_empty_reply");
     let stored = stored.expect("the failed end was stored");
     assert_eq!(stored.phase, MasterTurnPhase::Failed);

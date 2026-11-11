@@ -3,6 +3,7 @@ use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
 use crate::cleanup_settings::{CleanupMode, CleanupSettings, DAYS_MAX, DAYS_MIN};
 use crate::github::{GitHubMethod, GitHubStatus};
+use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
 use crate::quit_settings::{
     HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
@@ -66,6 +67,8 @@ const LEFT_TEXT: &str =
 const LEFT_RUNNING_NOTE: &str = "An agent still running when the time is up ends with its terminal. Opening CrazyAgent before then takes it over. The limit also covers agents left behind when CrazyAgent did not quit cleanly.";
 const LEFT_CHOICES: [LeftRunning; 2] = [LeftRunning::AfterHours, LeftRunning::Never];
 const HOURS_TEXT: &str = "Enter a whole number of hours from 1 to 168.";
+const STEPS_TEXT: &str = "Master step limit: the most steps a project's master takes in one turn.";
+const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers a Claude master with tools on; a Codex master counts no steps.";
 const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.
@@ -130,6 +133,20 @@ pub(in crate::tui) fn left_running_title(left_running: LeftRunning, hours: u16) 
     }
 }
 
+/// The title of one master step limit option and what it does, the same words as the
+/// desktop Settings. Input: the option. Output: the title and the sentence.
+pub(in crate::tui) fn step_limit_words(limit: StepLimit) -> (&'static str, &'static str) {
+    match limit {
+        StepLimit::NoLimit => (
+            "No limit",
+            "A turn runs until the master replies or its time is up.",
+        ),
+        StepLimit::Steps50 => ("50 steps", "A turn stops after 50 steps."),
+        StepLimit::Steps100 => ("100 steps", "A turn stops after 100 steps."),
+        StepLimit::Steps200 => ("200 steps", "A turn stops after 200 steps."),
+    }
+}
+
 /// The plain title and explanation of one Linux sockets option, as Settings shows it.
 /// Input: the option. Output: the title and the sentence naming what it allows and risks.
 pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
@@ -164,6 +181,9 @@ pub fn setup_plain(code: &str) -> String {
             "The stored finished agents setting is not one this version knows."
         }
         "quit_settings_invalid" => "The stored quitting setting is not one this version knows.",
+        "master_step_settings_invalid" => {
+            "The stored master step limit is not one this version knows."
+        }
         crate::storage::versioned::STALE_CODE => {
             "The pack changed in another window, so this was not saved. The list shows it now."
         }
@@ -288,6 +308,9 @@ enum Ask {
         on_quit: OnQuit,
         field: TextField,
     },
+    Steps {
+        choice: usize,
+    },
 }
 
 enum Sent {
@@ -300,7 +323,8 @@ enum Sent {
 /// home folder: Enter installs and continues to Home, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
-/// setting, when finished agents' worktrees go and what quitting does to team agents.
+/// setting, when finished agents' worktrees go, what quitting does to team agents and
+/// the master step limit.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
@@ -309,10 +333,11 @@ pub struct AppSetup {
     sandbox: Load<SandboxSettings>,
     cleanup: Load<CleanupSettings>,
     quit: Load<QuitSettings>,
+    steps: Load<MasterStepSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 6],
+    reading: [bool; 7],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -324,7 +349,7 @@ impl AppSetup {
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
     /// home, the GitHub account, the sandbox settings, the finished agents
-    /// setting and the quitting setting.
+    /// setting, the quitting setting and the master step limit.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
@@ -334,10 +359,11 @@ impl AppSetup {
             sandbox: Load::Idle,
             cleanup: Load::Idle,
             quit: Load::Idle,
+            steps: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 6],
+            reading: [false; 7],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -421,6 +447,10 @@ impl AppSetup {
             self.quit = Load::Loading;
         }
         self.read(5, AppSetupJob::Quit, ctx);
+        if matches!(self.steps, Load::Idle) {
+            self.steps = Load::Loading;
+        }
+        self.read(6, AppSetupJob::MasterSteps, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -907,6 +937,81 @@ impl AppSetup {
         lines
     }
 
+    fn ask_steps(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.steps else {
+            ctx.say(Message::warning(
+                "The master step limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = StepLimit::ALL
+            .iter()
+            .position(|limit| *limit == settings.limit)
+            .expect("every option is listed");
+        assert!(choice < StepLimit::ALL.len());
+        self.ask = Some(Ask::Steps { choice });
+    }
+
+    fn set_steps(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < StepLimit::ALL.len());
+        let settings = MasterStepSettings {
+            limit: StepLimit::ALL[choice],
+        };
+        let Load::Ready(current) = &self.steps else {
+            ctx.say(Message::warning(
+                "The master step limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        if *current == settings {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Master step limit: {}.", step_limit_words(settings.limit).0);
+        let job = AppSetupJob::SetMasterSteps {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn steps_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.steps {
+            Load::Ready(settings) => Line::raw(step_limit_words(settings.limit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn steps_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < StepLimit::ALL.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let mut lines = muted(STEPS_TEXT, 0);
+        for (index, option) in StepLimit::ALL.iter().enumerate() {
+            let (title, detail) = step_limit_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            let title = styled(title, Role::Heading, theme);
+            lines.push(join([Line::raw(mark), title]));
+            lines.extend(muted(detail, 4));
+        }
+        lines.extend(muted(STEPS_NOTE, 0));
+        assert!(lines.len() > 2 * StepLimit::ALL.len());
+        lines
+    }
+
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
         match &self.github {
             Load::Ready(github) if github.signed_in => self.ask = Some(Ask::SignOut),
@@ -1033,6 +1138,21 @@ impl AppSetup {
                 Key::Enter => self.pick_cleanup(choice, ctx),
                 Key::Esc => {}
                 _ => self.ask = Some(Ask::Cleanup { choice }),
+            },
+            Ask::Steps { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Steps {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Steps {
+                        choice: (choice + 1).min(StepLimit::ALL.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_steps(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Steps { choice }),
             },
             Ask::CleanupDays(mut field) => match key {
                 Key::Esc => {}
@@ -1371,6 +1491,10 @@ impl AppSetup {
             lines.push(label("Left running", Line::raw(title)));
             lines.extend(under(LEFT_RUNNING_NOTE));
         }
+        lines.push(label("Master steps", self.steps_value(ctx)));
+        if matches!(self.steps, Load::Ready(_)) {
+            lines.extend(under(STEPS_NOTE));
+        }
         lines
     }
 
@@ -1421,6 +1545,7 @@ impl AppSetup {
                 }
             }
             Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
+            Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
             Some(Ask::CleanupDays(field)) => {
                 let (field_lines, at) =
                     field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
@@ -1570,7 +1695,8 @@ impl Screen for AppSetup {
                 ask @ (Ask::Sockets { .. }
                 | Ask::Cleanup { .. }
                 | Ask::QuitChoice { .. }
-                | Ask::QuitLimit { .. }),
+                | Ask::QuitLimit { .. }
+                | Ask::Steps { .. }),
             ) => {
                 let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
                 let enter = if matches!(ask, Ask::QuitChoice { .. }) {
@@ -1622,6 +1748,7 @@ impl Screen for AppSetup {
             hints.push(hint("l", "Linux sockets"));
             hints.push(hint("f", "Finished agents"));
             hints.push(hint("q", "Quitting"));
+            hints.push(hint("m", "Master steps"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -1689,13 +1816,17 @@ impl Screen for AppSetup {
                 self.ask_quit(ctx);
                 Flow::Handled
             }
+            Key::Char('m') if !self.first_run => {
+                self.ask_steps(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 6];
+            self.reading = [false; 7];
             self.sent = None;
             return Flow::Handled;
         }
@@ -1709,7 +1840,8 @@ impl Screen for AppSetup {
             | AppSetupEvent::HomeSet(result)
             | AppSetupEvent::SandboxSet(result)
             | AppSetupEvent::CleanupSet(result)
-            | AppSetupEvent::QuitSet(result) => self.changed(result, ctx),
+            | AppSetupEvent::QuitSet(result)
+            | AppSetupEvent::MasterStepsSet(result) => self.changed(result, ctx),
             AppSetupEvent::Sandbox(result) => {
                 self.reading[3] = false;
                 self.sandbox = loaded(result);
@@ -1721,6 +1853,10 @@ impl Screen for AppSetup {
             AppSetupEvent::Quit(result) => {
                 self.reading[5] = false;
                 self.quit = loaded(result);
+            }
+            AppSetupEvent::MasterSteps(result) => {
+                self.reading[6] = false;
+                self.steps = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -1771,6 +1907,7 @@ impl Screen for AppSetup {
             || matches!(self.sandbox, Load::Loading)
             || matches!(self.cleanup, Load::Loading)
             || matches!(self.quit, Load::Loading)
+            || matches!(self.steps, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

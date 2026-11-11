@@ -57,6 +57,8 @@ function answer(scene, command, args) {
     case "desktop_set_cleanup_settings": throw FAILURE;
     case "desktop_quit_settings": return read(scene.quit, command, { on_quit: "keep_running", left_running: "after_hours", hours: 24 });
     case "desktop_set_quit_settings": throw FAILURE;
+    case "desktop_master_step_settings": return read(scene.master, command, { limit: scene.limit ?? "no_limit" });
+    case "desktop_set_master_step_settings": throw FAILURE;
     case "desktop_team_events": return read(scene.events, command, { rule: null, rule_version: 0, effective: SHIPPED, notifications: scene.events === "none" ? [] : NOTES, unseen: 3, projects: [] });
     case "desktop_system_notifications": return "available";
     case "desktop_update_settings": return read(scene.updates, command, { current_version: "0.2.0", channel: scene.channel ?? "stable" });

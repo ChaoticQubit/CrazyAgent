@@ -1078,6 +1078,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::cleanup_settings::initialize(connection)?;
     crate::quit_settings::initialize(connection)?;
+    crate::master_step_limit::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1425,6 +1426,7 @@ fn apply(
             | Command::OwnerSandbox { .. }
             | Command::OwnerAgentCleanup { .. }
             | Command::OwnerAgentQuit { .. }
+            | Command::OwnerMasterSteps { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1612,6 +1614,7 @@ fn execute(
         Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
+        Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2756,6 +2759,7 @@ fn owner_read(
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
+        OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },

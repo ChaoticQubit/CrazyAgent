@@ -426,8 +426,7 @@ impl Process {
                     self.stdin = None;
                 }
                 let refused_tool = !self.tools && matches!(&event.kind, EventKind::ToolUse { .. });
-                if self.output.try_send(event.into()).is_err() {
-                    self.fail(Fault::Host("claude_host_event_delivery_failed"));
+                if !self.deliver(event.into()) {
                     return;
                 }
                 if refused_tool {
@@ -438,6 +437,35 @@ impl Process {
         }
         assert!(self.frame.len() <= FRAME_LINE_MAX);
         assert!(self.completed_turns <= self.events);
+    }
+
+    /// Hands one event to the turn's reader, waiting while the reader's queue is full, so a
+    /// burst of frames is never a failed turn (OB-5b); the harness waits on its pipe
+    /// meanwhile. The wait ends at the host's stop, at its deadline, which is recorded as the
+    /// fault, or with `claude_host_event_delivery_failed` when the reader is gone.
+    /// Input: the event. Output: whether the reader has it.
+    fn deliver(&mut self, event: ObservedEvent) -> bool {
+        assert!(self.events >= 1);
+        assert!(self.events <= self.limits.events);
+        let mut waiting = event;
+        loop {
+            match self.output.try_send(waiting) {
+                Ok(()) => return true,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.fail(Fault::Host("claude_host_event_delivery_failed"));
+                    return false;
+                }
+                Err(mpsc::error::TrySendError::Full(event)) => waiting = event,
+            }
+            if self.stop.load(Ordering::Acquire) {
+                return false;
+            }
+            if Instant::now() >= self.deadline {
+                self.fail(Fault::Host("claude_host_deadline"));
+                return false;
+            }
+            std::thread::sleep(POLL_TIME);
+        }
     }
 
     fn read_stderr(&mut self) {

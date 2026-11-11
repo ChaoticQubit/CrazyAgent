@@ -1,5 +1,6 @@
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
+use crate::master_step_limit::MasterStepSettings;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::quit_settings::QuitSettings;
@@ -105,6 +106,31 @@ impl OwnerController {
         }
         self.read(OwnerRead::QuitSettings).await?;
         self.begin_mutation(OwnerMutation::SetQuitSettings { settings }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Reads how many steps a master with its tools on may take for one message. Input:
+    /// none. Output: the stored setting, or the default before the first save.
+    pub async fn master_step_settings(&mut self) -> Result<MasterStepSettings, EngineError> {
+        match self.read(OwnerRead::MasterStepSettings).await?.data {
+            OwnerData::MasterStepSettings { settings } => Ok(settings),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Saves how many steps a master with its tools on may take for one message, as one
+    /// retained owner mutation. Input: the full setting and a nonzero client generation.
+    /// Output: the engine response.
+    pub async fn set_master_step_settings(
+        &mut self,
+        settings: MasterStepSettings,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        self.read(OwnerRead::MasterStepSettings).await?;
+        self.begin_mutation(OwnerMutation::SetMasterStepSettings { settings }, generation)?;
         self.send_pending().await
     }
 

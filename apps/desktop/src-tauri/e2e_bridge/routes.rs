@@ -12,6 +12,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
     use crazyagent::engine::owner::NativeAuthMethod;
+    use crazyagent::master_step_limit::MasterStepSettings;
     use crazyagent::memory::ReviewDecision;
     use crazyagent::owner_profile::OwnerProfile;
     use crazyagent::plugins::Scope;
@@ -2021,6 +2022,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_quit_settings(settings, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_master_step_settings" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.master_step_settings().await }.await;
+            routed(result)
+        }
+        "desktop_set_master_step_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: MasterStepSettings,
+                generation: u64,
+            }
+            let Args { settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_master_step_settings(settings, generation) .await }.await;
             routed(result)
         }
         "desktop_pool_summaries" => {

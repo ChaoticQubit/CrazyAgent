@@ -9,6 +9,7 @@ use crate::engine::owner::is_hex_id;
 #[cfg(unix)]
 use crate::engine::owner::random_id;
 use crate::master_session::MasterBackend;
+use crate::master_step_limit::StepLimit;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
@@ -159,6 +160,7 @@ impl OwnerRuntimeHandle {
                 wall_time,
                 delegate,
                 &prepared.tools_off,
+                prepared.steps,
             )?
         } else {
             codex_master_turn(
@@ -300,7 +302,8 @@ pub(super) struct MasterTurnLaunch {
 /// a new private mailbox in the turn's temporary folder, less the tools switched off. The keychain
 /// stays denied and the managed home is never given to the master. Inputs: where the turn runs, the
 /// account lease, the registered executable, the attempt's connection, the instruction text, the
-/// turn's wall time, the engine executable for tools on and the team tools switched off. Output:
+/// turn's wall time, the engine executable for tools on, the team tools switched off and the
+/// owner's master step limit, which only a tools-on command carries (OB-5b). Output:
 /// the launch parts with the copy, or the refusal of the part that failed,
 /// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
 /// minute after a renewal.
@@ -314,6 +317,7 @@ pub(super) fn claude_master_turn(
     wall_time: Duration,
     engine: Option<&Path>,
     tools_off: &[String],
+    steps: StepLimit,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -357,7 +361,7 @@ pub(super) fn claude_master_turn(
             let drop = tmp.join(crate::team::tool::DROP_FILE);
             let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
             make_mailbox(&mailbox)?;
-            let command = crate::engine::claude_host::tools_launch_command(
+            let mut command = crate::engine::claude_host::tools_launch_command(
                 executable,
                 place.worktree,
                 &home,
@@ -370,6 +374,7 @@ pub(super) fn claude_master_turn(
                     off: tools_off,
                 },
             )?;
+            crate::engine::claude_host::limit_steps(&mut command, steps);
             (command, sandbox, Some(drop))
         }
     };
