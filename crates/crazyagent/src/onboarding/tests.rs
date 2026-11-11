@@ -890,7 +890,7 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
     std::fs::create_dir(&layout).unwrap();
     let base = Drafted::new("demo".into(), &pool());
     let json_only = "```json\n{\"about\": \"Greets people.\", \"tech_stack\": [\"Rust\"]}\n```\n";
-    let (step, kept, wrote) =
+    let (step, kept, wrote, _) =
         service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
     assert_eq!(wrote, None);
     assert_eq!(
@@ -2154,7 +2154,7 @@ fn an_overview_entry_that_is_not_a_text_file_is_reported_and_left_as_it_is() {
         make(entry.as_path());
         let before = std::fs::symlink_metadata(&entry).unwrap().file_type();
         let base = Drafted::new("demo".into(), &pool());
-        let (step, kept, wrote) =
+        let (step, kept, wrote, _) =
             service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
         assert_eq!(step, Step::failed(service::OVERVIEW_BLOCKED), "{what}");
         assert_eq!(wrote, None, "{what}");
