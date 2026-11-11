@@ -1004,6 +1004,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 Request::Process(query) => connection.process(*query).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
+                Request::TeamGraph { project } => connection.team_graph(project).unwrap(),
                 Request::Recovery(query) => connection.recovery(*query).unwrap(),
                 Request::Settings(job) => {
                     sent.push(match job.as_ref() {
@@ -1467,6 +1468,7 @@ async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&
                 Request::Process(query) => connection.process(*query).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
+                Request::TeamGraph { project } => connection.team_graph(project).unwrap(),
                 Request::Recovery(query)
                     if matches!(
                         *query,
