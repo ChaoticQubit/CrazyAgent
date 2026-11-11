@@ -133,7 +133,8 @@ pub(super) enum Intent {
 /// What a change set held before a reset that may never happen: the fields an update, a
 /// restore or a regeneration changes, so an engine start can put them back as the step's
 /// own refusal does. An open state means the set's pending ref named `head`, any other
-/// state that it had none.
+/// state that it had none. A copy of a set never regenerated is written without the
+/// regenerated fields, so an older engine still reads it after a rollback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Earlier {
@@ -149,9 +150,9 @@ pub(super) struct Earlier {
     restorable_until_ms: Option<u64>,
     #[serde(default)]
     restored: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     regenerated_head: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     regenerated_files: Vec<String>,
 }
 
