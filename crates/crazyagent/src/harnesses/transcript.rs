@@ -1064,7 +1064,10 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 /// Reads what was typed into a harness conversation after byte `offset` of its record,
 /// with where each typed line ends, so a caller can read on from one typed message to the
 /// next. Only lines the harness finished are read, from at most `EXCERPT_TAIL_BYTES_MAX`
-/// bytes past the offset, never following a link. Takes the harness, the record and the
+/// bytes past the offset, never following a link. A Claude Code line is typed only when it
+/// is a prompt that starts a turn (`claude_prompt`), so a compact summary, a line only the
+/// transcript shows or a sub-agent's line is never read as a turn's words. Takes the
+/// harness, the record and the
 /// offset. Returns the typed texts oldest first, each with the byte offset just past its
 /// line, and the offset just past the last line read; none when the record cannot be read
 /// or is now shorter than the offset.
@@ -1091,7 +1094,11 @@ pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64
         };
         let said = match harness {
             "codex" => codex_message(&value),
-            "claude-code" => claude_message(&value),
+            "claude-code"
+                if claude_prompt(&value, &content_texts(&value["message"]["content"])) =>
+            {
+                claude_message(&value)
+            }
             _ => None,
         };
         if let Some((Speaker::Input, text)) = said {

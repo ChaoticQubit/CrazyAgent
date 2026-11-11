@@ -542,6 +542,79 @@ pub(crate) fn mark_live_turn(
     bind_typed(connection, project, session, harness, next, false)
 }
 
+/// Stores the start of a live terminal turn that follows one the engine dropped as no
+/// turn, whose message is still open. A turn counts once: a start with nothing typed since
+/// is the dropped turn at work again and stores nothing, and a dropped turn no typed
+/// message was read for gives its message to the turn that starts. Only a start the kept
+/// record shows a new typed message for, past the one the dropped turn was bound to, or
+/// one the engine typed after such a turn, is a turn of its own and is stored as
+/// `mark_live_turn` stores it, so each typed message is read for one turn only. Takes the
+/// engine database, the project, the session, the harness in the terminal and what the
+/// engine typed, if it did. Returns Ok, also when the session id cannot be one.
+pub(crate) fn mark_live_turn_again(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    harness: &str,
+    fed: Option<&Fed>,
+) -> Result<(), EngineError> {
+    if session.is_empty() || session.len() > 128 {
+        return Ok(());
+    }
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    if held_elsewhere(connection, project, session)? {
+        return Ok(());
+    }
+    let Some((seq, _)) = open_turn(connection, session)? else {
+        return mark_live_turn(connection, project, session, harness, fed);
+    };
+    assert!(seq > 0);
+    let bound: Option<(Option<String>, i64)> = connection
+        .query_row(
+            "SELECT record,record_at FROM session_messages
+             WHERE session=?1 AND seq=?2 AND record_at IS NOT NULL",
+            params![session, seq],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((record, at)) = bound else {
+        if let Some(Fed::Owner(text) | Fed::Engine(text)) = fed {
+            let speaker = match fed {
+                Some(Fed::Engine(_)) => MessageSpeaker::Engine,
+                _ => MessageSpeaker::Owner,
+            };
+            let taken = connection
+                .execute(
+                    "UPDATE session_messages SET speaker=?1, text=?2, source=?3
+                     WHERE session=?4 AND seq=?5 AND record_at IS NULL",
+                    params![
+                        speaker.name(),
+                        Some(marked(text, MESSAGE_BYTES_MAX)).filter(|text| !text.is_empty()),
+                        TERMINAL,
+                        session,
+                        seq
+                    ],
+                )
+                .map_err(error)?;
+            assert!(taken == 1);
+        }
+        return bind_typed(connection, project, session, harness, seq, false);
+    };
+    assert!(at >= 0);
+    let typed = kept_record(connection, project, session, harness)?
+        .filter(|kept| record.as_deref() == Some(kept.resume.id.as_str()))
+        .and_then(|kept| {
+            let from = u64::try_from(at).ok()?;
+            crate::harnesses::transcript::typed_past(&kept.harness, &kept.resume.record, from)
+        })
+        .is_some_and(|(typed, _)| !typed.is_empty());
+    if fed.is_some() || typed {
+        return mark_live_turn(connection, project, session, harness, fed);
+    }
+    Ok(())
+}
+
 /// Stores the start of a live terminal turn the engine did not type, as `mark_live_turn`
 /// does. Takes the engine database, the project, the session and the harness in the
 /// terminal. Returns Ok, also when the session id cannot be one.
@@ -672,6 +745,27 @@ fn open_turn(connection: &Connection, session: &str) -> Result<Option<(i64, Stri
     }))
 }
 
+/// The conversation a session kept for the harness in its terminal, whose record the typed
+/// words of its turns are read from. Takes the connection, project, session and the
+/// harness in the terminal. Returns it, or None when the session kept none, kept one of
+/// another harness or kept one the harness reader refused.
+fn kept_record(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    harness: &str,
+) -> Result<Option<SessionConversation>, EngineError> {
+    if !table_exists(connection, "team_master_conversations")? {
+        return Ok(None);
+    }
+    Ok(
+        crate::team::master::session_conversation(connection, project, session)?
+            .filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
+            .filter(|kept| crate::harnesses::same(&kept.harness, harness))
+            .filter(|kept| (1..=128).contains(&kept.resume.id.len())),
+    )
+}
+
 /// Tells who typed a message a harness record shows: the engine, for a handoff it typed or
 /// a message it typed for the team, else the owner. Takes the typed text. Returns the
 /// speaker.
@@ -713,14 +807,7 @@ fn bind_typed(
     closing: bool,
 ) -> Result<(), EngineError> {
     assert!(seq > 0);
-    if !table_exists(connection, "team_master_conversations")? {
-        return Ok(());
-    }
-    let kept = crate::team::master::session_conversation(connection, project, session)?
-        .filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
-        .filter(|kept| crate::harnesses::same(&kept.harness, harness))
-        .filter(|kept| (1..=128).contains(&kept.resume.id.len()));
-    let Some(kept) = kept else {
+    let Some(kept) = kept_record(connection, project, session, harness)? else {
         return Ok(());
     };
     let turn: Option<(Option<String>, Option<i64>)> = connection
@@ -3936,6 +4023,25 @@ mod tests {
         super::takeover(messages, next).map(|taken| taken.from)
     }
 
+    /// Appends one typed input, with no reply, to the record `old_record` keeps.
+    #[cfg(unix)]
+    fn record_typed(folder: &tempfile::TempDir, typed: &str) {
+        use std::io::Write;
+        let record = folder
+            .path()
+            .join("4f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(record)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type": "user", "message": {"content": typed}})
+        )
+        .unwrap();
+    }
+
     /// Appends typed inputs and their replies to the record `old_record` keeps.
     #[cfg(unix)]
     fn record_more(folder: &tempfile::TempDir, exchanges: &[(&str, &str)]) {
@@ -4698,6 +4804,112 @@ mod tests {
                 "master/live/terminal: One",
                 "owner/live/record: Second",
                 "master/live/terminal: Two",
+            ]
+        );
+    }
+
+    /// OB-6 merge-up with OB-1: a live turn the engine dropped as no turn keeps its message
+    /// open. The same turn at work again stores nothing. A message typed after it is a
+    /// turn of its own with its own words, and the turn after that reads its own words,
+    /// not those of the turn before.
+    #[cfg(unix)]
+    #[test]
+    fn a_typed_turn_after_a_dropped_one_is_its_own_turn_and_shifts_no_words() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        old_record(&folder, &connection, "s-drop", &[]);
+        let again = || {
+            super::mark_live_turn_again(&connection, &project, "s-drop", "claude-code", None)
+                .unwrap();
+        };
+
+        record_typed(&folder, "First");
+        super::mark_owner_turn(&connection, &project, "s-drop", "claude-code").unwrap();
+        again();
+        let same_turn = shown(&connection, "s-drop");
+        record_typed(&folder, "Second");
+        again();
+        super::mark_owner_reply(&connection, &project, "s-drop", "claude-code", "Two").unwrap();
+        record_typed(&folder, "Third");
+        super::mark_owner_turn(&connection, &project, "s-drop", "claude-code").unwrap();
+
+        assert_eq!(same_turn, ["owner/live/record: First"]);
+        assert_eq!(
+            shown(&connection, "s-drop"),
+            [
+                "owner/live/record: First",
+                "owner/live/record: Second",
+                "master/live/terminal: Two",
+                "owner/live/record: Third",
+            ]
+        );
+    }
+
+    /// OB-6 merge-up with OB-1: a dropped turn no typed message was read for gives its
+    /// message to the turn that starts next, so the two count as one turn (OB1-F3) and the
+    /// message gets the words typed for that turn.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_dropped_with_nothing_typed_gives_its_message_to_the_turn_that_starts() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        old_record(&folder, &connection, "s-none", &[]);
+
+        super::mark_owner_turn(&connection, &project, "s-none", "claude-code").unwrap();
+        let dropped = shown(&connection, "s-none");
+        record_typed(&folder, "Real prompt");
+        super::mark_live_turn_again(&connection, &project, "s-none", "claude-code", None).unwrap();
+        super::mark_owner_reply(&connection, &project, "s-none", "claude-code", "Done").unwrap();
+
+        assert_eq!(dropped, ["owner/live/terminal: -"]);
+        assert_eq!(
+            shown(&connection, "s-none"),
+            [
+                "owner/live/record: Real prompt",
+                "master/live/terminal: Done",
+            ]
+        );
+    }
+
+    /// OB-6 merge-up with OB-1: what the engine typed for the turn that starts after a
+    /// dropped one is stored as the engine's on the dropped turn's message when that
+    /// message has no words, and as a turn of its own when it has.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_engine_typed_after_a_dropped_turn_is_stored_as_the_engine_s() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        old_record(&folder, &connection, "s-fed-drop", &[]);
+        let fed = super::Fed::Engine("[team] Agent 4 finished".into());
+        let again = |fed: &super::Fed| {
+            super::mark_live_turn_again(
+                &connection,
+                &project,
+                "s-fed-drop",
+                "claude-code",
+                Some(fed),
+            )
+            .unwrap();
+        };
+
+        super::mark_owner_turn(&connection, &project, "s-fed-drop", "claude-code").unwrap();
+        again(&fed);
+        let taken = shown(&connection, "s-fed-drop");
+        record_typed(&folder, "[team] Agent 4 finished");
+        super::mark_owner_reply(&connection, &project, "s-fed-drop", "claude-code", "Noted")
+            .unwrap();
+        record_typed(&folder, "Ship it");
+        super::mark_owner_turn(&connection, &project, "s-fed-drop", "claude-code").unwrap();
+        again(&super::Fed::Engine("[team] Agent 5 finished".into()));
+
+        assert_eq!(taken, ["engine/live/terminal: [team] Agent 4 finished"]);
+        assert_eq!(
+            shown(&connection, "s-fed-drop"),
+            [
+                "engine/live/terminal: [team] Agent 4 finished",
+                "master/live/terminal: Noted",
+                "owner/live/record: Ship it",
+                "engine/live/terminal: [team] Agent 5 finished",
             ]
         );
     }

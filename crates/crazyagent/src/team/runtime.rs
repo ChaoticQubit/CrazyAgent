@@ -8434,17 +8434,20 @@ impl TeamRuntime {
                 let live_session = worker
                     .session
                     .clone()
-                    .filter(|_| worker.live && !counted)
+                    .filter(|_| worker.live)
                     .map(|session| (worker.project.clone(), session, worker.harness.clone()));
                 super::master::turn_started(&self.connection, id)?;
                 if let Some((project, session, harness)) = live_session {
-                    crate::master_sessions::mark_live_turn(
-                        &self.connection,
-                        &project,
-                        &session,
-                        &harness,
-                        fed.as_ref(),
-                    )?;
+                    let (db, fed) = (&self.connection, fed.as_ref());
+                    if counted {
+                        crate::master_sessions::mark_live_turn_again(
+                            db, &project, &session, &harness, fed,
+                        )?;
+                    } else {
+                        crate::master_sessions::mark_live_turn(
+                            db, &project, &session, &harness, fed,
+                        )?;
+                    }
                 }
                 self.mark_agent(id, AgentStatus::Working, None)?;
                 Ok(false)

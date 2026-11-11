@@ -16186,7 +16186,9 @@ fn a_live_master_turn_reported_as_none_closes_without_counting() {
 
 /// OB-1 r1 (OB1-F3): a live master's turn dropped as none was counted once for the Sessions
 /// list at its start, so the next start, the same turn starting again or a new one, takes
-/// that count and adds none. A start with no drop before it counts as before.
+/// that count and adds none. A start with no drop before it counts as before. The count is
+/// the session's owner and engine messages in the one conversation store (OB-6), which the
+/// Sessions list counts.
 #[test]
 fn a_dropped_live_master_turn_counts_once_in_the_sessions_list() {
     let fixture = Fixture::new(1);
@@ -16204,7 +16206,8 @@ fn a_dropped_live_master_turn_counts_once_in_the_sessions_list() {
         fixture
             .connection
             .query_row(
-                "SELECT COALESCE(SUM(turns),0) FROM session_owner_turns WHERE session='s-dropped'",
+                "SELECT COUNT(*) FROM session_messages
+                 WHERE session='s-dropped' AND speaker IN ('owner','engine')",
                 [],
                 |row| row.get(0),
             )

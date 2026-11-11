@@ -123,6 +123,41 @@ fn claude_meta_lines_and_unknown_lines_are_ignored() {
     assert_eq!(reader.read().unwrap(), Vec::new());
 }
 
+/// OB-6 merge-up with OB-1: the typed lines read for a live turn's words are the prompts
+/// that start a turn and no other user line, so a line that starts no turn is never read
+/// as the words of the turn after it. Each typed line comes with the offset just past it.
+#[test]
+fn claude_typed_lines_past_an_offset_are_only_the_prompts_that_start_a_turn() {
+    let case = Case::new();
+    let file = case.path().join("typed.jsonl");
+    let summary = r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}"#;
+    let sidechain =
+        r#"{"type":"user","isSidechain":true,"message":{"content":"Search the repository"}}"#;
+    let first = r#"{"type":"user","message":{"content":"Plan the launch"}}"#;
+    let second = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(
+        &file,
+        &format!("{summary}\n{first}\n{sidechain}\n{second}\n"),
+    );
+    let first_end = u64::try_from(summary.len() + 1 + first.len() + 1).unwrap();
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let all = typed_past("claude-code", &file, 0).unwrap();
+    let rest = typed_past("claude-code", &file, first_end).unwrap();
+
+    assert_eq!(
+        all,
+        (
+            vec![
+                (first_end, "Plan the launch".to_owned()),
+                (length, "Ship it".to_owned()),
+            ],
+            length,
+        )
+    );
+    assert_eq!(rest, (vec![(length, "Ship it".to_owned())], length));
+}
+
 /// A Claude Code user line that is no prompt to the model starts no turn, whatever text it
 /// carries, and the prompt typed after it starts one as before (OB-1: such a line opened a
 /// live master's turn that nothing closed). One shape per entry, each on a fresh record.
