@@ -4,6 +4,7 @@ pub mod launch;
 pub mod leftovers;
 pub mod terminal_session;
 pub mod transcript;
+pub mod update;
 
 #[cfg(test)]
 mod probe_tests;
