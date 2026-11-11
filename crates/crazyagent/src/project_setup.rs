@@ -649,8 +649,8 @@ pub enum ContextKind {
 
 /// One file of a project's context: its context path, what it is and its size. `linked` is
 /// set for a repository file linked into the context, whose path starts with
-/// [`LINKED_PREFIX`]; it is left off the wire when false, so a reader from before linked
-/// files still reads every other item.
+/// [`LINKED_PREFIX`]; it is left off the wire when false, so a list with no linked file
+/// reads as it did before, while a reader from before linked files refuses a list with one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextItem {
