@@ -411,7 +411,7 @@ fn repeated_note(settings: &InstructionSettings, repeats: u32) -> String {
         }
         (Mode::Both, _, 0) => "No line of this project's file repeats the app instructions.".into(),
         (Mode::Both, Repeated::LeaveOut, _) => format!(
-            "{lines} of this project's file {repeat} the app instructions and {are} left out for agents. Headings, code blocks, tables and rules always stay."
+            "{lines} of this project's file {repeat} the app instructions and {are} left out for agents. Only a line under the same headings counts. Code blocks, tables and rules always stay."
         ),
         (Mode::Both, Repeated::Keep, _) => format!(
             "{lines} of this project's file {repeat} the app instructions, and agents get {them} twice."

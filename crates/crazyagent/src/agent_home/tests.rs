@@ -240,8 +240,129 @@ fn a_project_text_with_no_repeat_is_given_byte_for_byte() {
     );
     assert_eq!(repeated_lines("", "- Use TDD.\n"), 0);
     assert_eq!(
-        repeated_lines("  - Use TDD.  \n", "- Use TDD.\n\t- Use TDD.\n"),
-        2
+        repeated_lines(
+            "  - Use TDD.  \n",
+            "  - Use TDD.\n\t- Use TDD.\n- Use TDD.\n"
+        ),
+        1,
+        "a line repeats only at the same indent; spaces at its end do not count"
+    );
+}
+
+#[test]
+fn the_same_rule_under_another_heading_is_never_left_out() {
+    let app = "## Always\n\n- Use npm.\n";
+    let project = "## Never\n\n- Use npm.\n";
+    assert_eq!(
+        render(app, project, Repeated::LeaveOut),
+        render(app, project, Repeated::Keep),
+        "leaving the line out would turn Never use npm into Always use npm"
+    );
+    assert_eq!(repeated_lines(app, project), 0);
+
+    let nested_app = "## Always\n\n### Tools\n\n- Use npm.\n";
+    let nested = "## Never\n\n### Tools\n\n- Use npm.\n";
+    assert_eq!(
+        repeated_lines(nested_app, nested),
+        0,
+        "the same inner heading under another outer heading is another section"
+    );
+    let underlined_app = "Always\n======\n\n- Use npm.\n";
+    let underlined = "Never\n=====\n\n- Use npm.\n";
+    assert_eq!(
+        render(underlined_app, underlined, Repeated::LeaveOut),
+        render(underlined_app, underlined, Repeated::Keep),
+        "an underlined heading names a section as a # heading does"
+    );
+    assert_eq!(
+        repeated_lines("- Use npm.\n", "## Never\n\n- Use npm.\n"),
+        0,
+        "a line before any heading is not the line under a heading"
+    );
+    assert_eq!(
+        repeated_lines(
+            "## Rules\n\n- Use npm.\n",
+            "## Rules\n\n- Use npm.\n- Run make.\n"
+        ),
+        1,
+        "under the same heading the repeated line is still left out"
+    );
+}
+
+#[test]
+fn a_line_at_another_indent_is_another_line() {
+    let app = "- Use npm.\n";
+    let project = "- Tools we never use:\n  - Use npm.\n";
+    assert_eq!(
+        render(app, project, Repeated::LeaveOut),
+        render(app, project, Repeated::Keep),
+        "a sub-bullet belongs to its parent line"
+    );
+    assert_eq!(repeated_lines(app, project), 0);
+    assert_eq!(repeated_lines("\t- Use npm.\n", "- Use npm.\n"), 0);
+    assert_eq!(
+        repeated_lines("- Use npm.  \n", "- Use npm.\n- Use npm.\t\n"),
+        2,
+        "only spaces at a line's end are ignored"
+    );
+}
+
+#[test]
+fn a_code_block_ends_only_on_its_own_fence() {
+    let app = "- Use TDD.\n";
+    for project in [
+        "~~~\n```\n- Use TDD.\n```\n~~~\n",
+        "````\n```\n- Use TDD.\n```\n````\n",
+        "```\n    ```\n- Use TDD.\n```\n",
+        "```text\n~~~\n- Use TDD.\n",
+        "~~~\n~~\n- Use TDD.\n~~~~\n",
+    ] {
+        assert_eq!(
+            repeated_lines(app, project),
+            0,
+            "a line inside the block stays: {project:?}"
+        );
+        assert_eq!(
+            render(app, project, Repeated::LeaveOut),
+            render(app, project, Repeated::Keep),
+            "{project:?}"
+        );
+    }
+    assert_eq!(
+        repeated_lines(app, "    ```\n- Use TDD.\n"),
+        1,
+        "a line indented by four spaces opens no block, so the repeat after it is left out"
+    );
+    assert_eq!(
+        repeated_lines(app, "```\ncode\n```\n- Use TDD.\n"),
+        1,
+        "after the block closes a repeat is left out again"
+    );
+    assert_eq!(
+        repeated_lines(app, "Run ```make``` first.\n- Use TDD.\n"),
+        1,
+        "backticks inside a sentence open no block"
+    );
+}
+
+#[test]
+fn a_heading_goes_only_when_every_line_under_it_was_left_out() {
+    let app = "## Rules\n\n- Use TDD.\n\n## Build\n\n- make\n";
+    let project = "## Rules\n\n- Use TDD.\n\n## Build\n\n- make\n- make test\n\n## Notes\n";
+    let joined = render(app, project, Repeated::LeaveOut);
+    assert!(
+        joined.ends_with("## Project instructions\n\n## Build\n\n- make test\n\n## Notes\n"),
+        "{joined}"
+    );
+    assert_eq!(repeated_lines(app, project), 2);
+    let underlined = render(
+        "Rules\n-----\n\n- Use TDD.\n",
+        "Rules\n-----\n\n- Use TDD.\n\n## Build\n\n- make\n",
+        Repeated::LeaveOut,
+    );
+    assert!(
+        underlined.ends_with("## Project instructions\n\n## Build\n\n- make\n"),
+        "an underlined heading goes with its underline: {underlined}"
     );
 }
 

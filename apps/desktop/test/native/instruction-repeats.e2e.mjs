@@ -60,7 +60,7 @@ test("Lines the project file repeats: Leave out gives agents the repeated line o
     await me.waitFor("the Delivery panel's repeated lines row", (text) => text.includes(ROW));
     const row = await settled(page, bridge, project, "leave_out", "Leave out");
     await me.capture("repeats-leave-out");
-    assert.equal(row.note, "1 line of this project's file repeats the app instructions and is left out for agents. Headings, code blocks, tables and rules always stay.");
+    assert.equal(row.note, "1 line of this project's file repeats the app instructions and is left out for agents. Only a line under the same headings counts. Code blocks, tables and rules always stay.");
 
     const given = await value(bridge, "desktop_process_given", { projectId: project });
     assert.equal(times(given, RULE), 1, `agents get the repeated line once: ${given}`);
@@ -90,5 +90,20 @@ test("Lines the project file repeats: Keep gives agents the repeated line twice"
     await me.click("Leave out", `[role=radiogroup][aria-label=${JSON.stringify(ROW)}] [role=radio]`);
     await settled(page, bridge, project, "leave_out", "Leave out");
     assert.equal(times(await value(bridge, "desktop_process_given", { projectId: project }), RULE), 1, "back on Leave out the line is given once again");
+  });
+});
+
+test("Lines the project file repeats: Leave out keeps a rule that stands under another heading", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-repeats-sections-", async ({ project, bridge }) => {
+    await write(bridge, null, "## Always\n\n- Use npm.\n");
+    await write(bridge, project, "## Never\n\n- Use npm.\n\n## Always\n\n- Use npm.\n- Run make check before you finish.\n");
+    const view = await value(bridge, "desktop_instruction_settings", { projectId: project });
+    assert.equal(view.settings.repeated, "leave_out");
+    assert.equal(view.repeats, 1, "only the line under the same heading counts as repeated");
+    const given = await value(bridge, "desktop_process_given", { projectId: project });
+    assert.equal(times(given, "- Use npm."), 2, `the rule under Never stays beside the app's rule under Always: ${given}`);
+    const never = given.indexOf("## Never");
+    assert.ok(never > 0 && given.indexOf("- Use npm.", never) < given.indexOf("## Always", never), "the Never section still holds its rule");
+    assert.equal(times(given, "- Run make check before you finish."), 1);
   });
 });

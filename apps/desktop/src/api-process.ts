@@ -329,7 +329,7 @@ export function repeatedNote(settings: InstructionSettings, repeats: number): st
   if (repeats === 0) return "No line of this project's file repeats the app instructions.";
   const lines = repeats === 1 ? "1 line of this project's file repeats" : `${repeats} lines of this project's file repeat`;
   if (settings.repeated === "keep") return `${lines} the app instructions, and agents get ${repeats === 1 ? "it" : "them"} twice.`;
-  return `${lines} the app instructions and ${repeats === 1 ? "is" : "are"} left out for agents. Headings, code blocks, tables and rules always stay.`;
+  return `${lines} the app instructions and ${repeats === 1 ? "is" : "are"} left out for agents. Only a line under the same headings counts. Code blocks, tables and rules always stay.`;
 }
 
 /** Every way an instruction edit can reach running agents, in the order the page lists

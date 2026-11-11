@@ -383,9 +383,9 @@ test("lines the project file repeats are left out or kept, Leave out first, and 
   assert.match(markup, /role="radio" aria-checked="true"[^>]*>Leave out</, "an engine reply without the choice or the count shows the default");
   assert.match(markup, note("No line of this project's file repeats the app instructions."));
   assert.match(shown({ repeated: "leave_out" }, 3),
-    note("3 lines of this project's file repeat the app instructions and are left out for agents. Headings, code blocks, tables and rules always stay."));
+    note("3 lines of this project's file repeat the app instructions and are left out for agents. Only a line under the same headings counts. Code blocks, tables and rules always stay."));
   assert.match(shown({ repeated: "leave_out" }, 1),
-    note("1 line of this project's file repeats the app instructions and is left out for agents. Headings, code blocks, tables and rules always stay."));
+    note("1 line of this project's file repeats the app instructions and is left out for agents. Only a line under the same headings counts. Code blocks, tables and rules always stay."));
   const kept = shown({ repeated: "keep" }, 2);
   assert.match(kept, /role="radio" aria-checked="true"[^>]*>Keep</);
   assert.match(kept, note("2 lines of this project's file repeat the app instructions, and agents get them twice."));
@@ -395,7 +395,7 @@ test("lines the project file repeats are left out or kept, Leave out first, and 
   }
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
   for (const words of ["No line of this project's file repeats the app instructions.", "Repeated lines only matter when agents get both the app and the project instructions.",
-    "the app instructions, and agents get {them} twice.", "left out for agents. Headings, code blocks, tables and rules always stay."]) {
+    "the app instructions, and agents get {them} twice.", "left out for agents. Only a line under the same headings counts. Code blocks, tables and rules always stay."]) {
     assert.ok(tui.includes(words), `the TUI says the same: ${words}`);
   }
 });
