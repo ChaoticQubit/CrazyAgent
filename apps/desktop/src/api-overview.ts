@@ -6,7 +6,8 @@ export type OverviewTabId = "quick_info" | "features" | "competitors" | "install
 
 /** One generated tab: its Markdown or null before the first run, the version a save or an
  * accept must name, whether the owner edited it, a refresh's proposal waiting for review, and
- * why its file can't be shown (`blank`, `too_large` or `not_utf8`), null when it can. */
+ * why its file can't be shown (`blank`, `too_large`, `not_utf8`, `not_a_file` for a link or
+ * folder in the file's place, `not_a_folder` for a tabs folder that is none), null when it can. */
 export interface TabState { tab: OverviewTabId; text: string | null; version: string; edited: boolean; proposal: string | null; blocked: string | null }
 
 /** The project's own README: its path in the project, its text and whether only the first

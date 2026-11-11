@@ -307,6 +307,28 @@ test("a blocked tab says why in plain words, names its file and what to do", () 
   assert.doesNotMatch(blank, /Not written yet/);
 });
 
+test("a tab whose place holds a link or folder says so, names the path and asks to remove it", () => {
+  const html = page({ selected: "features", overview: blockedTab(base(), "features", "not_a_file") });
+  assert.match(html, /CrazyAgent can&#x27;t show this tab: a link or folder is where its file goes\./);
+  assert.match(html, /\.crazyagent\/overview\/features\.md/);
+  assert.match(html, /Remove it, then choose Refresh\./);
+  assert.doesNotMatch(html, /Fix or delete the file/);
+  assert.doesNotMatch(html, />Edit</);
+});
+
+test("a tabs folder that is a link or a file blocks every tab and names the folder, not a tab file", () => {
+  let overview = base();
+  for (const tab of ["quick_info", "features", "competitors", "install_and_use"]) overview = blockedTab(overview, tab, "not_a_folder");
+  for (const tab of ["features", "competitors", "install_and_use"]) {
+    const html = page({ selected: tab, overview });
+    assert.match(html, /CrazyAgent can&#x27;t show this tab: the folder for the tabs is a link or a file\./, tab);
+    assert.match(html, /<span class="pj-mono">\.crazyagent\/overview<\/span>/, tab);
+    assert.match(html, /Remove it, then choose Refresh\./, tab);
+    assert.doesNotMatch(html, /\.md<\/span>/, tab);
+    assert.doesNotMatch(html, />Edit</, tab);
+  }
+});
+
 test("a blocked Quick info keeps the About and the mapping's overview under the reason", () => {
   const html = page({ selected: "quick_info", about: "A research reader.", mappingOverview: "Reads papers.\n", overview: blockedTab(base(), "quick_info", "blank") });
   assert.match(html, /CrazyAgent can&#x27;t show this tab: its file is empty\./);

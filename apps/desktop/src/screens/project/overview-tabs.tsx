@@ -69,7 +69,11 @@ export const TAB_BYTES_MAX = 64 * 1024;
 export const COMMAND_LINES_MAX = 200;
 
 const TAB_FILES: Record<OverviewTabId, string> = { quick_info: "quick-info", features: "features", competitors: "competitors", install_and_use: "install-and-use" };
-const BLOCKED: Record<string, string> = { blank: "its file is empty", too_large: "its file is larger than 64 KB", not_utf8: "its file is not plain text" };
+const BLOCKED: Record<string, string> = {
+  blank: "its file is empty", too_large: "its file is larger than 64 KB", not_utf8: "its file is not plain text",
+  not_a_file: "a link or folder is where its file goes", not_a_folder: "the folder for the tabs is a link or a file",
+};
+const BLOCKED_BY_ENTRY = new Set(["not_a_file", "not_a_folder"]);
 const COMPETITOR = "competitor_research";
 const LINKS_SHOWN = 5;
 const TAB_CHANGED = "overview_tab_changed";
@@ -346,12 +350,16 @@ function ReadmePanel({ projectId, readme }: { projectId: string; readme: Readme 
   </>;
 }
 
-/** Why a tab's file can't be shown, where the file is and what to do about it.
- * Inputs: the tab and the engine's reason code. Output: the line. */
+/** Why a tab's file can't be shown, where the trouble is and what to do about it: the tab's
+ * file, or the tabs' folder when that is what is wrong; an entry that is no file is removed,
+ * a file is fixed or deleted. Inputs: the tab and the engine's reason code. Output: the line. */
 function Blocked({ tab, reason }: { tab: OverviewTabId; reason: string }) {
   const why = Object.hasOwn(BLOCKED, reason) ? BLOCKED[reason] : "its file can't be read";
-  return <p className="pj-error" role="alert">CrazyAgent can't show this tab: {why}. The file
-    is <span className="pj-mono">.crazyagent/overview/{TAB_FILES[tab]}.md</span> in the project. Fix or delete the file, then choose Refresh.</p>;
+  const path = reason === "not_a_folder" ? ".crazyagent/overview" : `.crazyagent/overview/${TAB_FILES[tab]}.md`;
+  const place = reason === "not_a_folder" ? "The folder" : reason === "not_a_file" ? "The path" : "The file";
+  const fix = BLOCKED_BY_ENTRY.has(reason) ? "Remove it, then choose Refresh." : "Fix or delete the file, then choose Refresh.";
+  return <p className="pj-error" role="alert">CrazyAgent can't show this tab: {why}. {place} is <span className="pj-mono">{path}</span> in
+    the project. {fix}</p>;
 }
 
 /** What the generated tabs of a project outside the CrazyAgent folder say, with the way to
