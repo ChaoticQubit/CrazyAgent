@@ -29,6 +29,9 @@ pub const TAB_TOO_LARGE: &str = "overview_tab_too_large";
 pub const TAB_EMPTY: &str = "overview_tab_empty";
 /// The tab has no proposal to accept.
 pub const NO_PROPOSAL: &str = "overview_no_proposal";
+/// The project has no `.crazyagent` folder to hold tab files: it was made before the
+/// projects home and has to move into it first.
+pub const NEEDS_HOME: &str = "overview_needs_project_home";
 /// A refresh was asked for while the project's Overview tabs are off.
 pub const OFF: &str = "overview_off";
 /// The engine's store could not be read or written.
@@ -145,6 +148,7 @@ pub struct TabState {
     pub version: String,
     pub edited: bool,
     pub proposal: Option<String>,
+    pub blocked: Option<String>,
 }
 
 /// The repository's README as the Overview shows it: its path in the project, its text and
@@ -179,6 +183,7 @@ pub struct Overview {
     pub failure: Option<String>,
     pub refresh: Refresh,
     pub apply: Apply,
+    pub needs_home: bool,
 }
 
 /// What an offered text became: the tab file, a proposal waiting for the owner, or nothing
@@ -207,6 +212,21 @@ enum Found {
     Missing,
     Text(String),
     Blocked,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test runs on its own thread between a write's checks and its rename, to stand
+    /// in for another writer arriving at that moment.
+    static BEFORE_REPLACE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether the project has no `.crazyagent` folder of its own, as a project made before the
+/// projects home: it holds no tab files until it moves into the home. Input: the project
+/// folder. Output: the answer.
+pub fn needs_home(folder: &Path) -> bool {
+    crate::projects_home::state_folder(folder).as_path() == folder
 }
 
 fn unavailable<E>(_: E) -> EngineError {
@@ -404,6 +424,12 @@ fn checked(text: &str) -> Result<(), EngineError> {
 fn write_tab(folder: &Folder, tab: Tab, text: &str) -> Result<(), EngineError> {
     assert!(text.len() <= TAB_BYTES_MAX);
     assert!(!text.trim().is_empty());
+    #[cfg(test)]
+    BEFORE_REPLACE.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
     replace(folder, &tab.file(), text.as_bytes()).map_err(|_| failure(TAB_BLOCKED))?;
     match found_in(folder, tab) {
         Found::Text(back) if back == text => Ok(()),
@@ -709,6 +735,7 @@ pub fn read(
             version,
             edited,
             proposal,
+            blocked: None,
         });
     }
     assert_eq!(tabs.len(), Tab::ALL.len());
@@ -728,5 +755,6 @@ pub fn read(
         failure: state.failure,
         refresh: state.refresh,
         apply: state.apply,
+        needs_home: false,
     })
 }

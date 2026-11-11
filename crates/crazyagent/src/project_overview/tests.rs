@@ -183,7 +183,9 @@ fn a_tab_file_that_is_a_link_is_neither_read_nor_replaced() {
             .0,
         TAB_BLOCKED
     );
-    assert!(features(&db, &project, folder.path()).text.is_none());
+    let found = features(&db, &project, folder.path());
+    assert!(found.text.is_none());
+    assert_eq!(found.blocked.as_deref(), Some("not_a_file"));
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret\n");
     assert!(
         std::fs::symlink_metadata(folder.path().join(FEATURES))
@@ -207,7 +209,14 @@ fn a_tabs_folder_that_is_a_link_is_neither_read_nor_written_through() {
             .0,
         TAB_BLOCKED
     );
-    assert!(features(&db, &project, folder.path()).text.is_none());
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    assert!(!overview.needs_home);
+    assert!(
+        overview
+            .tabs
+            .iter()
+            .all(|tab| tab.text.is_none() && tab.blocked.as_deref() == Some("not_a_folder"))
+    );
     assert_eq!(
         std::fs::read_to_string(outside.join("features.md")).unwrap(),
         "- theirs\n"
@@ -249,9 +258,16 @@ fn a_file_that_is_too_long_or_not_text_is_left_alone_and_never_cut() {
     let (db, project, folder) = case();
     std::fs::create_dir_all(folder.path().join(".crazyagent/overview")).unwrap();
     let long = "y".repeat(TAB_BYTES_MAX + 1);
-    for body in [long.as_bytes(), &[0xff, 0xfe, 0x00][..], &b"  \n"[..]] {
+    for (body, why) in [
+        (long.as_bytes(), "too_large"),
+        (&[0xff, 0xfe, 0x00][..], "not_utf8"),
+        (&b"  \n"[..], "blank"),
+    ] {
         std::fs::write(folder.path().join(FEATURES), body).unwrap();
-        assert!(features(&db, &project, folder.path()).text.is_none());
+        let found = features(&db, &project, folder.path());
+        assert!(found.text.is_none());
+        assert!(found.version.is_empty());
+        assert_eq!(found.blocked.as_deref(), Some(why));
         assert_eq!(
             offer(&db, &project, folder.path(), Tab::Features, "- A\n")
                 .unwrap_err()
@@ -328,6 +344,12 @@ fn an_overview_goes_over_the_wire_in_the_shape_the_desktop_reads() {
     );
     assert_eq!(wire["refresh"], "after_landing");
     assert_eq!(wire["apply"], "always_ask");
+    assert_eq!(wire["needs_home"], false);
+    assert_eq!(wire["tabs"][3]["blocked"], serde_json::Value::Null);
+    std::fs::write(folder.path().join(".crazyagent/overview/features.md"), "\n").unwrap();
+    let blank = serde_json::to_value(read(&db, &project, folder.path(), 1).unwrap()).unwrap();
+    assert_eq!(blank["tabs"][1]["blocked"], "blank");
+    assert_eq!(blank["tabs"][1]["text"], serde_json::Value::Null);
     assert_eq!(wire["tabs"][3]["tab"], "install_and_use");
     assert_eq!(wire["tabs"][3]["text"], "npm i\n");
     assert_eq!(wire["tabs"][3]["edited"], false);
@@ -347,4 +369,174 @@ fn an_overview_goes_over_the_wire_in_the_shape_the_desktop_reads() {
             .join(".crazyagent/overview/install-and-use.md")
             .is_file()
     );
+}
+
+/// Two connections to one engine database in a temp project folder, for rows where two
+/// writers meet. Output: both connections, the project and the folder.
+fn shared() -> (Connection, Connection, ProjectId, tempfile::TempDir) {
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(folder.path().join(".crazyagent")).unwrap();
+    let database = folder.path().join("engine.db");
+    let first = Connection::open(&database).unwrap();
+    crate::roadmap_status::initialize(&first).unwrap();
+    initialize(&first).unwrap();
+    let second = Connection::open(&database).unwrap();
+    for db in [&first, &second] {
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    }
+    (first, second, ProjectId::new("alpha").unwrap(), folder)
+}
+
+#[test]
+fn an_owner_save_that_meets_a_refresh_in_the_middle_of_its_write_is_refused_not_replaced() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let (refresher, owner, project, folder) = shared();
+    set_apply(&owner, &project, Apply::WhenUnedited).unwrap();
+    offer(&owner, &project, folder.path(), Tab::Features, "- A\n").unwrap();
+    let seen = features(&owner, &project, folder.path()).version;
+    let (started, start) = channel::<()>();
+    let (done, finished) = channel::<()>();
+    let refresh = {
+        let (project, path) = (project.clone(), folder.path().to_path_buf());
+        std::thread::spawn(move || {
+            BEFORE_REPLACE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    started.send(()).unwrap();
+                    let _ = finished.recv_timeout(Duration::from_millis(500));
+                }));
+            });
+            offer(&refresher, &project, &path, Tab::Features, "- B\n")
+        })
+    };
+    start.recv_timeout(Duration::from_secs(10)).unwrap();
+    let saved = save(
+        &owner,
+        &project,
+        folder.path(),
+        Tab::Features,
+        "- mine\n",
+        &seen,
+    );
+    let _ = done.send(());
+    assert_eq!(refresh.join().unwrap().unwrap(), Offered::Written);
+    assert_eq!(saved.unwrap_err().0, TAB_CHANGED);
+    let now = features(&owner, &project, folder.path());
+    assert_eq!(now.text.as_deref(), Some("- B\n"));
+    save(
+        &owner,
+        &project,
+        folder.path(),
+        Tab::Features,
+        "- mine\n",
+        &now.version,
+    )
+    .unwrap();
+    let kept = features(&owner, &project, folder.path());
+    assert_eq!(kept.text.as_deref(), Some("- mine\n"));
+    assert!(kept.edited);
+}
+
+#[test]
+fn a_file_that_appears_while_the_first_text_of_a_tab_is_written_is_kept() {
+    let (db, project, folder) = case();
+    let target = folder.path().join(FEATURES);
+    let theirs = target.clone();
+    BEFORE_REPLACE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::write(&theirs, "- theirs\n").unwrap();
+        }));
+    });
+    let offered = offer(&db, &project, folder.path(), Tab::Features, "- A\n");
+    BEFORE_REPLACE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(offered.unwrap_err().0, TAB_CHANGED);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "- theirs\n");
+    let names: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["features.md"]);
+    let found = features(&db, &project, folder.path());
+    assert!(found.edited);
+    assert!(found.proposal.is_none());
+}
+
+#[test]
+fn a_project_with_no_crazyagent_folder_needs_the_projects_home_and_is_not_marked_due() {
+    let (db, project, folder) = case();
+    std::fs::remove_dir(folder.path().join(".crazyagent")).unwrap();
+    assert!(needs_home(folder.path()));
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    assert!(overview.needs_home);
+    assert!(!overview.stale);
+    assert!(
+        overview
+            .tabs
+            .iter()
+            .all(|tab| tab.text.is_none() && tab.blocked.is_none())
+    );
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM project_overview", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+    assert_eq!(
+        offer(&db, &project, folder.path(), Tab::Features, "- A\n")
+            .unwrap_err()
+            .0,
+        NEEDS_HOME
+    );
+    assert_eq!(
+        save(&db, &project, folder.path(), Tab::Features, "- A\n", "")
+            .unwrap_err()
+            .0,
+        NEEDS_HOME
+    );
+    assert!(std::fs::symlink_metadata(folder.path().join(".crazyagent")).is_err());
+    std::fs::create_dir(folder.path().join(".crazyagent")).unwrap();
+    assert!(!needs_home(folder.path()));
+    let overview = read(&db, &project, folder.path(), 2).unwrap();
+    assert!(!overview.needs_home);
+    assert!(overview.stale);
+}
+
+#[test]
+fn a_failure_longer_than_the_bound_is_cut_at_read_and_refused_by_a_new_table() {
+    let old = Connection::open_in_memory().unwrap();
+    old.execute_batch(
+        "CREATE TABLE project_overview(project TEXT PRIMARY KEY,
+           refresh TEXT NOT NULL DEFAULT 'after_landing', apply TEXT NOT NULL DEFAULT 'always_ask',
+           stale INTEGER NOT NULL DEFAULT 0, due_ms INTEGER NOT NULL DEFAULT 0,
+           running_ms INTEGER, checked_ms INTEGER, failure TEXT);",
+    )
+    .unwrap();
+    initialize(&old).unwrap();
+    let long = "\u{e9}".repeat(FAILURE_BYTES_MAX);
+    old.execute(
+        "INSERT INTO project_overview(project,failure) VALUES('alpha',?1)",
+        [&long],
+    )
+    .unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(folder.path().join(".crazyagent")).unwrap();
+    let project = ProjectId::new("alpha").unwrap();
+    let failure = read(&old, &project, folder.path(), 1)
+        .unwrap()
+        .failure
+        .unwrap();
+    assert_eq!(failure.len(), FAILURE_BYTES_MAX);
+    assert!(long.starts_with(&failure));
+
+    let (db, _, _folder) = case();
+    db.execute(
+        "INSERT INTO project_overview(project,failure) VALUES('alpha',?1)",
+        ["x".repeat(FAILURE_BYTES_MAX + 1)],
+    )
+    .unwrap_err();
+    db.execute(
+        "INSERT INTO project_overview(project,failure) VALUES('alpha',?1)",
+        ["x".repeat(FAILURE_BYTES_MAX)],
+    )
+    .unwrap();
 }
