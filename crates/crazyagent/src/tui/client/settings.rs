@@ -10,6 +10,7 @@ use crate::engine::owner::{
     NativeAuthMethod, NativeAuthPhase, NativeAuthStart, OwnerResult,
 };
 use crate::harnesses::HarnessEntry;
+use crate::harnesses::update::{HarnessVersions, UpdateSettings};
 use crate::memory::library::{
     AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX,
     SavedMemory,
@@ -37,6 +38,17 @@ pub(in crate::tui) enum SettingsJob {
     Accounts(AccountsRequest),
     AllAccounts,
     Harnesses,
+    HarnessVersions {
+        id: String,
+        look: bool,
+    },
+    HarnessUpdate {
+        id: String,
+    },
+    HarnessInstall {
+        id: String,
+    },
+    HarnessUpdateSettings,
     Usage {
         since_ms: Option<i64>,
         offset_minutes: i32,
@@ -196,6 +208,10 @@ impl std::fmt::Debug for SettingsJob {
             Self::Accounts(_) => "Accounts",
             Self::AllAccounts => "AllAccounts",
             Self::Harnesses => "Harnesses",
+            Self::HarnessVersions { .. } => "HarnessVersions",
+            Self::HarnessUpdate { .. } => "HarnessUpdate",
+            Self::HarnessInstall { .. } => "HarnessInstall",
+            Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
             Self::SetMoney(_) => "SetMoney",
@@ -314,6 +330,10 @@ pub(in crate::tui) enum SettingsEvent {
     Accounts(Result<AccountsReply, String>),
     AllAccounts(Result<Vec<AccountView>, String>),
     Harnesses(Result<Vec<HarnessEntry>, String>),
+    HarnessVersions(String, Result<HarnessVersions, String>),
+    HarnessUpdated(String, Result<(), String>),
+    HarnessInstalled(String, Result<(), String>),
+    HarnessUpdateSettings(Result<UpdateSettings, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
     MoneySet(Result<(), String>),
@@ -365,6 +385,12 @@ impl SettingsEvent {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
             SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
+            SettingsJob::HarnessVersions { id, .. } => {
+                Self::HarnessVersions(id.clone(), Err(problem))
+            }
+            SettingsJob::HarnessUpdate { id } => Self::HarnessUpdated(id.clone(), Err(problem)),
+            SettingsJob::HarnessInstall { id } => Self::HarnessInstalled(id.clone(), Err(problem)),
+            SettingsJob::HarnessUpdateSettings => Self::HarnessUpdateSettings(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
@@ -521,6 +547,45 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::HarnessVersions { id, look } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_versions(&id, look)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessVersions(id, result)
+            }
+            SettingsJob::HarnessUpdate { id } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_update(&id)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessUpdated(id, result)
+            }
+            SettingsJob::HarnessInstall { id } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_install(&id)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessInstalled(id, result)
+            }
+            SettingsJob::HarnessUpdateSettings => {
+                SettingsEvent::HarnessUpdateSettings(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_update_settings()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::Usage {
                 since_ms,
                 offset_minutes,

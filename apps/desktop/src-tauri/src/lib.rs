@@ -32,6 +32,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
+use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
@@ -309,6 +310,59 @@ async fn desktop_harness_catalog(
     read(&state)
         .await?
         .harness_catalog(check.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
+async fn desktop_harness_versions(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    look: bool,
+) -> Result<HarnessVersions, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_versions(&id, look).await
+}
+
+#[tauri::command]
+async fn desktop_harness_update(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_update(&id).await
+}
+
+#[tauri::command]
+async fn desktop_harness_install(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_install(&id).await
+}
+
+#[tauri::command]
+async fn desktop_harness_update_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::harnesses::update::UpdateSettings, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_update_settings().await
+}
+
+#[tauri::command]
+async fn desktop_harness_set_update_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: crazyagent::harnesses::update::UpdateSettings,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    read(&state)
+        .await?
+        .harness_set_update_settings(settings)
         .await
 }
 
@@ -4196,6 +4250,11 @@ native_commands! {
     desktop_connect,
     desktop_status,
     desktop_harness_catalog,
+    desktop_harness_versions,
+    desktop_harness_update,
+    desktop_harness_install,
+    desktop_harness_update_settings,
+    desktop_harness_set_update_settings,
     desktop_baselines,
     desktop_inspect_baseline,
     desktop_approve_baseline,

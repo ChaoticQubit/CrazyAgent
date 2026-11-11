@@ -49,6 +49,63 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state) .await? .harness_catalog(check.unwrap_or(false)) .await }.await;
             routed(result)
         }
+        "desktop_harness_versions" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                look: bool,
+            }
+            let Args { id, look } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_versions(&id, look).await }.await;
+            routed(result)
+        }
+        "desktop_harness_update" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_update(&id).await }.await;
+            routed(result)
+        }
+        "desktop_harness_install" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_install(&id).await }.await;
+            routed(result)
+        }
+        "desktop_harness_update_settings" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_update_settings().await }.await;
+            routed(result)
+        }
+        "desktop_harness_set_update_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: crazyagent::harnesses::update::UpdateSettings,
+            }
+            let Args { settings } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state) .await? .harness_set_update_settings(settings) .await }.await;
+            routed(result)
+        }
         "desktop_baselines" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
