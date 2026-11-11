@@ -1244,6 +1244,13 @@ export function removeProject(id: string, generation: number): Promise<IntentRec
   return invoke<IntentReceipt>("desktop_remove_project", { id, generation });
 }
 
+/** Moves or copies a project kept where it is into the projects home; the engine waits for its
+ * team to stop first. Inputs: the project id, move or copy, the soft refusals the owner chose to
+ * go past and a generation. Output: the engine receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
+}
+
 /** Stops one research job; a running agent's whole process group stops.
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {

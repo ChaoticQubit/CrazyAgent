@@ -606,6 +606,36 @@ impl NativeBridge {
         self.deliver_intent(false).await
     }
 
+    /// Moves or copies a project kept where it is into the projects home: the engine waits
+    /// for its team to stop, moves the folder and points the project and its agents' copies
+    /// at the new place. Takes the project id, move or copy, the soft refusals the owner
+    /// chose to go past and the client generation. Returns the actual commit receipt.
+    pub async fn move_project_home(
+        &mut self,
+        id: &str,
+        mode: crazyagent::projects_home::AddMode,
+        overrides: Vec<crazyagent::projects_home::AddOverride>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::MoveProjectHome {
+                    project_id,
+                    mode,
+                    overrides,
+                },
+                generation,
+            )
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
     /// Stops one research job; the runner stops a running agent's whole process group.
     /// Takes the project id, the job id and the client generation.
     /// Returns the actual commit receipt; a finished job is a plain rejection.

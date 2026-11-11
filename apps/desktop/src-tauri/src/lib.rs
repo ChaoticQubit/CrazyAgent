@@ -1935,6 +1935,22 @@ async fn desktop_update_project_setup(
 }
 
 #[tauri::command]
+async fn desktop_move_project_home(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: AddMode,
+    overrides: Vec<AddOverride>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .move_project_home(&id, mode, overrides, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_remove_project(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4246,6 +4262,7 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
