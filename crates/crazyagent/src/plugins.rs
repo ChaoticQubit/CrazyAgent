@@ -528,10 +528,6 @@ const PROBLEMS: &[(&str, &str)] = &[
         "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
     ),
     (
-        "server_check_ports_not_kept",
-        "CrazyAgent can't check servers on Linux while a local model endpoint is set up, because Linux can't keep that port free of the server. Nothing was run.",
-    ),
-    (
         "server_cleanup_uncertain",
         "The server's processes could not be confirmed stopped.",
     ),

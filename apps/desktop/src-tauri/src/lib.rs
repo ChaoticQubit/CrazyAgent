@@ -34,6 +34,8 @@ use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubS
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
+use crazyagent::master_step_limit::MasterStepSettings;
+use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
@@ -43,11 +45,12 @@ use crazyagent::plugins::{
 };
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
+    ContextChunk, KeptFile, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
+use crazyagent::roadmap_status::RoadmapStatus;
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
@@ -1926,11 +1929,28 @@ async fn desktop_update_project_setup(
     name: Option<String>,
     revision: Option<u64>,
     generation: u64,
+    kept: Option<Vec<KeptFile>>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .update_project_setup(&id, setup, name, revision, generation)
+        .update_project_setup(&id, setup, name, revision, kept, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_move_project_home(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: AddMode,
+    overrides: Vec<AddOverride>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .move_project_home(&id, mode, overrides, generation)
         .await
 }
 
@@ -1999,6 +2019,40 @@ async fn desktop_plan_roadmap(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.plan_roadmap(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_roadmap_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<RoadmapStatus, BridgeError> {
+    main_window(&webview)?;
+    let call = read(&state).await?.roadmap_status(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_refresh_roadmap_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.refresh_roadmap_status(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_set_roadmap_refresh(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    refresh: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.set_roadmap_refresh(id, refresh)?;
+    call.await
 }
 
 #[tauri::command]
@@ -2379,6 +2433,22 @@ async fn desktop_master_inputs(
 }
 
 #[tauri::command]
+async fn desktop_master_messages(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    before: Option<u64>,
+    limit: u8,
+) -> Result<bridge::master::MasterMessages, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .master_messages(&ticket, &session_id, before, limit)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_session_turns(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2691,6 +2761,52 @@ async fn desktop_set_quit_settings(
     lock(&state)
         .await?
         .set_quit_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_step_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<MasterStepSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.master_step_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_master_step_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MasterStepSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_master_step_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_time_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<MasterTimeSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.master_time_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_master_time_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MasterTimeSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_master_time_settings(settings, generation)
         .await
 }
 
@@ -3504,13 +3620,13 @@ async fn desktop_answer_question(
     state: State<'_, NativeState>,
     id: u64,
     version: u64,
-    option: Option<u8>,
-    text: Option<String>,
+    picks: Vec<u8>,
+    comment: Option<String>,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let call = lock(&state)
         .await?
-        .answer_question(id, version, option, text)?;
+        .answer_question(id, version, picks, comment)?;
     call.await
 }
 
@@ -3812,6 +3928,41 @@ async fn desktop_instruction_settings(
 ) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.instruction_settings(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_process_propose(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    pool: Option<String>,
+) -> Result<crazyagent::engine::owner::Proposal, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.propose_process(project_id, pool)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_instruction_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::engine::owner::AppInstructionSettings, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_instruction_settings()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_app_instruction_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: crazyagent::engine::owner::AppInstructionSettings,
+) -> Result<crazyagent::engine::owner::AppInstructionSettings, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .save_app_instruction_settings(settings)?;
     call.await
 }
 
@@ -4246,9 +4397,13 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
+    desktop_roadmap_status,
+    desktop_refresh_roadmap_status,
+    desktop_set_roadmap_refresh,
     desktop_research_log,
     desktop_projects_home,
     desktop_set_projects_home,
@@ -4299,6 +4454,7 @@ native_commands! {
     desktop_master_sessions,
     desktop_master_session_turns,
     desktop_master_inputs,
+    desktop_master_messages,
     desktop_new_master_session,
     desktop_resume_master_session,
     desktop_delete_master_session,
@@ -4329,6 +4485,10 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_master_step_settings,
+    desktop_set_master_step_settings,
+    desktop_master_time_settings,
+    desktop_set_master_time_settings,
     desktop_pool_summaries,
     desktop_account_schedule,
     desktop_account_ranking,
@@ -4409,6 +4569,9 @@ native_commands! {
     desktop_ide_window_out,
     desktop_instruction_settings,
     desktop_save_instruction_settings,
+    desktop_process_propose,
+    desktop_app_instruction_settings,
+    desktop_save_app_instruction_settings,
     desktop_adoption,
     desktop_usage_report,
     desktop_usage_metrics,

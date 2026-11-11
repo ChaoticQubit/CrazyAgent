@@ -123,6 +123,461 @@ fn claude_meta_lines_and_unknown_lines_are_ignored() {
     assert_eq!(reader.read().unwrap(), Vec::new());
 }
 
+/// OB-6 merge-up with OB-1: the typed lines read for a live turn's words are the prompts
+/// that start a turn and no other user line, so a line that starts no turn is never read
+/// as the words of the turn after it. Each typed line comes with the offset just past it.
+#[test]
+fn claude_typed_lines_past_an_offset_are_only_the_prompts_that_start_a_turn() {
+    let case = Case::new();
+    let file = case.path().join("typed.jsonl");
+    let summary = r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}"#;
+    let sidechain =
+        r#"{"type":"user","isSidechain":true,"message":{"content":"Search the repository"}}"#;
+    let first = r#"{"type":"user","message":{"content":"Plan the launch"}}"#;
+    let second = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(
+        &file,
+        &format!("{summary}\n{first}\n{sidechain}\n{second}\n"),
+    );
+    let first_end = u64::try_from(summary.len() + 1 + first.len() + 1).unwrap();
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let all = typed_past("claude-code", &file, 0).unwrap();
+    let rest = typed_past("claude-code", &file, first_end).unwrap();
+
+    assert_eq!(
+        all,
+        (
+            vec![
+                (first_end, "Plan the launch".to_owned()),
+                (length, "Ship it".to_owned()),
+            ],
+            length,
+        )
+    );
+    assert_eq!(rest, (vec![(length, "Ship it".to_owned())], length));
+}
+
+/// OB6R2-M1: typed lines are read on to the record's end, however much a turn wrote
+/// between two of them, here one 5 MiB tool result that is longer than any one read.
+#[test]
+fn claude_typed_lines_are_read_to_the_record_s_end_past_a_turn_of_megabytes() {
+    let case = Case::new();
+    let file = case.path().join("long-turn.jsonl");
+    let first = r#"{"type":"user","message":{"content":"Plan the launch"}}"#;
+    let result = format!(
+        r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{}"}}]}}}}"#,
+        "x".repeat(5 * 1024 * 1024)
+    );
+    let second = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(&file, &format!("{first}\n{result}\n{second}\n"));
+    let first_end = u64::try_from(first.len() + 1).unwrap();
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let all = typed_past("claude-code", &file, 0).unwrap();
+    let rest = typed_past("claude-code", &file, first_end).unwrap();
+    let none = typed_past("claude-code", &file, length).unwrap();
+
+    assert_eq!(
+        all,
+        (
+            vec![
+                (first_end, "Plan the launch".to_owned()),
+                (length, "Ship it".to_owned()),
+            ],
+            length,
+        )
+    );
+    assert_eq!(rest, (vec![(length, "Ship it".to_owned())], length));
+    assert_eq!(none, (Vec::new(), length));
+}
+
+/// OB6R2-M1: a record with no typed line past the offset is read to its last finished
+/// line, which is where a turn with no typed words is bound, and a line the harness has
+/// not finished is left for the next read.
+#[test]
+fn claude_a_record_with_no_typed_line_reads_to_its_last_finished_line() {
+    let case = Case::new();
+    let file = case.path().join("no-typed.jsonl");
+    let result = format!(
+        r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{}"}}]}}}}"#,
+        "x".repeat(5 * 1024 * 1024)
+    );
+    append(&file, &format!("{result}\n"));
+    let finished = std::fs::metadata(&file).unwrap().len();
+    append(&file, r#"{"type":"user","message":{"content":"Half a li"#);
+
+    let read = typed_past("claude-code", &file, 0).unwrap();
+
+    assert_eq!(read, (Vec::new(), finished));
+}
+
+/// OB6R2-M1: a line longer than `LINE_BYTES_MAX`, which the turn reader refuses too, is
+/// passed over without being held in memory, and the typed line after it is read.
+#[test]
+fn claude_a_line_longer_than_the_reader_takes_is_passed_over_not_read() {
+    let case = Case::new();
+    let file = case.path().join("long-line.jsonl");
+    let long = format!(
+        r#"{{"type":"user","message":{{"content":"{}"}}}}"#,
+        "x".repeat(LINE_BYTES_MAX)
+    );
+    let typed = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(&file, &format!("{long}\n{typed}\n"));
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let read = typed_past("claude-code", &file, 0).unwrap();
+
+    assert_eq!(read, (vec![(length, "Ship it".to_owned())], length));
+}
+
+/// A Claude Code user line that is no prompt to the model starts no turn, whatever text it
+/// carries, and the prompt typed after it starts one as before (OB-1: such a line opened a
+/// live master's turn that nothing closed). One shape per entry, each on a fresh record.
+#[test]
+fn claude_user_lines_that_are_no_prompt_start_no_turn() {
+    let shapes = [
+        (
+            "compact summary",
+            r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}"#,
+        ),
+        (
+            "transcript only",
+            r#"{"type":"user","isVisibleInTranscriptOnly":true,"message":{"content":"Shown in the transcript only"}}"#,
+        ),
+        (
+            "sub-agent line",
+            r#"{"type":"user","isSidechain":true,"message":{"content":"Search the repository"}}"#,
+        ),
+        (
+            "tool result with text",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"},{"type":"text","text":"Continue"}]}}"#,
+        ),
+        (
+            "local command",
+            r#"{"type":"user","message":{"content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"}}"#,
+        ),
+        (
+            "command message",
+            r#"{"type":"user","message":{"content":"<command-message>review is running</command-message>\n<command-name>/review</command-name>"}}"#,
+        ),
+        (
+            "local command output",
+            r#"{"type":"user","message":{"content":"<local-command-stdout>Set model to opus</local-command-stdout>"}}"#,
+        ),
+        (
+            "local command error",
+            r#"{"type":"user","message":{"content":"<local-command-stderr>Unknown model</local-command-stderr>"}}"#,
+        ),
+        (
+            "local command caveat",
+            r#"{"type":"user","message":{"content":"<local-command-caveat>The messages below were generated by local commands.</local-command-caveat>"}}"#,
+        ),
+        (
+            "bash mode input",
+            r#"{"type":"user","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+        ),
+        (
+            "bash mode output",
+            r#"{"type":"user","message":{"content":"<bash-stdout>a.txt</bash-stdout><bash-stderr></bash-stderr>"}}"#,
+        ),
+        (
+            "bash mode error",
+            r#"{"type":"user","message":{"content":"<bash-stderr>ls: no such file</bash-stderr>"}}"#,
+        ),
+        (
+            "reminder",
+            r#"{"type":"user","message":{"content":"<system-reminder>Plan mode is on</system-reminder>"}}"#,
+        ),
+        (
+            "prompt hook",
+            r#"{"type":"user","message":{"content":"<user-prompt-submit-hook>blocked</user-prompt-submit-hook>"}}"#,
+        ),
+        (
+            "text block after blank space",
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"\n  <local-command-stdout>ok</local-command-stdout>"}]}}"#,
+        ),
+        (
+            "blank text",
+            r#"{"type":"user","message":{"content":"   "}}"#,
+        ),
+    ];
+    for (name, line) in shapes {
+        let case = Case::new();
+        let (file, mut reader) = case.claude();
+        append(&file, &format!("{line}\n"));
+        assert_eq!(reader.read().unwrap(), Vec::new(), "{name}");
+        append(
+            &file,
+            concat!(
+                r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+                "\n"
+            ),
+        );
+        assert_eq!(
+            reader.read().unwrap(),
+            vec![TranscriptEvent::TurnStarted],
+            "{name}"
+        );
+    }
+}
+
+/// A typed command that runs a prompt is no prompt line itself, yet the model answers it:
+/// the turn starts at the model's first line and ends like any other, so a live master that
+/// runs a skill is still followed. A command line that carries an API error ends the same way.
+#[test]
+fn claude_a_typed_command_the_model_answers_is_a_turn_from_its_first_line() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"<command-message>review is running</command-message>\n<command-name>/review</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Review the open change"}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(
+        &file,
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewing"},{"type":"tool_use","name":"Bash"}],"stop_reason":"tool_use"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("Reviewing\n"),
+            TranscriptEvent::ToolUse {
+                name: "Bash".to_owned()
+            },
+            text("Done\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"<command-message>review is running</command-message>\n<command-name>/review</command-name>"}}"#,
+            "\n",
+            r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"API Error"}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::TurnError { rate_limited: true },
+            TranscriptEvent::TurnFinished { success: false },
+        ]
+    );
+}
+
+/// A local command the model never answers leaves no turn open and none pending: its lines
+/// and a later turn duration say nothing, and the next prompt starts exactly one turn.
+#[test]
+fn claude_a_local_command_the_model_never_answers_leaves_no_turn_open() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<local-command-stdout>Set model to opus</local-command-stdout>"}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("Fixed\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// Only the model's answer to a line that was no prompt starts a turn by itself: a reply
+/// with no such line before it starts none, as before, and neither does a sub-agent's reply
+/// after one. A prompt that carries a reminder block beside its words is still a prompt.
+#[test]
+fn claude_a_reply_starts_a_turn_only_after_a_line_that_was_no_prompt() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Late"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"Sub"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(reader.read().unwrap(), vec![text("Late\n"), text("Sub\n")]);
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"<system-reminder>Plan mode is on</system-reminder>"},{"type":"text","text":"Fix the build"}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+}
+
+/// OB-1 r1: a Claude Code turn dropped as none is open no more, so a typed command the
+/// model answers after it is a turn from the model's first line, started once; and the
+/// model at work in the dropped turn itself, with a tool or with text, starts it again.
+#[test]
+fn claude_a_dropped_turn_is_open_no_more_and_starts_again_with_the_model_s_work() {
+    let prompt = concat!(
+        r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+        "\n"
+    );
+    let reply = concat!(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewed"}],"stop_reason":"end_turn"}}"#,
+        "\n"
+    );
+    let ended = vec![
+        TranscriptEvent::TurnStarted,
+        text("Reviewed\n"),
+        TranscriptEvent::TurnFinished { success: true },
+    ];
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(&file, prompt);
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"<command-message>review</command-message>\n<command-name>/review</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Review the open change."}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(&file, prompt);
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}],"stop_reason":"tool_use"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::ToolUse {
+                name: "Bash".to_owned()
+            },
+        ]
+    );
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended[1..]);
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(&file, prompt);
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+    append(&file, reply);
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![text("Reviewed\n")],
+        "only a dropped turn starts again by the model's work"
+    );
+}
+
+/// OB-1 r1: a Codex turn dropped as none gives no end when its end comes alone, and the
+/// model's text in it starts it again so its end is given.
+#[test]
+fn codex_a_dropped_turn_gives_no_lone_end_and_starts_again_with_the_model_s_text() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let mut reader = TranscriptReader::new(
+        Transcript::CodexRollouts {
+            sessions: sessions.clone(),
+        },
+        &case.work(),
+        SystemTime::now(),
+    );
+    let path = rollout(
+        &sessions,
+        "2026/10/23",
+        "rollout-dropped.jsonl",
+        &case.work(),
+        &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+    );
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    let complete = concat!(
+        r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        "\n"
+    );
+    append(&path, complete);
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(
+        &path,
+        concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#,
+            "\n",
+        ),
+    );
+    append(&path, complete);
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("Done\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// Only an open turn can be dropped: dropping with none open is a caller's mistake.
+#[test]
+#[should_panic(expected = "assertion failed: self.in_turn")]
+fn dropping_a_turn_with_none_open_panics() {
+    let case = Case::new();
+    let (_, mut reader) = case.claude();
+    reader.drop_turn();
+}
+
 #[test]
 fn claude_interrupt_and_api_errors_end_the_turn() {
     let case = Case::new();

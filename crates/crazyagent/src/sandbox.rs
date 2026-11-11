@@ -98,11 +98,6 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
-/// Why a sandbox with an open network and kept local model ports does not start on Linux:
-/// its boundary cannot keep a port free of the agent's listeners, so the launch is refused
-/// instead of started without that protection (DEC-137 G3).
-pub const KEPT_PORTS_NEED_SEATBELT: &str = "keeping local model ports free needs the macOS sandbox";
-
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
@@ -116,6 +111,9 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
+/// The most folder links one sandbox makes readable by name beside its roots: the links
+/// its process is started through.
+const LINKS_MAX: usize = 4;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
 /// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
@@ -125,6 +123,11 @@ pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
+/// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
+/// attribute values are denied with every write, run, link and clone, while names, sizes
+/// and dates stay readable, so a tool that only stats such a path does not fail.
+const KEPT_OUT_DENY: &str =
+    "(deny file-read-data file-read-xattr file-write* process-exec file-link file-clone";
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -745,6 +748,13 @@ pub enum LinuxSockets {
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
+/// Why a sandbox with an open network does not start on a Linux that cannot keep ports
+/// free. Only Landlock network rules (Linux 6.7 or newer) keep an agent's listeners off the
+/// owner's fixed ports, the kept local model ports and the model proxy ports; without them
+/// the launch is refused instead of started unprotected (DEC-137 addendum 2).
+pub const LINUX_OPEN_NETWORK_NEEDS_LANDLOCK: &str = "keeping the owner's ports free of an \
+     open-network agent needs Landlock network rules (Linux 6.7 or newer)";
+
 /// The launch refusal when, under `TcpOnly`, a harness that looks host names up is not a
 /// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
 pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
@@ -799,6 +809,7 @@ pub struct ProjectSandbox {
     hidden: Vec<PathBuf>,
     kept_out: Vec<PathBuf>,
     revealed: Vec<PathBuf>,
+    links: Vec<PathBuf>,
     network: SandboxNetwork,
     linux_sockets: LinuxSockets,
     kept_ports: Vec<u16>,
@@ -877,6 +888,7 @@ impl ProjectSandbox {
             hidden: Vec::new(),
             kept_out: Vec::new(),
             revealed: Vec::new(),
+            links: Vec::new(),
             network,
             linux_sockets: LinuxSockets::default(),
             kept_ports: Vec::new(),
@@ -1265,6 +1277,46 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets the agent follow one folder link that leads to a read root it already has, such
+    /// as the version link uv keeps beside a managed Python: only the link's own text becomes
+    /// readable, and no deny gives way to it, since the profile writes it before every deny.
+    /// Input: a clean absolute link in a real folder, outside the hidden, kept-out and
+    /// [`Self::secret_paths`], leading to a read root. Output: the sandbox, or `Invalid`.
+    pub fn allow_read_link(mut self, link: &Path) -> Result<Self, SandboxError> {
+        if self.links.len() >= LINKS_MAX {
+            return Err(invalid("too many links to read roots"));
+        }
+        clear_of_secrets(link, &self.secret_paths())?;
+        let is_link =
+            std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        let in_real_folder = link
+            .parent()
+            .is_some_and(|parent| canonical(parent).is_ok_and(|real| real == parent));
+        if !clean_absolute(link) || !is_link || !in_real_folder {
+            return Err(invalid(
+                "a link to a read root must be a clean absolute link in a real folder",
+            ));
+        }
+        let denied = self
+            .hidden
+            .iter()
+            .chain(self.kept_out.iter())
+            .any(|path| link.starts_with(path));
+        if denied {
+            return Err(invalid(
+                "a link to a read root must lie outside every hidden and kept-out path",
+            ));
+        }
+        let target = canonical(link)?;
+        assert!(target.is_absolute());
+        if !self.read_roots.contains(&target) {
+            return Err(invalid("a link must lead to a read root already granted"));
+        }
+        self.links.push(link.to_path_buf());
+        assert!(self.links.len() <= LINKS_MAX);
+        Ok(self)
+    }
+
     /// Lets the agent start one exact program the engine itself launches, such as its
     /// harness or the engine executable, from an app bundle's `Contents/MacOS`, which no
     /// agent may start otherwise (OP-24). One inside a folder the agent can write stays
@@ -1469,11 +1521,13 @@ impl ProjectSandbox {
         self
     }
 
-    /// Keeps one file or folder inside a granted root out of the agent's reach, read and
-    /// write, as a hidden folder is; the graph step keeps the project's secret-like and
-    /// git-ignored paths from graphify (MAP-2). Input: a clean absolute path below a root, of
-    /// any kind or absent. Output: the narrowed sandbox, or `Invalid` past [`KEPT_OUT_MAX`].
-    /// Only Seatbelt holds it, so the Linux and Windows boundaries refuse such a sandbox.
+    /// Keeps one file or folder inside a granted root from being read, written or run: its
+    /// name, size and dates stay visible, its contents, folder listing and attribute values
+    /// do not, so a tool that stats an import does not fail; the graph step keeps the
+    /// project's secret-like and git-ignored paths from graphify (MAP-2). Input: a clean
+    /// absolute path below a root, of any kind or absent. Output: the narrowed sandbox, or
+    /// `Invalid` past [`KEPT_OUT_MAX`]. Only Seatbelt holds it, so the Linux and Windows
+    /// boundaries refuse such a sandbox.
     pub fn keep_out(mut self, path: &Path) -> Result<Self, SandboxError> {
         if self.kept_out.len() >= KEPT_OUT_MAX {
             return Err(invalid("too many paths kept out"));
@@ -1742,16 +1796,6 @@ impl ProjectSandbox {
         &self.network
     }
 
-    /// Tells whether this sandbox must keep ports of the owner's configured local model
-    /// endpoints free of the agent's listeners: its network is open and
-    /// [`ProjectSandbox::keep_ports`] kept at least one port. Only Seatbelt can do that, so
-    /// the Linux boundary refuses such a sandbox. Output: the answer.
-    #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn keeps_ports_free(&self) -> bool {
-        assert!(self.kept_ports.len() <= KEPT_PORTS_MAX);
-        self.network == SandboxNetwork::Open && !self.kept_ports.is_empty()
-    }
-
     /// Sets how this agent's sockets are held on Linux when its network is limited. Input:
     /// the owner's setting. Output: the sandbox.
     pub fn limit_sockets(mut self, sockets: LinuxSockets) -> Self {
@@ -1929,6 +1973,13 @@ impl ProjectSandbox {
                 regex_escape(branch)
             ));
         }
+        assert!(self.links.len() <= LINKS_MAX);
+        for link in self.links.iter().filter(|link| clean_absolute(link)) {
+            text.push_str(&format!(
+                "(allow file-read* (literal \"{}\"))\n",
+                link.display()
+            ));
+        }
         text.push_str("(deny file-read* file-write*");
         for secret in self.secret_paths() {
             if clean_absolute(&secret) {
@@ -1951,12 +2002,17 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
-        if !self.hidden.is_empty() || !self.kept_out.is_empty() {
+        if !self.hidden.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
-            for folder in self.hidden.iter().chain(&self.kept_out) {
-                if clean_absolute(folder) {
-                    text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
-                }
+            for folder in self.hidden.iter().filter(|folder| clean_absolute(folder)) {
+                text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
+            }
+            text.push_str(")\n");
+        }
+        if !self.kept_out.is_empty() {
+            text.push_str(KEPT_OUT_DENY);
+            for path in self.kept_out.iter().filter(|path| clean_absolute(path)) {
+                text.push_str(&format!("\n  (subpath \"{}\")", path.display()));
             }
             text.push_str(")\n");
         }
@@ -3435,29 +3491,6 @@ mod linux_sockets_tests {
 
     fn model() -> SandboxNetwork {
         SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
-    }
-
-    #[test]
-    fn only_an_open_network_with_a_kept_port_must_keep_ports_free() {
-        let case = case();
-        let open = || sandbox(&case, SandboxNetwork::Open, LinuxSockets::TcpOnly);
-        assert!(
-            open().keep_ports(&[20_000]).unwrap().keeps_ports_free(),
-            "the Linux boundary cannot keep the port free, so it must refuse this sandbox"
-        );
-        assert!(!open().keeps_ports_free());
-        assert!(!open().keep_ports(&[]).unwrap().keeps_ports_free());
-        assert!(
-            !open().keep_ports(&OWNER_PORTS).unwrap().keeps_ports_free(),
-            "the fixed owner ports are not kept ports"
-        );
-        let limited = sandbox(&case, model(), LinuxSockets::TcpOnly)
-            .keep_ports(&[20_000])
-            .unwrap();
-        assert!(
-            !limited.keeps_ports_free(),
-            "a limited network opens no listener, so it has no port to keep free"
-        );
     }
 
     fn local() -> SandboxNetwork {

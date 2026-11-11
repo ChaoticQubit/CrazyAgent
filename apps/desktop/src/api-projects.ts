@@ -1,10 +1,10 @@
 import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterMessages, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -134,10 +134,13 @@ export interface ActivityItem {
   place?: "changes" | "ide" | null;
 }
 
+/** One file of a project's context. `linked` is true for a file linked from the owner's
+ * repository; its path then starts with "repo/" and the rest is the path in the repository. */
 export interface ContextItem {
   path: string;
   kind: "brief" | "document" | "research" | "plan";
   bytes: number;
+  linked?: boolean;
 }
 
 export interface ProjectContext {
@@ -236,6 +239,15 @@ const copy: Record<string, string> = {
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
   planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
+  roadmap_status_off: "Roadmap status is off in Project settings.",
+  roadmap_status_unavailable: "The roadmap status could not be read or saved. Try again.",
+  roadmap_status_invalid: "That roadmap status request could not be read.",
+  roadmap_status_request_invalid: "That roadmap status request could not be read.",
+  roadmap_status_request_bounds: "That roadmap status request was too large for the engine. Try again.",
+  roadmap_status_reply_bounds: "The roadmap status was too large to show. Try again.",
+  roadmap_status_project_missing: "This project no longer exists.",
+  roadmap_status_changed: "The roadmap status changed while it was being read. Try again.",
+  roadmap_status_outcome_unknown: "The engine did not confirm that roadmap status request. Check the status and try again.",
   setup_unconfirmed: "Confirm this project's setup first. Its setup review has the roadmap switch.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
@@ -681,11 +693,17 @@ export function openLink(url: string): Promise<Result<void>> {
   return call<void>("desktop_open_link", { url });
 }
 
+/** One file the setup mapping found that the owner keeps linked, with the group it was found
+ * under: `research` is the research kind, null for a file found as the roadmap. */
+export interface KeptFile { path: string; research: JobKind | null }
+
 /** Changes a project's details, research, pool and team in one engine change. Inputs: project id,
- * the whole new setup (no documents), a generation, the new name or null to keep it, and the
- * setup revision the screen showed, so a change made elsewhere is refused. Output: the receipt. */
-export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
+ * the whole new setup (no documents), a generation, the new name or null to keep it, the setup
+ * revision the screen showed, so a change made elsewhere is refused, and the files the setup
+ * mapping found that the owner keeps linked, each with its group, null to leave the links alone.
+ * Output: the receipt. */
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null, kept: KeptFile[] | null = null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation, kept });
 }
 
 /** What removing a project would do, read before the owner picks how: its stored name, the folders
@@ -715,6 +733,14 @@ export async function removeProject(id: string, generation: number, deleteName: 
   const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
   if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
   return result;
+}
+
+/** Moves or copies a project kept where it is into the projects folder. The engine waits for
+ * its team to stop, moves the folder and points the project and its agents' copies at the new
+ * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
+ * generation. Output: the receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
 }
 
 export const PAGES_MAX = 50;
@@ -799,6 +825,13 @@ export function readSessions(ticket: string): Promise<Result<MasterSessions>> {
   return wrap(() => masterSessions(ticket));
 }
 
+/** Reads one page of a session's stored messages, whatever master ran them. Inputs: the
+ * master ticket, the session id, the sequence number to read below or null for the newest,
+ * and the page size, 1 to 64. Output: the page. */
+export function readMessages(ticket: string, session: string, before: number | null, limit: number): Promise<Result<MasterMessages>> {
+  return wrap(() => masterMessages(ticket, session, before, limit));
+}
+
 /** Reads the owner messages behind some turns of a session. Inputs: the master ticket, the
  * session id and at most 32 turn input cursors. Output: the lines the engine found. */
 export function readOwnerLines(ticket: string, session: string, cursors: string[]): Promise<Result<MasterInputs>> {
@@ -832,4 +865,73 @@ export function cancelMasterTurn(ticket: string, session: string, turn: string, 
 
 export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => submitMaster(ticket, session, text, generation));
+}
+
+/** The most roadmap items one status holds, the engine's `ITEMS_MAX`. */
+export const ROADMAP_ITEMS_MAX = 200;
+
+export type RoadmapItemStatus = "pending" | "in_progress" | "done" | "tested";
+export type RoadmapRefresh = "after_landing" | "refresh_only" | "off";
+
+/** One roadmap item with where it stands and the evidence line that decided it. */
+export interface RoadmapItemState {
+  item: { section: string; text: string };
+  status: RoadmapItemStatus;
+  evidence: string;
+}
+
+/** A project's roadmap status: the items of the last check, when it ran, whether one runs now
+ * or is due after a landing, the refresh setting, the roadmap file read and why the last check
+ * failed, if it did. */
+export interface RoadmapStatus {
+  items: RoadmapItemState[];
+  checked_ms: number | null;
+  running: boolean;
+  stale: boolean;
+  refresh: RoadmapRefresh;
+  source: string | null;
+  problem: string | null;
+}
+
+const ROADMAP_STATUSES: readonly string[] = ["pending", "in_progress", "done", "tested"];
+const ROADMAP_REFRESHES: readonly string[] = ["after_landing", "refresh_only", "off"];
+
+/** Whether a bridge reply is a roadmap status this window can show: every field of its type,
+ * known status and refresh names, at most `ROADMAP_ITEMS_MAX` items. Input: the reply.
+ * Output: the answer. */
+export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
+  if (typeof value !== "object" || value === null) return false;
+  const status = value as Record<string, unknown>;
+  const text = (field: unknown) => field === null || typeof field === "string";
+  const items = status.items;
+  if (!Array.isArray(items) || items.length > ROADMAP_ITEMS_MAX) return false;
+  const listed = items.every((entry) => typeof entry === "object" && entry !== null
+    && typeof entry.item === "object" && entry.item !== null
+    && typeof entry.item.section === "string" && typeof entry.item.text === "string"
+    && ROADMAP_STATUSES.includes(entry.status) && typeof entry.evidence === "string");
+  return listed && (status.checked_ms === null || typeof status.checked_ms === "number")
+    && typeof status.running === "boolean" && typeof status.stale === "boolean"
+    && typeof status.refresh === "string" && ROADMAP_REFRESHES.includes(status.refresh)
+    && text(status.source) && text(status.problem);
+}
+
+/** Reads a project's roadmap status. Input: the project id. Output: the status, or
+ * `invalid_response` for a reply that is not one. */
+export async function roadmapStatus(id: string): Promise<Result<RoadmapStatus>> {
+  const result = await call<RoadmapStatus>("desktop_roadmap_status", { id });
+  if (result.kind !== "ok" || isRoadmapStatus(result.value)) return result;
+  return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+}
+
+/** Asks the engine to check a project's roadmap status now, without the wait after a landing.
+ * Input: the project id. Output: done, or the engine's refusal, `roadmap_status_off` when the
+ * project's setting is Off. */
+export function refreshRoadmapStatus(id: string): Promise<Result<void>> {
+  return call<void>("desktop_refresh_roadmap_status", { id });
+}
+
+/** Saves when a project's roadmap status is checked. Inputs: the project id and the choice.
+ * Output: done, or the engine's refusal. */
+export function setRoadmapRefresh(id: string, refresh: RoadmapRefresh): Promise<Result<void>> {
+  return call<void>("desktop_set_roadmap_refresh", { id, refresh });
 }

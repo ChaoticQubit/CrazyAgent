@@ -111,7 +111,7 @@ test("the live master area shows the switch divider under its header, above the 
   const data = (live_switch) => ({
     id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
     pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch } }, at: 1 }, reloadTeam: () => {},
+    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch, messages: [] } }, at: 1 }, reloadTeam: () => {},
   });
   const view = (live_switch) => renderToStaticMarkup(createElement(live.LiveMasterView, {
     data: data(live_switch), harness: "codex", live: { kind: "running", node: null }, onSwitch() {},

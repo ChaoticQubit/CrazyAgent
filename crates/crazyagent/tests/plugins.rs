@@ -845,21 +845,6 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
             .await
             .unwrap();
         let checked = check(&controller, server.id.clone()).await.unwrap();
-        if cfg!(target_os = "linux") {
-            assert_eq!(
-                checked.problem.as_deref(),
-                Some(
-                    "CrazyAgent can't check servers on Linux while a local model endpoint is set up, because Linux can't keep that port free of the server. Nothing was run."
-                ),
-                "{name}: the Linux boundary cannot keep the port free, so the check is refused"
-            );
-            assert!(
-                !checked.tools.iter().any(|tool| tool == "listened"),
-                "{name} port {port}: {:?}",
-                checked.tools
-            );
-            continue;
-        }
         assert_eq!(checked.problem, None, "{name}");
         assert_eq!(
             checked.tools,

@@ -18,7 +18,7 @@ import { Settings } from "./screens/settings";
 import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
-import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
+import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
 /** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
@@ -140,6 +140,16 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
   }
 }
 
+/** The shell's sidebar with the engine restart its footer menu runs: the same restart
+ * Settings, Updates uses, held off while an update install runs, and the session reconnects
+ * once the engine is back. Inputs: the route, the projects, the profile name and the session. */
+function ShellSidebar({ route, projects, profileName, session }: { route: Route; projects: SidebarProject[] | undefined; profileName: string | undefined; session: Session }) {
+  const [restart, restartNow] = useEngineRestart(session.retry);
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
+  const control = { held: blocking(update), busy: restart.kind === "busy", failure: restart.kind === "failed" ? restart.message : "", onRestart: restartNow };
+  return <Sidebar route={route} projects={projects} profileName={profileName} engine={session.engine} onRetry={session.retry} restart={control} />;
+}
+
 /** The whole app for one session and route: the engine-down or engine-outdated state, the
  * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
  * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
@@ -164,7 +174,7 @@ export function AppView({ session, route, alerts, working }: { session: Session;
   }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
-      sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
+      sidebar={<ShellSidebar route={route} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
         <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>

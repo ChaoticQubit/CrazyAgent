@@ -596,7 +596,11 @@ fn stale_agent_instructions_save_is_refused() {
     );
 
     let given = crate::agent_home::with_agent(
-        crate::agent_home::render("App rule.", "Project rule."),
+        crate::agent_home::render(
+            "App rule.",
+            "Project rule.",
+            crate::agent_home::Repeated::LeaveOut,
+        ),
         "Write the docs.\n",
     );
     let (app, own, mine) = (
@@ -660,6 +664,7 @@ fn saves_at_once_land_only_on_the_version_they_read() {
             mode,
             transcripts,
             edits,
+            ..Default::default()
         })
         .collect();
     assert_eq!(options.len(), 6);
@@ -684,7 +689,8 @@ fn saves_at_once_land_only_on_the_version_they_read() {
                                     saved,
                                     InstructionView {
                                         settings,
-                                        version: read.version + 1
+                                        version: read.version + 1,
+                                        repeats: 0,
                                     }
                                 );
                                 landed += 1;
@@ -713,6 +719,60 @@ fn saves_at_once_land_only_on_the_version_they_read() {
     assert!(options.contains(&now.settings));
 }
 
+/// A project's agents get each line the app text already has once, the settings read counts
+/// those lines, and the project's Keep choice gives both texts whole again; a save reports
+/// the size of the text agents then get (DEC-129 item 5, DEC-132 Q7).
+#[test]
+fn a_project_leaves_out_lines_the_app_text_has_until_its_setting_says_keep() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let own = "- Use TDD.\n- No em dash.\n- Run make check.\n";
+    save(&root, None, "- Use TDD.\n- No em dash.\n", 0).unwrap();
+    let sized = |saved: SavedText| match saved {
+        SavedText::Saved {
+            size: Some(size), ..
+        } => size.bytes as usize,
+        other => panic!("{other:?}"),
+    };
+    let left_out = sized(save(&root, Some(project.clone()), own, 0).unwrap());
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(fresh.settings.repeated, Repeated::LeaveOut);
+    assert_eq!(fresh.repeats, 2);
+    let given = given_text(&root, &project).unwrap();
+    assert_eq!(given.matches("- Use TDD.").count(), 1);
+    assert!(given.ends_with("## Project instructions\n\n- Run make check.\n"));
+    assert_eq!(left_out, given.len());
+    let keep = InstructionSettings {
+        repeated: Repeated::Keep,
+        ..fresh.settings
+    };
+    let kept = instruction_settings(&root, &project, Some((keep, Some(fresh.version)))).unwrap();
+    assert_eq!((kept.settings.repeated, kept.repeats), (Repeated::Keep, 2));
+    let given = given_text(&root, &project).unwrap();
+    assert_eq!(given.matches("- Use TDD.").count(), 2);
+    assert_eq!(
+        sized(save(&root, Some(project.clone()), own, 1).unwrap()),
+        given.len()
+    );
+    assert!(given.len() > left_out);
+    let alone = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        ..fresh.settings
+    };
+    let alone = instruction_settings(&root, &project, Some((alone, Some(kept.version)))).unwrap();
+    assert_eq!(
+        alone.repeats, 0,
+        "a project that gets one text has no repeat"
+    );
+    assert_eq!(
+        given_text(&root, &project).unwrap(),
+        format!("# Instructions from CrazyAgent\n\n## Project instructions\n\n{own}")
+    );
+}
+
 /// A save from an older version is refused as stale and leaves the stored settings and
 /// version as they were; a save naming no version is refused while the stored settings are
 /// readable and replaces them, at the next version, once they are not (Q35).
@@ -731,26 +791,30 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
         fresh,
         InstructionView {
             settings: InstructionSettings::default(),
-            version: 0
+            version: 0,
+            repeats: 0,
         }
     );
     let none = InstructionSettings {
         mode: Mode::ProjectOnly,
         transcripts: false,
         edits: EditDelivery::Restart,
+        ..Default::default()
     };
     let saved = instruction_settings(&root, &project, Some((none, Some(0)))).unwrap();
     assert_eq!(
         saved,
         InstructionView {
             settings: none,
-            version: 1
+            version: 1,
+            repeats: 0,
         }
     );
     let user = InstructionSettings {
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::Badge,
+        ..Default::default()
     };
     assert_eq!(
         instruction_settings(&root, &project, Some((user, Some(0))))
@@ -783,7 +847,8 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
         instruction_settings(&root, &project, Some((user, None))).unwrap(),
         InstructionView {
             settings: user,
-            version: 2
+            version: 2,
+            repeats: 0,
         },
         "unreadable settings are replaced at the next version"
     );
@@ -807,6 +872,7 @@ fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_whe
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::Badge,
+        ..Default::default()
     };
     assert_ne!(settings, InstructionSettings::default());
     let save_settings = || -> Result<InstructionView, EngineError> {
@@ -848,7 +914,8 @@ fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_whe
         instruction_settings(&root, &project, None).unwrap(),
         InstructionView {
             settings: InstructionSettings::default(),
-            version: 0
+            version: 0,
+            repeats: 0,
         }
     );
     let saved = save(&root, None, "App rule.\n", 0).unwrap();
@@ -867,7 +934,8 @@ fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_whe
         save_settings().unwrap(),
         InstructionView {
             settings,
-            version: 1
+            version: 1,
+            repeats: 0,
         }
     );
 }
@@ -938,6 +1006,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
@@ -1073,6 +1142,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
     assert_eq!(
@@ -1116,6 +1186,7 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let given = Given {
         text: "# Rules\n".into(),
@@ -1212,7 +1283,11 @@ fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
     let both = given(&root, &project).unwrap();
     assert_eq!(
         both,
-        crate::agent_home::render("App rule.\n", "  Project rule.\n\n")
+        crate::agent_home::render(
+            "App rule.\n",
+            "  Project rule.\n\n",
+            crate::agent_home::Repeated::LeaveOut
+        )
     );
     assert!(
         both.starts_with("# Instructions from CrazyAgent\n") && both.contains("Project rule.\n"),
@@ -1233,7 +1308,7 @@ fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
             .version;
         assert_eq!(
             given(&root, &project).unwrap(),
-            crate::agent_home::render(app, own),
+            crate::agent_home::render(app, own, crate::agent_home::Repeated::LeaveOut),
             "{mode:?}"
         );
     }
@@ -1289,7 +1364,10 @@ fn a_delivery_switch_that_leaves_agents_no_instructions_is_refused() {
     save(&root, None, "App rule.\n", 0).unwrap();
     let before = instruction_settings(&root, &project, None).unwrap();
     let given_before = given(&root, &project).unwrap();
-    assert_eq!(given_before, crate::agent_home::render("App rule.\n", ""));
+    assert_eq!(
+        given_before,
+        crate::agent_home::render("App rule.\n", "", crate::agent_home::Repeated::LeaveOut)
+    );
     assert_eq!(
         switch(&root, &project, Mode::ProjectOnly),
         Err(EngineError(NONE_GIVEN_CODE.into())),
@@ -1323,7 +1401,7 @@ fn a_delivery_switch_that_leaves_agents_no_instructions_is_refused() {
     assert_eq!(instruction_settings(&root, &project, None).unwrap(), before);
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("", "Project rule.\n")
+        crate::agent_home::render("", "Project rule.\n", crate::agent_home::Repeated::LeaveOut)
     );
 }
 
@@ -1358,7 +1436,7 @@ fn an_app_text_save_that_leaves_agents_no_instructions_is_refused() {
     assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("App rule.\n", "")
+        crate::agent_home::render("App rule.\n", "", crate::agent_home::Repeated::LeaveOut)
     );
 
     save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
@@ -1371,7 +1449,7 @@ fn an_app_text_save_that_leaves_agents_no_instructions_is_refused() {
     );
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("", "Project rule.\n")
+        crate::agent_home::render("", "Project rule.\n", crate::agent_home::Repeated::LeaveOut)
     );
 }
 
@@ -1406,7 +1484,7 @@ fn a_project_text_save_that_leaves_agents_no_instructions_is_refused() {
     );
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("", "Project rule.\n")
+        crate::agent_home::render("", "Project rule.\n", crate::agent_home::Repeated::LeaveOut)
     );
 
     save(&root, None, "App rule.\n", 0).unwrap();
@@ -1420,7 +1498,7 @@ fn a_project_text_save_that_leaves_agents_no_instructions_is_refused() {
     );
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("App rule.\n", "")
+        crate::agent_home::render("App rule.\n", "", crate::agent_home::Repeated::LeaveOut)
     );
 }
 
@@ -1626,5 +1704,358 @@ fn process_adoption_round_trip() {
     assert_eq!(
         adoption(&root, &unknown).unwrap_err().0,
         "process_project_unknown"
+    );
+}
+
+fn cleanup_project(root: &Path) -> ProjectId {
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    with_project(root, &folder)
+}
+
+fn never(_: &str) -> Result<String, &'static str> {
+    panic!("no text may reach a model here");
+}
+
+#[test]
+fn a_project_proposal_holds_both_texts_keeps_the_version_and_writes_nothing() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, None, "- Use TDD.\n", 0).unwrap();
+    let own = "- Use TDD.\n- Run make check.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let before = current_text(&root, Some(&project)).unwrap();
+    let mut prompts = Vec::new();
+    let proposed = propose(&root, Some(&project), None, |prompt| {
+        prompts.push(prompt.to_owned());
+        Ok("Done.\n~~~\n- Run make check.\n~~~\n".to_owned())
+    })
+    .unwrap();
+    assert_eq!(
+        proposed,
+        ProcessText {
+            text: "- Run make check.\n".into(),
+            version: before.version
+        }
+    );
+    assert_eq!(prompts.len(), 1, "one model run per proposal");
+    assert!(
+        prompts[0].contains("App instructions file, for comparison only:\n~~~\n- Use TDD.\n~~~\n")
+    );
+    assert!(prompts[0].contains(&format!(
+        "The project instructions file to rewrite:\n~~~\n{own}~~~\n"
+    )));
+    assert_eq!(
+        current_text(&root, Some(&project)).unwrap(),
+        before,
+        "a proposal saves nothing"
+    );
+    assert_eq!(current_text(&root, None).unwrap().text, "- Use TDD.\n");
+}
+
+#[test]
+fn a_project_whose_agents_get_its_file_alone_never_sends_the_app_text() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, None, "- App secret rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    let alone = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        ..fresh.settings
+    };
+    instruction_settings(&root, &project, Some((alone, Some(fresh.version)))).unwrap();
+    let mut seen = String::new();
+    propose(&root, Some(&project), None, |prompt| {
+        seen = prompt.to_owned();
+        Ok("~~~\n- Run make check.\n~~~".to_owned())
+    })
+    .unwrap();
+    assert!(!seen.contains("App secret rule"));
+    assert!(!seen.contains("repeat the app instructions file"));
+}
+
+#[test]
+fn with_the_app_wide_setting_off_a_project_proposal_never_sends_the_app_text() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, None, "- App secret rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let off = AppInstructionSettings {
+        edit_with_ai: false,
+    };
+    let propose_once = |root: &Path| {
+        let mut seen = String::new();
+        let proposed = propose(root, Some(&project), None, |prompt| {
+            seen = prompt.to_owned();
+            Ok("~~~\n- Run make check.\n~~~".to_owned())
+        })
+        .unwrap();
+        assert_eq!(proposed.text, "- Run make check.\n");
+        seen
+    };
+    let on = propose_once(&root);
+    assert!(
+        on.contains("- App secret rule.") && on.contains("- Run make check."),
+        "On, a project whose agents get both texts compares them: {on}"
+    );
+    assert_eq!(app_settings(&root, Some(off)).unwrap(), off);
+    let seen = propose_once(&root);
+    assert!(
+        !seen.contains("App secret rule"),
+        "Off, the app text is sent to no model: {seen}"
+    );
+    assert!(!seen.contains("repeat the app instructions file"), "{seen}");
+    assert!(seen.contains("- Run make check."), "{seen}");
+    assert!(
+        instruction_settings(&root, &project, None)
+            .unwrap()
+            .settings
+            .edit_with_ai,
+        "the project's own setting stays on and still governs its editor"
+    );
+}
+
+#[test]
+fn the_app_proposal_needs_the_picked_pool_and_a_project_takes_none() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let pool = CredentialRef::new("pool-a").unwrap();
+    save(&root, None, "- Use TDD.\n- Use TDD.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    assert_eq!(
+        propose(&root, None, None, never).unwrap_err().0,
+        "instructions_cleanup_pool_needed"
+    );
+    assert_eq!(
+        propose(&root, Some(&project), Some(&pool), never)
+            .unwrap_err()
+            .0,
+        "instructions_cleanup_pool_not_asked"
+    );
+    let mut seen = String::new();
+    let proposed = propose(&root, None, Some(&pool), |prompt| {
+        seen = prompt.to_owned();
+        Ok("~~~\n- Use TDD.\n~~~\n".to_owned())
+    })
+    .unwrap();
+    assert_eq!(proposed.text, "- Use TDD.\n");
+    assert_eq!(proposed.version, current_text(&root, None).unwrap().version);
+    assert!(
+        seen.contains("The app instructions file to rewrite:\n~~~\n- Use TDD.\n- Use TDD.\n~~~\n")
+    );
+    assert!(
+        !seen.contains("Run make check"),
+        "the app run never holds a project's text"
+    );
+}
+
+#[test]
+fn edit_with_ai_off_refuses_its_own_scope_before_any_text_reaches_a_model() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let pool = CredentialRef::new("pool-a").unwrap();
+    let reply = |_: &str| Ok("~~~\n- Kept.\n~~~".to_owned());
+    save(&root, None, "- Use TDD.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    assert_eq!(
+        app_settings(&root, None).unwrap(),
+        AppInstructionSettings { edit_with_ai: true },
+        "on until the owner turns it off"
+    );
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    assert!(fresh.settings.edit_with_ai);
+    assert!(propose(&root, None, Some(&pool), reply).is_ok(), "app On");
+    assert!(
+        propose(&root, Some(&project), None, reply).is_ok(),
+        "project On"
+    );
+
+    let off = AppInstructionSettings {
+        edit_with_ai: false,
+    };
+    assert_eq!(app_settings(&root, Some(off)).unwrap(), off);
+    assert_eq!(app_settings(&root, None).unwrap(), off);
+    assert_eq!(
+        propose(&root, None, Some(&pool), never).unwrap_err().0,
+        "instructions_cleanup_off",
+        "app Off"
+    );
+    assert!(
+        propose(&root, Some(&project), None, reply).is_ok(),
+        "the app-wide Off leaves a project's own setting alone"
+    );
+
+    let on = AppInstructionSettings { edit_with_ai: true };
+    assert_eq!(app_settings(&root, Some(on)).unwrap(), on);
+    let project_off = InstructionSettings {
+        edit_with_ai: false,
+        ..fresh.settings
+    };
+    let stored =
+        instruction_settings(&root, &project, Some((project_off, Some(fresh.version)))).unwrap();
+    assert!(!stored.settings.edit_with_ai);
+    assert_eq!(
+        propose(&root, Some(&project), None, never).unwrap_err().0,
+        "instructions_cleanup_off",
+        "project Off"
+    );
+    assert!(
+        propose(&root, None, Some(&pool), reply).is_ok(),
+        "a project's Off leaves the app editor alone"
+    );
+}
+
+#[test]
+fn an_empty_file_a_failed_run_and_an_unusable_reply_change_nothing() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    assert_eq!(
+        propose(&root, Some(&project), None, never).unwrap_err().0,
+        "instructions_cleanup_empty"
+    );
+    save(&root, None, "- Use TDD.\n", 0).unwrap();
+    save(&root, Some(project.clone()), " \n\n", 0).unwrap();
+    assert_eq!(
+        propose(&root, Some(&project), None, never).unwrap_err().0,
+        "instructions_cleanup_empty"
+    );
+    let version = current_text(&root, Some(&project)).unwrap().version;
+    save(&root, Some(project.clone()), "- Run make check.\n", version).unwrap();
+    let before = current_text(&root, Some(&project)).unwrap();
+    for (ending, code) in [
+        (Err(cleanup::FAILED), "instructions_cleanup_failed"),
+        (Err(cleanup::TIMED_OUT), "instructions_cleanup_timed_out"),
+        (Err(cleanup::BUSY), "instructions_cleanup_busy"),
+        (Err(cleanup::NO_ACCOUNT), "instructions_cleanup_no_account"),
+        (Err(cleanup::PAUSED), "instructions_cleanup_paused"),
+        (
+            Err(cleanup::PROJECT_POOL_MISSING),
+            "instructions_cleanup_project_pool_missing",
+        ),
+        (
+            Err(cleanup::POOL_UNKNOWN),
+            "instructions_cleanup_pool_unknown",
+        ),
+        (
+            Err(cleanup::UNAVAILABLE),
+            "instructions_cleanup_unavailable",
+        ),
+        (
+            Ok("I would rather not."),
+            "instructions_cleanup_no_proposal",
+        ),
+        (Ok("~~~\n\n~~~"), "instructions_cleanup_no_proposal"),
+    ] {
+        let refused = propose(&root, Some(&project), None, |_| ending.map(str::to_owned));
+        assert_eq!(refused.unwrap_err().0, code);
+        assert!(
+            PROCESS_CODES.contains(&code),
+            "{code} reaches the owner as itself"
+        );
+    }
+    let large = format!("~~~\n{}\n~~~", "x".repeat(TEXT_BYTES_MAX + 1));
+    assert_eq!(
+        propose(&root, Some(&project), None, |_| Ok(large.clone()))
+            .unwrap_err()
+            .0,
+        "instructions_cleanup_too_large"
+    );
+    for code in [
+        cleanup::OFF,
+        cleanup::EMPTY,
+        cleanup::POOL_NEEDED,
+        cleanup::POOL_NOT_ASKED,
+    ] {
+        assert!(PROCESS_CODES.contains(&code));
+    }
+    assert_eq!(current_text(&root, Some(&project)).unwrap(), before);
+}
+
+#[test]
+fn accepting_a_proposal_made_before_a_newer_save_answers_stale_and_keeps_the_newer_text() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, Some(project.clone()), "- Old.\n- Old.\n", 0).unwrap();
+    let proposed = propose(&root, Some(&project), None, |_| {
+        Ok("~~~\n- Old.\n~~~".to_owned())
+    })
+    .unwrap();
+    let newer = "- Old.\n- Old.\n- Added in another window.\n";
+    save(&root, Some(project.clone()), newer, proposed.version).unwrap();
+    match save(
+        &root,
+        Some(project.clone()),
+        &proposed.text,
+        proposed.version,
+    )
+    .unwrap()
+    {
+        SavedText::Stale { current, .. } => assert_eq!(current.text, newer),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(current_text(&root, Some(&project)).unwrap().text, newer);
+    let again = propose(&root, Some(&project), None, |_| {
+        Ok("~~~\n- Old.\n- Added in another window.\n~~~".to_owned())
+    })
+    .unwrap();
+    match save(&root, Some(project.clone()), &again.text, again.version).unwrap() {
+        SavedText::Saved { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        current_text(&root, Some(&project)).unwrap().text,
+        "- Old.\n- Added in another window.\n"
+    );
+}
+
+#[test]
+fn only_a_proposal_request_is_served_past_the_owner_exchange() {
+    let body = |action: Action| {
+        serde_json::to_vec(&Envelope {
+            process: action,
+            text_bytes: None,
+        })
+        .unwrap()
+    };
+    let pool = CredentialRef::new("pool-a").unwrap();
+    let project = ProjectId::new("process-1").unwrap();
+    let propose = body(Action::Propose {
+        project: None,
+        pool: Some(pool),
+    });
+    assert_eq!(
+        String::from_utf8(propose.clone()).unwrap(),
+        r#"{"process":{"kind":"propose","project":null,"pool":"pool-a"},"text_bytes":null}"#
+    );
+    assert!(deferred(&propose));
+    assert!(deferred(&body(Action::Propose {
+        project: Some(project.clone()),
+        pool: None
+    })));
+    for quick in [
+        Action::AppSettings,
+        Action::SaveAppSettings {
+            settings: AppInstructionSettings {
+                edit_with_ai: false,
+            },
+        },
+        Action::Read { project: None },
+        Action::Given { project },
+    ] {
+        assert!(!deferred(&body(quick)));
+    }
+    assert!(!deferred(b"{}"));
+    assert!(!deferred(&vec![b' '; REQUEST_BYTES_MAX + 1]));
+    assert!(
+        !deferred(
+            br#"{"process":{"kind":"propose","project":null,"pool":"pool-a"},"text_bytes":4}"#
+        ),
+        "a proposal carries no text"
+    );
+    assert_eq!(
+        PROPOSE_TIMEOUT,
+        cleanup::WALL_TIME + Duration::from_secs(30)
     );
 }

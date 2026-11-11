@@ -59,10 +59,10 @@ enum Action {
     Answer {
         id: u64,
         version: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        picks: Vec<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        option: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
+        comment: Option<String>,
     },
     Dismiss {
         id: u64,
@@ -118,9 +118,9 @@ impl OwnerClient {
         }
     }
 
-    /// Answers one owner question with an option or typed text, naming the version the
-    /// owner read; the engine tells the asker once. Inputs: the question id, the version and
-    /// the answer. Output: Settled once recorded, or Stale when it was settled or changed
+    /// Answers one owner question with picked options, a comment or both, naming the version
+    /// the owner read; the engine tells the asker once. Inputs: the question id, the version
+    /// and the answer. Output: Settled once recorded, or Stale when it was settled or changed
     /// since it was read.
     pub async fn questions_answer(
         &self,
@@ -128,15 +128,11 @@ impl OwnerClient {
         version: u64,
         answer: Answer,
     ) -> Result<Settlement, EngineError> {
-        let (option, text) = match answer {
-            Answer::Option(index) => (Some(index), None),
-            Answer::Text(text) => (None, Some(text)),
-        };
         let action = Action::Answer {
             id,
             version,
-            option,
-            text,
+            picks: answer.picks,
+            comment: answer.comment,
         };
         match self.questions_exchange(action).await? {
             Reply::Settled { settlement } => Ok(settlement),
@@ -271,8 +267,9 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 }
 
 /// Runs one authenticated Questions action against the engine database in the engine root.
-/// An answer names exactly one of an option position or typed text. Inputs: the engine root
-/// and the action. Output: the reply, or the log's refusal.
+/// An answer names option positions, a comment or both, never neither; the log checks them
+/// against the question. Inputs: the engine root and the action. Output: the reply, or the
+/// log's refusal.
 fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = questions::open(root)?;
     let settlement = |settlement| Ok(Reply::Settled { settlement });
@@ -283,14 +280,13 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
         Action::Answer {
             id,
             version,
-            option,
-            text,
+            picks,
+            comment,
         } => {
-            let answer = match (option, text) {
-                (Some(index), None) => Answer::Option(index),
-                (None, Some(text)) => Answer::Text(text),
-                _ => return Err(failure("questions_answer_invalid")),
-            };
+            if picks.is_empty() && comment.is_none() {
+                return Err(failure("questions_answer_invalid"));
+            }
+            let answer = Answer { picks, comment };
             settlement(questions::answer(&db, id, version, &answer)?)
         }
         Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),

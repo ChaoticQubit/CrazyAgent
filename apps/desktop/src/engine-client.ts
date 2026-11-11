@@ -417,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -1245,6 +1245,13 @@ export function removeProject(id: string, generation: number): Promise<IntentRec
   return invoke<IntentReceipt>("desktop_remove_project", { id, generation });
 }
 
+/** Moves or copies a project kept where it is into the projects home; the engine waits for its
+ * team to stop first. Inputs: the project id, move or copy, the soft refusals the owner chose to
+ * go past and a generation. Output: the engine receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
+}
+
 /** Stops one research job; a running agent's whole process group stops.
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
@@ -1315,9 +1322,10 @@ export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
 /** One kind of research the project's own documents already hold, read from their text:
- * the kind and the files below the project folder that hold it. */
+ * the kind and the files below the project folder that hold it. A setup mapped by an engine
+ * up to 2.2.0 may hold a roadmap planning group, whose files are roadmap files. */
 export interface FoundResearch {
-  kind: ResearchKind;
+  kind: JobKind;
   files: string[];
 }
 
@@ -1328,6 +1336,7 @@ export interface MappingFacts {
   entry_points: string[];
   research?: FoundResearch[];
   documents?: string[];
+  roadmap?: string[];
 }
 
 /** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or
@@ -1381,6 +1390,7 @@ export interface OnboardingView {
   folder_overview: string | null;
   finished: boolean;
   imported?: ImportFile[];
+  proposed?: ProjectSetup | null;
 }
 
 export interface GitHubDeviceCode {
@@ -2249,7 +2259,7 @@ export interface MasterTurn {
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
-  attempt?: { connection: { account_ref: string } } | null;
+  attempt?: { connection: { id: string; account_ref: string }; selected_at_ms?: number } | null;
   accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;
@@ -2257,6 +2267,15 @@ export interface MasterTurn {
   changes?: string | null;
   engine_request?: MasterEngineRequest | null;
   input_cursor?: string;
+  activity?: MasterActivityLine[];
+}
+
+/** One line of what a running master turn is doing, as the engine words it: a fixed phrase
+ * with at most one project-relative path, and the engine's clock in milliseconds when it
+ * last saw it. The engine sends the lines oldest first, only while the turn is outstanding. */
+export interface MasterActivityLine {
+  at_ms: number;
+  text: string;
 }
 
 /** What the engine asked the master in a turn Ask agent to update started: the change set,
@@ -2296,6 +2315,59 @@ export interface MasterSessionSummary {
   last_line: string | null;
   agents: string[];
   results_waiting: number;
+  mode?: MasterMode | null;
+  harness?: string | null;
+}
+
+/** Which kind of master ran a message or a session: the one the engine runs one turn at a
+ * time, or the one that runs live in its terminal. */
+export type MasterMode = "one_turn" | "live";
+
+/** One stored message of a master conversation. `seq` orders a session's messages from 1.
+ * `speaker` "engine" is a request the engine typed itself and "switch" the divider where
+ * another master took the conversation over, whose `text` is the whole divider line.
+ * `harness` is a live master's catalog id or alias, or a one-turn master's backend (`rcli`,
+ * `codex`, `claude`). `text` is null for a terminal turn whose typed words were not read.
+ * `source` tells where the row comes from (see `SessionMessageSource`). */
+export interface SessionMessage {
+  seq: number;
+  speaker: "owner" | "engine" | "master" | "switch";
+  mode: MasterMode;
+  harness: string | null;
+  text: string | null;
+  at_ms: number;
+  source: SessionMessageSource;
+}
+
+/** Where a stored message comes from: a turn the engine ran ("turn"), a turn in the live
+ * terminal ("terminal"), a master switch ("switch") or the divider an upgrade placed
+ * ("backfill"). "record" is text read from the harness's own record and "counter" a row that
+ * stands for a terminal turn an older engine only counted: the engine did not see those
+ * words typed, so a view marks them. */
+export type SessionMessageSource = "turn" | "terminal" | "record" | "counter" | "switch" | "backfill";
+
+/** One page of a session's stored messages, oldest first. `next` is the `before` of the page
+ * of older messages, null once the page holds the session's first message; `count` is every
+ * stored message of the session. */
+export interface MasterMessagePage {
+  project_id: string;
+  session_id: string;
+  messages: SessionMessage[];
+  next: number | null;
+  count: number;
+}
+
+export interface MasterMessages {
+  ticket: string;
+  revision: string;
+  page: MasterMessagePage;
+}
+
+/** Reads one page of the stored messages of any session of the selected project, in either
+ * master mode: the newest when `before` is null, else those with a sequence number below it.
+ * Inputs: the selection ticket, the session id, the cursor and the page size, 1 to 64. */
+export function masterMessages(ticket: string, sessionId: string, before: number | null, limit: number): Promise<MasterMessages> {
+  return invoke<MasterMessages>("desktop_master_messages", { ticket, sessionId, before, limit });
 }
 
 export interface MasterSessions {

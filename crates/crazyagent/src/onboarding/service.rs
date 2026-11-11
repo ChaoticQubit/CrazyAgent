@@ -328,7 +328,9 @@ const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
 /// and counts the attempt; a row whose pool or draft cannot be read fails with
-/// [`ROW_UNREADABLE`] instead. Returns `None` when nothing waits.
+/// [`ROW_UNREADABLE`] instead. A step of a project whose folder is being moved into the
+/// projects home is not claimed until the move is finished or forgotten. Returns `None`
+/// when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -361,6 +363,11 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
         return Ok(None);
     };
+    if crate::projects_home::project_move_holds(&tx, std::path::Path::new(&repo))
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(None);
+    }
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
     let read = CredentialRef::new(pool)
         .ok()
@@ -1026,7 +1033,7 @@ fn mapping_step(
         let cause = match work.runner.run_read_only(&run, beat) {
             #[cfg(unix)]
             Ok(ReadOnlyEnding::Answered(text)) => {
-                let (step, merged, wrote) = answered(&layout, &base, &text, &found, &stack);
+                let (step, merged, wrote, asks) = answered(&layout, &base, &text, &found, &stack);
                 let _ = super::seal_draft(database, &claimed.repo, &merged);
                 if let Some(overview) = wrote {
                     let _ = super::seal_overview(database, &claimed.repo, &overview);
@@ -1036,7 +1043,12 @@ fn mapping_step(
                         kept = merged;
                         reason
                     }
-                    step => return (step, merged),
+                    step => {
+                        if matches!(step, Step::Done) {
+                            raise_setup_questions(database, &claimed.project, &asks);
+                        }
+                        return (step, merged);
+                    }
                 }
             }
             Ok(ReadOnlyEnding::Failed(reason))
@@ -1091,7 +1103,8 @@ fn tries_failed(causes: &[String]) -> String {
 /// overview kept, the step fails with [`OVERVIEW_BLOCKED`] while something else sits at
 /// `overview.md`, else with [`MAPPING_NO_OVERVIEW`], and still keeps the merged draft.
 /// Takes the `.crazyagent` folder, the draft so far, the answer text and the facts the
-/// manifests gave. Returns the step's ending, the draft to keep and the overview it wrote.
+/// manifests gave. Returns the step's ending, the draft to keep, the overview it wrote and,
+/// once the step is done, the questions the answer left for the owner.
 #[cfg(unix)]
 pub(crate) fn answered(
     layout: &Path,
@@ -1099,14 +1112,14 @@ pub(crate) fn answered(
     text: &str,
     found: &MappingFacts,
     stack: &[String],
-) -> (Step, Drafted, Option<String>) {
+) -> (Step, Drafted, Option<String>, Vec<crate::questions::Ask>) {
     let answer = draft::parse_answer(text);
     let merged = draft::merge(base, &answer, found, stack);
     let Ok(wrote) = draft::write_overview(layout, &answer.overview) else {
-        return (Step::failed(DRAFT_UNSAVED), base.clone(), None);
+        return (Step::failed(DRAFT_UNSAVED), base.clone(), None, Vec::new());
     };
     if draft::save(layout, &merged).is_err() {
-        return (Step::failed(DRAFT_UNSAVED), base.clone(), wrote);
+        return (Step::failed(DRAFT_UNSAVED), base.clone(), wrote, Vec::new());
     }
     if wrote.is_none() && draft::overview(layout).is_none() {
         let reason = if draft::overview_blocked(layout) {
@@ -1114,9 +1127,31 @@ pub(crate) fn answered(
         } else {
             MAPPING_NO_OVERVIEW
         };
-        return (Step::failed(reason), merged, None);
+        return (Step::failed(reason), merged, None, Vec::new());
     }
-    (Step::Done, merged, wrote)
+    (Step::Done, merged, wrote, answer.questions)
+}
+
+/// Raises the questions a finished mapping left for the owner as the mapping's own, once
+/// each while pending. The first refusal, such as a full question log, stops it and is
+/// logged as `onboarding_questions_unlogged`, so the mapping never fails on its questions.
+/// Takes the engine connection, the project and the questions.
+#[cfg(unix)]
+pub(crate) fn raise_setup_questions(
+    database: &Connection,
+    project: &str,
+    asks: &[crate::questions::Ask],
+) {
+    let Ok(project) = crate::protocol::ProjectId::new(project) else {
+        return;
+    };
+    let source = crate::questions::EngineSource::Mapping;
+    for ask in asks {
+        if crate::questions::raise(database, &project, &source, ask).is_err() {
+            eprintln!("onboarding_questions_unlogged project={}", project.as_str());
+            return;
+        }
+    }
 }
 
 /// The graphify executable this machine has, looked up again on each call:

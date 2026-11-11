@@ -827,5 +827,55 @@ fn an_agent_gets_no_claude_copy_for_a_malformed_or_inference_less_scope_set() {
     }
 }
 
+/// Waits up to five seconds for a profile's lease to end. Input: the manifest path.
+/// Output: whether it ended.
+fn lease_ended(manifest: &Path) -> bool {
+    let file = File::open(manifest).unwrap();
+    let waited = Instant::now();
+    while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+        if waited.elapsed() >= Duration::from_secs(5) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+/// OB-5 r2: a turn with no time bound always gets a keeper, whatever time its token has
+/// left, so a turn that outlives the token keeps its sign-in. With a token good for thirty
+/// days the keeper leases the profile until the copy is dropped.
+#[test]
+fn a_turn_with_no_time_bound_gets_a_keeper_however_long_its_token_lasts() {
+    let mut case = UseCase::new();
+    let expires = now() + 30 * 86_400;
+    private_file(&case.home().join("auth.json"), &codex_auth(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_turn(&agent, None, &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert_busy(&case.manifest());
+    drop(copy);
+    assert!(lease_ended(&case.manifest()), "the keeper kept its lease");
+}
+
+/// A bounded turn its token outlasts still gets no keeper: once the turn's own lease ends
+/// nothing holds the profile, though the copy is still there.
+#[test]
+fn a_bounded_turn_its_token_outlasts_gets_no_keeper() {
+    let mut case = UseCase::new();
+    let expires = now() + 30 * 86_400;
+    private_file(&case.home().join("auth.json"), &codex_auth(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_turn(&agent, Some(TURN), &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert!(lease_ended(&case.manifest()), "a keeper leased the profile");
+    drop(copy);
+}
+
 #[cfg(target_os = "macos")]
 mod renewal_tests;

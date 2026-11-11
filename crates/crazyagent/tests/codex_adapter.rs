@@ -213,7 +213,7 @@ fn decoder_preserves_fragmented_utf8_and_multiple_lines() {
 }
 
 #[test]
-fn decoder_enforces_frame_chunk_and_event_bounds() {
+fn decoder_enforces_frame_and_chunk_bounds_and_counts_no_frames() {
     let mut protocol = CodexProtocol::new();
     assert!(
         protocol
@@ -229,8 +229,52 @@ fn decoder_enforces_frame_chunk_and_event_bounds() {
         Err(ProtocolError::FrameTooLarge)
     );
     let mut protocol = initialized();
-    let bytes = wire(json!({"method":"warning","params":{}})).repeat(129);
-    assert_eq!(protocol.receive(&bytes), Err(ProtocolError::Capacity));
+    let bytes = wire(json!({"method":"warning","params":{}})).repeat(10_000);
+    assert!(bytes.len() <= LINE_BYTES_MAX);
+    let events = protocol.receive(&bytes).unwrap();
+    assert_eq!(
+        events.len(),
+        10_000,
+        "one chunk is bounded by bytes, not frames"
+    );
+    assert_eq!(protocol.state(), State::Ready);
+}
+
+/// A long turn ends completed whatever it counts (OB-5e): 10,000 reply deltas, 10,000
+/// server requests, each declined, where the 1,025th used to be refused, and a turn end
+/// listing 10,000 items, where 129 used to be refused. A request id sent twice is still
+/// refused.
+#[test]
+fn a_long_turn_of_ten_thousand_items_and_requests_ends_completed() {
+    let mut protocol = active();
+    let delta = wire(json!({"method":"item/agentMessage/delta","params":{
+        "threadId":"thread-unit","turnId":"turn-unit","itemId":"item-unit","delta":"x"
+    }}));
+    for number in 0..10_000 {
+        let events = protocol.receive(&delta).unwrap();
+        assert!(matches!(&events[..], [Event::AgentMessageDelta { .. }]));
+        let asked = wire(json!({"id":number,"method":"thread/child/cancel","params":{}}));
+        let events = protocol.receive(&asked).unwrap();
+        assert!(matches!(&events[..], [Event::UnsupportedRequest { .. }]));
+        protocol.deny_request(&WireId::Number(number)).unwrap();
+    }
+    assert_eq!(protocol.state(), State::Active);
+    let items: Vec<Value> = (0..10_000).map(|item| json!({"id":item})).collect();
+    let ended = wire(json!({"method":"turn/completed","params":{
+        "threadId":"thread-unit",
+        "turn":{"id":"turn-unit","items":items,"status":"completed"}
+    }}));
+    assert!(ended.len() <= LINE_BYTES_MAX);
+    assert_eq!(
+        protocol.receive(&ended).unwrap(),
+        vec![Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }]
+    );
+    assert_eq!(protocol.state(), State::Idle);
+    let twice = wire(json!({"id":9_999,"method":"thread/child/cancel","params":{}}));
+    assert_eq!(protocol.receive(&twice), Err(ProtocolError::StaleMessage));
     assert_eq!(protocol.state(), State::Failed);
 }
 
@@ -874,4 +918,50 @@ fn unsupported_request_while_idle_is_deniable_and_blocks_new_dispatch() {
         -32601
     );
     assert_eq!(request(&protocol.start_turn("next").unwrap())["id"], 4);
+}
+
+/// A master may start any number of native sub-agents in one turn (OB-5 r2): 1,000 threads
+/// one after another, where the 17th used to end the turn as over capacity, then 100 at
+/// once, where the 17th waiting interrupt did. Each is interrupted, none reaches the turn,
+/// and the turn still ends completed.
+#[test]
+fn a_turn_that_starts_a_thousand_native_sub_agents_still_ends_completed() {
+    let mut protocol = active();
+    let mut next = 4;
+    for index in 0..1_000 {
+        let (thread, turn) = (format!("child-{index}"), format!("child-turn-{index}"));
+        let started = child_turn(&thread, &turn, "turn-unit", "inProgress");
+        assert_eq!(
+            protocol.receive(&started).unwrap(),
+            vec![Event::NativeSubAgentStarted {
+                thread_id: thread.clone(),
+                turn_id: turn.clone()
+            }]
+        );
+        let interrupt = request(&protocol.interrupt_child(&thread, &turn).unwrap());
+        assert_eq!(interrupt["id"], next);
+        assert!(reply(&mut protocol, next, json!({})).is_empty());
+        let ended = child_turn(&thread, &turn, "turn-unit", "interrupted");
+        assert!(protocol.receive(&ended).unwrap().is_empty());
+        next += 1;
+    }
+    for index in 0..100 {
+        let (thread, turn) = (format!("batch-{index}"), format!("batch-turn-{index}"));
+        let started = child_turn(&thread, &turn, "turn-unit", "inProgress");
+        assert_eq!(protocol.receive(&started).unwrap().len(), 1);
+        protocol.interrupt_child(&thread, &turn).unwrap();
+    }
+    for index in 0..100 {
+        assert!(reply(&mut protocol, next + index, json!({})).is_empty());
+    }
+    assert_eq!(protocol.state(), State::Active);
+    let ended = notification("turn/completed", "turn-unit", "completed");
+    assert_eq!(
+        protocol.receive(&ended).unwrap(),
+        vec![Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }]
+    );
+    assert_eq!(protocol.state(), State::Idle);
 }

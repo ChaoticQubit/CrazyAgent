@@ -1545,6 +1545,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_stale" => {
             "These changes moved on since you opened them. Review them again, then accept."
         }
+        "move_project_in_progress" => {
+            "This project is being moved into your projects folder. Try again when the move is done."
+        }
         "changes_branch_moved" => {
             "Your branch moved while these changes were landing, so nothing changed. Review and accept again."
         }

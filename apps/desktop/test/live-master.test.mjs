@@ -10,6 +10,7 @@ import { pasteTerminal } from "./native/trial-kit.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
 const live = await import("../src/screens/project/live-master.tsx");
+const loads = await import("../src/state.ts");
 
 const key = (type, extra = {}) => ({ type, key: "Enter", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, ...extra });
 
@@ -224,6 +225,33 @@ test("only an idle stop in this project's read offers Start again", async () => 
   assert.equal(idleStopped(status({ live_master: false, live_problem: "No account." }), "alpha"), false, "another stop");
   assert.equal(idleStopped(status({ live_master: false, live_idle_stopped: true }), "beta"), false, "another project's read");
   assert.equal(idleStopped({ kind: "not_ready" }, "alpha"), false);
+});
+
+test("the master area shows the engine's move line while it is the newest engine note and under 15 minutes old, and only on a running master (DEC-139)", async () => {
+  const { LiveMasterView, movedNote } = await import("../src/screens/project/live-master.tsx");
+  const MOVED = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
+  const NOW = 1_800_000_000_000;
+  const MINUTE = 60_000;
+  const note = (id, text, author = "engine", state = "note", created_ms = NOW - MINUTE) => ({ id, author, text, state, created_ms });
+  const status = (messages) => ({ kind: "ok", value: teamStatus({ messages }) });
+  const written = (ago) => status([note(1, MOVED, "engine", "note", NOW - ago)]);
+  assert.equal(movedNote(undefined, "alpha", NOW), null, "not read yet");
+  assert.equal(movedNote(status([]), "alpha", NOW), null, "nothing moved");
+  assert.equal(movedNote(status([note(1, "Seeded from earlier turns."), note(2, MOVED)]), "alpha", NOW), MOVED);
+  assert.equal(movedNote(status([note(1, MOVED), note(2, "hello", "owner", "answered")]), "alpha", NOW), MOVED, "an owner message does not hide it");
+  assert.equal(movedNote(status([note(1, MOVED), note(2, "The live master was turned off: it was idle for 15 min.")]), "alpha", NOW), null, "a newer engine note replaces it");
+  assert.equal(movedNote(status([note(1, MOVED, "master")]), "alpha", NOW), null, "only the engine's own note counts");
+  assert.equal(movedNote(status([note(1, MOVED)]), "beta", NOW), null, "another project's read");
+  assert.equal(movedNote({ kind: "not_ready" }, "alpha", NOW), null);
+  assert.equal(movedNote(written(15 * MINUTE - 1), "alpha", NOW), MOVED, "it stays until 15 minutes passed");
+  assert.equal(movedNote(written(15 * MINUTE), "alpha", NOW), null, "it ends 15 minutes after the move");
+  assert.equal(movedNote(written(4 * 24 * 60 * MINUTE), "alpha", NOW), null, "a move days ago shows no line");
+  assert.equal(movedNote(written(-5000), "alpha", NOW), MOVED, "a note written after the clock was last read shows");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  assert.match(source, /const moved = live\.kind === "running" \? movedNote\(data\.team\.result, data\.id, now\) : null;/u, "a stopped master shows why it stopped, not an old move");
+  assert.match(source, /const timer = window\.setInterval\(\(\) => setNow\(Date\.now\(\)\), CLOCK_MS\);/u, "the clock is read again with no new team read, so the line ends on an open page");
+  assert.match(source, /\{moved && <div className="pj-row pj-small pj-muted" role="status" data-testid="master-moved">/u);
+  assert.equal(typeof LiveMasterView, "function");
 });
 
 test("the live master switch is read from the team status, and a switch never set reads as null", async () => {
@@ -537,7 +565,7 @@ test("a refused or failed owner Open is named in the live master area while its 
   const data = {
     id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
     pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch: null } }, at: 1 }, reloadTeam: () => {},
+    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch: null, messages: [] } }, at: 1 }, reloadTeam: () => {},
   };
   const view = (openNote) => renderToStaticMarkup(createElement(live.LiveMasterView, {
     data, harness: "codex", live: { kind: "running", node: null }, onStart: async () => undefined, openNote,
@@ -600,7 +628,7 @@ test("the master area is headed by the harness the running master uses and names
 test("the running harness comes from the team status agent behind the master card, not the card, which names the saved plan (N-D26)", () => {
   assert.equal(typeof live.runningHarness, "function", "the area reads the running master's harness from the team status");
   const agent = (id, harness, status) => ({ id, role: "master", label: "Master", harness, tools: true, account: null, worktree: null, status, status_label: status, task: null, turns: 1, problem: null, process_group: null, created_ms: id });
-  const team = { kind: "ok", value: { project_id: "p-1", live_switch: null, agents: [agent(71, "codex", "stopped"), agent(72, "claude", "idle")] } };
+  const team = { kind: "ok", value: { project_id: "p-1", live_switch: null, messages: [], agents: [agent(71, "codex", "stopped"), agent(72, "claude", "idle")] } };
   assert.equal(live.runningHarness(team, "p-1", 72), "claude", "the agent behind the card");
   assert.equal(live.runningHarness(team, "p-1", 71), "codex", "the card's own agent even when an older one");
   assert.equal(live.runningHarness(team, "p-1", null), "claude", "no agent on the card: the newest live master");
@@ -621,6 +649,11 @@ test("the running harness comes from the team status agent behind the master car
   assert.match(shown, /data-testid="master-switch-waits"[^>]*>Codex from the next start</, shown);
   const same = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
   assert.doesNotMatch(same, /master-switch-waits/);
+  assert.match(shown, /<span class="pj-console-detail">claude-account-f2fa<\/span>/, "with no name read yet the head falls back to the account's id (OB-4)");
+  loads.cacheLoad(loads.loadKey("accounts", []), { kind: "ok", value: [{ id: "claude-account-f2fa", name: "Claude-ScholarScope" }] });
+  const named = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
+  assert.match(named, /<span class="pj-console-detail">Claude-ScholarScope<\/span>/, "the head names the master's account as Accounts does");
+  assert.doesNotMatch(named, /claude-account-f2fa/);
 });
 
 test("Live terminal is unavailable with its plain reason for a master with no live terminal, and available with its words for one that has it (OWNER-Q4-2-L3)", async () => {

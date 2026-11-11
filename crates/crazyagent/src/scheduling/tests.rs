@@ -188,6 +188,7 @@ fn owner_choices_are_stored_read_back_and_cleared() {
         schedule,
         Schedule {
             strategy: Strategy::Balanced,
+            live_master: LiveMasterAccount::Keep,
             pools: vec![ScopedStrategy {
                 id: reference("pool-a"),
                 strategy: Strategy::ManualRank,
@@ -216,6 +217,102 @@ fn owner_choices_are_stored_read_back_and_cleared() {
     let cleared = load(&connection).unwrap();
     assert!(cleared.accounts.is_empty() && cleared.pools.is_empty());
     assert_eq!(cleared.projects.len(), 1);
+}
+
+#[test]
+fn the_live_master_account_choice_is_keep_until_stored_and_each_option_reads_back() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b"]);
+    assert_eq!(LiveMasterAccount::default(), LiveMasterAccount::Keep);
+    assert_eq!(live_master(&connection).unwrap(), LiveMasterAccount::Keep);
+    assert_eq!(
+        load(&connection).unwrap().live_master,
+        LiveMasterAccount::Keep
+    );
+    for (choice, version) in [
+        (LiveMasterAccount::MoveWhenIdle, 1),
+        (LiveMasterAccount::Keep, 2),
+        (LiveMasterAccount::MoveWhenIdle, 3),
+    ] {
+        let edit = ScheduleChange::LiveMaster { choice };
+        let mut held = load(&connection).unwrap();
+        assert_eq!(
+            change(&mut connection, &access, edit.clone()),
+            Outcome::Applied
+        );
+        held.update(&edit);
+        let stored = load(&connection).unwrap();
+        assert_eq!(stored.live_master, choice);
+        assert_eq!(stored.version, version);
+        assert_eq!(live_master(&connection).unwrap(), choice);
+        assert_eq!(
+            stored, held,
+            "a view's own update matches the stored schedule"
+        );
+        assert_eq!(load_page(&connection, None).unwrap().0.live_master, choice);
+    }
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM account_live_master", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "three changes keep one row");
+    let tx = connection.transaction().unwrap();
+    let keep = ScheduleChange::LiveMaster {
+        choice: LiveMasterAccount::Keep,
+    };
+    assert_eq!(
+        apply(&tx, &access, &keep, 2).unwrap(),
+        Outcome::Rejected {
+            code: "stale_revision".into()
+        }
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        live_master(&connection).unwrap(),
+        LiveMasterAccount::MoveWhenIdle,
+        "a stale change stores nothing"
+    );
+}
+
+#[test]
+fn the_live_master_account_choice_travels_by_its_codes_and_an_unknown_code_is_refused() {
+    let (_directory, connection) = database();
+    for choice in LiveMasterAccount::ALL {
+        assert_eq!(
+            serde_json::to_value(choice).unwrap(),
+            serde_json::Value::from(choice.code())
+        );
+        assert_eq!(LiveMasterAccount::parse(choice.code()), Some(choice));
+        assert!(!choice.label().is_empty() && !choice.detail().is_empty());
+    }
+    assert_eq!(
+        serde_json::to_value(ScheduleChange::LiveMaster {
+            choice: LiveMasterAccount::MoveWhenIdle,
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "live_master", "choice": "move_when_idle" })
+    );
+    let old: Schedule = serde_json::from_value(serde_json::json!({
+        "strategy": "balanced", "pools": [], "projects": [], "accounts": [], "version": 3
+    }))
+    .unwrap();
+    assert_eq!(
+        old.live_master,
+        LiveMasterAccount::Keep,
+        "a schedule written before the setting reads Keep"
+    );
+    connection
+        .execute(
+            "INSERT INTO account_live_master(id,choice) VALUES (1,'sometimes')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        live_master(&connection).unwrap_err().0,
+        "account_schedule_record"
+    );
+    assert_eq!(load(&connection).unwrap_err().0, "account_schedule_record");
 }
 
 #[test]
@@ -876,6 +973,110 @@ fn without_limits_or_ranks_the_current_account_then_the_least_loaded_comes_first
     list[0].current = true;
     assert_eq!(ordered(&choice, &list), ["a", "c", "b"]);
     assert_eq!(ordered(&Choice::default(), &list), ["a", "c", "b"]);
+}
+
+/// Tells whether account `a`, with no work, is clearly before account `b`, which holds the
+/// work and three live agents, under `strategy`. Takes the strategy, the owner's plans and
+/// the limits rows. Returns the answer.
+fn a_before_held_b(
+    strategy: Strategy,
+    plans: &[(&str, AccountPlan)],
+    rows: &[LimitsRow<'_>],
+) -> bool {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b"]);
+    let (pool, strategy) = (reference("pool-a"), Some(strategy));
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::PoolStrategy { pool, strategy },
+    );
+    for (id, account) in plans {
+        plan(&mut connection, &access, id, *account);
+    }
+    limits(&connection, rows);
+    let mut list = candidates(&["a", "b"]);
+    list[1].load = 3;
+    list[1].current = true;
+    read(&connection, &access).clearly_before(&list[0], &list[1])
+}
+
+#[test]
+fn under_balanced_only_weekly_use_lower_by_the_margin_is_clearly_before_a_held_account() {
+    assert_eq!(MOVE_MARGIN_PERMILLE, 50);
+    let soon = Some(NOW_MS + 24 * HOUR_MS);
+    let balanced = |a: (f64, f64), b: (f64, f64)| {
+        let rows: [LimitsRow<'_>; 2] = [("a", a.0, None, a.1, soon), ("b", b.0, None, b.1, soon)];
+        a_before_held_b(Strategy::Balanced, &[], &rows)
+    };
+    assert!(balanced((0.0, 25.2), (0.0, 30.2)), "5 points less moves");
+    assert!(!balanced((0.0, 25.3), (0.0, 30.2)), "4.9 points less stays");
+    assert!(!balanced((0.0, 30.1), (0.0, 30.2)));
+    assert!(!balanced((0.0, 30.2), (0.0, 30.2)));
+    assert!(!balanced((0.0, 30.0), (90.0, 30.0)), "5-hour use alone");
+    assert!(balanced((0.0, 96.0), (0.0, 100.0)), "a reached limit");
+    let lone =
+        |id: &'static str| a_before_held_b(Strategy::Balanced, &[], &[(id, 0.0, None, 20.0, soon)]);
+    assert!(!lone("a"), "the held account has no reading");
+    assert!(!lone("b"), "the other account has no reading");
+}
+
+#[test]
+fn a_sooner_reset_a_better_rank_or_a_use_last_pin_is_clearly_before_with_no_margin() {
+    let resets = |a: i64, b: i64| -> [LimitsRow<'static>; 2] {
+        let at = |hours: i64| Some(NOW_MS + hours * HOUR_MS);
+        [("a", 0.0, None, 4.0, at(a)), ("b", 0.0, None, 4.0, at(b))]
+    };
+    let at_rank = |rank: u16| AccountPlan {
+        rank: Some(rank),
+        ..AccountPlan::default()
+    };
+    let last = AccountPlan {
+        pin: Some(Pin::UseLast),
+        ..AccountPlan::default()
+    };
+    let use_it = Strategy::UseItOrLoseIt;
+    assert!(a_before_held_b(use_it, &[], &resets(24, 72)));
+    assert!(!a_before_held_b(use_it, &[], &resets(72, 24)));
+    assert!(!a_before_held_b(use_it, &[], &resets(24, 24)));
+    assert!(a_before_held_b(
+        use_it,
+        &[("a", at_rank(1))],
+        &resets(24, 24)
+    ));
+    assert!(!a_before_held_b(
+        use_it,
+        &[("b", at_rank(1))],
+        &resets(24, 24)
+    ));
+    assert!(!a_before_held_b(
+        use_it,
+        &[("a", at_rank(1))],
+        &resets(72, 24)
+    ));
+    assert!(a_before_held_b(use_it, &[("b", last)], &resets(72, 24)));
+    assert!(!a_before_held_b(use_it, &[("a", last)], &resets(24, 72)));
+    let manual = Strategy::ManualRank;
+    assert!(!a_before_held_b(manual, &[], &[]));
+    assert!(a_before_held_b(
+        manual,
+        &[("a", at_rank(1)), ("b", at_rank(2))],
+        &[]
+    ));
+    assert!(!a_before_held_b(
+        manual,
+        &[("a", at_rank(2)), ("b", at_rank(1))],
+        &[]
+    ));
+}
+
+#[test]
+fn the_move_when_idle_help_names_the_margin_and_the_time_between_moves() {
+    let help = LiveMasterAccount::MoveWhenIdle.detail();
+    let margin = format!("at least {} points less", MOVE_MARGIN_PERMILLE / 10);
+    let dwell = format!("at most once every {} minutes", MOVE_DWELL_SECS / 60);
+    assert!(help.contains(&margin), "{help}");
+    assert!(help.contains(&dwell), "{help}");
 }
 
 #[test]

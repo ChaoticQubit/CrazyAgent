@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { listAccounts, type Result } from "../../api";
+import { accountLabels, listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
@@ -19,6 +19,13 @@ import "../project/projects.css";
 import "./metrics.css";
 
 const MINUTE = 60_000;
+
+/** Stops on a state this file holds impossible. Inputs: the condition and what it guards.
+ * Output: nothing, or a thrown error. */
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
 const TICK_MS = 10_000;
 const RELOAD_TICKS = 3;
 
@@ -52,6 +59,10 @@ const APP_PANELS: { by: MetricsBy; title: string }[] = [
 const MAIN_NUMBERS: { value: "dollars" | "tokens"; label: string }[] = [{ value: "dollars", label: "Dollars" }, { value: "tokens", label: "Tokens" }];
 
 const PRICE_SOURCES: { value: "bundled" | "off"; label: string }[] = [{ value: "bundled", label: "Bundled" }, { value: "off", label: "Off" }];
+
+const PROJECT_LIMITS: { value: "hidden" | "shown"; label: string }[] = [{ value: "hidden", label: "Hidden" }, { value: "shown", label: "Shown" }];
+
+const LIMITS_HIDDEN_NOTE = "Limits belong to accounts, not projects. Pick All projects to see them, or show them here.";
 
 const RESULTS: Record<string, string> = {
   running: "Working",
@@ -370,12 +381,26 @@ function Breakdown({ control, ...parts }: BreakdownParts & { by: MetricsBy; cont
   return <Panel title="Breakdown" padded={false} actions={control}><BreakdownTable {...parts} /></Panel>;
 }
 
+/** Whether the app page shows what belongs to accounts, not projects: each account's limits
+ * and the next accounts. Always with every project; with one picked only when the owner
+ * chose Shown, and an engine that sends no choice reads as Hidden. Inputs: the picked project
+ * or null, and the money view once read. Output: whether they show. */
+export function showsAccountLimits(projectId: string | null, money: MoneyView | null): boolean {
+  if (projectId === null) return true;
+  const choice = money?.settings.project_limits ?? "hidden";
+  assert(choice === "hidden" || choice === "shown", "the account limits choice is Hidden or Shown");
+  return choice === "shown";
+}
+
 /** The app page's words above its numbers: what it counts, the engine's word on which
- * counting they use while it has one, and anything wrong with this reading. Inputs: the usage
- * read, the last failed action and now. */
-function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: string; nowMs: number }) {
+ * counting they use while it has one, and anything wrong with this reading. With the account
+ * limits hidden it names only the project's tokens. Inputs: the usage read, the last failed
+ * action, now and whether account limits show. */
+function AppNotices({ usage, failure, nowMs, accountWide }: { usage: UsageReport; failure: string; nowMs: number; accountWide: boolean }) {
   return <>
-    <p className="secondary">Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes.</p>
+    <p className="secondary">{accountWide
+      ? "Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes."
+      : "Tokens this project's agents used. Counts come from each run's own record."}</p>
     {usage.counting_notice && <Notice tone="warn">{usage.counting_notice}</Notice>}
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
     {(usage.health ?? []).map((item) => <Notice key={item.step} tone={item.recovered_ms === null ? "warn" : "info"}>{healthText(item, nowMs)}</Notice>)}
@@ -383,15 +408,26 @@ function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: st
   </>;
 }
 
-/** What the app page keeps from the usage read alone while the metrics read fails: the usage
- * notices, each account's limits with the next accounts, By pool, the lines changed and the
- * tokens by day. Inputs: the usage read, the filter, the names, now and the viewer's offset. */
-function UsageOnly({ usage, filter, names, nowMs, offset }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; offset: number }) {
-  const pools = poolTable(usage, nowMs, filter);
+/** Each account's limits with the next accounts, or one line saying where they went while
+ * a picked project hides them. Inputs: the usage read, the filter, the names, now and whether
+ * account limits show. */
+function AccountWide({ usage, filter, names, nowMs, accountWide }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; accountWide: boolean }) {
+  if (!accountWide) return <p className="muted">{LIMITS_HIDDEN_NOTE}</p>;
   return <>
-    <AppNotices usage={usage} failure={filter.limits.failure} nowMs={nowMs} />
     <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
     {filter.limits.next}
+  </>;
+}
+
+/** What the app page keeps from the usage read alone while the metrics read fails: the usage
+ * notices, each account's limits with the next accounts unless a picked project hides them,
+ * By pool, the lines changed and the tokens by day. Inputs: the usage read, the filter, the
+ * names, now, the viewer's offset and whether account limits show. */
+function UsageOnly({ usage, filter, names, nowMs, offset, accountWide }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; offset: number; accountWide: boolean }) {
+  const pools = poolTable(usage, nowMs, filter);
+  return <>
+    <AppNotices usage={usage} failure={filter.limits.failure} nowMs={nowMs} accountWide={accountWide} />
+    <AccountWide usage={usage} filter={filter} names={names} nowMs={nowMs} accountWide={accountWide} />
     <div className="mx-panels">
       <TokenPanel title="By pool" rows={pools.rows} money={usage.money}><BreakdownTable by="pool" {...pools} total={usage.total} money={usage.money} /></TokenPanel>
       <LinesPanel rows={usage.lines} name={(key) => projectLabel(filter, key)} />
@@ -402,13 +438,15 @@ function UsageOnly({ usage, filter, names, nowMs, offset }: { usage: UsageReport
 
 /** What the app page keeps while its reads are incomplete: a refused action's words and, once
  * the usage read holds, each account's limits and the next accounts. Without that read only
- * Check limits now stays. Inputs: the usage read, the filter, the names and now. */
-function LimitsWhileReading({ usage, filter, names, nowMs }: { usage: Loaded<UsageReport>; filter: MetricsFilter; names: MetricsNames; nowMs: number }) {
+ * Check limits now stays. A picked project that hides account limits keeps the refused
+ * action's words alone. Inputs: the usage read, the filter, the names, now and whether account
+ * limits show. */
+function LimitsWhileReading({ usage, filter, names, nowMs, accountWide }: { usage: Loaded<UsageReport>; filter: MetricsFilter; names: MetricsNames; nowMs: number; accountWide: boolean }) {
   return <>
     {filter.limits.failure && <Notice tone="danger" alert>{filter.limits.failure}</Notice>}
-    {usage.kind === "ok"
-      ? <><AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />{filter.limits.next}</>
-      : <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />}
+    {accountWide && (usage.kind === "ok"
+      ? <AccountWide usage={usage.value} filter={filter} names={names} nowMs={nowMs} accountWide />
+      : <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />)}
   </>;
 }
 
@@ -487,9 +525,11 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   const covers = filter === undefined ? (projectId === null ? "All projects" : "This project only")
     : projectId === null ? `${filter.projects.length} project${filter.projects.length === 1 ? "" : "s"}` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
   const money = usage.kind === "ok" ? usage.value.money : null;
+  const accountWide = showsAccountLimits(projectId, money);
   const moneyTools = money && <div className="pj-row mx-money">
     {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(main_number) => change({ ...money.settings, main_number })} />}
     <Segmented label="Prices" value={money.settings.prices} options={PRICE_SOURCES} onValue={(prices) => change({ ...money.settings, prices })} />
+    {filter && projectId !== null && <Segmented label="Account limits here" value={money.settings.project_limits ?? "hidden"} options={PROJECT_LIMITS} onValue={(project_limits) => change({ ...money.settings, project_limits })} />}
   </div>;
   const tools = <div className="mx-tools">
     {filter ? <div className="pj-row">
@@ -501,7 +541,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs, usage.kind === "error" || metrics.kind === "error")} · provider-reported usage per turn</span>
   </div>;
   const head = <>{tools}{refused && <LoadError message={refused} onRetry={() => { setRefused(""); onRetry(); }} />}</>;
-  const kept = filter && <LimitsWhileReading usage={usage} filter={filter} names={names} nowMs={nowMs} />;
+  const kept = filter && <LimitsWhileReading usage={usage} filter={filter} names={names} nowMs={nowMs} accountWide={accountWide} />;
   const reads = [usage, metrics];
   if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) {
     return filter && usage.kind === "ok" ? <div className="stack">{head}<NotReady what="Metrics" />{kept}</div> : <NotReady what="Metrics" />;
@@ -509,7 +549,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
     const error = failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />;
-    if (filter && usage.kind === "ok") return <div className="stack mx-page">{head}{error}<UsageOnly usage={usage.value} filter={filter} names={names} nowMs={nowMs} offset={offset} /></div>;
+    if (filter && usage.kind === "ok") return <div className="stack mx-page">{head}{error}<UsageOnly usage={usage.value} filter={filter} names={names} nowMs={nowMs} offset={offset} accountWide={accountWide} /></div>;
     return <div className="stack">{head}{kept}{error}</div>;
   }
   if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{head}{kept}<Skeleton shape="card" count={3} /></div>;
@@ -528,12 +568,11 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   </>;
   if (filter) return <div className="stack mx-page">
     {head}
-    <AppNotices usage={usage.value} failure={filter.limits.failure} nowMs={nowMs} />
+    <AppNotices usage={usage.value} failure={filter.limits.failure} nowMs={nowMs} accountWide={accountWide} />
     {recount}
     <LeadPanel usage={usage.value} metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} />
     <Tiles usage={usage.value} metrics={metrics.value} lead />
-    <AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
-    {filter.limits.next}
+    <AccountWide usage={usage.value} filter={filter} names={names} nowMs={nowMs} accountWide={accountWide} />
     {empty ? <EmptyState icon="trending-up" title="No usage in this range" compact>Runs show up here a few seconds after an agent works.</EmptyState> : <>
       <div className="mx-panels">
         {APP_PANELS.map(({ by: choice, title }) => {
@@ -612,7 +651,7 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
       agents.set(agentKey(id, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harness}`);
     }
   }
-  const names: MetricsNames = { agents, accounts: new Map(accounts.kind === "ok" ? accounts.value.map((row) => [row.id, row.name]) : []) };
+  const names: MetricsNames = { agents, accounts: accountLabels(accounts.kind === "ok" ? accounts.value : []) };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
     sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter} notices={notices.kind === "ok" ? notices.value : ""}

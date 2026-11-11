@@ -612,6 +612,145 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
 }
 
 #[test]
+fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_clearly_before() {
+    let project = ProjectId::new("team-held").unwrap();
+    let Accounts::Usable(accounts) = eligible_accounts(
+        &access("team-held", &["local-a", "local-b"]),
+        &project,
+        "codex",
+    ) else {
+        panic!("pool assigned");
+    };
+    let held = reference("local-b");
+    let pick = |choice: &crate::scheduling::Choice,
+                paused: &BTreeSet<CredentialRef>,
+                held: Option<&CredentialRef>| {
+        pick_account_held(&accounts, &|_| 0, paused, choice, held)
+            .map(|account| account.connection.as_str().to_owned())
+    };
+    let mut paused = BTreeSet::new();
+    let tie = crate::scheduling::Choice::default();
+    assert_eq!(
+        pick(&tie, &paused, None).as_deref(),
+        Some("local-a"),
+        "new work takes pool order"
+    );
+    assert_eq!(
+        pick(&tie, &paused, Some(&held)).as_deref(),
+        Some("local-b"),
+        "the held account wins a tie"
+    );
+    let mut behind = crate::scheduling::Choice::default();
+    behind
+        .schedule
+        .accounts
+        .push(crate::scheduling::AccountEntry {
+            connection: held.clone(),
+            plan: crate::scheduling::AccountPlan {
+                pin: Some(crate::scheduling::Pin::UseLast),
+                ..crate::scheduling::AccountPlan::default()
+            },
+        });
+    assert_eq!(
+        pick(&behind, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "an account a Use last pin puts clearly before the held one wins"
+    );
+    let mut ranked = crate::scheduling::Choice {
+        strategy: crate::scheduling::Strategy::ManualRank,
+        ..crate::scheduling::Choice::default()
+    };
+    ranked
+        .schedule
+        .accounts
+        .push(crate::scheduling::AccountEntry {
+            connection: reference("local-a"),
+            plan: crate::scheduling::AccountPlan {
+                rank: Some(1),
+                ..crate::scheduling::AccountPlan::default()
+            },
+        });
+    assert_eq!(
+        pick(&ranked, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "an account the owner ranked first wins over an unranked held one"
+    );
+    let busy = |connection: &CredentialRef| usize::from(connection == &held) * 3;
+    assert_eq!(
+        pick_account_held(&accounts, &busy, &paused, &tie, Some(&held))
+            .map(|account| account.connection.as_str()),
+        Some("local-b"),
+        "more live agents on the held account never move running work"
+    );
+    paused.insert(held.clone());
+    assert_eq!(
+        pick(&tie, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "a held account that rests gives way"
+    );
+}
+
+#[test]
+fn under_spread_work_on_a_shared_account_leaves_it_only_for_an_unused_one_clearly_before() {
+    let project = ProjectId::new("team-spread").unwrap();
+    let Accounts::Usable(accounts) = eligible_accounts(
+        &access("team-spread", &["local-a", "local-b"]),
+        &project,
+        "codex",
+    ) else {
+        panic!("pool assigned");
+    };
+    let (shared, free) = (reference("local-a"), reference("local-b"));
+    let used = BTreeSet::from([&shared]);
+    let paused = BTreeSet::new();
+    let pick = |choice: &crate::scheduling::Choice, held: Option<&CredentialRef>| {
+        let first = spread_candidates(&accounts, &used, held);
+        pick_account_held(&first, &|_| 0, &paused, choice, held)
+            .map(|account| account.connection.as_str().to_owned())
+    };
+    let used_last = |connection: &CredentialRef| {
+        let mut choice = crate::scheduling::Choice::default();
+        choice
+            .schedule
+            .accounts
+            .push(crate::scheduling::AccountEntry {
+                connection: connection.clone(),
+                plan: crate::scheduling::AccountPlan {
+                    pin: Some(crate::scheduling::Pin::UseLast),
+                    ..crate::scheduling::AccountPlan::default()
+                },
+            });
+        choice
+    };
+    let level = crate::scheduling::Choice::default();
+    assert_eq!(
+        pick(&level, None).as_deref(),
+        Some("local-b"),
+        "new work takes the account no agent of the project uses"
+    );
+    assert_eq!(
+        pick(&level, Some(&shared)).as_deref(),
+        Some("local-a"),
+        "work that shares its account stays while the unused one is no better"
+    );
+    assert_eq!(
+        pick(&used_last(&free), Some(&shared)).as_deref(),
+        Some("local-a"),
+        "it never leaves a shared account for a worse unused one"
+    );
+    assert_eq!(
+        pick(&used_last(&shared), Some(&shared)).as_deref(),
+        Some("local-b"),
+        "it moves to an unused account that is clearly before its own"
+    );
+    assert_eq!(
+        pick(&level, Some(&free)).as_deref(),
+        Some("local-b"),
+        "work alone on its account keeps it"
+    );
+}
+
+#[test]
 fn admission_follows_the_team_plan_and_the_pool() {
     let (_directory, mut connection) = database();
     let setup = stored(

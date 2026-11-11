@@ -15,6 +15,7 @@ use crate::harnesses::leftovers::{self, Unstopped};
 use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
+use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
@@ -943,7 +944,8 @@ impl ResearchRunner {
             Ok(sandbox)
         })??;
         still_held(jobs, job)?;
-        let prompt = research_prompt(&root, &job.kind)?;
+        let linked = self.linked_research(job, &root)?;
+        let prompt = research_prompt(&root, &job.kind, &linked)?;
         write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
         if let Some(host) = &self.terminal {
             let output = match harness {
@@ -1347,6 +1349,39 @@ impl ResearchRunner {
         ))
     }
 
+    /// The research files linked from the project's repository, for the planning job only:
+    /// no other job's prompt carries them, each read through the links store with no link
+    /// followed. Inputs: the job and the project folder. Output: each file's research kind,
+    /// path and text, or the refusal when the links cannot be read.
+    fn linked_research(
+        &self,
+        job: &ResearchJob,
+        root: &Path,
+    ) -> Result<Vec<(ResearchKind, LinkedText)>, RunError> {
+        if job.kind != ResearchKind::RoadmapPlanning.name() {
+            return Ok(Vec::new());
+        }
+        let unreadable = || RunError::Invalid(LINKS_UNREADABLE.into());
+        let runtime = self.database.parent().ok_or_else(unreadable)?;
+        let project = ProjectId::new(job.project.clone()).map_err(|_| unreadable())?;
+        let db = crate::questions::open(runtime).map_err(|_| unreadable())?;
+        let linked =
+            crate::project_setup::links::research(&db, &project, root).map_err(|_| unreadable())?;
+        assert!(linked.len() <= crate::project_setup::links::LINKS_MAX);
+        assert!(
+            linked
+                .iter()
+                .all(|(_, file)| file.text.len() as u64
+                    <= crate::project_setup::links::LINK_BYTES_MAX)
+        );
+        Ok(linked)
+    }
+
+    /// Publishes a finished job's output: the planning job's reply as the roadmap documents
+    /// with its open points raised, any other job's report under the project's research
+    /// folder with the owner questions its agent returned taken out of it and raised.
+    /// Inputs: the job, its harness, the project folder and the agent's output file.
+    /// Output: the written file, or the plain failure the job ends with.
     fn publish(
         &self,
         job: &ResearchJob,
@@ -1371,8 +1406,22 @@ impl ResearchRunner {
                 .map_err(|_| crate::planning::QUESTIONS_UNLOGGED)?;
             return Ok(state.join(crate::planning::ROADMAP));
         }
-        let report = render_report(&kind_label(&job.kind), harness.label(), body);
-        write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
+        let label = kind_label(&job.kind);
+        let path = ResearchKind::parse(&job.kind).map_or_else(
+            || format!("context/research/{}.md", job.kind),
+            ResearchKind::report_path,
+        );
+        let (body, asks) = report_questions(body, &label, &path);
+        if body.is_empty() {
+            return Err("Agent returned no report");
+        }
+        let report = render_report(&label, harness.label(), &body);
+        let written = write_report(root, &job.kind, &report)
+            .map_err(|_| "Could not save the research report")?;
+        let source = crate::questions::EngineSource::Research(job.kind.clone());
+        crate::planning::raise_asks(self.database(), &job.project, &source, &asks)
+            .map_err(|_| REPORT_QUESTIONS_UNLOGGED)?;
+        Ok(written)
     }
 }
 
@@ -3056,10 +3105,18 @@ fn read_bounded(base: &Path, path: &Path, max: u64) -> io::Result<String> {
     Ok(text)
 }
 
-fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
+/// Builds a research job's prompt: the planning prompt with the linked research files for
+/// the planning job, else the brief, the owner's attached documents, the kind's task and
+/// the report rules, the owner questions block among them. Inputs: the project folder, the
+/// job kind and the linked research files. Output: the prompt, or the read failure.
+fn research_prompt(
+    root: &Path,
+    kind: &str,
+    linked: &[(ResearchKind, LinkedText)],
+) -> Result<String, RunError> {
     if kind == ResearchKind::RoadmapPlanning.name() {
         let state = crate::projects_home::state_folder(root);
-        return Ok(crate::planning::prompt::prompt(&state)?);
+        return Ok(crate::planning::prompt::prompt_with_links(&state, linked)?);
     }
     let context = crate::projects_home::state_folder(root).join("context");
     let brief = match read_bounded(&context, &context.join("brief.md"), BRIEF_BYTES_MAX) {
@@ -3103,6 +3160,8 @@ fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
     prompt.push_str(
         "\nRules:\n- Work only inside your current folder; do not change files anywhere else.\n- Reply with the full report in Markdown, with short headings.\n- Cite sources inline as Markdown links.\n- End with a section \"## Links and references\" that lists every source as a Markdown link.\n",
     );
+    prompt.push_str(QUESTIONS_RULE);
+    assert!(prompt.ends_with('\n'));
     Ok(prompt)
 }
 
@@ -3135,6 +3194,41 @@ fn kind_task(kind: &str, label: &str) -> String {
         "tech_stack_research" => "Compare technologies that suit this project and recommend a stack with clear reasons and tradeoffs.".into(),
         _ => format!("Research this topic for the project: {label}."),
     }
+}
+
+/// The job failure when a report's questions could not be logged.
+const REPORT_QUESTIONS_UNLOGGED: &str = "Could not log the report's questions for the owner";
+/// The refusal of a planning run whose project's linked files cannot be read.
+const LINKS_UNREADABLE: &str = "linked research files unreadable";
+/// The report rule asking a research agent for the decisions only the owner can make, in
+/// the shape every engine question has.
+const QUESTIONS_RULE: &str = "- When a decision needs the owner, add one fenced json block after that section and nothing after it: {\"questions\":[{\"question\":\"...\",\"kind\":\"single\",\"options\":[\"...\",\"...\"],\"recommended\":\"...\"}]}. kind is single or multi with 2 to 6 short options and one of them as recommended, or text with no options only when no short list of answers fits. Leave the block out when nothing needs the owner.\n";
+
+/// Takes the owner questions out of a research report: its last fenced JSON block holding a
+/// `questions` list is cut from the text and each question in it is checked as the questions
+/// log checks it, with where it came from as its context. Inputs: the agent's report, the
+/// job's plain label and the report's path inside the project. Output: the report without
+/// the block and the questions, the report as it came when it holds no such block.
+fn report_questions(body: &str, label: &str, path: &str) -> (String, Vec<crate::questions::Ask>) {
+    let Some((block, value)) = crate::planning::question_block(body) else {
+        return (body.to_owned(), Vec::new());
+    };
+    let context = format!(
+        "Raised by the {} job. Its report is in {path}.",
+        label.to_lowercase()
+    );
+    let asks = crate::questions::asks_from_json(&value, &context);
+    let before = body[..block.start].trim_end();
+    let after = body[block.end..].trim_start();
+    let gap = if before.is_empty() || after.is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let report = format!("{before}{gap}{after}");
+    assert!(report.len() <= body.len());
+    assert!(asks.len() <= crate::questions::ASKS_FROM_ONE_REPLY_MAX);
+    (report, asks)
 }
 
 fn render_report(label: &str, harness: &str, body: &str) -> String {
@@ -4129,6 +4223,58 @@ mod tests {
             "See [Vet](https://vet.example/a), https://vet.example/a. and <http://b.example/x>; https://",
         );
         assert_eq!(links, vec!["https://vet.example/a", "http://b.example/x"]);
+    }
+
+    #[test]
+    fn a_report_question_block_is_raised_and_left_out_of_the_report() {
+        let body = "## Findings\n\nRivals charge less.\n\n```json\n{\"questions\":[{\"question\":\"Which rival matters most?\",\"kind\":\"single\",\"options\":[\"Scite\",\"Elicit\"],\"recommended\":\"Scite\"},{\"question\":\"No recommended one?\",\"kind\":\"multi\",\"options\":[\"A\",\"B\"]}]}\n```\n\n## Links and references\n\n- <https://a.example/x>\n";
+        let (report, asks) = report_questions(
+            body,
+            "Competitor research",
+            "context/research/competitor_research.md",
+        );
+        assert_eq!(
+            asks.len(),
+            1,
+            "a question outside the kind rules is dropped"
+        );
+        assert_eq!(asks[0].kind, crate::questions::QuestionKind::Single);
+        assert_eq!(asks[0].recommended.as_deref(), Some("Scite"));
+        assert_eq!(
+            asks[0].context.as_deref(),
+            Some(
+                "Raised by the competitor research job. Its report is in context/research/competitor_research.md."
+            )
+        );
+        assert!(!report.contains("\"questions\"") && !report.contains("```"));
+        assert!(report.contains("Rivals charge less."));
+        assert!(report.contains("## Links and references\n\n- <https://a.example/x>"));
+        let plain = "## Findings\n\n```json\n{\"prices\":[1,2]}\n```\n";
+        let (kept, none) = report_questions(
+            plain,
+            "Market research",
+            "context/research/market_research.md",
+        );
+        assert_eq!(kept, plain);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn the_research_prompt_asks_for_owner_questions_in_the_shared_shape() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("context")).unwrap();
+        fs::write(root.join("context").join("brief.md"), "# Planner\n").unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(prompt.contains(
+            "{\"questions\":[{\"question\":\"...\",\"kind\":\"single\",\"options\":[\"...\",\"...\"],\"recommended\":\"...\"}]}"
+        ));
+        assert!(
+            prompt.contains(
+                "single or multi with 2 to 6 short options and one of them as recommended"
+            )
+        );
+        assert!(prompt.contains("Leave the block out when nothing needs the owner."));
     }
 
     #[test]

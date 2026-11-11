@@ -854,6 +854,7 @@ fn only_the_whole_store_view_carries_the_comparison_and_prices_off_strips_its_do
         MoneySettings {
             main_number: MainNumber::Tokens,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();

@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { AppMetrics } from "../../src/screens/metrics/index.tsx";
+import { MetricsView } from "../../src/screens/metrics/view.tsx";
 import { SessionContext } from "../../src/state.ts";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -16,10 +17,10 @@ export async function settle(ms) {
   await act(async () => { await new Promise((done) => setTimeout(done, ms)); });
 }
 
-/** Mounts the app Metrics page against answers the fixture gives for the page's engine
- * commands; any other command is not in this build. Inputs: the page's CSS and the answers
- * by command. Output: nothing. */
-export async function mount(css, answers) {
+/** Mounts one element inside the session against answers the fixture gives for the engine
+ * commands; any other command is not in this build. Inputs: the page's CSS, the answers by
+ * command and the element. Output: nothing. */
+async function mountWith(css, answers, element) {
   sent = [];
   toasts = [];
   window.__TAURI_INTERNALS__ = {
@@ -42,9 +43,32 @@ export async function mount(css, answers) {
     showToast: (words) => toasts.push(words),
   };
   await act(async () => {
-    root.render(createElement(SessionContext.Provider, { value: session }, createElement(AppMetrics, { projects: PROJECTS })));
+    root.render(createElement(SessionContext.Provider, { value: session }, element));
   });
   await settle(40);
+}
+
+/** Mounts the app Metrics page. Inputs: the page's CSS and the bridge answers by command.
+ * Output: nothing. */
+export async function mount(css, answers) {
+  await mountWith(css, answers, createElement(AppMetrics, { projects: PROJECTS }));
+}
+
+/** Mounts one project's Metrics tab, as the project page shows it. Inputs: the styles, the
+ * bridge answers and the project id. Output: nothing. */
+export async function mountProject(css, answers, projectId) {
+  await mountWith(css, answers, createElement(MetricsView, { projectId }));
+}
+
+/** Picks a select's option as the owner does and lets the reads it starts land. Inputs: the
+ * select's id and the option's value. Output: nothing. */
+export async function pick(id, value) {
+  const select = document.getElementById(id);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, value);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await settle(120);
 }
 
 /** The screen centre of the element a selector finds with the given words, scrolled into

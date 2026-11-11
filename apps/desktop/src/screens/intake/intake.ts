@@ -1,6 +1,6 @@
 import { ADD_WARNINGS, measuredLine } from "../../api-intake";
 import type { Result } from "../../api";
-import { receiptState, type StoredSetup } from "../../api-projects";
+import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
   AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntentReceipt,
   MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
@@ -499,19 +499,54 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
 }
 
 /** What the mapping read in the project's own documents: per research kind the files that already
- * hold it, and the other project documents, each path made safe to show. Input: the mapping facts.
- * Output: { research, documents }. */
-export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[] } {
+ * hold it, the roadmap files, and the other project documents, each path made safe to show. A
+ * roadmap planning group counts as roadmap files, each shown once, as the engine links it as the
+ * roadmap. Input: the mapping facts. Output: { research, documents, roadmap }. */
+export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[]; roadmap: string[] } {
   const research: Partial<Record<ResearchKind, string[]>> = {};
-  for (const found of facts.research ?? []) research[found.kind] = found.files.map(displayText);
-  return { research, documents: (facts.documents ?? []).map(displayText) };
+  const roadmap = [...(facts.roadmap ?? [])];
+  for (const found of facts.research ?? []) {
+    if (found.kind === "roadmap_planning") roadmap.push(...found.files.filter((path) => !roadmap.includes(path)));
+    else research[found.kind] = found.files.map(displayText);
+  }
+  return { research, documents: (facts.documents ?? []).map(displayText), roadmap: roadmap.map(displayText) };
 }
 
-/** Tells whether the graph and mapping steps have stopped changing or the setup is already saved.
+/** The most repository files one project links, as the engine's links store bounds them. */
+export const LINKS_MAX = 32;
+
+/** The repository files a first confirm links, each with the group it was found under: the
+ * mapping's roadmap files unless the owner turned "roadmap" off, a roadmap planning group's
+ * files with them under their own kind, then each research kind's files unless the owner
+ * turned that kind off, each once per group and at most LINKS_MAX, as the mapping wrote them.
+ * A file found under two groups goes only with the groups left on, so the engine links it as
+ * nothing the owner turned off. Null once the setup is saved or when
+ * the mapping found no file, so the engine leaves the links alone. Inputs: the onboarding view
+ * and the turned-off keys ("roadmap" or a research kind). Output: the files or null. */
+export function confirmKept(view: OnboardingView, dropped: readonly string[]): KeptFile[] | null {
+  const kept: KeptFile[] = [];
+  const keep = (paths: readonly string[], research: KeptFile["research"]) => {
+    for (const path of paths) {
+      if (kept.length < LINKS_MAX && !kept.some((file) => file.path === path && file.research === research)) kept.push({ path, research });
+    }
+  };
+  const found = [...(view.facts.roadmap ?? []), ...(view.facts.research ?? []).flatMap((item) => item.files)];
+  if (view.finished || found.length === 0) return null;
+  const groups = view.facts.research ?? [];
+  if (!dropped.includes("roadmap")) {
+    keep(view.facts.roadmap ?? [], null);
+    for (const item of groups) if (item.kind === "roadmap_planning") keep(item.files, item.kind);
+  }
+  for (const item of groups) if (item.kind !== "roadmap_planning" && !dropped.includes(item.kind)) keep(item.files, item.kind);
+  return kept;
+}
+
+/** Tells whether the mapping step has stopped changing or the setup is already saved. A failed
+ * graph does not settle it: the mapping agent still runs after it.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
   const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
-  return view.finished || done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
+  return view.finished || done(view.mapping);
 }
 
 /** Says whether the owner can confirm yet and what to do.
@@ -520,9 +555,26 @@ export function confirmReady(view: OnboardingView): { ready: boolean; line: stri
   if (view.finished) return { ready: true, line: "This project is set up. Change anything below, then save." };
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
-  if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
+  if (view.graph.kind === "failed") return { ready: false, line: "The code graph couldn't be built. The mapping agent still reads the project; the form fills in when it finishes." };
   if (!["done", "off", "not_installed"].includes(view.graph.kind)) return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
+}
+
+/** Whether the review offers the mapping's answers for a setup saved without them: the setup is
+ * saved and the engine kept the mapping's draft as `proposed` with an About or a tech stack.
+ * Input: the onboarding view. Output: true when "Use the mapping's answers" shows. */
+export function offerProposed(view: OnboardingView): boolean {
+  const proposed = view.proposed ?? null;
+  return view.finished && proposed !== null && (proposed.about.trim() !== "" || proposed.tech_stack.length > 0);
+}
+
+/** The form's draft with the mapping's About, tech stack and platforms when the review offers
+ * them, every other answer the owner gave, saved or not, kept; any other draft as it is.
+ * Input: the draft on screen and the onboarding view. Output: the draft the form shows. */
+export function withProposed(draft: ProjectDraft, view: OnboardingView): ProjectDraft {
+  if (!offerProposed(view) || !view.proposed) return draft;
+  const { about, tech_stack, platforms } = view.proposed;
+  return { ...draft, about, stack: [...tech_stack], platforms: [...platforms] };
 }
 
 /** Reads a Start setup receipt. Input: the receipt. Output: started with the project id, rejected

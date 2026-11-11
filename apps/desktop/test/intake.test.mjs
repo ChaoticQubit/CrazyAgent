@@ -13,6 +13,7 @@ const { AddFolderView, AnywayDialog, ICloudDialog, MoveConfirmDialog } = await i
 const intakeApi = await import("../src/api-intake.ts");
 const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/clone.tsx");
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
+const fields = await import("../src/screens/new-project/fields.tsx");
 const { ToolsSetupView } = await import("../src/screens/intake/setup-step.tsx");
 const { Welcome } = await import("../src/screens/first-run/index.tsx");
 const { Icon } = await import("../src/ui/icon.tsx");
@@ -258,18 +259,55 @@ test("the review form starts from the mapping agent's draft and keeps the saved 
   assert.equal(intake.onboardingDraft(view({ name: undefined }), stored()).name, "shop");
 });
 
+test("a failed graph alone does not make the form ready while the mapping waits", () => {
+  const waiting = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "waiting" } });
+  assert.equal(intake.confirmReady(waiting).ready, false);
+  assert.equal(intake.settled(waiting), false);
+  const running = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "running" } });
+  assert.equal(intake.confirmReady(running).ready, false);
+  assert.equal(intake.settled(running), false);
+});
+
+test("a saved empty setup with a finished mapping offers the mapping's answers", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"] }) });
+  assert.equal(intake.offerProposed(saved), true);
+  assert.equal(intake.offerProposed(view({ finished: true })), false);
+  assert.equal(intake.offerProposed(view({ finished: false, proposed: setup({ about: "A research reader." }) })), false);
+  assert.equal(intake.offerProposed(view({ finished: true, proposed: setup({ about: "  ", tech_stack: [] }) })), false);
+  const before = intake.onboardingDraft(saved, stored());
+  const used = intake.withProposed(before, saved);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.equal(intake.withProposed(before, view()), before);
+});
+
+test("using the mapping's answers keeps the owner's unsaved name, research and pool", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"], platforms: ["website"] }) });
+  const edited = { ...intake.onboardingDraft(saved, stored()), name: "ScholarScope", research: ["market_research"], pool: "work", poolChosen: true };
+  const used = intake.withProposed(edited, saved);
+  assert.equal(used.name, "ScholarScope");
+  assert.deepEqual(used.research, ["market_research"]);
+  assert.equal(used.pool, "work");
+  assert.equal(used.poolChosen, true);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.deepEqual(used.platforms, ["website"]);
+});
+
 test("confirm waits for the mapping agent unless a step failed", () => {
   assert.deepEqual(intake.confirmReady(view()), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "failed", reason: "x" } })), { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })),
-    { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." });
+    { ready: false, line: "The code graph couldn't be built. The mapping agent still reads the project; the form fills in when it finishes." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" } })),
+    { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "running" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." });
   assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "running" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.equal(intake.settled(view()), true);
   assert.equal(intake.settled(view({ mapping: { kind: "running" } })), false);
-  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), true);
+  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), false);
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" } })), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
@@ -679,6 +717,16 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.doesNotMatch(found, />Overview</);
 });
 
+test("a setup saved without the mapping's answers offers them in the review", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
+  const proposed = setup({ about: "A research reader.", tech_stack: ["Rust"] });
+  const offered = html(OnboardingReviewView, { ...base, view: ok(view({ finished: true, draft: setup(), proposed })), onUseProposed: noop });
+  assert.match(offered, /This setup was saved without the mapping&#x27;s description and tech stack\./);
+  assert.match(offered, />Use the mapping&#x27;s answers</);
+  assert.doesNotMatch(html(OnboardingReviewView, { ...base, view: ok(view({ finished: true })), onUseProposed: noop }), /Use the mapping/);
+});
+
 test("the setup review shows each research toggle the repo already covers and the documents found", () => {
   const catalog = ok({ tech_stack: [], platforms: [], research: [{ kind: "market_research", label: "Market research" }, { kind: "competitor_research", label: "Competitor research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
   const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
@@ -688,11 +736,101 @@ test("the setup review shows each research toggle the repo already covers and th
   const research = markup.slice(markup.indexOf("<legend>Research</legend>"), markup.indexOf("</fieldset>", markup.indexOf("<legend>Research</legend>")));
   const items = research.split('class="pj-switch-item"').slice(1);
   assert.equal(items.length, 2, "one switch per research kind; the roadmap switch sits outside the Research fieldset");
-  assert.doesNotMatch(items[0], /Already in the repo/);
-  assert.match(items[1], /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.doesNotMatch(items[0], /Linked|Already in the repo|Use these files/);
+  assert.match(items[1], /Linked: research\/landscape-2026\.md, notes\/rivals\.txt\. CrazyAgent reads them from your repo; edits go to those files\./);
+  assert.match(items[1], /<input type="checkbox" checked=""\/><span>Use these files<\/span>/);
+  assert.match(items[1], /id="ob-research-competitor_research"[^>]*aria-checked="false"[^>]*aria-disabled="true"/);
   assert.match(markup, /Project documents found[\s\S]*<li>docs\/q3-plan\.md<\/li>/);
+  const off = html(OnboardingReviewView, { ...base, view: ok(mapped), draft: intake.onboardingDraft(mapped, stored()), dropped: ["competitor_research"] });
+  assert.match(off, /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.match(off, /<input type="checkbox"\/><span>Use these files<\/span>/);
+  const saved = view({ facts, finished: true });
+  const later = html(OnboardingReviewView, { ...base, view: ok(saved), draft: intake.onboardingDraft(saved, stored()) });
+  assert.match(later, /Already in the repo: research\/landscape-2026\.md/);
+  assert.doesNotMatch(later, /Linked:|Use these files/);
   const plain = html(OnboardingReviewView, { ...base, view: ok(view()), draft: intake.onboardingDraft(view(), stored()) });
-  assert.doesNotMatch(plain, /Already in the repo|Project documents found/);
+  assert.doesNotMatch(plain, /Linked:|Already in the repo|Project documents found|Roadmap found|Use these files/);
+});
+
+test("a research kind the repo already holds starts off and names the linked files", () => {
+  const markup = html(fields.ResearchSwitches, {
+    prefix: "t", catalog: undefined, value: ["competitor_research"], onChange: noop,
+    found: { competitor_research: ["docs/research-competitors.md"] },
+  });
+  assert.match(markup, /Linked: docs\/research-competitors\.md\. CrazyAgent reads them from your repo; edits go to those files\./);
+  assert.match(markup, /id="t-research-competitor_research"[^>]*aria-checked="false"[^>]*aria-disabled="true"/);
+  assert.doesNotMatch(markup, /Use these files/, "the checkbox comes only with its handler");
+  const plain = html(fields.ResearchSwitches, { prefix: "t", catalog: undefined, value: ["competitor_research"], onChange: noop });
+  assert.match(plain, /id="t-research-competitor_research"[^>]*aria-checked="true"/);
+  assert.doesNotMatch(plain, /Linked|aria-disabled/);
+});
+
+test("the setup review links a found roadmap and hides roadmap planning while it is used", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const mapped = view({ facts: { ...view().facts, roadmap: ["research/docs/ss-phase1-revision/report.md"] } });
+  const draft = intake.onboardingDraft(mapped, stored());
+  const linked = html(OnboardingReviewView, { ...base, view: ok(mapped), draft });
+  assert.match(linked, /<legend>Roadmap found<\/legend><p class="pj-help">Linked: research\/docs\/ss-phase1-revision\/report\.md\. CrazyAgent reads them from your repo; edits go to those files\.<\/p>/);
+  assert.match(linked, /<input type="checkbox" checked=""\/><span>Use these files<\/span>/);
+  assert.doesNotMatch(linked, /id="ob-roadmap"/);
+  const off = html(OnboardingReviewView, { ...base, view: ok(mapped), draft, dropped: ["roadmap"] });
+  assert.match(off, /In the repo: research\/docs\/ss-phase1-revision\/report\.md/);
+  assert.match(off, /id="ob-roadmap"/);
+  const saved = html(OnboardingReviewView, { ...base, view: ok({ ...mapped, finished: true }), draft });
+  assert.doesNotMatch(saved, /Roadmap found/);
+});
+
+test("a roadmap planning group is shown as a found roadmap, hides roadmap planning while used and is kept as its own kind", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const planning = { kind: "roadmap_planning", files: ["docs/next.md"] };
+  const facts = { ...view().facts, research: [{ kind: "market_research", files: ["docs/market.md"] }, planning] };
+  const mapped = view({ facts });
+  const repo = intake.inRepo(facts);
+  assert.deepEqual(repo.roadmap, ["docs/next.md"]);
+  assert.deepEqual(repo.research, { market_research: ["docs/market.md"] });
+  const draft = intake.onboardingDraft(mapped, stored());
+  const linked = html(OnboardingReviewView, { ...base, view: ok(mapped), draft });
+  assert.match(linked, /<legend>Roadmap found<\/legend><p class="pj-help">Linked: docs\/next\.md\. /);
+  assert.match(linked, /<input type="checkbox" checked=""\/><span>Use these files<\/span>/);
+  assert.doesNotMatch(linked, /id="ob-roadmap"/);
+  const off = html(OnboardingReviewView, { ...base, view: ok(mapped), draft, dropped: ["roadmap"] });
+  assert.match(off, /In the repo: docs\/next\.md/);
+  assert.match(off, /id="ob-roadmap"/);
+  const market = { path: "docs/market.md", research: "market_research" };
+  const next = { path: "docs/next.md", research: "roadmap_planning" };
+  assert.deepEqual(intake.confirmKept(mapped, []), [next, market]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap"]), [market], "unticked with the roadmap, the planning file is linked as nothing");
+  assert.deepEqual(intake.confirmKept(mapped, ["market_research"]), [next]);
+  const both = view({ facts: { ...facts, roadmap: ["docs/next.md", "ROADMAP.md"] } });
+  assert.deepEqual(intake.inRepo(both.facts).roadmap, ["docs/next.md", "ROADMAP.md"], "a file found both ways is shown once");
+  assert.deepEqual(intake.confirmKept(both, ["market_research"]), [{ path: "docs/next.md", research: null }, { path: "ROADMAP.md", research: null }, next]);
+  assert.deepEqual(intake.confirmKept(both, ["roadmap", "market_research"]), []);
+});
+
+test("the first confirm keeps the found roadmap and research files the owner left ticked", () => {
+  const facts = {
+    ...view().facts,
+    roadmap: ["research/docs/ss-phase1-revision/report.md"],
+    research: [
+      { kind: "competitor_research", files: ["docs/rivals.md", "research/docs/ss-phase1-revision/report.md"] },
+      { kind: "market_research", files: ["docs/market.md"] },
+    ],
+  };
+  const mapped = view({ facts });
+  const roadmap = "research/docs/ss-phase1-revision/report.md";
+  const rivals = [{ path: "docs/rivals.md", research: "competitor_research" }, { path: roadmap, research: "competitor_research" }];
+  assert.deepEqual(intake.confirmKept(mapped, []), [{ path: roadmap, research: null }, ...rivals, { path: "docs/market.md", research: "market_research" }]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "market_research"]), rivals, "a file also found as the roadmap goes only with the group left on");
+  assert.deepEqual(intake.confirmKept(mapped, ["competitor_research"]), [{ path: roadmap, research: null }, { path: "docs/market.md", research: "market_research" }]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "competitor_research", "market_research"]), []);
+  const twice = view({ facts: { ...facts, roadmap: [roadmap, roadmap] } });
+  assert.deepEqual(intake.confirmKept(twice, ["competitor_research", "market_research"]), [{ path: roadmap, research: null }], "a file named twice in one group is kept once");
+  assert.equal(intake.confirmKept(view({ facts, finished: true }), []), null, "a saved setup leaves its links alone");
+  assert.equal(intake.confirmKept(view(), []), null, "nothing found, nothing to link");
+  const many = view({ facts: { ...view().facts, research: [{ kind: "market_research", files: Array.from({ length: 40 }, (_, at) => `docs/${at}.md`) }] } });
+  assert.equal(intake.confirmKept(many, []).length, intake.LINKS_MAX);
 });
 
 test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {

@@ -179,6 +179,17 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
+    HomeProjectMovePlan(
+        Admission,
+        Cursor,
+        ProjectId,
+        crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
+        RequestId,
+        u64,
+        oneshot::Sender<Result<crate::projects_home::ProjectMove, EngineError>>,
+    ),
+    HomeProjectMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeMoveRecheck(
         u64,
         oneshot::Sender<Result<Result<(), String>, EngineError>>,
@@ -330,6 +341,9 @@ impl Storage {
                 if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::project_move_settle(&mut connection, None, true) {
+                        eprintln!("project_move_not_settled cause={}", e.0);
                     }
                     if let Err(e) = projects_home::delete_settle(&connection, None) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
@@ -627,6 +641,22 @@ impl Storage {
                                 home_watch.restart(&connection);
                             }
                         }
+                        Job::HomeProjectMovePlan(admission, expected, project, mode, overrides, request, exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_plan(&mut connection, &path, &admission, &expected, &project, mode, &overrides, &request, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeProjectMoveSettle(exchange, ran, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_settle(&mut connection, Some(exchange), ran)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::HomeRecord(admission, request, effect, reply) => {
                             let moved_home = matches!(
                                 &request.operation,
@@ -794,6 +824,7 @@ impl Storage {
                                 OwnerRead::ProjectMaster { .. }
                                     | OwnerRead::ProjectMasterTurns { .. }
                                     | OwnerRead::ProjectMasterSessions { .. }
+                                    | OwnerRead::ProjectMasterMessages { .. }
                                     | OwnerRead::ProjectMasterInputs { .. }
                             ) {
                                 let _ = reply.send(master_session::read(
@@ -1048,6 +1079,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::cleanup_settings::initialize(connection)?;
     crate::quit_settings::initialize(connection)?;
+    crate::master_step_limit::initialize(connection)?;
+    crate::master_time_limit::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1056,6 +1089,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::activity::initialize(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
+    crate::roadmap_status::initialize(connection)?;
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
@@ -1394,6 +1428,8 @@ fn apply(
             | Command::OwnerSandbox { .. }
             | Command::OwnerAgentCleanup { .. }
             | Command::OwnerAgentQuit { .. }
+            | Command::OwnerMasterSteps { .. }
+            | Command::OwnerMasterTime { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1581,6 +1617,8 @@ fn execute(
         Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
+        Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
+        Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2698,9 +2736,15 @@ fn owner_read(
                 more: listed.more,
             }
         }
-        OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
-            context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
-        },
+        OwnerRead::ProjectContext { project_id } => {
+            let links = crate::project_setup::links::list(&tx, project_id)?;
+            OwnerData::ProjectContext {
+                context: crate::project_setup::list_context_with_links(
+                    &stored_setup(&tx, project_id)?,
+                    &links,
+                )?,
+            }
+        }
         OwnerRead::ResearchLog { project_id, job } => {
             crate::project_setup::project_job(&tx, project_id, *job)?
                 .ok_or_else(|| error("research_job_missing"))?;
@@ -2714,17 +2758,27 @@ fn owner_read(
             project_id,
             path,
             offset,
-        } => OwnerData::ProjectContextItem {
-            chunk: crate::project_setup::read_context(
-                &stored_setup(&tx, project_id)?,
-                path,
-                *offset,
-            )?,
-        },
+        } => {
+            let links = if path.starts_with(crate::project_setup::LINKED_PREFIX) {
+                crate::project_setup::links::list(&tx, project_id)?
+            } else {
+                Vec::new()
+            };
+            OwnerData::ProjectContextItem {
+                chunk: crate::project_setup::read_context_with_links(
+                    &stored_setup(&tx, project_id)?,
+                    &links,
+                    path,
+                    *offset,
+                )?,
+            }
+        }
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
+        OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
+        OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },

@@ -27,15 +27,16 @@ pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
-    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionMode, InstructionRecord,
-    InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved, ProcessText, SavedText,
-    UncommittedImport,
+    Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile, InstructionMode,
+    InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved,
+    ProcessText, Proposal, SavedText, UncommittedImport,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
     BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
     RecoveryBanner, RunShown,
 };
+pub use transport::roadmap::ROADMAP_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
@@ -186,6 +187,8 @@ pub enum OwnerMutation {
         expected_revision: u64,
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<crate::project_setup::KeptFile>>,
     },
     RemoveProject {
         project_id: ProjectId,
@@ -215,6 +218,12 @@ pub enum OwnerMutation {
     },
     AddExistingFolder {
         source: String,
+        mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
+    },
+    MoveProjectHome {
+        project_id: ProjectId,
         mode: crate::projects_home::AddMode,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         overrides: Vec<crate::projects_home::AddOverride>,
@@ -256,6 +265,12 @@ pub enum OwnerMutation {
     },
     SetQuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    SetMasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    SetMasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
     },
     Memory {
         action: crate::memory::library::LibraryAction,
@@ -410,12 +425,14 @@ impl OwnerMutation {
                 expected_revision,
                 name,
                 setup,
+                kept,
             } => {
                 let action = crate::project_setup::SetupAction::Update {
                     project_id: project_id.clone(),
                     expected_revision: *expected_revision,
                     name: name.clone(),
                     setup: setup.clone(),
+                    kept: kept.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -477,6 +494,19 @@ impl OwnerMutation {
             } => {
                 let action = crate::projects_home::HomeAction::Added {
                     source: source.clone(),
+                    mode: *mode,
+                    overrides: overrides.clone(),
+                };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveProject {
+                    project_id: project_id.clone(),
                     mode: *mode,
                     overrides: overrides.clone(),
                 };
@@ -548,6 +578,12 @@ impl OwnerMutation {
                 settings: *settings,
             },
             Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
+                settings: *settings,
+            },
+            Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
+                settings: *settings,
+            },
+            Self::SetMasterTimeSettings { settings } => Command::OwnerMasterTime {
                 settings: *settings,
             },
             Self::Memory { action } => {
@@ -650,6 +686,12 @@ pub enum OwnerRead {
     ProjectMasterSessions {
         project_id: ProjectId,
     },
+    ProjectMasterMessages {
+        project_id: ProjectId,
+        session_id: SessionId,
+        before: Option<u64>,
+        limit: u8,
+    },
     ProjectMasterInputs {
         project_id: ProjectId,
         session_id: SessionId,
@@ -742,6 +784,8 @@ pub enum OwnerRead {
     SandboxSettings,
     CleanupSettings,
     QuitSettings,
+    MasterStepSettings,
+    MasterTimeSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -817,6 +861,7 @@ impl OwnerRead {
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
             | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterMessages { .. }
             | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
@@ -841,6 +886,8 @@ impl OwnerRead {
             | Self::SandboxSettings
             | Self::CleanupSettings
             | Self::QuitSettings
+            | Self::MasterStepSettings
+            | Self::MasterTimeSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -861,7 +908,10 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectContextItem { path, .. } => {
-                if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+                if path.is_empty()
+                    || path.len() > crate::project_setup::CONTEXT_PATH_BYTES_MAX
+                    || path.chars().any(char::is_control)
+                {
                     return Err(failure("context_path_invalid"));
                 }
                 return Ok(None);
@@ -1024,6 +1074,9 @@ impl OwnerRequest {
                 if let OwnerRead::ProjectMasterTurns { cursor, limit, .. } = query {
                     crate::master_session::validate_page(cursor.as_ref(), *limit)?;
                 }
+                if let OwnerRead::ProjectMasterMessages { before, limit, .. } = query {
+                    crate::master_sessions::validate_messages_page(*before, *limit)?;
+                }
                 if let OwnerRead::ModelAccessPage { limit, cursor, .. } = query {
                     if !(1..=16).contains(limit) {
                         return Err(failure("model_access_page_limit"));
@@ -1171,6 +1224,9 @@ pub enum OwnerData {
     ProjectMasterSessions {
         sessions: Vec<crate::master_sessions::MasterSessionSummary>,
     },
+    ProjectMasterMessages {
+        page: crate::master_sessions::SessionMessagePage,
+    },
     ProjectMasterInputs {
         entries: Vec<crate::conversation::ConversationEntry>,
     },
@@ -1276,6 +1332,12 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    MasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    MasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

@@ -785,5 +785,5 @@ jobs:
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --offline
           cargo test -p crazyagent --locked --offline --test windows_terminal
-          cargo test -p crazyagent --locked --offline --lib -- storage::setup::switch_tests onboarding::step_tests
+          cargo test -p crazyagent --locked --offline --lib -- storage::setup::switch_tests onboarding::step_tests platform::beneath_tests
           cargo test -p crazyagent-desktop --locked --offline --test picker_windows

@@ -15078,3 +15078,122 @@ fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
     }
     assert_eq!(overrides.len(), 3 * 8);
 }
+
+/// While a project move is pending for the folder a change set's repository is in, an owner
+/// action on the change set is refused and writes nothing; it goes through once the move is
+/// finished or forgotten.
+#[test]
+fn a_pending_project_move_refuses_an_owner_action_on_a_change_set_in_its_folder() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let before = case.tip();
+    let origin = case.repo.canonicalize().unwrap();
+    crate::projects_home::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO projects_home_project_move VALUES (1,'request-1',1,'project-one',?1,?2,'move')",
+            rusqlite::params![
+                origin.to_str().unwrap(),
+                origin.with_file_name("moved").to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "move_project_in_progress");
+    assert_eq!(case.tip(), before);
+    case.db
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_ne!(case.tip(), before);
+}
+
+#[test]
+fn a_pending_project_move_answers_owner_actions_at_once_while_it_holds_the_repository() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let before = case.tip();
+    let stored = store::load(&case.db, &id).unwrap().repository;
+    let origin = case.repo.canonicalize().unwrap();
+    crate::projects_home::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO projects_home_project_move VALUES (1,'request-1',1,'project-one',?1,?2,'move')",
+            rusqlite::params![
+                origin.to_str().unwrap(),
+                origin.with_file_name("moved").to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let repositories = std::collections::BTreeSet::from([stored]);
+    let (release, held_until) = channel::<()>();
+    let (ready, taken) = channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let moving = crate::landing::hold_repositories(&repositories, Duration::ZERO).unwrap();
+        ready.send(()).unwrap();
+        let _ = held_until.recv_timeout(Duration::from_secs(6));
+        drop(moving);
+    });
+    taken.recv().unwrap();
+    let started = std::time::Instant::now();
+    observe(&case.db, None).unwrap();
+    let refused = case.accept(&id).unwrap_err().0;
+    let waited = started.elapsed();
+    let _ = release.send(());
+    holder.join().unwrap();
+    assert_eq!(refused, "move_project_in_progress");
+    assert!(
+        waited < Duration::from_secs(3),
+        "an owner action waited {waited:?} on the move"
+    );
+    assert_eq!(case.tip(), before);
+}
+
+#[test]
+fn a_landed_change_set_marks_the_projects_roadmap_status_stale() {
+    let case = Case::new();
+    crate::roadmap_status::initialize(&case.db).unwrap();
+    let project = case.workspace.project.clone();
+    let stale = || {
+        crate::roadmap_status::read(&case.db, &project)
+            .unwrap()
+            .stale
+    };
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(!stale(), "a set that only waits for review changes nothing");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert!(stale(), "a landing asks for a new roadmap status check");
+}
+
+#[test]
+fn a_change_set_still_lands_when_the_roadmap_status_cannot_be_marked() {
+    let case = Case::new();
+    let tables: i64 = case
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'roadmap_status%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "this store has no roadmap status tables");
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+}

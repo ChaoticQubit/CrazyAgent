@@ -338,9 +338,12 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   sandbox_settings: "changing the sandbox setting",
   cleanup_settings: "changing when finished agents' worktrees go",
   quit_settings: "changing what quitting does to team agents",
+  master_step_settings: "changing the master step limit",
+  master_time_settings: "changing the master time limit",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
+  project_move_home: "moving the project into your projects folder",
   start_onboarding: "starting project setup",
   run_setup: "running project setup",
   pack_set: "changing the default pack",
@@ -465,6 +468,42 @@ export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> 
   return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
 }
 
+/** The most steps a master takes in one turn, the engine's `StepLimit`. */
+export type StepLimit = "no_limit" | "steps50" | "steps100" | "steps200";
+
+/** The owner's master step limit setting, the engine's `MasterStepSettings`. */
+export interface MasterStepSettings {
+  limit: StepLimit;
+}
+
+/** Reads the master step limit. Output: the stored setting, or No limit before the first save. */
+export function getMasterStepSettings(): Promise<Result<MasterStepSettings>> {
+  return call<MasterStepSettings>("desktop_master_step_settings");
+}
+
+/** Saves the master step limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterStepSettings(settings: MasterStepSettings): Promise<Result<void>> {
+  return change("desktop_set_master_step_settings", { settings, generation: nextGeneration() });
+}
+
+/** How long a master works on one turn before it stops, the engine's `TimeLimit`. */
+export type TimeLimit = "no_limit" | "minutes10" | "minutes30" | "minutes60";
+
+/** The owner's master time limit setting, the engine's `MasterTimeSettings`. */
+export interface MasterTimeSettings {
+  limit: TimeLimit;
+}
+
+/** Reads the master time limit. Output: the stored setting, or No limit before the first save. */
+export function getMasterTimeSettings(): Promise<Result<MasterTimeSettings>> {
+  return call<MasterTimeSettings>("desktop_master_time_settings");
+}
+
+/** Saves the master time limit. Input: the full setting. Output: ok once saved. */
+export function saveMasterTimeSettings(settings: MasterTimeSettings): Promise<Result<void>> {
+  return change("desktop_set_master_time_settings", { settings, generation: nextGeneration() });
+}
+
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
 export type SignInMethod = "subscription" | "api_key" | "url";
 export type AccountField = "hidden" | "optional" | "required";
@@ -515,6 +554,19 @@ export interface AccountCheck {
  * order, each with its sign-in methods. */
 export function accountCatalog(): Promise<Result<ProviderEntry[]>> {
   return call<ProviderEntry[]>("desktop_account_catalog");
+}
+
+/** The words each account goes by wherever a view shows it outside its own row in Accounts:
+ * the name the owner gave it, with the account id after it when another account has the
+ * same name, so two accounts never read the same. Input: the accounts. Output: the words by
+ * account id. */
+export function accountLabels(accounts: readonly { id: string; name: string }[]): Map<string, string> {
+  const uses = new Map<string, number>();
+  for (const account of accounts) uses.set(account.name, (uses.get(account.name) ?? 0) + 1);
+  const labels = new Map<string, string>();
+  for (const account of accounts) labels.set(account.id, uses.get(account.name) === 1 ? account.name : `${account.name} (${account.id})`);
+  if (labels.size > accounts.length) throw new Error(`more account labels than accounts: ${labels.size} for ${accounts.length}`);
+  return labels;
 }
 
 /** Reads every account, following the engine's pages. Output: all accounts in engine order. */
@@ -662,6 +714,8 @@ export function poolSummaries(): Promise<Result<PoolSummary[]>> {
 
 export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
 export type AccountPin = "never_use" | "use_last";
+/** What a live master does once its pool's account order puts another account first (DEC-139). */
+export type LiveMasterAccount = "keep" | "move_when_idle";
 
 export interface AccountPlan {
   rank: number | null;
@@ -671,6 +725,7 @@ export interface AccountPlan {
 
 export interface AccountSchedule {
   strategy: AccountStrategy;
+  live_master: LiveMasterAccount;
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
@@ -679,6 +734,7 @@ export interface AccountSchedule {
 
 export type ScheduleChange =
   | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "live_master"; choice: LiveMasterAccount }
   | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
   | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
   | { kind: "account"; connection: string; plan: AccountPlan };

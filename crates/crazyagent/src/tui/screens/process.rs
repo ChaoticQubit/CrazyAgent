@@ -5,16 +5,16 @@ use crate::agent_home::TEXT_BYTES_MAX;
 use crate::coord::adoption::AgentAdoption;
 use crate::coord::settings::Nudges;
 use crate::engine::owner::{
-    Adoption, InstructionSettings, InstructionView, ProcessText, SavedText,
+    Adoption, AppInstructionSettings, InstructionSettings, InstructionView, ProcessText, SavedText,
 };
-use crate::instruction_files::{EditDelivery, Mode};
+use crate::instruction_files::{EditDelivery, Mode, Repeated};
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::conflict::{CHOICES, Conflict, LINES_SHOWN_MAX};
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::ctx::Ctx;
+use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
@@ -30,12 +30,26 @@ use ratatui::text::{Line, Span};
 mod tests;
 
 const PAGE_STEP: usize = 10;
-const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
+/// The plugin names the engine accepts before a skill name: `crazyagent:tdd` names the same
+/// skill as `tdd`.
+const SKILL_NAMESPACES: [&str; 3] = ["crazyagent:", "superpowers:", "software-practices:"];
+const NAMESPACE_BYTES_MAX: usize = 19;
+const _: () = {
+    let mut index = 0;
+    while index < SKILL_NAMESPACES.len() {
+        assert!(SKILL_NAMESPACES[index].len() <= NAMESPACE_BYTES_MAX);
+        index += 1;
+    }
+};
+const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2 + NAMESPACE_BYTES_MAX;
 const EDITOR_ROWS_MIN: usize = 3;
+const _: () = assert!(EDITOR_ROWS_MIN >= 2);
 const EDITOR_CHROME_ROWS: usize = 2;
 const READ_REFUSED: &str = "The instructions weren't read: too many requests are waiting.";
 const ADOPTION_ROWS_MAX: usize = 6;
 const PATH_BYTES_MAX: usize = 4096;
+const DIFF_LINES_MAX: usize = 2000;
+const PROPOSING: &str = "A model is cleaning up the saved instructions. This can take up to 5 minutes. Nothing changes until you accept.";
 
 /// Where an instructions text applies: every project, or one project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +69,83 @@ enum State {
     Loading,
     Failed(String),
     Ready { saved: String, version: u64 },
+}
+
+/// How one line of a proposed text stands against the saved text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    Same,
+    Removed,
+    Added,
+}
+
+/// Where Edit with AI stands while it covers the editor: asking which pool runs the edit of
+/// the app instructions, with the row the cursor is on and no pick kept from an earlier use,
+/// or showing the proposed text with the version it was made from and its marked lines,
+/// none when the texts are too long to mark.
+#[derive(Debug, PartialEq, Eq)]
+enum Cleanup {
+    Choosing {
+        selected: usize,
+    },
+    Proposed {
+        text: String,
+        base_version: u64,
+        rows: Option<Vec<(Mark, String)>>,
+    },
+}
+
+/// The line changes from one text to another, keeping the longest run of lines both hold.
+/// Inputs: the saved text and the proposed one. Output: every line with its mark, in reading
+/// order, or `None` when either text has more than `DIFF_LINES_MAX` lines.
+fn line_diff(before: &str, after: &str) -> Option<Vec<(Mark, String)>> {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    if old.len() > DIFF_LINES_MAX || new.len() > DIFF_LINES_MAX {
+        return None;
+    }
+    let columns = new.len() + 1;
+    let mut kept = vec![0u16; (old.len() + 1) * columns];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            kept[i * columns + j] = if old[i] == new[j] {
+                kept[(i + 1) * columns + j + 1] + 1
+            } else {
+                kept[(i + 1) * columns + j].max(kept[i * columns + j + 1])
+            };
+        }
+    }
+    let mut rows = Vec::with_capacity(old.len().max(new.len()));
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() && j < new.len() {
+        if old[i] == new[j] {
+            rows.push((Mark::Same, old[i].to_owned()));
+            i += 1;
+            j += 1;
+        } else if kept[(i + 1) * columns + j] >= kept[i * columns + j + 1] {
+            rows.push((Mark::Removed, old[i].to_owned()));
+            i += 1;
+        } else {
+            rows.push((Mark::Added, new[j].to_owned()));
+            j += 1;
+        }
+    }
+    rows.extend(
+        old[i..]
+            .iter()
+            .map(|line| (Mark::Removed, (*line).to_owned())),
+    );
+    rows.extend(
+        new[j..]
+            .iter()
+            .map(|line| (Mark::Added, (*line).to_owned())),
+    );
+    assert!(rows.len() <= old.len() + new.len());
+    assert_eq!(
+        rows.iter().filter(|(mark, _)| *mark != Mark::Added).count(),
+        old.len()
+    );
+    Some(rows)
 }
 
 /// One catalog skill the editor tags: its name as characters, its engine id and its name.
@@ -101,8 +192,33 @@ fn ends_at(chars: &[char], end: usize) -> bool {
     }
 }
 
+/// Finds the catalog skill written at one position of a line: its name, or its name after
+/// an engine namespace such as `crazyagent:`, which tags the whole written text. A catalog
+/// name that itself holds a colon wins, and an unknown namespace is no tag. Inputs: the
+/// line's characters, the position and the tags, longest first. Output: the tag and the
+/// character after the written name, or none.
+fn skill_at(chars: &[char], at: usize, skills: &[Skill]) -> Option<(usize, usize)> {
+    let named = |start: usize| {
+        skills
+            .iter()
+            .position(|skill| {
+                chars[start..].starts_with(&skill.name) && ends_at(chars, start + skill.name.len())
+            })
+            .map(|index| (index, start + skills[index].name.len()))
+    };
+    named(at).or_else(|| {
+        SKILL_NAMESPACES.iter().find_map(|namespace| {
+            let start = at + namespace.len();
+            let written =
+                start <= chars.len() && chars[at..start].iter().copied().eq(namespace.chars());
+            written.then(|| named(start)).flatten()
+        })
+    })
+}
+
 /// Finds the catalog skill names in one line that touch a range of characters: a whole
-/// name, not part of a longer name, with sentence punctuation after it allowed.
+/// name, bare or after an engine namespace, not part of a longer name, with sentence
+/// punctuation after it allowed.
 /// Inputs: the line's characters, the range and the tags, longest first.
 /// Output: each name's first character, the character after it and its tag, in order.
 fn skill_ranges(
@@ -116,16 +232,10 @@ fn skill_ranges(
     let mut at = from.saturating_sub(NAME_REACH);
     while at < to {
         let free = at == 0 || !name_char(chars[at - 1]);
-        let hit = free
-            .then(|| {
-                skills.iter().position(|skill| {
-                    chars[at..].starts_with(&skill.name) && ends_at(chars, at + skill.name.len())
-                })
-            })
-            .flatten();
+        let hit = free.then(|| skill_at(chars, at, skills)).flatten();
         match hit {
-            Some(index) => {
-                let end = at + skills[index].name.len();
+            Some((index, end)) => {
+                assert!(at < end && end <= chars.len());
                 found.push((at, end, index));
                 at = end;
             }
@@ -214,6 +324,20 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
         "instruction_settings_save_unavailable" => "The engine couldn't save right now, so nothing was saved. Change it again.".into(),
         "process_adoption_unavailable" => "Workflow adoption couldn't be read. Try again.".into(),
+        "instructions_cleanup_pool_needed" => "Pick the pool that runs this edit first.".into(),
+        "instructions_cleanup_pool_not_asked" => "A project's edit runs on the project's own pool, so nothing was sent. Try again.".into(),
+        "instructions_cleanup_pool_unknown" => "That pool no longer exists, so nothing was sent. Pick another one.".into(),
+        "instructions_cleanup_project_pool_missing" => "This project has no pool yet, so nothing was sent. Give it one under Pools, then try again.".into(),
+        "instructions_cleanup_no_account" => "No account in the pool can run this edit, so nothing was sent. Sign one in under Pools, then try again.".into(),
+        "instructions_cleanup_paused" => "Every account in the pool hit its limit, so nothing was sent. Try again later.".into(),
+        "instructions_cleanup_busy" => "Another Edit with AI is still running. Wait for it, then try again.".into(),
+        "instructions_cleanup_empty" => "There is nothing saved to clean up yet. Write the instructions first.".into(),
+        "instructions_cleanup_failed" => "The model run failed, so nothing changed. Try again.".into(),
+        "instructions_cleanup_timed_out" => "The model took longer than 5 minutes, so nothing changed. Try again.".into(),
+        "instructions_cleanup_no_proposal" => "The model gave no file back, so nothing changed. Try again.".into(),
+        "instructions_cleanup_too_large" => "The model's file is over 64 KB, so nothing changed. Try again.".into(),
+        "instructions_cleanup_off" => "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.".into(),
+        "instructions_cleanup_unavailable" => "Edit with AI can't run in this engine, so nothing was sent.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
 }
@@ -282,6 +406,46 @@ fn edits_note(edits: EditDelivery) -> &'static str {
         EditDelivery::Badge => {
             "Nothing is sent. A running agent shows Instructions changed until it starts again."
         }
+    }
+}
+
+/// The owner's words for whether project lines the app instructions already have are left
+/// out. Input: the choice. Output: its name.
+fn repeated_label(repeated: Repeated) -> &'static str {
+    match repeated {
+        Repeated::LeaveOut => "Leave out",
+        Repeated::Keep => "Keep",
+    }
+}
+
+/// The choice Ctrl-L moves to from one choice. Input: the choice. Output: the other one.
+fn next_repeated(repeated: Repeated) -> Repeated {
+    match repeated {
+        Repeated::LeaveOut => Repeated::Keep,
+        Repeated::Keep => Repeated::LeaveOut,
+    }
+}
+
+/// What the repeated lines choice does for this project now, in one sentence naming how
+/// many of its lines the app instructions already have. Inputs: the project's settings and
+/// that count. Output: the sentence.
+fn repeated_note(settings: &InstructionSettings, repeats: u32) -> String {
+    let (lines, repeat, are, them) = match repeats {
+        1 => ("1 line".to_owned(), "repeats", "is", "it"),
+        count => (format!("{count} lines"), "repeat", "are", "them"),
+    };
+    match (settings.mode, settings.repeated, repeats) {
+        (Mode::ProjectOnly | Mode::AppOnly, _, _) => {
+            "Repeated lines only matter when agents get both the app and the project instructions."
+                .into()
+        }
+        (Mode::Both, _, 0) => "No line of this project's file repeats the app instructions.".into(),
+        (Mode::Both, Repeated::LeaveOut, _) => format!(
+            "{lines} of this project's file {repeat} the app instructions and {are} left out for agents. Only a line in the same place counts. Code blocks, tables and rules always stay."
+        ),
+        (Mode::Both, Repeated::Keep, _) => format!(
+            "{lines} of this project's file {repeat} the app instructions, and agents get {them} twice."
+        ),
     }
 }
 
@@ -526,11 +690,17 @@ impl Editor {
 /// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
 /// process, each into a preview first. For one project it also shows the agent settings:
 /// Ctrl-F picks the instruction files its agents get, Ctrl-T whether headless Claude runs
-/// keep their transcript and Ctrl-R how an instruction edit reaches running agents, each
+/// keep their transcript, Ctrl-R how an instruction edit reaches running agents and Ctrl-L
+/// whether project lines the app instructions already have are left out, each
 /// saved at once at the version read; one refused because the settings changed since reads
 /// them again. A stale save of the text shows the conflict and keeps the draft until the
 /// owner reloads the saved text (Ctrl-R, which reloads while the conflict shows) or keeps
-/// their own (Ctrl-Y). One request runs at a time.
+/// their own (Ctrl-Y). Ctrl-P is Edit with AI: a model with tools off proposes a cleaned
+/// text of the saved instructions, shown with its changed lines marked; y saves it at the
+/// version it was made from, so a save that landed since shows the conflict, and Esc drops
+/// it. The app text asks which pool runs each edit and keeps no pick; a project runs on its
+/// own pool. Ctrl-B turns Edit with AI on or off, per project or for the app text, and Off
+/// sends nothing to a model. One request runs at a time.
 pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
@@ -544,6 +714,9 @@ pub(in crate::tui) struct ProcessPage {
     preview_top: usize,
     path: Option<String>,
     skills: Vec<Skill>,
+    cleanup: Option<Cleanup>,
+    cleanup_top: usize,
+    app_ai: Option<Result<bool, String>>,
 }
 
 impl ProcessPage {
@@ -563,6 +736,9 @@ impl ProcessPage {
             preview_top: 0,
             path: None,
             skills: Vec::new(),
+            cleanup: None,
+            cleanup_top: 0,
+            app_ai: None,
         }
     }
 
@@ -679,6 +855,317 @@ impl ProcessPage {
         );
     }
 
+    /// Whether Edit with AI is on for this page's text: the project's own choice, or the
+    /// app-wide one. A choice not read yet or unreadable counts as off, so no text is sent
+    /// to a model on a guess. Output: true when on.
+    fn edit_with_ai(&self) -> bool {
+        match &self.scope {
+            Scope::App => matches!(self.app_ai, Some(Ok(true))),
+            Scope::Project { .. } => {
+                matches!(&self.settings, Some(Ok(view)) if view.settings.edit_with_ai)
+            }
+        }
+    }
+
+    fn proposing(&self) -> bool {
+        matches!(self.pending, Some(ProcessQuery::Propose { .. }))
+    }
+
+    /// Turns Edit with AI on or off for this page's text and saves the choice at once: the
+    /// project's agent settings, or the app-wide choice. Input: the context. Output: unit.
+    fn switch_edit_with_ai(&mut self, ctx: &mut Ctx) {
+        match self.scope {
+            Scope::Project { .. } => self.change_settings(
+                |settings| settings.edit_with_ai = !settings.edit_with_ai,
+                ctx,
+            ),
+            Scope::App if self.app_ai.is_some() => {
+                let settings = AppInstructionSettings {
+                    edit_with_ai: !self.edit_with_ai(),
+                };
+                self.send(ProcessQuery::SaveAppSettings { settings }, ctx);
+            }
+            Scope::App => {}
+        }
+    }
+
+    /// Starts Edit with AI on the saved text. It says why not when it is off, when the
+    /// editor holds unsaved edits or when nothing is saved yet. A project's text is sent on
+    /// the project's pool at once; the app text first asks which pool, every time.
+    /// Input: the context. Output: unit.
+    fn start_cleanup(&mut self, ctx: &mut Ctx) {
+        if self.pending.is_some() || self.conflict.is_some() {
+            return;
+        }
+        let State::Ready { saved, .. } = &self.state else {
+            return;
+        };
+        if !self.edit_with_ai() {
+            ctx.say(Message::warning(
+                "Edit with AI is off.",
+                "Ctrl-B turns it on.",
+            ));
+            return;
+        }
+        if self.changed() {
+            ctx.say(Message::warning(
+                "Save first.",
+                "Save or discard your edits to use Edit with AI.",
+            ));
+            return;
+        }
+        if saved.trim().is_empty() {
+            ctx.say(Message::warning(
+                "Nothing to clean up yet.",
+                "Write some instructions first; Edit with AI cleans up what is saved.",
+            ));
+            return;
+        }
+        match self.project() {
+            Some(project) => self.send(
+                ProcessQuery::Propose {
+                    project: Some(project),
+                    pool: None,
+                },
+                ctx,
+            ),
+            None => {
+                ctx.request(Request::Pools);
+                self.cleanup = Some(Cleanup::Choosing { selected: 0 });
+            }
+        }
+    }
+
+    /// Saves the proposed text at the version it was made from and puts it in the editor,
+    /// so a save that landed since shows the conflict with the proposal as the owner's
+    /// text. Input: the context. Output: unit.
+    fn accept(&mut self, ctx: &mut Ctx) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(Cleanup::Proposed {
+            text, base_version, ..
+        }) = self.cleanup.take()
+        else {
+            return;
+        };
+        assert!(text.len() <= TEXT_BYTES_MAX);
+        self.editor = Editor::new(&text);
+        self.problem = None;
+        self.send(
+            ProcessQuery::Save {
+                project: self.project(),
+                text,
+                version: base_version,
+                opened: None,
+            },
+            ctx,
+        );
+    }
+
+    /// Handles a key while Edit with AI covers the editor. On the pool question the arrows
+    /// move, Enter sends the app text on the pool under the cursor and Esc cancels; on a
+    /// proposal y accepts, the arrows and page keys scroll and Esc discards. Inputs: the
+    /// key and the context. Output: handled, so no key reaches the editor meanwhile.
+    fn cleanup_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let pools = ctx.store.pools.ready().map_or(0, Vec::len);
+        match (&mut self.cleanup, key) {
+            (Some(_), Key::Esc) => self.cleanup = None,
+            (Some(Cleanup::Choosing { selected }), Key::Up) => {
+                *selected = selected.saturating_sub(1);
+            }
+            (Some(Cleanup::Choosing { selected }), Key::Down) => {
+                *selected = (*selected + 1).min(pools.saturating_sub(1));
+            }
+            (Some(Cleanup::Choosing { selected }), Key::Enter) if pools > 0 => {
+                let index = (*selected).min(pools - 1);
+                let pool = ctx
+                    .store
+                    .pools
+                    .ready()
+                    .and_then(|pools| pools.get(index))
+                    .map(|pool| pool.id.clone());
+                assert!(pool.is_some());
+                self.cleanup = None;
+                self.send(
+                    ProcessQuery::Propose {
+                        project: None,
+                        pool,
+                    },
+                    ctx,
+                );
+            }
+            (Some(Cleanup::Proposed { .. }), Key::Char('y')) => self.accept(ctx),
+            (Some(Cleanup::Proposed { .. }), Key::Up) => {
+                self.cleanup_top = self.cleanup_top.saturating_sub(1);
+            }
+            (Some(Cleanup::Proposed { .. }), Key::Down) => self.cleanup_top += 1,
+            (Some(Cleanup::Proposed { .. }), Key::PageUp) => {
+                self.cleanup_top = self.cleanup_top.saturating_sub(PAGE_STEP);
+            }
+            (Some(Cleanup::Proposed { .. }), Key::PageDown) => self.cleanup_top += PAGE_STEP,
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    /// Adds what Edit with AI shows in place of the settings and the editor: the pool
+    /// question with the pools as loaded, or the proposal with its changed lines marked, from
+    /// the row scrolled to. Inputs: the width, the rows the whole view may take, the lines so
+    /// far and the context. Output: unit.
+    fn cleanup_lines(
+        &mut self,
+        width: usize,
+        rows: usize,
+        lines: &mut Vec<Line<'static>>,
+        ctx: &Ctx,
+    ) {
+        let theme = &ctx.theme;
+        let start = lines.len();
+        let room = |lines: &Vec<Line<'static>>| {
+            rows.saturating_sub(lines.len() - start)
+                .max(EDITOR_ROWS_MIN)
+        };
+        let muted = |text: &str, lines: &mut Vec<Line<'static>>| {
+            lines.extend(
+                wrap(text, width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+        };
+        match &self.cleanup {
+            None => {}
+            Some(Cleanup::Choosing { selected }) => {
+                lines.push(styled("Edit with AI", Role::Heading, theme));
+                muted(
+                    "Which pool runs this edit? The app instructions are sent to a model on the pool you pick. You are asked every time.",
+                    lines,
+                );
+                match &ctx.store.pools {
+                    Load::Ready(pools) if pools.is_empty() => lines.push(styled(
+                        "No pool yet. Add one under Pools, then try again.",
+                        Role::Warning,
+                        theme,
+                    )),
+                    Load::Ready(pools) => {
+                        let at = (*selected).min(pools.len() - 1);
+                        let shown = room(lines);
+                        let first = at.saturating_sub(shown - 1);
+                        for (index, pool) in pools.iter().enumerate().skip(first).take(shown) {
+                            let (marker, role) = if index == at {
+                                (">", Role::Accent)
+                            } else {
+                                (" ", Role::Muted)
+                            };
+                            lines.push(Line::from(vec![
+                                styled(format!("{marker} "), role, theme).spans.remove(0),
+                                Span::raw(pool.name.clone()),
+                                Span::styled(format!("  {}", pool.summary), theme.muted),
+                            ]));
+                        }
+                    }
+                    Load::Failed(_) | Load::NotReady => lines.push(styled(
+                        "The pools couldn't be read. Press Esc, then try again.",
+                        Role::Error,
+                        theme,
+                    )),
+                    Load::Idle | Load::Loading => lines.push(ctx.loading("Loading pools")),
+                }
+            }
+            Some(Cleanup::Proposed {
+                text, rows: marked, ..
+            }) => {
+                lines.push(styled("Proposed instructions", Role::Heading, theme));
+                let body: Vec<Line<'static>> = match marked {
+                    Some(marked) => {
+                        let count =
+                            |mark| marked.iter().filter(|(found, _)| *found == mark).count();
+                        let removed = count(Mark::Removed);
+                        muted(
+                            &format!(
+                                "{removed} {} removed, {} added. Nothing changes until you accept.",
+                                if removed == 1 { "line" } else { "lines" },
+                                count(Mark::Added)
+                            ),
+                            lines,
+                        );
+                        marked
+                            .iter()
+                            .flat_map(|(mark, line)| {
+                                let (sign, role) = match mark {
+                                    Mark::Same => (' ', None),
+                                    Mark::Removed => ('-', Some(Role::Error)),
+                                    Mark::Added => ('+', Some(Role::Success)),
+                                };
+                                quoted(line, width.saturating_sub(2).max(1))
+                                    .into_iter()
+                                    .map(move |text| match role {
+                                        Some(role) => styled(format!("{sign} {text}"), role, theme),
+                                        None => Line::raw(format!("{sign} {text}")),
+                                    })
+                            })
+                            .collect()
+                    }
+                    None => {
+                        muted(
+                            "Too many lines to mark each change, so the proposed text is shown whole. Nothing changes until you accept.",
+                            lines,
+                        );
+                        quoted(text, width.saturating_sub(2).max(1))
+                            .into_iter()
+                            .map(|text| Line::raw(format!("  {text}")))
+                            .collect()
+                    }
+                };
+                let shown = room(lines);
+                self.cleanup_top = self.cleanup_top.min(body.len().saturating_sub(shown));
+                lines.extend(body.into_iter().skip(self.cleanup_top).take(shown));
+            }
+        }
+    }
+
+    /// Adds the app-wide Edit with AI choice above the editor with its key and what it does,
+    /// or why it could not be read. Inputs: the width, the lines so far and the context.
+    /// Output: unit.
+    fn app_ai_lines(&self, width: usize, lines: &mut Vec<Line<'static>>, ctx: &Ctx) {
+        let theme = &ctx.theme;
+        let Some(stored) = &self.app_ai else {
+            return;
+        };
+        let (option, note, role) = match stored {
+            Ok(true) => (
+                "On",
+                "Ctrl-P proposes a cleaned text you review. Each use asks which pool runs it.",
+                Role::Muted,
+            ),
+            Ok(false) => (
+                "Off",
+                "The app instructions are never sent to a model for editing.",
+                Role::Muted,
+            ),
+            Err(_) => (
+                "Off",
+                "The Edit with AI setting could not be read, so it stays off. Ctrl-B sets it.",
+                Role::Error,
+            ),
+        };
+        lines.push(row(
+            width,
+            Line::from(vec![
+                Span::raw("Edit with AI: "),
+                Span::styled(option.to_owned(), theme.accent),
+            ]),
+            styled("Ctrl-B changes", Role::Muted, theme),
+            ctx.glyphs,
+        ));
+        lines.extend(
+            wrap(note, width)
+                .into_iter()
+                .map(|text| styled(text, role, theme)),
+        );
+        lines.push(Line::default());
+    }
+
     fn skill_at_cursor(&self) -> Option<&Skill> {
         let chars: Vec<char> = self.editor.lines[self.editor.row].chars().collect();
         let column = self.editor.column;
@@ -725,8 +1212,11 @@ impl ProcessPage {
                     version: *version,
                 };
                 self.conflict = None;
+                self.cleanup = None;
                 if let (Some(project), None) = (self.project(), &self.settings) {
                     self.send(ProcessQuery::Settings { project }, ctx);
+                } else if self.scope == Scope::App && self.app_ai.is_none() {
+                    self.send(ProcessQuery::AppSettings, ctx);
                 }
             }
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
@@ -819,6 +1309,54 @@ impl ProcessPage {
                 });
             }
             (ProcessQuery::SaveSettings { .. }, Err(code)) => {
+                ctx.say(Message::error(&message(code), ""));
+            }
+            (ProcessQuery::Propose { .. }, Ok(ProcessReply::Proposal(proposal))) => {
+                let State::Ready { saved, version } = &self.state else {
+                    return;
+                };
+                if proposal.base_version != *version {
+                    self.state = State::Loading;
+                    let query = ProcessQuery::Read {
+                        project: self.project(),
+                    };
+                    self.send(query, ctx);
+                    ctx.say(Message::warning(
+                        "These instructions changed since you opened them.",
+                        "The page now reads the saved ones; run Edit with AI again.",
+                    ));
+                } else if proposal.text == *saved {
+                    ctx.say(Message::success("The model found nothing to change.", ""));
+                } else {
+                    self.cleanup = Some(Cleanup::Proposed {
+                        rows: line_diff(saved, &proposal.text),
+                        text: proposal.text.clone(),
+                        base_version: proposal.base_version,
+                    });
+                    self.cleanup_top = 0;
+                }
+            }
+            (ProcessQuery::Propose { .. }, Err(code)) => {
+                ctx.say(Message::error(&message(code), ""));
+            }
+            (ProcessQuery::AppSettings, Ok(ProcessReply::AppSettings(settings))) => {
+                self.app_ai = Some(Ok(settings.edit_with_ai));
+            }
+            (ProcessQuery::AppSettings, Err(code)) => self.app_ai = Some(Err(message(code))),
+            (ProcessQuery::SaveAppSettings { .. }, Ok(ProcessReply::AppSettings(settings))) => {
+                self.app_ai = Some(Ok(settings.edit_with_ai));
+                ctx.say(match settings.edit_with_ai {
+                    true => Message::success(
+                        "Edit with AI is on for the app instructions.",
+                        "Each use asks which pool runs it.",
+                    ),
+                    false => Message::success(
+                        "Edit with AI is off for the app instructions.",
+                        "They are never sent to a model for editing.",
+                    ),
+                });
+            }
+            (ProcessQuery::SaveAppSettings { .. }, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
             _ => {}
@@ -925,9 +1463,19 @@ impl ProcessPage {
             }
             State::Ready { .. } => {}
         }
-        if let Scope::Project { .. } = self.scope {
-            self.settings_lines(width, &mut lines, ctx);
-            self.adoption_lines(width, &mut lines, ctx);
+        if self.cleanup.is_some() {
+            let rows = height
+                .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
+                .max(EDITOR_ROWS_MIN);
+            self.cleanup_lines(width, rows, &mut lines, ctx);
+            return (lines, None);
+        }
+        match self.scope {
+            Scope::Project { .. } => {
+                self.settings_lines(width, &mut lines, ctx);
+                self.adoption_lines(width, &mut lines, ctx);
+            }
+            Scope::App => self.app_ai_lines(width, &mut lines, ctx),
         }
         if let Some(conflict) = &self.conflict {
             lines.extend(
@@ -953,9 +1501,14 @@ impl ProcessPage {
             );
             lines.push(Line::default());
         }
+        let floor = if self.problem.is_some() || self.pending.is_some() {
+            EDITOR_ROWS_MIN - 1
+        } else {
+            EDITOR_ROWS_MIN
+        };
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
-            .max(EDITOR_ROWS_MIN);
+            .max(floor);
         if let Some(path) = &self.path {
             lines.push(styled("Import from file", Role::Heading, theme));
             lines.extend(
@@ -1051,10 +1604,17 @@ impl ProcessPage {
             lines.push(styled(problem.clone(), Role::Error, theme));
         } else if let Some(pending) = &self.pending {
             let doing = match pending {
-                ProcessQuery::Save { .. } | ProcessQuery::SaveSettings { .. } => "Saving...",
+                ProcessQuery::Save { .. }
+                | ProcessQuery::SaveSettings { .. }
+                | ProcessQuery::SaveAppSettings { .. } => "Saving...",
+                ProcessQuery::Propose { .. } => PROPOSING,
                 _ => "Reading...",
             };
-            lines.push(styled(doing, Role::Muted, theme));
+            lines.extend(
+                wrap(doing, width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
         }
         let cursor = Position::new((gutter + column) as u16, (first + line) as u16);
         (lines, Some(cursor))
@@ -1082,7 +1642,12 @@ impl ProcessPage {
             }
             Some(Ok(view)) => view.settings,
         };
+        let repeats = match &self.settings {
+            Some(Ok(view)) => view.repeats,
+            _ => 0,
+        };
         let transcripts = if settings.transcripts { "On" } else { "Off" };
+        let ai = if settings.edit_with_ai { "On" } else { "Off" };
         for (name, option, key) in [
             ("Agent instructions", mode_label(settings.mode), "Ctrl-F"),
             (
@@ -1091,6 +1656,12 @@ impl ProcessPage {
                 "Ctrl-T",
             ),
             ("Instruction edits", edits_label(settings.edits), "Ctrl-R"),
+            (
+                "Lines the project file repeats",
+                repeated_label(settings.repeated),
+                "Ctrl-L",
+            ),
+            ("Edit with AI", ai, "Ctrl-B"),
         ] {
             lines.push(row(
                 width,
@@ -1102,7 +1673,12 @@ impl ProcessPage {
                 ctx.glyphs,
             ));
         }
-        for note in [mode_note(settings.mode), edits_note(settings.edits)] {
+        let repeated = repeated_note(&settings, repeats);
+        for note in [
+            mode_note(settings.mode),
+            edits_note(settings.edits),
+            repeated.as_str(),
+        ] {
             lines.extend(
                 wrap(note, width)
                     .into_iter()
@@ -1214,6 +1790,23 @@ impl Screen for ProcessPage {
         if self.path.is_some() {
             return vec![hint("Enter", "Read file"), hint("Esc", "Cancel")];
         }
+        match &self.cleanup {
+            Some(Cleanup::Choosing { .. }) => {
+                return vec![
+                    hint("Enter", "Use this pool"),
+                    hint(&format!("{}{}", ctx.glyphs.up, ctx.glyphs.down), "Move"),
+                    hint("Esc", "Cancel"),
+                ];
+            }
+            Some(Cleanup::Proposed { .. }) => {
+                return vec![
+                    hint("y", "Accept"),
+                    hint(&format!("{}{}", ctx.glyphs.up, ctx.glyphs.down), "Scroll"),
+                    hint("Esc", "Discard"),
+                ];
+            }
+            None => {}
+        }
         if self.preview.is_some() {
             return vec![
                 hint("Enter", "Put in the editor"),
@@ -1245,10 +1838,19 @@ impl Screen for ProcessPage {
             if self.conflict.is_none() {
                 hints.push(hint("Ctrl-R", "Instruction edits"));
             }
+            hints.push(hint("Ctrl-L", "Repeated lines"));
         }
         if self.scope == Scope::App {
             hints.push(hint("Ctrl-G", "Import from file"));
             hints.push(hint("Ctrl-D", "Default process"));
+        }
+        if self.edit_with_ai() && self.conflict.is_none() {
+            hints.push(hint("Ctrl-P", "Edit with AI"));
+        }
+        if self.settings.is_some() || self.app_ai.is_some() {
+            hints.push(hint("Ctrl-B", "Edit with AI on or off"));
+        }
+        if self.scope == Scope::App {
             hints.push(sections_hint(ctx.glyphs));
         }
         hints.push(back);
@@ -1256,15 +1858,27 @@ impl Screen for ProcessPage {
     }
 
     fn typing(&self) -> bool {
-        matches!(self.state, State::Ready { .. }) && self.preview.is_none()
+        matches!(self.state, State::Ready { .. })
+            && self.preview.is_none()
+            && self.cleanup.is_none()
+            && !self.proposing()
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if self.path.is_some() {
             return self.path_key(key, ctx);
         }
+        if self.cleanup.is_some() {
+            return self.cleanup_key(key, ctx);
+        }
         if self.preview.is_some() {
             return self.preview_key(key);
+        }
+        if self.proposing() {
+            return match key {
+                Key::Esc => Flow::Ignored,
+                _ => Flow::Handled,
+            };
         }
         match (&self.state, key) {
             (State::Failed(_), Key::Char('r') | Key::Enter) => {
@@ -1303,6 +1917,21 @@ impl Screen for ProcessPage {
             }
             (State::Ready { .. }, Key::Ctrl('r')) if self.settings.is_some() => {
                 self.change_settings(|settings| settings.edits = next_edits(settings.edits), ctx);
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('l')) if self.settings.is_some() => {
+                self.change_settings(
+                    |settings| settings.repeated = next_repeated(settings.repeated),
+                    ctx,
+                );
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('p')) => {
+                self.start_cleanup(ctx);
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('b')) => {
+                self.switch_edit_with_ai(ctx);
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('o')) => self.open_skill(ctx),

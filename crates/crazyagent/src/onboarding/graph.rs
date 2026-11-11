@@ -8,7 +8,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -80,12 +80,15 @@ pub(crate) enum GraphEnding {
     Stopped,
 }
 
-/// The folders graphify needs to read to start: its own tool folder and, for
-/// a uv tool install, the Python installation its `pyvenv.cfg` names.
+/// The folders graphify needs to read to start: its own tool folder and, for a uv tool
+/// install, the Python installation its `pyvenv.cfg` names. uv 0.13 names that installation
+/// through a version link beside it (`cpython-3.12-...` leading to `cpython-3.12.16-...`)
+/// and starts the environment's Python through it, so that link is returned too. Takes the
+/// graphify executable. Returns the folders and the link, if the installation has one.
 #[cfg(unix)]
-fn read_roots(graphify: &Path) -> Vec<PathBuf> {
+fn read_roots(graphify: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
     let Some(bin) = graphify.parent() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let tool = bin.parent().unwrap_or(bin);
     let mut roots = vec![tool.to_path_buf()];
@@ -99,18 +102,26 @@ fn read_roots(graphify: &Path) -> Vec<PathBuf> {
             file.take(VENV_BYTES_MAX).read_to_string(&mut text).ok()?;
             Some(text)
         });
+    let mut link = None;
     if let Some(home) = venv.as_deref().and_then(|text| {
         text.lines()
             .filter_map(|line| line.split_once('='))
             .find(|(key, _)| key.trim() == "home")
             .map(|(_, value)| PathBuf::from(value.trim()))
-    }) && let Some(python) = home.parent()
-        && let Ok(python) = python.canonicalize()
-        && !roots.contains(&python)
+    }) && let Some(named) = home.parent()
+        && let Ok(python) = named.canonicalize()
     {
-        roots.push(python);
+        if std::fs::symlink_metadata(named).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            link = Some(named.to_path_buf());
+        }
+        if !roots.contains(&python) {
+            roots.push(python);
+        }
     }
-    roots
+    assert!(roots.len() <= 2);
+    assert!(roots.first().is_some_and(|root| root == tool));
+    (roots, link)
 }
 
 /// Runs the free, AST-only `graphify update .` in `repo` under a sandbox with
@@ -194,8 +205,9 @@ pub(crate) fn update(
     private_directory(&tmp)?;
     let mut sandbox = ProjectSandbox::new(&out, &home, &tmp, SandboxNetwork::Only(Vec::new()))?
         .allow_read(repo)?;
-    for root in read_roots(&graphify) {
-        sandbox = sandbox.allow_read(&root)?;
+    let (roots, link) = read_roots(&graphify);
+    for root in &roots {
+        sandbox = sandbox.allow_read(root)?;
     }
     sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
     for folder in hidden {
@@ -206,6 +218,11 @@ pub(crate) fn update(
             Ok(sandbox) => sandbox,
             Err(_) => return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED)),
         };
+    }
+    if let Some(link) = &link
+        && let Ok(linked) = sandbox.clone().allow_read_link(link)
+    {
+        sandbox = linked;
     }
     let profile = state.join("profiles").join(format!("{name}.sb"));
     sandbox.install(&profile)?;
@@ -273,14 +290,7 @@ pub(crate) fn update(
     };
     running.stop().map_err(RunError::Uncertain)?;
     if ending == GraphEnding::Built {
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-            .open(out.join(KEPT_OUT_MARK))?
-            .write_all(mark.as_bytes())?;
+        write_mark(&out, &mark)?;
     }
     Ok(ending)
 }
@@ -329,15 +339,49 @@ fn kept_out_mark(kept: &[PathBuf], hidden: &[PathBuf]) -> String {
     format!("keep-out v1 {:x}\n", digest.finalize())
 }
 
-/// The mark the graph in `out` carries, read without following a link and within 128
-/// bytes. Takes the graph folder. Returns the mark's text, or `None` when it has none.
+/// Writes the keep-out mark into the graph in `out`, a folder agents can write: without
+/// following a link and without waiting on a FIFO placed at its name, which fails the open
+/// when it has no reader. Whatever opens is emptied and written only when it is a regular
+/// file with one name, so no FIFO, device or hard link to another file takes the mark.
+/// Takes the graph folder and the mark's text. Returns unit, or the error that makes the
+/// build count as failed.
 #[cfg(unix)]
-fn marked(out: &Path) -> Option<String> {
+pub(super) fn write_mark(out: &Path, mark: &str) -> std::io::Result<()> {
+    assert!(!mark.is_empty(), "a keep-out mark has text");
+    assert!(
+        mark.len() as u64 <= MARK_BYTES_MAX,
+        "a keep-out mark fits what is read back"
+    );
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o644)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(out.join(KEPT_OUT_MARK))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the graph keep-out mark is not a regular file of its own",
+        ));
+    }
+    file.set_len(0)?;
+    file.write_all(mark.as_bytes())
+}
+
+/// The mark the graph in `out` carries, read without following a link, without waiting on
+/// a FIFO or device placed at its name, only from a regular file and within 128 bytes.
+/// Takes the graph folder. Returns the mark's text, or `None` when it has none.
+#[cfg(unix)]
+pub(super) fn marked(out: &Path) -> Option<String> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(out.join(KEPT_OUT_MARK))
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut text = String::new();
     file.take(MARK_BYTES_MAX).read_to_string(&mut text).ok()?;
     Some(text)

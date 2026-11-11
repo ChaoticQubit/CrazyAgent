@@ -804,6 +804,7 @@ async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
     assert_eq!(result(missing), rejected("pool_missing"));
     let with_documents = SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision: 3,
         name: None,
         setup: ProjectSetup {
@@ -817,6 +818,7 @@ async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
     );
     let blank_name = SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision: 3,
         name: Some(" ".into()),
         setup: edited,
@@ -1548,6 +1550,7 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         &crate::questions::Asker::Master(1),
         &crate::questions::Ask {
             question: "Ship on Friday?".into(),
+            kind: crate::questions::QuestionKind::Text,
             options: Vec::new(),
             recommended: None,
             context: None,
@@ -2277,6 +2280,79 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
         defaults,
         "the project added again starts with the default depth, child landing and new folder limit"
     );
+}
+
+/// A removed project takes its linked repository files with it, so a project added again
+/// under the same id starts with no links into a folder it may no longer have.
+#[tokio::test]
+async fn a_removed_project_forgets_its_doc_links() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let mut db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    let tx = db.transaction().unwrap();
+    crate::project_setup::links::set(
+        &tx,
+        &project,
+        &[crate::project_setup::links::DocLink {
+            path: "docs/plan.md".into(),
+            kind: crate::project_setup::links::LinkKind::Roadmap,
+        }],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(db);
+    let links = "SELECT COUNT(*) FROM project_doc_links WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(links), 1);
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(engine.rows(links), 0);
+    engine.stop().await;
+}
+
+/// A removed project takes its roadmap status and its refresh setting with it, so a project
+/// added again under the same id starts unchecked with the default setting.
+#[tokio::test]
+async fn a_removed_project_forgets_its_roadmap_status() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    crate::roadmap_status::set_refresh(&db, &project, crate::roadmap_status::Refresh::RefreshOnly)
+        .unwrap();
+    crate::roadmap_status::refresh(&db, &project).unwrap();
+    drop(db);
+    let status = "SELECT COUNT(*) FROM roadmap_status WHERE project='setup-pooled'";
+    let setting = "SELECT COUNT(*) FROM roadmap_status_settings WHERE project='setup-pooled'";
+    assert_eq!((engine.rows(status), engine.rows(setting)), (1, 1));
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!((engine.rows(status), engine.rows(setting)), (0, 0));
+    engine.stop().await;
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 22] = [
+const COMMANDS: [&str; 23] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -33,6 +33,7 @@ const COMMANDS: [&str; 22] = [
     "desktop_review_memory",
     "desktop_update_project_setup",
     "desktop_remove_project",
+    "desktop_move_project_home",
     "desktop_cancel_research",
     "desktop_retry_research",
     "desktop_plan_roadmap",
@@ -318,7 +319,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         ..setup(vec![])
     };
     let drafted_before = bridge
-        .update_project_setup(&id, edited.clone(), None, Some(1), 14)
+        .update_project_setup(&id, edited.clone(), None, Some(1), None, 14)
         .await?;
     assert_eq!(
         drafted_before.rejection.as_deref(),
@@ -344,6 +345,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             edited.clone(),
             Some("Chore board two".into()),
             None,
+            None,
             15,
         )
         .await?;
@@ -366,7 +368,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             .any(|row| row.id == id && row.name == "Chore board two")
     );
     let stale = bridge
-        .update_project_setup(&id, edited, None, Some(1), 16)
+        .update_project_setup(&id, edited, None, Some(1), None, 16)
         .await?;
     assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 

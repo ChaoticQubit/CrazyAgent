@@ -54,14 +54,14 @@ test("a 60-letter pool name wraps in the list and in the pane and nothing moves 
 });
 
 test("real Tab keys walk New pool, each pool in the list, the app's order, then the selected pool's actions", async () => {
-  const walked = await onPools({}, (page) => tabWalk(page, 7));
+  const walked = await onPools({}, (page) => tabWalk(page, 8));
   const from = walked.indexOf("New pool");
   assert.notEqual(from, -1, JSON.stringify(walked));
-  const names = walked.slice(from, from + 7);
+  const names = walked.slice(from, from + 8);
   assert.match(names[1], /^Main pool/);
   assert.match(names[2], /^Spare/);
   assert.equal(names[3], "Use it or lose it");
-  assert.deepEqual(names.slice(4), ["Pool name", "Get ready for agents: Main pool", "Delete pool Main pool"]);
+  assert.deepEqual(names.slice(4), ["Keep start account", "Pool name", "Get ready for agents: Main pool", "Delete pool Main pool"]);
 });
 
 test("the rows stand exactly as the ranking gives them, each with its place, name, state, plan, why and usage", async () => {

@@ -1899,6 +1899,7 @@ fn with_prices_off_no_metric_carries_a_dollar() {
         MoneySettings {
             main_number: MainNumber::Dollars,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();
@@ -2185,6 +2186,7 @@ fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
         MoneySettings {
             main_number: MainNumber::Dollars,
             prices: PriceSource::Off,
+            ..MoneySettings::default()
         },
     )
     .unwrap();
@@ -2250,4 +2252,37 @@ fn activity_keeps_to_the_project_and_range_and_says_when_that_project_began() {
     let other = ProjectId::new("gamma").unwrap();
     let none = read(&db, Some(&other), 0, 14_400_000).unwrap();
     assert_eq!((none.activity.len(), none.activity_since_ms), (0, None));
+}
+
+/// One project's Metrics count only that project in the report total and in every chart bar
+/// of the metrics read, and every project together is their sum (DEC-129 item 1).
+#[test]
+fn each_project_reads_only_its_own_tokens_in_every_metrics_part() {
+    let (_directory, db) = database();
+    db.execute_batch(&format!(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+         VALUES ({hour},'agent','alpha','main','acct-a','team-1','codex','s1','gpt-5',1000,0,0,0,0),
+                ({hour},'agent','beta','main','acct-a','team-2','codex','s2','gpt-5',7000,0,0,0,0)",
+        hour = MIDNIGHT + HOUR
+    ))
+    .unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    let total = |project: Option<&ProjectId>| {
+        crate::usage::report::report(&db, project, Some(MIDNIGHT), 0, NOW, &[])
+            .unwrap()
+            .total
+            .input
+    };
+    let bars = |project: Option<&ProjectId>| -> u64 {
+        read(&db, project, MIDNIGHT, NOW)
+            .unwrap()
+            .series
+            .iter()
+            .map(|bar| bar.tokens.input)
+            .sum()
+    };
+    assert_eq!((total(Some(&alpha)), bars(Some(&alpha))), (1_000, 1_000));
+    assert_eq!((total(Some(&beta)), bars(Some(&beta))), (7_000, 7_000));
+    assert_eq!((total(None), bars(None)), (8_000, 8_000));
 }

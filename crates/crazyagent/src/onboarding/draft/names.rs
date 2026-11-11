@@ -60,7 +60,7 @@ const EXTENSION_BYTES_MAX: usize = 8;
 /// Whether the file or folder `name` looks like it holds a secret: one of its words, split
 /// at every character that is not an ASCII letter or digit, or two adjacent words joined,
 /// is in [`SECRET_WORDS`], ignoring case. Takes the full name, extensions included.
-pub(super) fn secret_like(name: &str) -> bool {
+pub(crate) fn secret_like(name: &str) -> bool {
     let words: Vec<&str> = name
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -74,6 +74,26 @@ pub(super) fn secret_like(name: &str) -> bool {
         || words
             .windows(2)
             .any(|pair| secret(&format!("{}{}", pair[0], pair[1])))
+}
+
+/// File extensions of programming source. A source file is not kept out of the code graph
+/// by a secret word in its name alone (DEC-132 Q12), as graphify's own detection rule does.
+const SOURCE_EXTENSIONS: &[&str] = &[
+    "c", "cc", "cjs", "cpp", "cs", "css", "go", "h", "hpp", "java", "js", "jsx", "kt", "kts",
+    "less", "mjs", "php", "py", "rb", "rs", "sass", "scala", "scss", "svelte", "swift", "ts",
+    "tsx", "vue",
+];
+
+/// Whether `name`, one file name, ends in a programming-source extension, matched exactly.
+/// Takes the name. Returns true for `tokens.ts`, false for `tokens.json`, `.env` and a name
+/// with no extension.
+pub(super) fn source_file(name: &str) -> bool {
+    assert!(!name.contains('/'), "a file name, not a path");
+    assert!(SOURCE_EXTENSIONS.windows(2).all(|pair| pair[0] < pair[1]));
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty() && SOURCE_EXTENSIONS.binary_search(&extension).is_ok()
 }
 
 /// The words of `text` that may name a file or folder: split at white space and

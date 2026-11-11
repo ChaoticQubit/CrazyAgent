@@ -3,7 +3,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, revealProjectFolder } from "../../api-projects";
 import { loadUncommittedImport } from "../../api-process";
 import { loadQuestionCounts, pendingByProject } from "../../api-questions";
-import { SessionContext, useLoad, type Loaded } from "../../state";
+import { SessionContext, readQuestionsShown, useLoad, type Loaded } from "../../state";
 import { Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { HEARTBEAT_MS, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
@@ -24,6 +24,7 @@ import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab, folderLabel, projectFolder } from "./overview";
 import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
 import { QuestionsTab } from "./questions";
+import { QuestionPopup, popupOn } from "./question-popup";
 import { shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
 import { routeSection, valueOf } from "./shared";
@@ -213,7 +214,8 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
   const [importMoves, setImportMoves] = useState(0);
-  const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
+  const [questionsShown] = useState(readQuestionsShown);
+  const select =(next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
   useCloseIde(projectId, data.notify);
 
@@ -279,6 +281,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active !== review && <WaitingChanges projectId={projectId} place={review} />}
       <ImportMoveBanner projectId={projectId} version={importMoves} />
       <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
+      {questionsShown !== "tab" && <QuestionPopup data={data} shown={popupOn(questionsShown, active)} />}
     </div>
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}

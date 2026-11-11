@@ -267,6 +267,7 @@ fn applied(calls: Vec<Call>, apply: impl FnMut(Call) -> Option<String>) -> Vec<S
 fn logged_ask(db: &Connection, project: &ProjectId, asker: &Asker, call: Call) -> Option<String> {
     let Call::Ask {
         question,
+        kind,
         options,
         recommended,
         context,
@@ -276,6 +277,7 @@ fn logged_ask(db: &Connection, project: &ProjectId, asker: &Asker, call: Call) -
     };
     let ask = crate::questions::Ask {
         question,
+        kind,
         options,
         recommended,
         context,
@@ -285,7 +287,7 @@ fn logged_ask(db: &Connection, project: &ProjectId, asker: &Asker, call: Call) -
         "questions_asker_full" => "8 of your questions are still open",
         "questions_full" => "64 questions of this project are still open",
         "questions_ask_invalid" | "questions_text_invalid" => {
-            "it is not one plain question with at most 6 one-line options and a recommended answer among them"
+            "it is not one plain question of kind single or multi with 2 to 6 one-line options and one of them recommended, or of kind text with no options"
         }
         _ => "the questions log could not be written",
     };
@@ -347,6 +349,7 @@ pub(in crate::team) fn agent_ask(
     assert!(matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }));
     let Call::Ask {
         question,
+        kind,
         options,
         recommended,
         context,
@@ -356,6 +359,7 @@ pub(in crate::team) fn agent_ask(
     };
     let ask = crate::questions::Ask {
         question,
+        kind,
         options,
         recommended,
         context,

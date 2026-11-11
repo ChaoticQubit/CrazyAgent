@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::project_setup::CONTEXT_DIRECTORY;
 use crate::protocol::ProjectId;
-use crate::questions::{Ask, EngineSource};
+use crate::questions::{Ask, EngineSource, QuestionKind};
 use std::path::Path;
 
 pub mod prompt;
@@ -16,6 +16,7 @@ pub const OPEN_POINTS_MAX: usize = 8;
 /// The largest open point raised as a question, the questions log's question bound.
 pub const OPEN_POINT_BYTES_MAX: usize = crate::questions::QUESTION_BYTES_MAX;
 const _: () = assert!(OPEN_POINTS_MAX as i64 <= crate::questions::PENDING_PER_ASKER_MAX);
+const _: () = assert!(crate::questions::ASKS_FROM_ONE_REPLY_MAX <= OPEN_POINTS_MAX);
 /// The largest agent reply a plan is read from.
 pub const REPLY_BYTES_MAX: usize = 512 * 1024;
 /// The job failure when the reply has no roadmap.
@@ -46,6 +47,7 @@ const ROADMAP_HEADING: &str = "# Roadmap";
 const RELEASE_HEADING: &str = "# Release process";
 const OPEN_HEADING: &str = "# Open questions";
 const OPEN_QUESTIONS_HEADING: &str = "## Open questions";
+const QUESTION_FENCE: &str = "```";
 const ENGINE_SECTIONS: [&str; 4] = [
     "roadmap",
     "release process",
@@ -53,13 +55,15 @@ const ENGINE_SECTIONS: [&str; 4] = [
     "owner answers",
 ];
 
-/// A planning agent's reply split into its parts: the roadmap body, the release process body
-/// and every open point in order, each as the agent wrote it.
+/// A planning agent's reply split into its parts: the roadmap body, the release process body,
+/// every open point in order as the agent wrote it, and the open points that came as choice
+/// questions in a JSON block, checked against the questions log's rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub roadmap: String,
     pub release_process: String,
     pub open_points: Vec<String>,
+    pub asks: Vec<Ask>,
 }
 
 /// The part of a planning reply a line belongs to while it is split.
@@ -72,32 +76,106 @@ enum Section {
 }
 
 impl Plan {
-    /// The open points raised as owner questions: hidden characters shown escaped, then the
-    /// first `OPEN_POINTS_MAX` within `OPEN_POINT_BYTES_MAX`. Every point stays in the roadmap.
-    /// Takes the plan. Returns the question texts in order.
-    pub fn questions(&self) -> Vec<String> {
-        let questions: Vec<String> = self
-            .open_points
-            .iter()
-            .map(|point| crate::memory::visible_text(point.as_str()))
-            .filter(|point| point.len() <= OPEN_POINT_BYTES_MAX)
-            .take(OPEN_POINTS_MAX)
-            .collect();
+    /// The open points raised as owner questions: the choice questions of the reply's JSON
+    /// block, or, for a reply with dash lines only, each line as a text question with hidden
+    /// characters shown escaped, within `OPEN_POINT_BYTES_MAX`. At most `OPEN_POINTS_MAX`;
+    /// every point stays in the roadmap. Takes the plan. Returns the questions in order.
+    pub fn questions(&self) -> Vec<Ask> {
+        let questions: Vec<Ask> = if self.asks.is_empty() {
+            self.open_points
+                .iter()
+                .map(|point| crate::memory::visible_text(point.as_str()))
+                .filter(|point| point.len() <= OPEN_POINT_BYTES_MAX)
+                .take(OPEN_POINTS_MAX)
+                .map(|question| Ask {
+                    question,
+                    kind: QuestionKind::Text,
+                    options: Vec::new(),
+                    recommended: None,
+                    context: Some(QUESTION_CONTEXT.to_owned()),
+                })
+                .collect()
+        } else {
+            self.asks.iter().take(OPEN_POINTS_MAX).cloned().collect()
+        };
         assert!(questions.len() <= OPEN_POINTS_MAX);
+        assert!(
+            questions
+                .iter()
+                .all(|ask| ask.kind != QuestionKind::Text || ask.options.is_empty())
+        );
         questions
     }
 }
 
+/// The fenced block of owner questions in an agent's text: the last block between two
+/// lines of three backticks whose text is a JSON object with a `questions` list. Input: the
+/// text. Output: the bytes the block covers, fence lines included, and the object.
+pub(crate) fn question_block(text: &str) -> Option<(std::ops::Range<usize>, serde_json::Value)> {
+    let mut found = None;
+    let mut open: Option<(usize, usize)> = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let (start, end) = (at, at + line.len());
+        at = end;
+        if !line.trim_start().starts_with(QUESTION_FENCE) {
+            continue;
+        }
+        let Some((block, body)) = open.take() else {
+            open = Some((start, end));
+            continue;
+        };
+        let value = serde_json::from_str::<serde_json::Value>(&text[body..start]).ok();
+        if let Some(value) =
+            value.filter(|value| value.get("questions").is_some_and(|list| list.is_array()))
+        {
+            found = Some((block..end, value));
+        }
+    }
+    assert!(at == text.len());
+    assert!(
+        found
+            .as_ref()
+            .is_none_or(|(range, _)| range.end <= text.len())
+    );
+    found
+}
+
+/// The open points of a reply's `# Open questions` section written as list lines: `- `,
+/// `* ` or `1. ` lines, a following plain line continuing the point; "None" is no point.
+/// Input: the section's lines. Output: the points in order.
+fn dash_points(lines: &[&str]) -> Vec<String> {
+    let mut points: Vec<String> = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if let Some(point) = bullet(line) {
+            points.push(point.to_owned());
+        } else if let Some(last) = points.last_mut()
+            && !line.is_empty()
+        {
+            last.push(' ');
+            last.push_str(line);
+        }
+    }
+    points.retain(|point| {
+        let point = point.trim().trim_end_matches('.');
+        !point.is_empty() && !point.eq_ignore_ascii_case("none")
+    });
+    assert!(points.len() <= lines.len());
+    points
+}
+
 /// Splits a planning agent's reply at its `# Roadmap`, `# Release process` and
 /// `# Open questions` lines, matched whole and without case; text before the first is
-/// dropped and a repeated heading continues its section. Open points are `- `, `* ` or
-/// `1. ` lines, a following plain line continuing the point; "None" is no point.
+/// dropped and a repeated heading continues its section. Open points come from the
+/// section's JSON block of questions (`question_block`), each checked as the questions log
+/// checks it, or, when it has none, from its list lines (`dash_points`).
 /// Takes the reply. Returns the plan, or the job failure when the roadmap or release
 /// process is empty.
 pub fn parse(reply: &str) -> Result<Plan, &'static str> {
     let mut section = Section::Preface;
     let (mut roadmap, mut release) = (Vec::new(), Vec::new());
-    let mut open_points: Vec<String> = Vec::new();
+    let mut open: Vec<&str> = Vec::new();
     for line in reply.lines() {
         let heading = line.trim();
         let next = [
@@ -115,22 +193,17 @@ pub fn parse(reply: &str) -> Result<Plan, &'static str> {
             Section::Preface => {}
             Section::Roadmap => roadmap.push(line),
             Section::Release => release.push(line),
-            Section::Open => {
-                if let Some(point) = bullet(heading) {
-                    open_points.push(point.to_owned());
-                } else if let Some(last) = open_points.last_mut()
-                    && !heading.is_empty()
-                {
-                    last.push(' ');
-                    last.push_str(heading);
-                }
-            }
+            Section::Open => open.push(line),
         }
     }
-    open_points.retain(|point| {
-        let point = point.trim().trim_end_matches('.');
-        !point.is_empty() && !point.eq_ignore_ascii_case("none")
-    });
+    let block = question_block(&open.join("\n"));
+    let (open_points, asks) = match block {
+        Some((_, value)) => {
+            let asks = crate::questions::asks_from_json(&value, QUESTION_CONTEXT);
+            (asks.iter().map(|ask| ask.question.clone()).collect(), asks)
+        }
+        None => (dash_points(&open), Vec::new()),
+    };
     let roadmap = roadmap.join("\n").trim().to_owned();
     let release_process = release.join("\n").trim().to_owned();
     if roadmap.is_empty() {
@@ -143,6 +216,7 @@ pub fn parse(reply: &str) -> Result<Plan, &'static str> {
         roadmap,
         release_process,
         open_points,
+        asks,
     })
 }
 
@@ -313,27 +387,41 @@ pub fn publish(state: &Path, reply: &str, harness: &str) -> Result<Plan, &'stati
 /// the project's master once as an engine note; the roadmap is never changed by it.
 /// Inputs: the engine database path, the project and the plan. Output: each logged question's id.
 pub fn raise(database: &Path, project: &str, plan: &Plan) -> Result<Vec<u64>, EngineError> {
+    raise_asks(
+        database,
+        project,
+        &EngineSource::Planning,
+        &plan.questions(),
+    )
+}
+
+/// Raises the questions an engine job's agent returned as owner questions of the project, in
+/// order: one the log refuses as invalid is skipped, and raising stops once the project's or
+/// the job's questions are full. Inputs: the engine database path, the project, the job as
+/// the source and at most `OPEN_POINTS_MAX` questions. Output: each logged question's id, or
+/// the log's failure.
+pub(crate) fn raise_asks(
+    database: &Path,
+    project: &str,
+    source: &EngineSource,
+    asks: &[Ask],
+) -> Result<Vec<u64>, EngineError> {
+    assert!(asks.len() <= OPEN_POINTS_MAX);
     let root = database
         .parent()
         .ok_or_else(|| failure("questions_unavailable"))?;
     let project = ProjectId::new(project).map_err(|_| failure("question_project_unknown"))?;
     let db = crate::questions::open(root)?;
     let mut logged = Vec::new();
-    for question in plan.questions() {
-        let ask = Ask {
-            question,
-            options: Vec::new(),
-            recommended: None,
-            context: Some(QUESTION_CONTEXT.to_owned()),
-        };
-        match crate::questions::raise(&db, &project, &EngineSource::Planning, &ask) {
+    for ask in asks {
+        match crate::questions::raise(&db, &project, source, ask) {
             Ok(id) => logged.push(id),
             Err(problem) if FULL.contains(&problem.0.as_str()) => break,
             Err(problem) if REFUSED.contains(&problem.0.as_str()) => {}
             Err(problem) => return Err(problem),
         }
     }
-    assert!(logged.len() <= OPEN_POINTS_MAX);
+    assert!(logged.len() <= asks.len());
     Ok(logged)
 }
 

@@ -7,12 +7,36 @@ import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
+import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
+import type { QuestionsShown } from "./api-questions";
 export type Loaded<T> = { kind: "loading" } | Result<T>;
 export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
 const TERMINAL_INPUT_KEY = "crazyagent.terminal-input";
+const QUESTIONS_SHOWN_KEY = "crazyagent.questions-shown";
+
+/** Reads where a waiting question shows on a project page, as kept in this app (not in the
+ * engine). Output: the choice; the default when storage is unavailable or holds something
+ * else. */
+export function readQuestionsShown(): QuestionsShown {
+  try {
+    return questionsShown(window.localStorage.getItem(QUESTIONS_SHOWN_KEY));
+  } catch {
+    return QUESTIONS_SHOWN_DEFAULT;
+  }
+}
+
+/** Remembers where a waiting question shows on a project page. Input: the choice. Output:
+ * none. */
+export function saveQuestionsShown(choice: QuestionsShown): void {
+  try {
+    window.localStorage.setItem(QUESTIONS_SHOWN_KEY, choice);
+  } catch {
+    return;
+  }
+}
 
 /** Reads where the owner types to every agent's terminal, as kept in this app (not in the
  * engine). The old Master input key is ignored on purpose: a live trial left Both in it.

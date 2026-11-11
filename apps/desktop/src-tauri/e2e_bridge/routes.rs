@@ -12,10 +12,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
     use crazyagent::engine::owner::NativeAuthMethod;
+    use crazyagent::master_step_limit::MasterStepSettings;
+    use crazyagent::master_time_limit::MasterTimeSettings;
     use crazyagent::memory::ReviewDecision;
     use crazyagent::owner_profile::OwnerProfile;
     use crazyagent::plugins::Scope;
     use crazyagent::plugins::ServerSpec;
+    use crazyagent::project_setup::KeptFile;
     use crazyagent::project_setup::ProjectSetup;
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
@@ -1326,12 +1329,29 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 name: Option<String>,
                 revision: Option<u64>,
                 generation: u64,
+                kept: Option<Vec<KeptFile>>,
             }
-            let Args { id, setup, name, revision, generation } = match parse(args) {
+            let Args { id, setup, name, revision, generation, kept } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .update_project_setup(&id, setup, name, revision, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .update_project_setup(&id, setup, name, revision, kept, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_move_project_home" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                mode: AddMode,
+                overrides: Vec<AddOverride>,
+                generation: u64,
+            }
+            let Args { id, mode, overrides, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .move_project_home(&id, mode, overrides, generation) .await }.await;
             routed(result)
         }
         "desktop_remove_project" => {
@@ -1404,6 +1424,46 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state).await?.plan_roadmap(&id, generation).await }.await;
+            routed(result)
+        }
+        "desktop_roadmap_status" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.roadmap_status(id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_refresh_roadmap_status" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.refresh_roadmap_status(id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_set_roadmap_refresh" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                refresh: String,
+            }
+            let Args { id, refresh } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.set_roadmap_refresh(id, refresh)?; call.await }.await;
             routed(result)
         }
         "desktop_research_log" => {
@@ -1764,6 +1824,22 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .master_inputs(&ticket, &session_id, &cursors) .await }.await;
             routed(result)
         }
+        "desktop_master_messages" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                session_id: String,
+                before: Option<u64>,
+                limit: u8,
+            }
+            let Args { ticket, session_id, before, limit } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .master_messages(&ticket, &session_id, before, limit) .await }.await;
+            routed(result)
+        }
         "desktop_master_session_turns" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -2005,6 +2081,42 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_quit_settings(settings, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_master_step_settings" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.master_step_settings().await }.await;
+            routed(result)
+        }
+        "desktop_set_master_step_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: MasterStepSettings,
+                generation: u64,
+            }
+            let Args { settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_master_step_settings(settings, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_master_time_settings" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.master_time_settings().await }.await;
+            routed(result)
+        }
+        "desktop_set_master_time_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: MasterTimeSettings,
+                generation: u64,
+            }
+            let Args { settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_master_time_settings(settings, generation) .await }.await;
             routed(result)
         }
         "desktop_pool_summaries" => {
@@ -2794,14 +2906,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: u64,
                 version: u64,
-                option: Option<u8>,
-                text: Option<String>,
+                picks: Vec<u8>,
+                comment: Option<String>,
             }
-            let Args { id, version, option, text } = match parse(args) {
+            let Args { id, version, picks, comment } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option, text)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, picks, comment)?; call.await }.await;
             routed(result)
         }
         "desktop_dismiss_question" => {
@@ -2954,6 +3066,37 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.instruction_settings(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_process_propose" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+                pool: Option<String>,
+            }
+            let Args { project_id, pool } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.propose_process(project_id, pool)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_instruction_settings" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_instruction_settings()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_save_app_instruction_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: crazyagent::engine::owner::AppInstructionSettings,
+            }
+            let Args { settings } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .save_app_instruction_settings(settings)?; call.await }.await;
             routed(result)
         }
         "desktop_retry_recovery" => {
