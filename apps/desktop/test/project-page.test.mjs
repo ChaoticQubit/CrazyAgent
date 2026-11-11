@@ -85,6 +85,15 @@ test("project folders and attached documents are shown under the home folder wit
   assert.equal(homePath("/Volumes/Work/notes.md"), "/Volumes/Work/notes.md");
 });
 
+test("the Overview shows the saved About and the mapping's overview", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const html = renderToStaticMarkup(createElement(overview.OverviewFacts, { about: "A research reader.", overview: "# ScholarScope\n\nReads papers.\n" }));
+  assert.match(html, /A research reader\./);
+  assert.match(html, /Reads papers\./);
+  assert.equal(renderToStaticMarkup(createElement(overview.OverviewFacts, { about: "  ", overview: null })), "");
+  assert.doesNotMatch(renderToStaticMarkup(createElement(overview.OverviewFacts, { about: "", overview: "# Only\n\nThe overview.\n" })), /<h2[^>]*>About</);
+});
+
 test("master status words follow the design's fixed set", () => {
   const turn = (phase, reason = null) => ({ id: "t", ordinal: 1, phase, reason, reply: null });
   assert.equal(research.masterStatus(null, []), "Ready");

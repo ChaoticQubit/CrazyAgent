@@ -89,8 +89,10 @@ pub struct MappingTry {
 /// steps, the try a running mapping step is on as `mapping_try`, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
 /// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
 /// engine wrote as `overview` or one it did not write as `folder_overview`, `finished`
-/// once the owner saved the setup, when name and draft are the saved ones, and the
-/// project's own instruction files the start moved into `.crazyagent/imported/`.
+/// once the owner saved the setup, when name and draft are the saved ones, the project's own
+/// instruction files the start moved into `.crazyagent/imported/`, and as `proposed` the
+/// mapping's draft when the owner saved a setup with neither about nor tech stack before
+/// the mapping finished.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingView {
@@ -107,6 +109,8 @@ pub struct OnboardingView {
     pub folder_overview: Option<String>,
     pub finished: bool,
     pub imported: Vec<crate::instruction_files::ImportFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<ProjectSetup>,
 }
 
 /// The receipt of `StartOnboarding`: the project the folder is registered as.
@@ -699,7 +703,13 @@ pub(crate) fn status(
     draft::restore_found(&mut drafted.facts, found.as_deref()).map_err(error)?;
     let saved = crate::project_setup::load_setup(tx, project_id)?.filter(|stored| stored.saved());
     let finished = saved.is_some();
+    let mut proposed = None;
     if let Some(stored) = saved {
+        let unanswered = stored.about.trim().is_empty() && stored.tech_stack.is_empty();
+        let mapped = !drafted.draft.about.trim().is_empty() || !drafted.draft.tech_stack.is_empty();
+        if unanswered && mapped && matches!(mapping, Step::Done) {
+            proposed = Some(drafted.draft.clone());
+        }
         drafted.draft = stored.editable();
         drafted.name = stored.name;
     }
@@ -729,5 +739,6 @@ pub(crate) fn status(
         folder_overview,
         finished,
         imported: crate::instruction_files::moved(tx, project_id, Path::new(&repo))?,
+        proposed,
     }))
 }
