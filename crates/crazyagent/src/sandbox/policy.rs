@@ -704,7 +704,14 @@ mod tests {
             );
         }
         #[cfg(target_os = "linux")]
-        assert_eq!(offered, [AgentAccess::Sandboxed]);
+        {
+            assert_eq!(offered, [AgentAccess::Sandboxed]);
+            assert!(
+                [AgentAccess::OwnBranch, AgentAccess::Full]
+                    .iter()
+                    .all(|access| access.unavailable() == Some(LINUX_UNAVAILABLE))
+            );
+        }
         #[cfg(target_os = "macos")]
         assert_eq!(offered, AgentAccess::ALL);
         assert_eq!(AgentAccess::default(), AgentAccess::Sandboxed);

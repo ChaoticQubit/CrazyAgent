@@ -157,7 +157,7 @@ pub(super) fn occupy(repository: &Path, id: &str) -> Running {
 
 /// Tells whether a set's regeneration still runs, for the rows that wait for its end. Input:
 /// the set. Output: the answer.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn is_running(id: &ChangeSetId) -> bool {
     running().contains_key(id.as_str())
 }

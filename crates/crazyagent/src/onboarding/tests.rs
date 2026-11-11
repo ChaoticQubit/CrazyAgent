@@ -300,6 +300,7 @@ fn git_init(root: &Path) {
     );
 }
 
+#[cfg(target_os = "macos")]
 fn git_in(root: &Path, args: &[&str]) {
     let mut command = std::process::Command::new(crate::research::runner::setup_git());
     command
@@ -1082,6 +1083,20 @@ fn a_setup_folder_swapped_for_a_link_mid_save_is_never_written_through() {
     );
 }
 
+/// On Linux the graph step itself refuses (DEC-094): `graph::update` ends failed with the
+/// plain line before it looks for graphify, and it makes no `graphify-out` in the project.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_graph_build_on_linux_ends_failed_and_writes_nothing() {
+    let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    assert_eq!(
+        run_graph(&repo, Path::new("/nonexistent/graphify"), &[]),
+        graph::GraphEnding::Failed("Graph build is not available on Linux in this version.")
+    );
+    assert!(std::fs::read_dir(&repo).unwrap().next().is_none());
+}
+
 #[test]
 fn only_linux_refuses_the_graph_build_with_a_plain_line() {
     assert_eq!(
@@ -1091,6 +1106,9 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
     assert_eq!(graph::unavailable("macos"), None);
 }
 
+/// macOS only: by DEC-094 the graph build is refused on Linux, so a Linux host installs no
+/// graphify for the engine to find (`only_linux_refuses_the_graph_build_with_a_plain_line`).
+#[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     let system = service::installed_graphify()
@@ -1180,6 +1198,7 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
 
 /// Builds the code graph of `repo` with the installed graphify and no hidden folders, in a
 /// fresh engine state folder. Takes the project folder. Returns how the build ended.
+#[cfg(target_os = "macos")]
 fn build_graph(repo: &Path) -> graph::GraphEnding {
     let graphify = service::installed_graphify()
         .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
@@ -1207,6 +1226,9 @@ fn run_graph(repo: &Path, graphify: &Path, hidden: &[std::path::PathBuf]) -> gra
     .unwrap()
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_graph_never_reads_secret_like_or_git_ignored_files() {
     let dir = tempfile::Builder::new()
@@ -1277,6 +1299,9 @@ fn the_graph_never_reads_secret_like_or_git_ignored_files() {
     }
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn without_an_answer_from_git_no_graph_is_built() {
     let dir = tempfile::Builder::new()
@@ -1363,6 +1388,9 @@ fn shell_cloud_and_gpg_credential_files_are_secret_like() {
     assert!(missed.is_empty(), "not secret-like: {missed:?}");
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_graph_marked_under_another_keep_out_never_reaches_the_prompt() {
     let dir = tempfile::Builder::new()
@@ -1396,6 +1424,7 @@ fn a_graph_marked_under_another_keep_out_never_reaches_the_prompt() {
     );
 }
 
+#[cfg(target_os = "macos")]
 fn graphed_then_hidden() -> (
     tempfile::TempDir,
     std::path::PathBuf,
@@ -1429,6 +1458,7 @@ fn graphed_then_hidden() -> (
     (dir, repo, hidden)
 }
 
+#[cfg(target_os = "macos")]
 fn assert_hidden_out_of_the_prompt(repo: &Path, hidden: &[std::path::PathBuf]) {
     let evidence = draft::gather(repo, hidden);
     assert!(
@@ -1448,12 +1478,18 @@ fn assert_hidden_out_of_the_prompt(repo: &Path, hidden: &[std::path::PathBuf]) {
     }
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_with_the_graph_off() {
     let (_dir, repo, hidden) = graphed_then_hidden();
     assert_hidden_out_of_the_prompt(&repo, &hidden);
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_graphify_is_missing() {
     let (_dir, repo, hidden) = graphed_then_hidden();
@@ -1464,6 +1500,9 @@ fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_graphify_is_mis
     assert_hidden_out_of_the_prompt(&repo, &hidden);
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_the_keep_out_is_refused() {
     let (_dir, repo, hidden) = graphed_then_hidden();
@@ -1478,6 +1517,9 @@ fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_the_keep_out_is
     assert_hidden_out_of_the_prompt(&repo, &hidden);
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_graph_never_reads_inside_a_nested_repository_or_submodule() {
     let dir = tempfile::Builder::new()
@@ -1630,6 +1672,9 @@ fn a_folder_outside_git_maps_like_a_repository_without_ignores() {
     }
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_folder_outside_git_gets_a_graph_without_its_secret_like_files() {
     let dir = tempfile::Builder::new()
@@ -1703,6 +1748,9 @@ fn a_graph_made_before_the_keep_out_never_reaches_the_prompt() {
     assert!(!mapping_prompt(root).contains("OLD_GRAPH_3030"));
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_graph_made_before_the_keep_out_is_rebuilt_from_nothing() {
     let dir = tempfile::Builder::new()
@@ -1741,6 +1789,9 @@ fn a_graph_made_before_the_keep_out_is_rebuilt_from_nothing() {
     );
 }
 
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_graph_update_drops_a_file_kept_out_since_the_last_build() {
     let dir = tempfile::Builder::new()

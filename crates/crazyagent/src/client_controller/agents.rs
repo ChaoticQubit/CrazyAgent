@@ -136,10 +136,14 @@ impl OwnerController {
 mod tests {
     use super::*;
     use crate::agents::AgentState;
+    #[cfg(target_os = "macos")]
     use crate::agents::tests::{alive, install_fixture, pids, spec, until};
     use crate::engine::bootstrap::EngineService;
     use std::os::unix::fs::PermissionsExt;
 
+    /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+    /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agent_controls_reach_the_engine_and_touch_only_one_agent() {
         let root = tempfile::Builder::new()
