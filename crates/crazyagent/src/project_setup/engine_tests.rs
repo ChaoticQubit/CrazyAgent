@@ -2283,6 +2283,47 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
 }
 
 #[tokio::test]
+async fn a_removed_projects_run_in_project_terminal_setting_goes_with_it() {
+    use crate::ide::bridge::run_command::{RunMode, mode, set_mode};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let other = ProjectId::new("another-project").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    set_mode(&db, &project, RunMode::Off).unwrap();
+    set_mode(&db, &other, RunMode::TypeOnly).unwrap();
+    assert_eq!(mode(&db, &project).unwrap(), RunMode::Off);
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT COUNT(*) FROM ide_run_settings WHERE project='setup-pooled'"),
+        0,
+        "the Run setting goes with the project"
+    );
+    assert_eq!(
+        mode(&db, &project).unwrap(),
+        RunMode::TypeAndRun,
+        "the project added again starts on Type and run"
+    );
+    assert_eq!(
+        mode(&db, &other).unwrap(),
+        RunMode::TypeOnly,
+        "another project's setting stays"
+    );
+}
+
+#[tokio::test]
 async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_stays_gone() {
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;

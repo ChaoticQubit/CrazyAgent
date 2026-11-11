@@ -34,6 +34,8 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.FULL_TITLE = exports.OWN_BRANCH_TITLE = exports.OWN_BRANCH_PROFILE = exports.TITLE = exports.PROFILE = void 0;
+exports.engineTerminal = engineTerminal;
+exports.defaultLevel = defaultLevel;
 exports.terminalMenu = terminalMenu;
 exports.terminalGit = terminalGit;
 exports.sandboxedTerminal = sandboxedTerminal;
@@ -53,6 +55,9 @@ const FULL_COMMAND = "crazyagent.terminal.full";
 const ABOVE = ["crazyagent.terminal.ownBranchAbove", "crazyagent.terminal.fullAbove"];
 function engineTerminal(engine, name, level) {
     return { name, pty: new pty_js_1.SandboxedPty((call, args) => engine.stream(call, args), level) };
+}
+function defaultLevel() {
+    return (0, pty_js_1.accessOf)(process.env[pty_js_1.ACCESS_ENV]);
 }
 function terminalMenu(context, engine) {
     void vscode.commands.executeCommand("setContext", ACCESS_KEY, (0, pty_js_1.accessOf)(process.env[pty_js_1.ACCESS_ENV]));

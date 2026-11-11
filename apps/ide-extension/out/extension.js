@@ -10,6 +10,7 @@ const git_js_1 = require("./git.js");
 const lock_js_1 = require("./lock.js");
 const readonly_js_1 = require("./readonly.js");
 const reveal_js_1 = require("./reveal.js");
+const run_command_js_1 = require("./run-command.js");
 const agents_js_1 = require("./sidebar/agents.js");
 const changes_js_1 = require("./sidebar/changes.js");
 const context_js_1 = require("./sidebar/context.js");
@@ -28,6 +29,7 @@ const features = [
     readonly_js_1.readonly,
     extensions_js_1.extensions,
     reveal_js_1.reveal,
+    run_command_js_1.runCommand,
     terminal_js_1.sandboxedTerminal,
     terminal_js_1.terminalMenu,
     terminal_js_1.terminalGit,

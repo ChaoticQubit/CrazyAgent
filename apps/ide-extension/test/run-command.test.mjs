@@ -1,0 +1,111 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import * as run from "../out/run-command-model.js";
+
+const rule = JSON.parse(readFileSync(new URL("./run-command-rule.json", import.meta.url), "utf8"));
+
+const event = (command, pressEnter = true) => ({ request: "r1", command, press_enter: pressEnter });
+
+function recorded() {
+  const order = [];
+  const terminal = {
+    show: () => order.push("show"),
+    sendText: (text, addNewLine) => order.push(["send", text, addNewLine]),
+    dispose: () => order.push("dispose"),
+  };
+  const ack = (request) => {
+    order.push(["ack", request]);
+    return Promise.resolve();
+  };
+  return { order, terminal, ack };
+}
+
+test("typed keeps the command verbatim and adds a new line only for type and run", () => {
+  assert.deepEqual(run.typed("cargo install alpha", true), { text: "cargo install alpha", addNewLine: true });
+  assert.deepEqual(run.typed("cargo install alpha", false), { text: "cargo install alpha", addNewLine: false });
+  assert.deepEqual(run.typed("  echo \"it's here\"  ", true), { text: "  echo \"it's here\"  ", addNewLine: true });
+  assert.deepEqual(run.typed("x".repeat(run.COMMAND_BYTES_MAX), false), { text: "x".repeat(512), addNewLine: false });
+});
+
+test("typed refuses a command with a line break or a control character, whatever the engine sent", () => {
+  assert.equal(run.typed("a\nb", true), null);
+  assert.equal(run.typed("a\rb", true), null);
+  assert.equal(run.typed("a\u001b[31m", true), null);
+  assert.equal(run.typed("", true), null);
+  assert.equal(run.typed("   ", true), null);
+});
+
+test("typed agrees with the shared rule table on every row, whatever the engine sent", () => {
+  assert.ok(rule.pass.length >= 20 && rule.refused.length >= 100, "the shared table holds its rows");
+  for (const command of rule.pass) assert.deepEqual(run.typed(command, true), { text: command, addNewLine: true }, JSON.stringify(command));
+  for (const [command] of rule.refused) assert.equal(run.typed(command, true), null, JSON.stringify(command));
+  assert.equal(run.BARE, rule.bare, "the characters a bare word may hold");
+  assert.equal(run.QUOTED_REFUSED, rule.quoted_refused, "the characters a quoted word may not hold");
+  assert.equal(run.typed(7, true), null);
+});
+
+test("a line that hides a second command in shell syntax opens no terminal", async () => {
+  const { order, ack } = recorded();
+  const open = () => {
+    throw new Error("a refused command never opens a terminal");
+  };
+  const hidden = rule.refused.filter(([, code]) => code === "ide_run_chained").map(([command]) => command);
+  assert.ok(hidden.some((command) => command.startsWith("cat =(")) && hidden.some((command) => command.startsWith("eval $'")));
+  for (const command of hidden) assert.equal(await run.handle(event(command), { open, ack }), false, JSON.stringify(command));
+  assert.deepEqual(order, []);
+});
+
+test("a run waits for the terminal to attach before typing and acknowledges only after typing", async () => {
+  const { order, terminal, ack } = recorded();
+  let attach = () => undefined;
+  const ready = new Promise((resolve) => (attach = resolve));
+  const done = run.handle(event("cargo build"), { open: () => ({ terminal, ready }), ack });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(order, [], "nothing is shown or typed before the terminal attached");
+  attach(true);
+  assert.equal(await done, true);
+  assert.deepEqual(order, ["show", ["send", "cargo build", true], ["ack", "r1"]]);
+});
+
+test("type only types the command and leaves Enter to the owner", async () => {
+  const { order, terminal, ack } = recorded();
+  assert.equal(await run.handle(event("cargo test", false), { open: () => ({ terminal, ready: Promise.resolve(true) }), ack }), true);
+  assert.deepEqual(order, ["show", ["send", "cargo test", false], ["ack", "r1"]]);
+});
+
+test("a terminal the engine refused gets no text and no acknowledgement, and shows why", async () => {
+  const { order, terminal, ack } = recorded();
+  assert.equal(await run.handle(event("cargo build"), { open: () => ({ terminal, ready: Promise.resolve(false) }), ack }), false);
+  assert.deepEqual(order, ["show"]);
+});
+
+test("a terminal that does not attach in time is closed, and nothing is typed even when it attaches later", async () => {
+  const { order, terminal, ack } = recorded();
+  let attach = () => undefined;
+  const ready = new Promise((resolve) => (attach = resolve));
+  assert.equal(await run.handle(event("cargo build"), { open: () => ({ terminal, ready }), ack, waitMs: 20 }), false);
+  attach(true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(order, ["dispose"]);
+  assert.ok(run.READY_WAIT_MS < 5000, "the wait ends before the engine stops waiting for the acknowledgement");
+});
+
+test("a command the rule refuses opens no terminal", async () => {
+  const { order, ack } = recorded();
+  let opened = 0;
+  const open = () => {
+    opened += 1;
+    throw new Error("a refused command never opens a terminal");
+  };
+  for (const command of ["a; b", "a\nb", "", "echo \u{202e}x"]) assert.equal(await run.handle(event(command), { open, ack }), false, command);
+  assert.equal(opened, 0);
+  assert.deepEqual(order, []);
+});
+
+test("a terminal that cannot be opened is not acknowledged", async () => {
+  const { order, ack } = recorded();
+  const refused = run.handle(event("cargo build"), { open: () => { throw new Error("no terminal"); }, ack });
+  await assert.rejects(refused, /no terminal/);
+  assert.deepEqual(order, []);
+});

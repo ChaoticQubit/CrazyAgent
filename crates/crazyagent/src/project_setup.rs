@@ -2604,6 +2604,7 @@ fn remove(
     crate::coord::forget_project(tx, project_id)?;
     crate::activity::forget_project(tx, project_id)?;
     crate::usage::forget_project(tx, project_id.as_str())?;
+    crate::ide::bridge::run_command::forget_project(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
