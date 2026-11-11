@@ -5,6 +5,7 @@ use std::fs::{File, Metadata};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 
@@ -75,6 +76,7 @@ pub(crate) struct RegisteredNativeAuthHost {
     file: File,
     identity: ExecutableIdentity,
     digest: [u8; 32],
+    entry: Option<PathBuf>,
 }
 
 impl RegisteredNativeAuthHost {
@@ -128,17 +130,38 @@ impl RegisteredNativeAuthHost {
             file,
             identity,
             digest,
+            entry: None,
         })
     }
 
     /// Captures a harness the engine found through a PATH entry: the entry, often a link
     /// into a versioned install, is resolved to its real file now and that file is pinned
-    /// as `capture` pins it. Input: the absolute entry. Output: the host, or
-    /// `native_auth_host_unavailable` when no installed file is behind the entry.
+    /// as `capture` pins it; the entry is kept for `current`. Input: the absolute entry.
+    /// Output: the host, or `native_auth_host_unavailable` when no file is behind the entry.
     pub(crate) fn capture_entry(entry: &Path) -> Result<Self, EngineError> {
         let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
             .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
-        Self::capture(&real)
+        let mut host = Self::capture(&real)?;
+        assert!(host.entry.is_none());
+        host.entry = Some(entry.to_path_buf());
+        Ok(host)
+    }
+
+    /// The host itself while its pinned file still verifies; else, for a host captured
+    /// through a PATH entry, a fresh capture of what the entry leads to now, as after a
+    /// harness update. Input: the shared host. Output: a verified host, the verify error
+    /// for a host with no entry, or `native_auth_host_unavailable` when the entry is gone.
+    pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
+        let stale = match self.verified_path() {
+            Ok(_) => return Ok(self.clone()),
+            Err(stale) => stale,
+        };
+        let Some(entry) = self.entry.as_deref() else {
+            return Err(stale);
+        };
+        let fresh = Self::capture_entry(entry)?;
+        assert_eq!(fresh.entry.as_deref(), Some(entry));
+        Ok(Arc::new(fresh))
     }
 
     /// Returns the captured path while the retained file and the file at that path still
