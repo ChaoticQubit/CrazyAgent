@@ -446,11 +446,12 @@ impl AddFolder {
                 download.progress = Some(*progress);
                 return Flow::Handled;
             }
-            Ok(IntakeView::IcloudDownloaded(_)) => {
+            Ok(IntakeView::IcloudDownloaded(_)) if !stopped => {
                 self.icloud = None;
                 self.downloaded = Some(path.to_owned());
                 return self.proceed(path.to_owned(), mode, ctx);
             }
+            Ok(IntakeView::IcloudDownloaded(_)) => self.problem = Some(ICLOUD_STOPPED.into()),
             Err(code) if stopped && code == "home_icloud_not_downloaded" => {
                 self.problem = Some(ICLOUD_STOPPED.into());
             }

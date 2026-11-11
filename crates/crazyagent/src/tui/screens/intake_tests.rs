@@ -2375,6 +2375,27 @@ fn esc_stops_a_running_download_and_the_folder_is_not_added() {
 }
 
 #[test]
+fn esc_just_before_a_download_ends_still_adds_nothing() {
+    let user = tempfile::tempdir().unwrap();
+    for mode in [AddMode::Copy, AddMode::Move] {
+        let (mut shell, typed) = measured_icloud_folder(user.path(), mode, 2);
+        shell.key(Key::Enter);
+        let (_, cancel) = download_job(&mut shell);
+        shell.key(Key::Esc);
+        assert!(cancel.load(Ordering::Relaxed), "Esc sets the stop flag");
+        shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(2))));
+        let rows = render(&mut shell, 80, 40);
+        assert!(
+            shows(&rows, "The download stopped. Nothing was moved or copied."),
+            "{rows:#?}"
+        );
+        assert!(!shows(&rows, "Copying the folder"), "{rows:#?}");
+        assert!(!shows(&rows, "Press Enter again to move it"), "{rows:#?}");
+        assert!(added_ways(&mut shell, &typed).is_empty(), "{mode:?}");
+    }
+}
+
+#[test]
 fn a_download_the_engine_ends_shows_its_sentence_and_adds_nothing() {
     let user = tempfile::tempdir().unwrap();
     let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 2);
