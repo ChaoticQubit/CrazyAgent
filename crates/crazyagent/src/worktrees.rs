@@ -1547,6 +1547,13 @@ fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError
 
 /// How long a lease check that failed on a read waits before its one more try.
 const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
+/// The codes of a Git command that failed at once, which is no rule of the engine's about
+/// the repository. `git_deadline` is not among them: a Git command that ran out of time
+/// has already held its caller for its whole deadline.
+const GIT_FAST_FAILURES: [&str; 2] = [
+    "git_reader_failed",
+    "git_operation_failed_or_output_capacity",
+];
 /// The most digits of a system error number a lease log line shows.
 const LOGGED_OS_ERROR_DIGITS_MAX: usize = 5;
 /// The most leases whose failed checks one engine run logs.
@@ -1559,19 +1566,19 @@ static LEASE_LOGGED: std::sync::Mutex<LeaseLog> = std::sync::Mutex::new(LeaseLog
     full: false,
 });
 
-/// Whether a lease check failed on a read and not on a rule or on Git. A rule and every
-/// failure of a Git command, its deadline among them, answer a plain code, some with `:`
-/// and a detail; a read answers the system's own words. A Git command that ran out of
-/// time has already held its caller for its whole deadline, so it is never run again.
+/// Whether a lease check failed on a read and not on a rule. A rule answers a plain code,
+/// some with `:` and a detail; a read answers the system's own words or one of
+/// `GIT_FAST_FAILURES`. A Git command that ran out of time, `git_deadline`, counts as
+/// final like a rule, so a stalled Git is never waited for twice.
 /// Input: the failure. Output: the answer.
 fn read_failure(problem: &EngineError) -> bool {
     let code = problem.0.split(':').next().unwrap_or_default();
-    crate::protocol::plain_code(code) != code
+    crate::protocol::plain_code(code) != code || GIT_FAST_FAILURES.contains(&code)
 }
 
 /// Runs one lease check and, when it failed on a read, once more after
-/// `VERIFY_RETRY_WAIT`: the file system fails a read for a moment while Git works, and
-/// that says nothing about the repository. A failure on a rule or of a Git command is
+/// `VERIFY_RETRY_WAIT`: the file system and Git fail a read for a moment while Git works,
+/// and that says nothing about the repository. A failure on a rule or a Git deadline is
 /// never tried again.
 /// Input: the check. Output: nothing, or the last failure and whether a second try ran.
 fn checked(mut check: impl FnMut() -> Result<(), EngineError>) -> Result<(), (EngineError, bool)> {
@@ -3210,10 +3217,16 @@ mod tests {
             run(&[Err(missing), Err("untrusted_git_entry:index.lock")]),
             (Err(("untrusted_git_entry:index.lock".to_owned(), true)), 2)
         );
+        for fast in GIT_FAST_FAILURES {
+            assert_eq!(run(&[Err(fast), Ok(())]), (Ok(()), 2), "{fast}");
+            assert_eq!(
+                run(&[Err(fast), Err(fast)]),
+                (Err((fast.to_owned(), true)), 2),
+                "{fast}"
+            );
+        }
         for rule in [
             "git_deadline",
-            "git_reader_failed",
-            "git_operation_failed_or_output_capacity",
             "untrusted_git_entry:index.lock",
             "git_metadata_capacity",
             "unsupported_shared_or_partial_git_metadata",
