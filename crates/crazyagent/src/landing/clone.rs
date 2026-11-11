@@ -493,6 +493,104 @@ fn alternate_line(repository: &Path) -> Option<String> {
     (!alternate.chars().any(char::is_control)).then(|| format!("{alternate}\n"))
 }
 
+/// Replaces the whole content of a small git pointer file when it holds exactly what the
+/// engine wrote there before: a plain file with one link, read without following a link,
+/// written to a new file beside it and renamed over it. Inputs: the file, the content it
+/// must hold and the content it gets. Output: true once rewritten, false when it already
+/// holds the new content, else `changes_workspace_invalid` with nothing written.
+fn replace_exact(file: &Path, from: &[u8], to: &[u8]) -> Result<bool, EngineError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let found = std::fs::symlink_metadata(file).map_err(|_| invalid())?;
+    if !found.is_file() || found.nlink() != 1 {
+        return Err(invalid());
+    }
+    let held = bounded_read(file, ALTERNATES_BYTES_MAX)?;
+    if held == to {
+        return Ok(false);
+    }
+    if held != from {
+        return Err(invalid());
+    }
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    let beside = file.with_file_name(format!("{name}.crazyagent-move"));
+    let _ = std::fs::remove_file(&beside);
+    let mut written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(found.mode() & 0o777)
+        .open(&beside)
+        .map_err(|_| invalid())?;
+    let stored = written.write_all(to).and_then(|()| written.sync_all());
+    drop(written);
+    if stored.is_err() || std::fs::rename(&beside, file).is_err() {
+        let _ = std::fs::remove_file(&beside);
+        return Err(invalid());
+    }
+    assert_eq!(bounded_read(file, ALTERNATES_BYTES_MAX)?, to);
+    Ok(true)
+}
+
+/// Points an agent's own clone at its project's object store after the project folder
+/// moved or was copied: the one alternates line `add` wrote for the old folder becomes the
+/// line for the new one, whose object folder must be a real folder. No git runs in the
+/// clone. Inputs: the clone's git folder and the old and new owner checkout roots. Output:
+/// true once rewritten, false when it already names the new store, else
+/// `changes_workspace_invalid` for a clone that is not as `add` left it.
+pub(super) fn repoint(git_dir: &Path, from: &Path, to: &Path) -> Result<bool, EngineError> {
+    let objects = git_dir.join("objects");
+    let info = objects.join("info");
+    let store = to.join(".git").join("objects");
+    let folder = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|found| found.is_dir());
+    if ![git_dir, objects.as_path(), info.as_path(), store.as_path()]
+        .into_iter()
+        .all(folder)
+    {
+        return Err(invalid());
+    }
+    let old = alternate_line(from).ok_or_else(invalid)?;
+    let new = alternate_line(to).ok_or_else(invalid)?;
+    replace_exact(&info.join("alternates"), old.as_bytes(), new.as_bytes())
+}
+
+/// Points a linked git worktree and its admin folder at each other after the repository
+/// that holds both moved: the admin folder's `gitdir` file names the worktree's `.git`
+/// file, which names the admin folder. Each is rewritten only when it holds exactly the
+/// old path. Inputs: the admin folder and the worktree where they are now, then where they
+/// were. Output: true once either file was rewritten, false when both already name the
+/// new places, else `changes_workspace_invalid`.
+pub(super) fn repoint_linked(
+    admin: &Path,
+    worktree: &Path,
+    old_admin: &Path,
+    old_worktree: &Path,
+) -> Result<bool, EngineError> {
+    let plain = |path: &Path| {
+        path.to_str()
+            .filter(|text| !text.chars().any(char::is_control))
+            .map(str::to_owned)
+            .ok_or_else(invalid)
+    };
+    let folder = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|found| found.is_dir());
+    if !folder(admin) || !folder(worktree) {
+        return Err(invalid());
+    }
+    let names_worktree = replace_exact(
+        &admin.join("gitdir"),
+        format!("{}/.git\n", plain(old_worktree)?).as_bytes(),
+        format!("{}/.git\n", plain(worktree)?).as_bytes(),
+    )?;
+    let names_admin = replace_exact(
+        &worktree.join(".git"),
+        format!("gitdir: {}\n", plain(old_admin)?).as_bytes(),
+        format!("gitdir: {}\n", plain(admin)?).as_bytes(),
+    )?;
+    Ok(names_worktree || names_admin)
+}
+
 /// Checks, right before git serves the clone, that its object store holds only its own
 /// files and the project's store (DEC102-F1, AL-1): its git, object, info and pack folders
 /// are real folders, its alternates file is a plain file with one link holding exactly the

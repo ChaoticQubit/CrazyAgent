@@ -625,6 +625,7 @@ pub(in crate::tui) enum ProjectReply {
     Usage,
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
+    MoveHome(crate::projects_home::AddMode),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -665,6 +666,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
+    pub confirm_move: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
     pub remove_typed: String,
@@ -748,6 +750,7 @@ impl ProjectScreen {
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
+            confirm_move: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
             remove_typed: String::new(),
@@ -1219,6 +1222,12 @@ impl ProjectScreen {
                 action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
+            SetupQuery::MoveHome { .. } => {
+                self.setup_due = true;
+                if !applied && self.problem.is_none() {
+                    self.problem = Some(plain_problem("change_outcome_unknown"));
+                }
+            }
             SetupQuery::Change {
                 action: SetupAction::SetReadPaths { .. },
                 ..
@@ -1407,6 +1416,7 @@ impl ProjectScreen {
             || self.access.is_some()
             || self.general.is_some()
             || self.confirm_remove
+            || self.confirm_move
             || self.pool_picker.is_some()
             || self.confirm_delete.is_some()
             || self.confirm_stop.is_some()
@@ -1440,6 +1450,9 @@ impl ProjectScreen {
         }
         if self.confirm_remove {
             return self.remove_key(key);
+        }
+        if self.confirm_move {
+            return self.move_key(key);
         }
         if let Some(cursor) = self.pool_picker {
             return self.picker_key(key, cursor);
@@ -2300,6 +2313,25 @@ impl ProjectScreen {
         }
     }
 
+    /// Answers one key in the move ask: m moves the project into the projects home, c copies
+    /// it there, and n or Esc keeps it where it is. Takes the key. Returns the move to send,
+    /// or Handled.
+    fn move_key(&mut self, key: KeyEvent) -> ProjectReply {
+        use crate::projects_home::AddMode;
+        assert!(self.confirm_move);
+        let mode = match key.code {
+            KeyCode::Char('m') => AddMode::Move,
+            KeyCode::Char('c') => AddMode::Copy,
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.confirm_move = false;
+                return ProjectReply::Handled;
+            }
+            _ => return ProjectReply::Handled,
+        };
+        self.confirm_move = false;
+        ProjectReply::MoveHome(mode)
+    }
+
     /// Closes the remove ask and forgets its preview, choice and typed name.
     /// Takes the screen. Returns nothing.
     fn close_remove(&mut self) {
@@ -2419,6 +2451,10 @@ impl ProjectScreen {
                         self.problem = Some("Still loading the agent access. Try again.".into());
                     }
                 }
+                ProjectReply::Handled
+            }
+            KeyCode::Char('m') => {
+                self.confirm_move = true;
                 ProjectReply::Handled
             }
             KeyCode::Char('i') => ProjectReply::Process,
@@ -2743,6 +2779,7 @@ impl ProjectScreen {
             self.access.is_some(),
             self.general.is_some(),
             self.confirm_remove,
+            self.confirm_move,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
         if self.remove_choice == RemoveChoice::Everything {
@@ -2766,6 +2803,7 @@ impl ProjectScreen {
         }
         if self.general.is_some()
             || self.confirm_remove
+            || self.confirm_move
             || self.folders.is_some()
             || self.hidden.is_some()
             || self.access.is_some()
@@ -2943,6 +2981,15 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "stale_revision" => "This project changed since you opened the form. Open it again.",
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
+        "move_project_busy" => {
+            "Stop the team first (Stop all on the Team tab), then move the project. If its agents are still stopping, try again in a few seconds."
+        }
+        code if code.starts_with("move_project_") || code.starts_with("home_") => {
+            return crate::projects_home::plain_problem(code).map_or_else(
+                || coded("That didn't work. Try again.", code),
+                str::to_owned,
+            );
+        }
         _ => return coded("That didn't work. Try again.", code),
     }
     .into()

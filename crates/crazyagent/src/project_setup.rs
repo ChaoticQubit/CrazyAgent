@@ -742,6 +742,11 @@ pub enum SetupQuery {
         project: ProjectId,
         generation: u64,
     },
+    MoveHome {
+        project: ProjectId,
+        mode: crate::projects_home::AddMode,
+        generation: u64,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 

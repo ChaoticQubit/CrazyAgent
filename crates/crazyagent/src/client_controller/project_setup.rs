@@ -335,6 +335,30 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Moves or copies a project kept where it is into the projects home: the engine waits
+    /// for its team to stop, moves the folder and points the project and its agents' copies
+    /// at the new place. Takes the project id, Move or Copy, the soft refusals the owner
+    /// chose to go past and the client generation. Returns the actual owner response; a
+    /// refusal names its plain code.
+    pub async fn move_project_home(
+        &mut self,
+        project_id: ProjectId,
+        mode: crate::projects_home::AddMode,
+        overrides: Vec<crate::projects_home::AddOverride>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
     /// Replaces a project's extra read-only folders for its agents' sandboxes.
     /// Takes the project id, the version the screen showed, the typed folders and the client
     /// generation. Returns the actual owner response; a refused folder is a plain rejection,

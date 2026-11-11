@@ -61,6 +61,7 @@ const REFUSALS: Record<string, string> = {
   changes_git_busy: "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.",
   changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
+  move_project_in_progress: "This project is being moved into your projects folder. Try again when the move is done.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",

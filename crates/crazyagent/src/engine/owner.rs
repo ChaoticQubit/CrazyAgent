@@ -219,6 +219,12 @@ pub enum OwnerMutation {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         overrides: Vec<crate::projects_home::AddOverride>,
     },
+    MoveProjectHome {
+        project_id: ProjectId,
+        mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
+    },
     DeleteProjectFolder {
         path: String,
     },
@@ -477,6 +483,19 @@ impl OwnerMutation {
             } => {
                 let action = crate::projects_home::HomeAction::Added {
                     source: source.clone(),
+                    mode: *mode,
+                    overrides: overrides.clone(),
+                };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveProject {
+                    project_id: project_id.clone(),
                     mode: *mode,
                     overrides: overrides.clone(),
                 };

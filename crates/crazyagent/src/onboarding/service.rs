@@ -328,7 +328,9 @@ const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
 /// and counts the attempt; a row whose pool or draft cannot be read fails with
-/// [`ROW_UNREADABLE`] instead. Returns `None` when nothing waits.
+/// [`ROW_UNREADABLE`] instead. A step of a project whose folder is being moved into the
+/// projects home is not claimed until the move is finished or forgotten. Returns `None`
+/// when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -361,6 +363,11 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
         return Ok(None);
     };
+    if crate::projects_home::project_move_holds(&tx, std::path::Path::new(&repo))
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(None);
+    }
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
     let read = CredentialRef::new(pool)
         .ok()

@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 22] = [
+const COMMANDS: [&str; 23] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -33,6 +33,7 @@ const COMMANDS: [&str; 22] = [
     "desktop_review_memory",
     "desktop_update_project_setup",
     "desktop_remove_project",
+    "desktop_move_project_home",
     "desktop_cancel_research",
     "desktop_retry_research",
     "desktop_plan_roadmap",

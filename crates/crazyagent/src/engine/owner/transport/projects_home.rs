@@ -1,13 +1,15 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
 use crate::projects_home::{
-    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, folder_size,
+    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, Moved, OldSource, Placed,
+    ProjectMove, folder_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
+const OLD_FOLDER_LEFT: &str = "move_project_old_folder_left";
 const SETTLE_TRIES: usize = 3;
 const SETTLE_GAP: Duration = Duration::from_millis(50);
 static EXCHANGES: AtomicU64 = AtomicU64::new(1);
@@ -23,6 +25,7 @@ enum Step {
 enum Work {
     Add(AddPlan),
     Move(MovePlan),
+    MoveProject(ProjectMove),
     New(NewProjectPlan),
     Delete(DeletePlan, Vec<i64>),
 }
@@ -32,25 +35,54 @@ impl Work {
         match self {
             Self::Add(_) => "home_add_interrupted",
             Self::Move(_) => "home_move_interrupted",
+            Self::MoveProject(_) => "move_project_interrupted",
             Self::New(_) => "home_new_project_interrupted",
             Self::Delete(..) => "project_delete_interrupted",
         }
     }
 
-    fn run(self) -> Step {
-        match self {
+    /// Runs the disk work. Output: the step to record and, for a project move, what it
+    /// leaves for after the record.
+    fn run(self) -> (Step, After) {
+        let step = match self {
             Self::Add(plan) => {
                 let source = plan.source().to_path_buf();
                 Step::Record(plan.run().map(|()| Some(source)).map_err(|e| e.0))
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
+            Self::MoveProject(plan) => {
+                let source = plan.source().to_path_buf();
+                return match plan.run().map(Moved::into_parts) {
+                    Ok((placed, landing)) => (
+                        Step::Record(Ok(Some(source))),
+                        After {
+                            old_folder: match placed {
+                                Placed::Whole => None,
+                                Placed::Copied(old) => Some(old),
+                            },
+                            landing: Some(landing),
+                        },
+                    ),
+                    Err(e) => (Step::Record(Err(e.0)), After::default()),
+                };
+            }
             Self::New(plan) => Step::Staged(plan.run()),
             Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
                 let files = plan.engine_files(&research);
                 (plan.database, files)
             })),
-        }
+        };
+        (step, After::default())
     }
+}
+
+/// What a project move's disk work leaves for after its record: the old folder of a move
+/// that went by copy, cleared only once the record is applied, and the landing holds,
+/// dropped once the record was tried.
+#[derive(Default)]
+struct After {
+    old_folder: Option<OldSource>,
+    landing: Option<crate::landing::RepositoryHolds>,
 }
 
 enum Planned {
@@ -59,8 +91,9 @@ enum Planned {
 }
 
 /// True for the owner requests that touch folders outside the engine data:
-/// AddExistingFolder, MoveProjectsHome that moves the projects, SetupProject
-/// (New Project), DeleteProject (Delete everything), FolderSize and ProjectFiles.
+/// AddExistingFolder, MoveProjectsHome that moves the projects, MoveProjectHome,
+/// SetupProject (New Project), DeleteProject (Delete everything), FolderSize and
+/// ProjectFiles.
 /// These run their slow disk work here, off the storage actor, and only then
 /// reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
@@ -72,6 +105,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                     move_projects: true,
                     ..
                 }
+                | OwnerMutation::MoveProjectHome { .. }
                 | OwnerMutation::SetupProject { .. }
                 | OwnerMutation::DeleteProject { .. }
         } | OwnerOperation::Read {
@@ -80,8 +114,8 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
     )
 }
 
-/// Serves AddExistingFolder, MoveProjectsHome, SetupProject and FolderSize
-/// for one owner. Input: the stream, engine, authority, owner packet and
+/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject and
+/// FolderSize for one owner. Input: the stream, engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
 /// the replay check, the plan, a grant check under the owner barrier and, for a
@@ -92,7 +126,14 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// move then sends a settle job for this exchange's pending move, trying again
 /// when that fails: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
-/// is finished from disk, and one whose disk work never ran is forgotten. A Delete
+/// is finished from disk, and one whose disk work never ran is forgotten. A project
+/// move (MoveProjectHome) stops the project's IDE server and refuses its opens from
+/// before its wait for the team until this exchange ends, and is settled the same way
+/// after the reply, a Copy never from disk alone. A project move that went by copy keeps
+/// its whole old folder until the record is applied; only then, outside the barrier, are
+/// the entries its check matched deleted, and when any stays the reply is
+/// `move_project_old_folder_left` for a move that is recorded and complete in the home.
+/// A Delete
 /// everything stops the project's IDE server before its wait and moves, and forgets
 /// its plan before its reply, trying again when that fails, so the reply means projects
 /// home moves may go again; a plan the reply could not reach is forgotten after it.
@@ -127,6 +168,15 @@ pub(super) async fn serve(
             mutation: OwnerMutation::DeleteProject { .. }
         }
     );
+    let moving_project = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::MoveProjectHome { .. }
+        }
+    );
+    #[cfg(unix)]
+    let mut _moved_ide = None;
+    let mut after = After::default();
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -157,10 +207,19 @@ pub(super) async fn serve(
                         }
                         _ => None,
                     };
+                    #[cfg(unix)]
+                    if let Work::MoveProject(plan) = &work {
+                        _moved_ide =
+                            Some(authority.ide_servers.hold_for_delete(plan.project()).await);
+                    }
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
                         .await
-                        .map_err(|_| failure(interrupted));
+                        .map_err(|_| failure(interrupted))
+                        .map(|(step, left)| {
+                            after = left;
+                            step
+                        });
                     (step, Instant::now() + engine.timeout, true)
                 }
                 Ok(Err(code)) => (Ok(Step::Record(Err(code))), deadline, false),
@@ -179,12 +238,32 @@ pub(super) async fn serve(
         _ => None,
     };
     let answer = async {
-        let _barrier = engine.owner_egress.write().await;
-        let result = match authority.authenticate(packet) {
+        let mut barrier = Some(engine.owner_egress.write().await);
+        let mut result = match authority.authenticate(packet) {
             Ok(current) if &current == a => finish(engine, a, request, step).await,
             Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
             Err(e) => Err(e),
         };
+        drop(after.landing.take());
+        if let Some(old) = after.old_folder.take()
+            && matches!(
+                &result,
+                Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
+                    if operation.result == OwnerResult::Applied
+            )
+        {
+            drop(barrier.take());
+            let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
+            barrier = Some(engine.owner_egress.write().await);
+            result = match authority.authenticate(packet) {
+                Ok(current) if &current == a => match cleared {
+                    Ok(Ok(())) => result,
+                    _ => Err(failure(OLD_FOLDER_LEFT)),
+                },
+                Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+                Err(e) => Err(e),
+            };
+        }
         let settled = !matches!(&result, Err(e) if UNSETTLED.contains(&e.0.as_str()));
         if let Some(staging) = staging
             && settled
@@ -197,11 +276,9 @@ pub(super) async fn serve(
                 if operation.result == OwnerResult::Applied && !operation.historical_replay
         );
         let forgotten = deleting && settle_delete(engine, exchange).await;
-        (
-            write_owner_reply(stream, result, id, mutation).await,
-            removed,
-            forgotten,
-        )
+        let written = write_owner_reply(stream, result, id, mutation).await;
+        drop(barrier);
+        (written, removed, forgotten)
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
     if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
@@ -222,6 +299,12 @@ pub(super) async fn serve(
     if moving {
         settled(engine, "projects_home_move_not_settled", |reply| {
             Job::HomeMoveSettle(exchange, ran, reply)
+        })
+        .await;
+    }
+    if moving_project {
+        settled(engine, "project_move_not_settled", |reply| {
+            Job::HomeProjectMoveSettle(exchange, ran, reply)
         })
         .await;
     }
@@ -314,6 +397,30 @@ async fn plan(
                 })
                 .await
                 .map(Work::Move)
+        }
+        OwnerMutation::MoveProjectHome {
+            project_id,
+            mode,
+            overrides,
+        } => {
+            let (project, mode, overrides): (ProjectId, AddMode, Vec<AddOverride>) =
+                (project_id.clone(), *mode, overrides.clone());
+            let id = request.request_id.clone();
+            engine
+                .owner_job(|reply| {
+                    Job::HomeProjectMovePlan(
+                        a.clone(),
+                        expected,
+                        project,
+                        mode,
+                        overrides,
+                        id,
+                        exchange,
+                        reply,
+                    )
+                })
+                .await
+                .map(Work::MoveProject)
         }
         OwnerMutation::DeleteProject { .. } => {
             let request = Box::new(request.clone());

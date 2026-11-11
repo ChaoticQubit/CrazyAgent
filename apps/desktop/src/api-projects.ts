@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -715,6 +715,14 @@ export async function removeProject(id: string, generation: number, deleteName: 
   const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
   if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
   return result;
+}
+
+/** Moves or copies a project kept where it is into the projects folder. The engine waits for
+ * its team to stop, moves the folder and points the project and its agents' copies at the new
+ * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
+ * generation. Output: the receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
 }
 
 export const PAGES_MAX = 50;

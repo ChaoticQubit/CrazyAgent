@@ -91,6 +91,7 @@
     "allow-desktop-terminals-per-window",
     "allow-desktop-update-project-setup",
     "allow-desktop-remove-project",
+    "allow-desktop-move-project-home",
     "allow-desktop-cancel-research",
     "allow-desktop-retry-research",
     "allow-desktop-plan-roadmap",

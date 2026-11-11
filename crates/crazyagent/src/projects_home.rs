@@ -1,16 +1,22 @@
 pub mod icloud;
 mod intake;
 mod layout;
+mod move_project;
+#[cfg(all(test, unix))]
+mod move_tests;
 mod platform;
 mod watch;
 
 pub use intake::{
-    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, copy_tree,
-    folder_size, move_by_copy, verify_tree,
+    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
+    copy_tree, folder_size, move_by_copy, verify_tree,
 };
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
+pub(crate) use move_project::holds as project_move_holds;
+pub(crate) use move_project::{Asked, Finished, finish, forget, pending, plan};
+pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;
@@ -35,6 +41,15 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
+);
+CREATE TABLE IF NOT EXISTS projects_home_project_move (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    exchange INTEGER NOT NULL CHECK(exchange > 0),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
+    target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
@@ -126,7 +141,8 @@ fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), Engin
 
 /// An owner change to the projects home recorded by the engine: picking the
 /// home folder, switching to a new one and optionally moving every project
-/// folder there, or recording a folder the transport moved or copied in.
+/// folder there, recording a folder the transport moved or copied in, or
+/// recording a registered project the transport moved or copied in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HomeAction {
@@ -145,6 +161,12 @@ pub enum HomeAction {
     },
     Trash {
         path: String,
+    },
+    MoveProject {
+        project_id: ProjectId,
+        mode: AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<AddOverride>,
     },
 }
 
@@ -166,6 +188,9 @@ impl HomeAction {
                 check_overrides(*mode, overrides)
             }
             Self::Trash { path } => path_text(path, "home_trash_invalid"),
+            Self::MoveProject {
+                mode, overrides, ..
+            } => check_overrides(*mode, overrides),
         }
     }
 }
@@ -1089,8 +1114,9 @@ pub(crate) fn save(connection: &rusqlite::Connection, home: &Path) -> Result<(),
     Ok(())
 }
 
-/// Tells whether a projects home move recorded before its folders move holds `folder`: one
-/// is pending and the folder is inside its old home, as given or as it resolves now. No
+/// Tells whether a move recorded before its folders move holds `folder`: a projects home
+/// move is pending and the folder is inside its old home, or a project move is pending and
+/// the folder is inside that project's old folder, as given or as it resolves now. No
 /// agent or research run starts there until the move is finished or forgotten.
 /// Input: an engine connection and the folder. Output: the answer, or any SQLite failure.
 pub(crate) fn move_holds(
@@ -1106,6 +1132,9 @@ pub(crate) fn move_holds(
         )
         .optional()?
         .is_some();
+    if move_project::holds(connection, folder)? {
+        return Ok(true);
+    }
     if !present {
         return Ok(false);
     }
@@ -1241,6 +1270,31 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_research_running" => {
             "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved."
+        }
+        "move_project_already_home" => "This project is already in your projects folder.",
+        "move_project_busy" => {
+            "The project is still working: an agent, a research job, onboarding or a change being landed. Stop the team or let it finish, then try again. Nothing was moved."
+        }
+        "move_project_master_session" => {
+            "The project's master has an open session with its own working copy. Close that session, then try again. Nothing was moved."
+        }
+        "move_project_copy_worktrees" => {
+            "Some agents of this project work in git worktrees that a copy would leave behind. Choose Move instead. Nothing was copied."
+        }
+        "move_project_folder_link" => {
+            "This project's folder is reached through a link. Add the real folder to CrazyAgent instead. Nothing was moved."
+        }
+        "move_project_in_progress" => {
+            "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "move_project_old_folder_left" => {
+            "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself."
+        }
+        "move_project_unavailable" => {
+            "The engine could not check the project's agents. Nothing was moved."
+        }
+        "move_project_interrupted" => {
+            "The move stopped part way. Check the project folder before trying again."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",

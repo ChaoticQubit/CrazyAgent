@@ -404,6 +404,32 @@ pub const BRANCH_BYTES_MAX: usize = 255;
 /// before it fails.
 pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 
+/// The landing holds on owner repositories that a project move keeps from its last check
+/// of the project's work until the move is recorded, so no landing work reads or writes
+/// the folder while it moves. Dropping it lets landing work start again.
+#[derive(Debug)]
+pub(crate) struct RepositoryHolds {
+    _held: Vec<flow::Held>,
+}
+
+/// Takes the landing hold on each repository, in path order, waiting no longer than
+/// `wait` in all for landing work already running there. Inputs: the repository roots and
+/// the wait. Output: the holds, or none (with nothing held) when the work did not end in
+/// time.
+pub(crate) fn hold_repositories(
+    repositories: &std::collections::BTreeSet<PathBuf>,
+    wait: Duration,
+) -> Option<RepositoryHolds> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut held = Vec::with_capacity(repositories.len());
+    for repository in repositories {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        held.push(flow::hold_within(repository, left)?);
+    }
+    assert_eq!(held.len(), repositories.len());
+    Some(RepositoryHolds { _held: held })
+}
+
 const SUBJECT_CHARS_MAX: usize = 48;
 const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
 
@@ -619,6 +645,44 @@ pub fn add_agent_clone_on(
     #[cfg(not(unix))]
     {
         let _ = (repository, worktree, base, branch);
+        Err(unavailable())
+    }
+}
+
+/// Points an agent's own clone at its project's object store after the project folder
+/// moved or was copied into the projects home, so its commits not landed yet stay
+/// readable. Inputs: the clone's git folder and the old and new owner checkout roots.
+/// Output: true once rewritten, false when it already names the new store, else
+/// `changes_workspace_invalid` for a clone that is not as the engine left it.
+pub(crate) fn repoint_agent_clone(
+    git_dir: &Path,
+    from: &Path,
+    to: &Path,
+) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return clone::repoint(git_dir, from, to);
+    #[cfg(not(unix))]
+    {
+        let _ = (git_dir, from, to);
+        Err(unavailable())
+    }
+}
+
+/// Points an agent's linked git worktree and its admin folder at each other after the
+/// repository that holds both moved. Inputs: the admin folder and the worktree where they
+/// are now, then where they were. Output: true once either pointer was rewritten, false
+/// when both already name the new places, else `changes_workspace_invalid`.
+pub(crate) fn repoint_linked_worktree(
+    admin: &Path,
+    worktree: &Path,
+    old_admin: &Path,
+    old_worktree: &Path,
+) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return clone::repoint_linked(admin, worktree, old_admin, old_worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = (admin, worktree, old_admin, old_worktree);
         Err(unavailable())
     }
 }
