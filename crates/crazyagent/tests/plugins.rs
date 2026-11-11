@@ -869,7 +869,8 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
 
 /// On Linux a configured local model port inside the range the kernel hands out by itself
 /// cannot be kept free, since a listener's automatic port may land on it, so the check is
-/// refused and the server never listens anywhere (LPF1-M1, REL220-F1).
+/// refused, the owner reads the port and the range in the refusal, and the server never
+/// listens anywhere (LPF1-M1, REL220-F1, REL220-F3).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_server_check_is_refused_on_linux_when_the_kept_port_lies_where_the_kernel_picks() {
@@ -898,10 +899,19 @@ async fn a_server_check_is_refused_on_linux_when_the_kept_port_lies_where_the_ke
         .await
         .unwrap();
     let checked = check(&controller, server.id.clone()).await.unwrap();
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let mut picked = range.split_ascii_whitespace();
+    let (low, high) = (picked.next().unwrap(), picked.next().unwrap());
+    let problem = checked.problem.as_deref().unwrap_or_default();
     assert!(
-        checked.problem.is_some(),
-        "a kept port the kernel may hand out refuses the check: {:?}",
-        checked.tools
+        problem.starts_with(&format!(
+            "CrazyAgent did not run the check: port {kept} is kept free"
+        )),
+        "a kept port the kernel may hand out refuses the check, naming the port: {problem:?}"
+    );
+    assert!(
+        problem.contains(&format!("hands out ports {low} to {high} by itself")),
+        "the refusal names the range the port lies in: {problem:?}"
     );
     assert!(
         !checked
