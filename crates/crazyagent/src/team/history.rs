@@ -39,7 +39,6 @@ const ROWS_MAX: usize = 20_000;
 const AGENTS_MAX: usize = 1024;
 #[cfg(unix)]
 const DEPTH_MAX: usize = 5;
-#[cfg(unix)]
 const VISITS_MAX: usize = 50_000;
 #[cfg(unix)]
 const RECORD_FOLDER: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY

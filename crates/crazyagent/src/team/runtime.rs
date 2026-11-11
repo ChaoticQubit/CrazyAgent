@@ -1962,7 +1962,10 @@ impl TeamRuntime {
             .zip(AgentId::team(lead).ok())
             .and_then(|(root, lead)| crate::terminal::teammates_socket(root, &lead).ok()));
         #[cfg(not(unix))]
-        Ok(None)
+        {
+            let _ = lead;
+            Ok(None)
+        }
     }
 
     /// Marks stopped each native teammate whose end a thread finished since the last call,
