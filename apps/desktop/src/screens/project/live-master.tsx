@@ -99,13 +99,24 @@ export function idleStopped(team: Result<TeamStatus> | undefined, projectId: str
  * Live master account: Move when idle (DEC-139). */
 const MOVED_START = "The live master moved to the account";
 
+/** How long the move line stays after the engine wrote its note, in milliseconds: the engine's
+ * own wait before a project's next move, so the line ends before another move can follow. */
+const MOVED_SHOWN_MS = 15 * 60 * 1000;
+
+/** How often the master area reads the clock again, in milliseconds, so the move line ends
+ * with no new team read. */
+const CLOCK_MS = 30_000;
+
 /** The line the master area shows after the engine moved the live master to another account:
- * the engine's own note while it is the newest thing the engine said to the team. Inputs: the
- * latest team status read and the project shown. Output: the note, or null. */
-export function movedNote(team: Result<TeamStatus> | undefined, projectId: string): string | null {
+ * the engine's own note while it is the newest thing the engine said to the team and younger
+ * than `MOVED_SHOWN_MS`. A note written after the clock was last read shows. Inputs: the latest
+ * team status read, the project shown and the time now in milliseconds. Output: the note, or
+ * null. */
+export function movedNote(team: Result<TeamStatus> | undefined, projectId: string, now: number): string | null {
   if (team?.kind !== "ok" || team.value.project_id !== projectId) return null;
   const last = team.value.messages.filter((message) => message.author === "engine" && message.state === "note").at(-1);
-  return last?.text.startsWith(MOVED_START) ? last.text : null;
+  if (last === undefined || !last.text.startsWith(MOVED_START)) return null;
+  return now - last.created_ms < MOVED_SHOWN_MS ? last.text : null;
 }
 
 /** Whether the engine says this project's Live terminal setting is Off (DEC-117 Q4). Inputs:
@@ -391,7 +402,12 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
   const waits = liveSwitch(data.team.result, data.id)?.problem ?? null;
-  const moved = live.kind === "running" ? movedNote(data.team.result, data.id) : null;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), CLOCK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+  const moved = live.kind === "running" ? movedNote(data.team.result, data.id, now) : null;
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
   const startTeam = async () => {

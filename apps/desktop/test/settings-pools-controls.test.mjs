@@ -220,7 +220,7 @@ const LIVE_LABEL = "Live master account";
 const LIVE = `[role="radiogroup"][aria-label="${LIVE_LABEL}"] [role="radio"]`;
 const LIVE_HINT = `Fixture.wordsOf(${JSON.stringify(`section[aria-label="${LIVE_LABEL}"] .pool-app-hint`)})`;
 const KEEP_HINT = "A live master stays on the account it started on until it restarts.";
-const MOVE_HINT = "An idle live master moves to its pool's top account and starts again there.";
+const MOVE_HINT = "An idle live master moves to its pool's top account once that account is clearly first (under Balanced: at least 5 points less weekly use), at most once every 15 minutes. The conversation carries over, as a summary unless both accounts are subscriptions.";
 
 test("Live master account reads Keep start account until the owner picks another, under the order card", async () => {
   const seen = await onPools({}, async (page) => ({ checked: await checked(page, LIVE_LABEL), hint: await page.evaluate(LIVE_HINT), options: await page.evaluate(`Fixture.optionsOf(${JSON.stringify(LIVE_LABEL)})`), cards: await page.evaluate("[...document.querySelectorAll('.pool-app-order h3')].map((head) => head.textContent)"), sent: await sent(page) }));

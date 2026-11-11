@@ -16,7 +16,7 @@ const SETTING = "Live master account";
 const KEEP = "Keep start account";
 const MOVE = "Move when idle";
 const KEEP_HINT = "A live master stays on the account it started on until it restarts.";
-const MOVE_HINT = "An idle live master moves to its pool's top account and starts again there.";
+const MOVE_HINT = "An idle live master moves to its pool's top account once that account is clearly first (under Balanced: at least 5 points less weekly use), at most once every 15 minutes. The conversation carries over, as a summary unless both accounts are subscriptions.";
 const MOVED = "[data-testid=master-moved]";
 const MOVED_LINE = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const MASTER = "#ps-master-harness";

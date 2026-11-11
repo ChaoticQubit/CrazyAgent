@@ -23,7 +23,7 @@ const LIVE_MASTER_LABEL = "Live master account";
  * words, with what each pick does. The first is the default. */
 const LIVE_MASTER: { value: LiveMasterAccount; label: string; hint: string }[] = [
   { value: "keep", label: "Keep start account", hint: "A live master stays on the account it started on until it restarts." },
-  { value: "move_when_idle", label: "Move when idle", hint: "An idle live master moves to its pool's top account and starts again there." },
+  { value: "move_when_idle", label: "Move when idle", hint: "An idle live master moves to its pool's top account once that account is clearly first (under Balanced: at least 5 points less weekly use), at most once every 15 minutes. The conversation carries over, as a summary unless both accounts are subscriptions." },
 ];
 
 /** One change an owner made: a schedule change, built from the schedule as it stands, with the
