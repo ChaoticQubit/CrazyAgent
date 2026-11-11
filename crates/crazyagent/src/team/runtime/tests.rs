@@ -21828,8 +21828,9 @@ fn an_endpoint_agent_under_no_network_gets_a_proxy_only_for_its_named_https_endp
 
 /// A kept pane an earlier engine left running gets its model proxy back on the port its
 /// record and profile name, with its account's hosts, and closes with the engine; a pane
-/// whose saved port another process took ends with the reason, since its profile reaches
-/// no other port (S4b).
+/// whose saved port another process took, or whose saved port is not one of the model proxy
+/// ports, ends with the reason and no listener on that port, since its profile reaches no
+/// other port (S4b, LPF1-L2).
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
@@ -21853,11 +21854,10 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         .unwrap()
     };
     let free = || {
-        crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        let model = ModelHost::new("models.crazyagent.test", 443).unwrap();
+        let port = ModelProxy::bind(7, vec![model], None, &[]).unwrap().port();
+        assert!(crate::sandbox::model_proxy::PROXY_PORTS.contains(&port));
+        port
     };
 
     let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
@@ -21893,8 +21893,8 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     host.kill(&AgentId::team(kept).unwrap()).unwrap();
 
     let taken = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
-    let holder = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
-    let held = holder.local_addr().unwrap().port();
+    let held = free();
+    let holder = crate::spawn_gate::bind_tcp_std(("127.0.0.1", held)).unwrap();
     let record = PaneRecord {
         proxy: Some(held),
         ..fixture.pane(&host, taken)
@@ -21911,6 +21911,30 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         "The terminal of team agent {taken} was closed: its model proxy port {held} is taken."
     )));
     assert!(again.shutdown().unwrap().is_empty());
+    drop(holder);
+
+    let old = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let outside = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert!(!crate::sandbox::model_proxy::PROXY_PORTS.contains(&outside));
+    let record = PaneRecord {
+        proxy: Some(outside),
+        ..fixture.pane(&host, old)
+    };
+    fixture.keep(old, &record);
+    let mut last = open().with_terminal(host.clone()).unwrap();
+    assert!(!host.alive().unwrap().contains(&AgentId::team(old).unwrap()));
+    assert!(fixture.note(&format!(
+        "The terminal of team agent {old} was closed: its model proxy port {outside} is outside the ports CrazyAgent uses now."
+    )));
+    assert!(
+        crate::spawn_gate::connect_tcp_std(("127.0.0.1", outside)).is_err(),
+        "a model proxy listens on {outside}"
+    );
+    assert!(last.shutdown().unwrap().is_empty());
     host.close(&[]).unwrap();
 }
 

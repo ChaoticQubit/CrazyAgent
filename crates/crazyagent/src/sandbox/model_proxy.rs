@@ -217,7 +217,8 @@ impl std::fmt::Debug for ModelProxy {
 impl ModelProxy {
     /// Starts one agent's proxy on 127.0.0.1 and ::1, on `port` when a kept pane needs the
     /// port its profile names again, otherwise on a [`PROXY_PORTS`] port that no socket holds
-    /// and that is none of `kept`, or refuses with `AddrInUse` when there is none. Inputs:
+    /// and that is none of `kept`, or refuses with `AddrInUse` when there is none and with
+    /// `InvalidInput` when `port` is not one of [`PROXY_PORTS`]. Inputs:
     /// the agent id its refusal lines name, its hosts (1 to `HOSTS_MAX`), the port and the
     /// owner's model ports. Output: the running proxy, or the bind error.
     pub fn bind(
@@ -261,6 +262,7 @@ impl ModelProxy {
         let listeners = loopback_pair(port, kept)?;
         let bound = listeners[0].local_addr()?.port();
         assert!(bound != 0 && port.is_none_or(|port| port == bound));
+        assert!(PROXY_PORTS.contains(&bound));
         assert!(port.is_some() || !kept.contains(&bound));
         for listener in &listeners {
             let address = listener.local_addr()?;
@@ -301,10 +303,17 @@ static NEXT_PROXY_PORT: AtomicUsize = AtomicUsize::new(0);
 /// Binds 127.0.0.1 and ::1 on one port: `port` when given, with `std`'s bind so a restarted
 /// engine binds its saved port while the old tunnels' connections sit in TIME_WAIT,
 /// otherwise the [`free_pair`] of [`PROXY_PORTS`] from a start that moves with each proxy and
-/// process. Inputs: the port and the owner's model ports. Output: the two listeners,
-/// 127.0.0.1 first, or the bind error.
+/// process. A given port outside [`PROXY_PORTS`] is refused with `InvalidInput` and binds
+/// nothing, since no sandbox keeps agents off it. Inputs: the port and the owner's model
+/// ports. Output: the two listeners, 127.0.0.1 first, or the bind error.
 fn loopback_pair(port: Option<u16>, kept: &[u16]) -> io::Result<[TcpListener; 2]> {
     if let Some(port) = port {
+        if !PROXY_PORTS.contains(&port) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a saved model proxy port outside the model proxy ports",
+            ));
+        }
         return bound_pair(port, spawn_gate::bind_tcp_std);
     }
     let block: Vec<u16> = PROXY_PORTS.collect();
