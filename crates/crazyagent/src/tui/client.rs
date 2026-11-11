@@ -1253,6 +1253,7 @@ impl NativeOwner {
                 sessions,
                 known,
                 before,
+                opened,
             } => {
                 let result = match self.master_controller(&context.identity) {
                     Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
@@ -1266,6 +1267,7 @@ impl NativeOwner {
                                 sessions,
                                 &known,
                                 before,
+                                opened.as_ref(),
                             )
                             .await
                             {

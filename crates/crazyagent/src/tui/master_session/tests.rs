@@ -197,3 +197,54 @@ fn a_session_with_more_stored_messages_than_the_client_keeps_never_counts_as_who
         "the newest rows are the ones kept"
     );
 }
+
+#[test]
+fn an_opened_session_shows_the_rows_it_holds_before_its_first_message_is_read() {
+    let session = SessionId::new("session-1").unwrap();
+    let mut state = State::default();
+    assert_eq!(state.opened_messages(), None);
+    state.open_messages(Some(session.clone()));
+    assert_eq!(state.opened_messages(), None, "no read arrived yet");
+    assert_eq!(state.opened_stored.wanted(), None);
+
+    state.opened_stored.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(5..=6),
+            newest_next: Some(5),
+            older: None,
+        },
+    );
+    assert_eq!(
+        state.opened_messages(),
+        Some((stored_rows(5..=6).as_slice(), false)),
+        "the newest rows show while older ones are still read"
+    );
+    assert_eq!(state.opened_stored.wanted(), Some(5));
+    state.opened_stored.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(5..=6),
+            newest_next: Some(5),
+            older: Some((5, stored_rows(1..=4), None)),
+        },
+    );
+    assert_eq!(
+        state.opened_messages(),
+        Some((stored_rows(1..=6).as_slice(), true))
+    );
+
+    state.open_messages(Some(session.clone()));
+    assert!(
+        state.opened_messages().is_some(),
+        "opening the same session again keeps its rows"
+    );
+    state.open_messages(Some(SessionId::new("session-2").unwrap()));
+    assert_eq!(
+        state.opened_messages(),
+        None,
+        "another session starts empty"
+    );
+    state.open_messages(None);
+    assert_eq!(state.opened_messages(), None);
+}

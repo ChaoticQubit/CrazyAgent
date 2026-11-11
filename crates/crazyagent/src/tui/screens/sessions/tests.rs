@@ -21,6 +21,28 @@ fn session(
         line: line.into(),
         agents: agents.iter().map(|name| (*name).to_owned()).collect(),
         waiting,
+        count: 0,
+        ran: None,
+        first: None,
+    }
+}
+
+/// One stored message for the rows about an opened session. Inputs: its sequence number,
+/// who said it, the master mode, the stored harness and its text, if any. Output: the row.
+fn stored(
+    seq: u64,
+    speaker: MessageSpeaker,
+    mode: MasterMode,
+    harness: &str,
+    text: Option<&str>,
+) -> SessionMessage {
+    SessionMessage {
+        seq,
+        speaker,
+        mode,
+        harness: Some(harness.into()),
+        text: text.map(str::to_owned),
+        at_ms: 1_000,
     }
 }
 
@@ -94,12 +116,18 @@ fn the_list_and_header_draw_every_session_at_80_and_120_columns() {
         let drawn = texts(&body);
         assert_eq!(drawn[0], "Sessions  3");
         assert_eq!(drawn[1], "");
-        assert_eq!(&drawn[2..], rows);
+        assert_eq!(&drawn[2..5], rows);
+        assert_eq!(
+            &drawn[5..],
+            ["", "  No messages yet"],
+            "the chosen session's count shows under the list"
+        );
         assert_eq!(
             help,
             vec![
                 ("\u{2191}\u{2193}", "Move"),
                 ("Enter", "Resume"),
+                ("m", "Messages"),
                 ("d", "Delete"),
                 ("n", "New session"),
                 ("Esc", "Back")
@@ -280,7 +308,7 @@ fn the_list_waits_for_its_read_follows_its_cursor_and_keeps_every_key() {
         drawn[3].starts_with("> Parked  earlier"),
         "the cursor stays on its session: {drawn:?}"
     );
-    assert_eq!(drawn.len(), 5);
+    assert_eq!(drawn.len(), 7, "three sessions and the chosen one's detail");
 
     let many: Vec<SessionRow> = (0..50)
         .map(|index| {
@@ -301,9 +329,10 @@ fn the_list_waits_for_its_read_follows_its_cursor_and_keeps_every_key() {
     let drawn = texts(&sessions.view(76, 8, NOW, 0, &look).unwrap().0);
     assert_eq!(drawn.len(), 8);
     assert!(
-        drawn[7].starts_with("> Parked  11:00         Session 49"),
+        drawn[5].starts_with("> Parked  11:00         Session 49"),
         "{drawn:?}"
     );
+    assert_eq!(&drawn[6..], ["", "  No messages yet"]);
     sessions.set(Vec::new());
     assert_eq!(
         texts(&sessions.view(76, 8, NOW, 0, &look).unwrap().0)[2],
@@ -390,5 +419,225 @@ fn d_asks_before_deleting_a_session_that_is_not_live_and_n_keeps_it() {
         SessionsReply::Act(SessionsAction::Delete {
             session: "s2".into()
         })
+    );
+}
+
+#[test]
+fn the_chosen_session_shows_its_count_the_master_that_ran_it_last_and_its_first_and_newest_line() {
+    use crate::protocol::{Cursor, SessionId};
+    let summary = |id: &str, phase, turns, first: Option<&str>, last: Option<&str>, ran| {
+        let (mode, harness): (Option<MasterMode>, Option<&str>) = ran;
+        MasterSessionSummary {
+            session_id: SessionId::new(id).unwrap(),
+            phase,
+            created: Cursor::new(3),
+            last_activity: Cursor::new(5),
+            started_ms: None,
+            active_ms: None,
+            turns,
+            first_line: first.map(str::to_owned),
+            last_line: last.map(str::to_owned),
+            agents: Vec::new(),
+            results_waiting: 0,
+            mode,
+            harness: harness.map(str::to_owned),
+        }
+    };
+    let rows = rows_of(&[
+        summary(
+            "live",
+            MasterSessionPhase::Configured,
+            15,
+            Some("Plan the launch"),
+            Some("Launch shipped"),
+            (Some(MasterMode::Live), Some("claude-code")),
+        ),
+        summary(
+            "old",
+            MasterSessionPhase::Parked,
+            1,
+            Some("Fix the login"),
+            Some("Fix the login"),
+            (Some(MasterMode::OneTurn), Some("rcli")),
+        ),
+        summary(
+            "new",
+            MasterSessionPhase::Parked,
+            0,
+            None,
+            None,
+            (None, None),
+        ),
+    ]);
+    assert_eq!(
+        (
+            rows[0].count,
+            rows[0].ran.as_deref(),
+            rows[0].first.as_deref()
+        ),
+        (15, Some("Claude Code"), Some("Plan the launch"))
+    );
+    assert_eq!(rows[0].line, "Launch shipped");
+    assert_eq!(
+        (
+            rows[1].count,
+            rows[1].ran.as_deref(),
+            rows[1].first.as_deref()
+        ),
+        (1, Some("One-turn master (RCLI)"), None),
+        "one line is shown once"
+    );
+    assert_eq!((rows[2].count, rows[2].ran.as_deref()), (0, None));
+
+    let look = Look::plain();
+    let mut sessions = Sessions::default();
+    sessions.key(press(KeyCode::Char('l')), true, false);
+    sessions.set(rows);
+    let drawn = texts(&sessions.view(76, 12, NOW, 0, &look).unwrap().0);
+    assert_eq!(
+        &drawn[5..],
+        [
+            "",
+            "  15 messages, last run by Claude Code",
+            "  First: Plan the launch",
+            "  Last: Launch shipped",
+        ]
+    );
+    sessions.key(press(KeyCode::Down), true, false);
+    let drawn = texts(&sessions.view(76, 12, NOW, 0, &look).unwrap().0);
+    assert_eq!(
+        &drawn[5..],
+        ["", "  1 message, last run by One-turn master (RCLI)"]
+    );
+    let tight = texts(&sessions.view(76, 4, NOW, 0, &look).unwrap().0);
+    assert_eq!(
+        tight.len(),
+        4,
+        "a short list keeps its rows for the sessions"
+    );
+    assert!(tight[2].starts_with("  Live"), "{tight:?}");
+
+    assert_eq!(ran_by(MasterMode::Live, Some("codex")), "Codex");
+    assert_eq!(ran_by(MasterMode::Live, Some("claude")), "Claude Code");
+    assert_eq!(ran_by(MasterMode::Live, None), "Live master");
+    assert_eq!(
+        ran_by(MasterMode::OneTurn, Some("claude")),
+        "One-turn master (Claude)"
+    );
+    assert_eq!(
+        ran_by(MasterMode::OneTurn, Some("codex")),
+        "One-turn master (Codex)"
+    );
+    assert_eq!(ran_by(MasterMode::OneTurn, None), "One-turn master");
+}
+
+#[test]
+fn m_opens_the_chosen_session_s_stored_messages_and_esc_goes_back_to_the_list() {
+    use MasterMode::{Live, OneTurn};
+    use MessageSpeaker::{Engine, Master, Owner, Switch};
+    let look = Look::plain();
+    let mut sessions = opened();
+    assert_eq!(sessions.reading(), None);
+    sessions.key(press(KeyCode::Down), true, false);
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('m')), true, false),
+        SessionsReply::Handled
+    );
+    assert_eq!(
+        sessions.reading(),
+        Some("s2"),
+        "the host reads this session"
+    );
+    assert!(sessions.showing());
+    let (body, help) = sessions.view(76, 12, NOW, 0, &look).unwrap();
+    assert_eq!(
+        texts(&body),
+        [
+            "Messages  session from 26 h ago, No messages yet",
+            "",
+            "Reading the messages..."
+        ]
+    );
+    assert_eq!(help, vec![("\u{2191}\u{2193}", "Scroll"), ("Esc", "Back")]);
+
+    let switched = "Switched to Claude Code. The conversation continues.";
+    let rows = [
+        stored(1, Owner, OneTurn, "rcli", Some("Plan the launch.")),
+        stored(2, Master, OneTurn, "rcli", Some("Launch planned.")),
+        stored(3, Switch, Live, "claude-code", Some(switched)),
+        stored(4, Owner, Live, "claude-code", None),
+        stored(5, Master, Live, "claude-code", Some("Launch shipped.")),
+        stored(6, Engine, Live, "claude-code", Some("A result came in.")),
+        stored(7, Master, Live, "claude-code", None),
+    ];
+    sessions.set_messages(Some((&rows[..], true)));
+    let (body, _) = sessions.view(76, 20, NOW, 0, &look).unwrap();
+    assert!(body.iter().all(|row| row.width() <= 76));
+    assert_eq!(
+        &texts(&body)[2..],
+        [
+            "You",
+            "  Plan the launch.",
+            "One-turn master (RCLI)",
+            "  Launch planned.",
+            switched,
+            TYPED_IN_TERMINAL,
+            "Claude Code",
+            "  Launch shipped.",
+            "CrazyAgent",
+            "  A result came in.",
+        ]
+    );
+
+    let (short, _) = sessions.view(76, 5, NOW, 0, &look).unwrap();
+    assert_eq!(
+        &texts(&short)[2..],
+        ["  Launch shipped.", "CrazyAgent", "  A result came in."],
+        "the newest messages show first"
+    );
+    sessions.key(press(KeyCode::Up), true, false);
+    sessions.key(press(KeyCode::Up), true, false);
+    let (up, _) = sessions.view(76, 5, NOW, 0, &look).unwrap();
+    assert_eq!(
+        &texts(&up)[2..],
+        [TYPED_IN_TERMINAL, "Claude Code", "  Launch shipped."]
+    );
+    for _ in 0..40 {
+        sessions.key(press(KeyCode::PageUp), true, false);
+    }
+    let (top, _) = sessions.view(76, 5, NOW, 0, &look).unwrap();
+    assert_eq!(
+        &texts(&top)[2..],
+        ["You", "  Plan the launch.", "One-turn master (RCLI)"],
+        "scrolling stops at the first message"
+    );
+
+    sessions.set_messages(Some((&rows[5..], false)));
+    let (part, _) = sessions.view(76, 20, NOW, 0, &look).unwrap();
+    assert_eq!(texts(&part)[2], "Reading earlier messages...");
+    sessions.set_messages(Some((&rows[..0], true)));
+    let (none, _) = sessions.view(76, 20, NOW, 0, &look).unwrap();
+    assert_eq!(texts(&none)[2], "No stored messages in this session.");
+
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('d')), true, false),
+        SessionsReply::Handled,
+        "no list key acts while the messages show"
+    );
+    assert_eq!(
+        sessions.key(press(KeyCode::Esc), true, false),
+        SessionsReply::Handled
+    );
+    assert_eq!(sessions.reading(), None);
+    let (list, _) = sessions.view(76, 12, NOW, 0, &look).unwrap();
+    assert_eq!(texts(&list)[0], "Sessions  3", "Esc goes back to the list");
+
+    sessions.key(press(KeyCode::Char('m')), true, false);
+    assert_eq!(sessions.reading(), Some("s2"));
+    sessions.set(vec![session("s3", true, Some(NOW), "Only one", &[], 0)]);
+    assert_eq!(
+        sessions.reading(),
+        None,
+        "a session the engine no longer lists is closed"
     );
 }

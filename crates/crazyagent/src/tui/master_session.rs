@@ -83,6 +83,7 @@ pub(super) enum Job {
         sessions: bool,
         known: Vec<Cursor>,
         before: Option<u64>,
+        opened: Option<(SessionId, Option<u64>)>,
     },
     Mutation {
         submission: Submission,
@@ -171,6 +172,13 @@ impl Stored {
         }
     }
 
+    /// The rows held for `session`, oldest first, and whether they start at its first
+    /// message. Input: the session. Output: none before a read of that session arrived.
+    fn held(&self, session: &SessionId) -> Option<(&[SessionMessage], bool)> {
+        (self.read && self.session.as_ref() == Some(session))
+            .then(|| (self.rows.as_slice(), self.older.is_none()))
+    }
+
     /// Every stored message of `session`, oldest first. Input: the session in view.
     /// Output: the rows, or none unless the client holds that session from its first
     /// message on.
@@ -221,6 +229,7 @@ pub(super) struct View {
     inputs: Vec<ConversationEntry>,
     sessions: Option<Vec<MasterSessionSummary>>,
     stored: Option<StoredRead>,
+    opened: Option<(SessionId, StoredRead)>,
 }
 
 struct Form {
@@ -272,6 +281,8 @@ pub(super) struct State {
     registered_home: Option<RegisteredHome>,
     sessions_shown: bool,
     stored: Stored,
+    opened: Option<SessionId>,
+    opened_stored: Stored,
     pub notice: String,
 }
 
@@ -296,6 +307,8 @@ impl Default for State {
             registered_home: None,
             sessions_shown: false,
             stored: Stored::default(),
+            opened: None,
+            opened_stored: Stored::default(),
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
         }
@@ -1010,6 +1023,24 @@ impl State {
         }
     }
 
+    /// Opens one session of the project for reading its stored messages, or closes the one
+    /// open. While one is open each master read also reads its messages, newest first, then
+    /// one older page a read. Input: the session, or none to close.
+    pub fn open_messages(&mut self, session: Option<SessionId>) {
+        if self.opened != session {
+            self.opened = session;
+            self.opened_stored = Stored::default();
+            self.next_read = Instant::now();
+        }
+    }
+
+    /// The stored messages held for the session the owner opened, oldest first, and
+    /// whether they start at its first message. Output: none while no session is open or
+    /// before its first read arrived.
+    pub fn opened_messages(&self) -> Option<(&[SessionMessage], bool)> {
+        self.opened_stored.held(self.opened.as_ref()?)
+    }
+
     /// The project's sessions as last read, live one included, newest activity first.
     /// Output: None while the list is hidden or before its first read.
     pub fn sessions(&self) -> Option<&[MasterSessionSummary]> {
@@ -1100,6 +1131,10 @@ impl State {
             sessions: self.sessions_shown,
             known,
             before: self.stored.wanted(),
+            opened: self
+                .opened
+                .clone()
+                .map(|session| (session, self.opened_stored.wanted())),
         })
     }
 
@@ -1195,6 +1230,11 @@ impl State {
                         }
                         (Some(_), None) => {}
                         (None, _) => self.stored = Stored::default(),
+                    }
+                    if let Some((session, read)) = view.opened.take()
+                        && self.opened.as_ref() == Some(&session)
+                    {
+                        self.opened_stored.take(&session, read);
                     }
                     self.view = Some(view);
                 }
@@ -2420,6 +2460,7 @@ pub(super) async fn read_view(
     sessions: bool,
     known: &[Cursor],
     before: Option<u64>,
+    opened: Option<&(SessionId, Option<u64>)>,
 ) -> Result<View, String> {
     let state = controller
         .read(OwnerRead::ProjectMaster {
@@ -2439,6 +2480,7 @@ pub(super) async fn read_view(
         inputs: Vec::new(),
         sessions: None,
         stored: None,
+        opened: None,
     };
     if let Some(session) = &view.session {
         if session.project_id != context.project
@@ -2464,7 +2506,12 @@ pub(super) async fn read_view(
             (&view.revision, &state.config_id),
         )
         .await?;
-        view.stored = read_stored(controller, context, session, before).await?;
+        view.stored = read_stored(controller, context, &session.session_id, before).await?;
+    }
+    if let Some((session_id, before)) = opened {
+        view.opened = read_stored(controller, context, session_id, *before)
+            .await?
+            .map(|read| (session_id.clone(), read));
     }
     if let Some(confirmation) = confirmation
         && let MasterOwnerAction::Submit { .. } = confirmation.submission.action
@@ -2484,14 +2531,14 @@ pub(super) async fn read_view(
     Ok(view)
 }
 
-/// Reads the stored messages of the session in view: its newest page, and the page below
-/// `before` when the client asks for older ones. Inputs: the controller, context, session
-/// and the cursor. Output: the read; none when the engine gave no page, so the view shows
-/// its turns alone; or the problem of a page that is not of this session.
+/// Reads the stored messages of one session of the project: its newest page, and the page
+/// below `before` when the client asks for older ones. Inputs: the controller, context,
+/// session id and the cursor. Output: the read; none when the engine gave no page, so the
+/// view shows its turns alone; or the problem of a page that is not of this session.
 async fn read_stored(
     controller: &mut OwnerController,
     context: &Context,
-    session: &MasterSessionView,
+    session: &SessionId,
     before: Option<u64>,
 ) -> Result<Option<StoredRead>, String> {
     let Some((newest, newest_next)) = stored_page(controller, context, session, None).await? else {
@@ -2511,19 +2558,19 @@ async fn read_stored(
 }
 
 /// Reads one page of a session's stored messages. Inputs: the controller, context,
-/// session and the sequence number to read below, or none for the newest page. Output:
+/// session id and the sequence number to read below, or none for the newest page. Output:
 /// the rows, oldest first, with the cursor of the page before them; none when the read
 /// itself failed; or the problem of a reply that is not that page.
 async fn stored_page(
     controller: &mut OwnerController,
     context: &Context,
-    session: &MasterSessionView,
+    session: &SessionId,
     before: Option<u64>,
 ) -> Result<Option<(Vec<SessionMessage>, Option<u64>)>, String> {
     let Ok(reply) = controller
         .read(OwnerRead::ProjectMasterMessages {
             project_id: context.project.clone(),
-            session_id: session.session_id.clone(),
+            session_id: session.clone(),
             before,
             limit: MESSAGES_PER_READ,
         })
@@ -2540,7 +2587,7 @@ async fn stored_page(
         .all(|pair| pair[0].seq < pair[1].seq);
     let below = before.is_none_or(|before| page.messages.iter().all(|row| row.seq < before));
     if page.project_id != context.project
-        || page.session_id != session.session_id
+        || &page.session_id != session
         || page.messages.len() > usize::from(MESSAGES_PER_READ)
         || !rising
         || !below
