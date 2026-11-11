@@ -466,3 +466,29 @@ fn a_confirm_ask_makes_the_next_step_poll_and_asks_within_the_minute_add_none() 
     usage.step(NOW + 70_000).unwrap();
     assert_eq!(usage.polled_ms, Some(NOW + 70_000));
 }
+
+#[test]
+fn a_harness_installed_after_engine_start_is_found_only_through_the_engines_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    drop(crate::usage::open(&root).unwrap());
+    let codex = root.join("bin").join("codex");
+    let given = root.join("given-claude");
+    let usage = Usage::open(
+        &database,
+        &team,
+        Box::new(|| None),
+        BTreeMap::from([("claude-code", given.clone())]),
+    )
+    .unwrap();
+    assert_eq!(usage.harness("codex"), None);
+    assert_eq!(usage.harness("claude-code"), Some(given.clone()));
+    let pinned = codex.clone();
+    let usage = usage.with_harness_lookup(Arc::new(move |harness: &str| {
+        (harness == "codex").then(|| pinned.clone())
+    }));
+    assert_eq!(usage.harness("codex"), Some(codex));
+    assert_eq!(usage.harness("claude-code"), Some(given));
+}

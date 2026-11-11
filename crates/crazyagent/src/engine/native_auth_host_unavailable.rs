@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use std::path::Path;
+use std::sync::Arc;
 
 #[path = "native_auth_host/claude_auth/types.rs"]
 pub(crate) mod claude_auth_types;
@@ -18,6 +19,20 @@ impl RegisteredNativeAuthHost {
     /// Takes the executable path, unused. Returns `native_auth_host_unavailable`.
     pub(crate) fn capture(_path: &Path) -> Result<Self, EngineError> {
         Err(EngineError("native_auth_host_unavailable".into()))
+    }
+
+    /// Refuses to pin a native sign-in host found through a PATH entry on this platform.
+    /// Takes the entry, unused. Returns `native_auth_host_unavailable`.
+    pub(crate) fn capture_entry(_entry: &Path) -> Result<Self, EngineError> {
+        Err(EngineError("native_auth_host_unavailable".into()))
+    }
+
+    pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
+        match **self {}
+    }
+
+    pub(crate) fn entry(&self) -> Option<&Path> {
+        match *self {}
     }
 
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {

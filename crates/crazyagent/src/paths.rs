@@ -263,21 +263,30 @@ fn executable_file(path: &Path) -> Option<PathBuf> {
     (metadata.is_file() && runnable).then_some(real)
 }
 
-/// Finds an executable by name the way a shell would, skipping relative PATH entries.
-/// Inputs: the name and a PATH value. Output: the first match with every link resolved,
-/// or none when it is missing.
-pub fn find_in_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+/// Finds the PATH entry a shell would run for a name, skipping relative PATH folders.
+/// Inputs: the name and a PATH value. Output: the absolute entry with its links kept,
+/// or none when no entry leads to a runnable file.
+fn path_entry(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
     for folder in std::env::split_paths(path?) {
         if !folder.is_absolute() {
             continue;
         }
         for file in executable_names(name) {
-            if let Some(found) = executable_file(&folder.join(file)) {
-                return Some(found);
+            let entry = folder.join(file);
+            if executable_file(&entry).is_some() {
+                assert!(entry.is_absolute());
+                return Some(entry);
             }
         }
     }
     None
+}
+
+/// Finds an executable by name the way a shell would, skipping relative PATH entries.
+/// Inputs: the name and a PATH value. Output: the first match with every link resolved,
+/// or none when it is missing.
+pub fn find_in_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    path_entry(name, path).and_then(|entry| executable_file(&entry))
 }
 
 /// The harness executables one engine start registers; none means not installed.
@@ -290,8 +299,8 @@ pub struct Harnesses {
 
 /// Resolves the harnesses for one engine start, never reusing an earlier answer. Inputs:
 /// the explicit flags, the PATH value and the folder holding the running executable.
-/// Output: each explicit flag, else `codex` and `claude` from PATH, and the RCLI host
-/// next to the executable, then from PATH.
+/// Output: each explicit flag, else the `codex` and `claude` PATH entries and the RCLI host
+/// next to the executable, then on PATH, links kept so each launch finds the current install.
 pub fn resolve_harnesses(
     explicit: Harnesses,
     path: Option<&OsStr>,
@@ -301,16 +310,63 @@ pub fn resolve_harnesses(
         let folder = executable_folder?;
         executable_names(RCLI_EXECUTABLE)
             .into_iter()
-            .find_map(|file| executable_file(&folder.join(file)))
+            .map(|file| folder.join(file))
+            .find(|entry| executable_file(entry).is_some())
     };
     Harnesses {
-        codex: explicit.codex.or_else(|| find_in_path("codex", path)),
-        claude: explicit.claude.or_else(|| find_in_path("claude", path)),
+        codex: explicit.codex.or_else(|| path_entry("codex", path)),
+        claude: explicit.claude.or_else(|| path_entry("claude", path)),
         rcli: explicit
             .rcli
             .or_else(beside)
-            .or_else(|| find_in_path(RCLI_EXECUTABLE, path)),
+            .or_else(|| path_entry(RCLI_EXECUTABLE, path)),
     }
+}
+
+/// How the team runtime, usage upkeep, research and onboarding find a harness the engine did
+/// not have when it started: the engine answers with the entry of a harness it has pinned
+/// since, so nothing is launched that did not pass the checks of a registration. Only engine
+/// start hands one out; a runtime built without it never looks past what it was given.
+/// Input: the launch harness id. Output: the entry, or none.
+pub type HarnessLookup = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
+/// Finds the PATH entry of a harness the engine did not have when it started, for the engine
+/// to check and pin after its own install or update job. It covers every catalog harness
+/// CrazyAgent starts itself, by the executable names of its catalog row; a harness without
+/// a launch adapter is never started, so nothing about it waits for a restart. Inputs: the
+/// catalog id and the engine's own PATH value. Output: the entry with its links kept; none
+/// for an alias or unknown id, for a harness without a launch adapter, for no PATH value
+/// and for a harness that is still not installed.
+pub fn harness_entry(harness: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    let spec = crate::harnesses::spec(harness)
+        .filter(|spec| spec.id == harness && spec.launch.is_none())?;
+    let entry = spec
+        .binaries
+        .iter()
+        .find_map(|name| path_entry(name, path))?;
+    assert!(entry.is_absolute());
+    Some(entry)
+}
+
+/// Resolves a harness entry kept at engine start to the real file a launch runs and its
+/// sandbox grants, as the entry stands now. Inputs: the absolute entry and the PATH value.
+/// Output: the entry's real file; when an entry in a PATH folder is gone, the first PATH
+/// match for its name; else NotFound, which a launch reports as not installed.
+pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
+    assert!(entry.is_absolute(), "harness entry {}", entry.display());
+    let on_path = || {
+        let folder = entry.parent()?;
+        let name = entry.file_name()?.to_str()?;
+        std::env::split_paths(path?)
+            .any(|listed| listed == folder)
+            .then(|| find_in_path(name, path))
+            .flatten()
+    };
+    let real = executable_file(entry).or_else(on_path).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "harness is not installed")
+    })?;
+    assert!(real.is_absolute());
+    Ok(real)
 }
 
 #[cfg(all(test, unix))]
@@ -500,7 +556,92 @@ mod tests {
     }
 
     #[test]
-    fn harness_lookup_takes_flags_then_path_and_resolves_links() {
+    fn a_harness_updated_behind_its_path_link_is_launched_from_the_new_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let bin = root.join("bin");
+        let old = root.join("cask/2.1.309/claude");
+        let new = root.join("cask/2.1.322/claude");
+        program(&old, 0o755);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&old, bin.join("claude")).unwrap();
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let entry = resolve_harnesses(Harnesses::default(), Some(&path), None)
+            .claude
+            .unwrap();
+        assert_eq!(entry, bin.join("claude"));
+        assert_eq!(launch_executable(&entry, Some(&path)).unwrap(), old);
+        program(&new, 0o755);
+        std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::remove_file(&entry).unwrap();
+        std::os::unix::fs::symlink(&new, &entry).unwrap();
+        assert_eq!(launch_executable(&entry, Some(&path)).unwrap(), new);
+    }
+
+    #[test]
+    fn a_harness_installed_after_engine_start_is_found_on_the_engines_path_by_its_launch_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let bin = root.join("bin");
+        let real = root.join("cask/2.1.322/claude");
+        program(&real, 0o755);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&real, bin.join("claude")).unwrap();
+        program(&bin.join("aider"), 0o755);
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        assert_eq!(
+            harness_entry("claude-code", Some(&path)),
+            Some(bin.join("claude"))
+        );
+        assert_eq!(harness_entry("codex", Some(&path)), None);
+        assert_eq!(harness_entry("aider", Some(&path)), None);
+        assert_eq!(harness_entry("claude", Some(&path)), None);
+        assert_eq!(harness_entry("claude-code", None), None);
+        let started = crate::harnesses::specs()
+            .iter()
+            .filter(|spec| spec.launch.is_none());
+        let mut covered = 0;
+        for spec in started {
+            let entry = bin.join(spec.binaries[0]);
+            if !entry.exists() {
+                program(&entry, 0o755);
+            }
+            assert_eq!(harness_entry(spec.id, Some(&path)), Some(entry));
+            assert!(crate::team::launch_harness(spec.id).is_some());
+            covered += 1;
+        }
+        assert!(covered >= 2);
+    }
+
+    #[test]
+    fn a_harness_gone_from_its_path_entry_is_looked_up_on_path_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        program(&first.join("claude"), 0o755);
+        program(&second.join("claude"), 0o755);
+        let path = std::env::join_paths([first.clone(), second.clone()]).unwrap();
+        let entry = resolve_harnesses(Harnesses::default(), Some(&path), None)
+            .claude
+            .unwrap();
+        assert_eq!(entry, first.join("claude"));
+        std::fs::remove_file(&entry).unwrap();
+        assert_eq!(
+            launch_executable(&entry, Some(&path)).unwrap(),
+            second.join("claude")
+        );
+        std::fs::remove_file(second.join("claude")).unwrap();
+        let gone = launch_executable(&entry, Some(&path)).unwrap_err();
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+        program(&first.join("claude"), 0o755);
+        let flagged = root.join("flags/claude");
+        let gone = launch_executable(&flagged, Some(&path)).unwrap_err();
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn harness_lookup_takes_flags_then_path_and_keeps_links() {
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let first = root.join("first");
@@ -514,7 +655,7 @@ mod tests {
         let path = std::env::join_paths([PathBuf::from("relative"), first.clone(), second.clone()])
             .unwrap();
         let found = resolve_harnesses(Harnesses::default(), Some(&path), None);
-        assert_eq!(found.codex.as_deref(), Some(cellar.as_path()));
+        assert_eq!(found.codex, Some(first.join("codex")));
         assert_eq!(found.claude, Some(second.join("claude")));
         assert_eq!(found.rcli, None);
         let explicit = Harnesses {

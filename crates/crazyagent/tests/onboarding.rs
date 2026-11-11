@@ -757,6 +757,7 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
         &bench.project_settings,
         Some(&codex()),
         None,
+        None,
     )
     .unwrap();
     let view = bench.settle(&project, Duration::from_secs(1200)).await;

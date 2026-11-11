@@ -2237,6 +2237,37 @@ async fn desktop_clone_repo(
 }
 
 #[tauri::command]
+async fn desktop_icloud_download(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    path: String,
+) -> Result<u64, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.icloud_download(path)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_icloud_progress(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Option<crazyagent::projects_home::icloud::Progress>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.icloud_progress()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_icloud_cancel(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.icloud_cancel()?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_setup_status(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4293,6 +4324,9 @@ native_commands! {
     desktop_github_sign_out,
     desktop_github_repos,
     desktop_clone_repo,
+    desktop_icloud_download,
+    desktop_icloud_progress,
+    desktop_icloud_cancel,
     desktop_setup_status,
     desktop_run_setup,
     desktop_set_pack_entry,

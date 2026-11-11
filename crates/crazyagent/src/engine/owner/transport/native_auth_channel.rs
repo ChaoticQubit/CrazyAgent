@@ -109,6 +109,47 @@ pub(super) struct NativeAuthHostRegistration {
     disabled: bool,
 }
 
+type HarnessSlot =
+    fn(&mut NativeAuthHostRegistration) -> &mut Option<Arc<RegisteredNativeAuthHost>>;
+
+/// The registered harness host in one slot, captured again from its PATH entry when its
+/// pinned file no longer verifies, as after a harness update; the fresh capture replaces
+/// the stale one unless another caller replaced it first. Inputs: the registration lock
+/// and the slot. Output: the host, None when none is registered, or the refusal.
+fn current_harness(
+    registration: &Mutex<NativeAuthHostRegistration>,
+    slot: HarnessSlot,
+) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
+    let held = {
+        let mut guard = registration
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        if guard.disabled {
+            return Err(failure("native_auth_host_unavailable"));
+        }
+        slot(&mut guard).clone()
+    };
+    let Some(held) = held else {
+        return Ok(None);
+    };
+    let current = held.current()?;
+    if Arc::ptr_eq(&current, &held) {
+        return Ok(Some(current));
+    }
+    let mut guard = registration
+        .lock()
+        .map_err(|_| failure("native_auth_recovery_required"))?;
+    if guard.disabled {
+        return Err(failure("native_auth_host_unavailable"));
+    }
+    let kept = slot(&mut guard);
+    if kept.as_ref().is_some_and(|kept| Arc::ptr_eq(kept, &held)) {
+        *kept = Some(current.clone());
+    }
+    assert!(kept.is_some());
+    Ok(Some(current))
+}
+
 pub(crate) struct NativeAuthDispatchHost {
     #[cfg(unix)]
     engine: Arc<Engine>,
@@ -165,41 +206,17 @@ impl NativeAuthDispatchHost {
     pub(crate) fn registered_codex_executable(
         &self,
     ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
-        let authority = self.authority()?;
-        let executable = {
-            let registration = authority
-                .native_auth_host
-                .lock()
-                .map_err(|_| failure("native_auth_recovery_required"))?;
-            if registration.disabled {
-                return Err(failure("native_auth_host_unavailable"));
-            }
-            registration.codex_executable.clone()
-        };
-        if let Some(executable) = executable.as_ref() {
-            executable.verified_path()?;
-        }
-        Ok(executable)
+        current_harness(&self.authority()?.native_auth_host, |registration| {
+            &mut registration.codex_executable
+        })
     }
 
     pub(crate) fn registered_claude_executable(
         &self,
     ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
-        let authority = self.authority()?;
-        let executable = {
-            let registration = authority
-                .native_auth_host
-                .lock()
-                .map_err(|_| failure("native_auth_recovery_required"))?;
-            if registration.disabled {
-                return Err(failure("native_auth_host_unavailable"));
-            }
-            registration.claude_executable.clone()
-        };
-        if let Some(executable) = executable.as_ref() {
-            executable.verified_path()?;
-        }
-        Ok(executable)
+        current_harness(&self.authority()?.native_auth_host, |registration| {
+            &mut registration.claude_executable
+        })
     }
 
     pub(crate) async fn prepare_native_auth_custody(
@@ -446,6 +463,81 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
+    /// Pins the host of Codex or Claude Code when it was installed after the engine started,
+    /// once the engine's own install or update job for it has ended; no request names a path.
+    /// Only an empty slot is filled: a pinned host is never replaced here, and a disabled
+    /// registration refuses. The entry is looked up on the engine's own PATH and captured
+    /// with every check of a registration at engine start. A harness installed outside the
+    /// app gets its host at the next engine restart. Inputs: the harness id and the engine's
+    /// PATH value. Output: true when a host was pinned now, false when there was nothing to pin.
+    pub(crate) fn register_installed_harness(
+        &self,
+        harness: &str,
+        path: Option<&std::ffi::OsStr>,
+    ) -> Result<bool, EngineError> {
+        let slot: HarnessSlot = match harness {
+            "codex" => |registration| &mut registration.codex_executable,
+            "claude-code" => |registration| &mut registration.claude_executable,
+            _ => return Ok(false),
+        };
+        if !self.authority.usable.load(Ordering::SeqCst) {
+            return Err(failure("owner_runtime_stale"));
+        }
+        self.native_auth_owner_runtime_dir()?;
+        let empty = || -> Result<bool, EngineError> {
+            let mut registration = self
+                .authority
+                .native_auth_host
+                .lock()
+                .map_err(|_| failure("native_auth_recovery_required"))?;
+            if registration.disabled {
+                return Err(failure("native_auth_host_registration_frozen"));
+            }
+            Ok(slot(&mut registration).is_none())
+        };
+        if !empty()? {
+            return Ok(false);
+        }
+        let Some(entry) = crate::paths::harness_entry(harness, path) else {
+            return Ok(false);
+        };
+        let host = RegisteredNativeAuthHost::capture_entry(&entry)?;
+        host.verified_path()?;
+        let mut registration = self
+            .authority
+            .native_auth_host
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        if registration.disabled {
+            return Err(failure("native_auth_host_registration_frozen"));
+        }
+        let kept = slot(&mut registration);
+        if kept.is_some() {
+            return Ok(false);
+        }
+        *kept = Some(Arc::new(host));
+        assert!(slot(&mut registration).is_some());
+        Ok(true)
+    }
+
+    /// Hands the team runtime, usage upkeep, research and onboarding the engine's answer for
+    /// a harness they were not given at engine start: the entry of the Codex or Claude Code
+    /// host pinned now, so a harness the engine refused or never pinned is never launched.
+    /// Input: none. Output: the lookup.
+    pub fn harness_lookup(&self) -> crate::paths::HarnessLookup {
+        let owner = self.clone();
+        Arc::new(move |harness: &str| {
+            let host = match harness {
+                "codex" => owner.registered_codex_executable(),
+                "claude-code" => owner.registered_claude_executable(),
+                _ => return None,
+            };
+            let entry = host.ok()?.entry()?.to_path_buf();
+            assert!(entry.is_absolute());
+            Some(entry)
+        })
+    }
+
     pub(crate) fn register_rcli_master_executable(
         &self,
         host: RegisteredNativeAuthHost,
@@ -501,22 +593,10 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        let executable = {
-            let registration = self
-                .authority
-                .native_auth_host
-                .lock()
-                .map_err(|_| failure("native_auth_recovery_required"))?;
-            if registration.disabled {
-                return Err(failure("native_auth_host_unavailable"));
-            }
-            registration
-                .codex_executable
-                .clone()
-                .ok_or_else(|| failure("native_auth_host_unavailable"))?
-        };
-        executable.verified_path()?;
-        Ok(executable)
+        current_harness(&self.authority.native_auth_host, |registration| {
+            &mut registration.codex_executable
+        })?
+        .ok_or_else(|| failure("native_auth_host_unavailable"))
     }
 
     pub(crate) fn registered_claude_executable(
@@ -526,22 +606,10 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        let executable = {
-            let registration = self
-                .authority
-                .native_auth_host
-                .lock()
-                .map_err(|_| failure("native_auth_recovery_required"))?;
-            if registration.disabled {
-                return Err(failure("native_auth_host_unavailable"));
-            }
-            registration
-                .claude_executable
-                .clone()
-                .ok_or_else(|| failure("native_auth_host_unavailable"))?
-        };
-        executable.verified_path()?;
-        Ok(executable)
+        current_harness(&self.authority.native_auth_host, |registration| {
+            &mut registration.claude_executable
+        })?
+        .ok_or_else(|| failure("native_auth_host_unavailable"))
     }
 
     /// Names the engine's own registered executable, which serves a tools-on master its
@@ -579,22 +647,10 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        let executable = {
-            let registration = self
-                .authority
-                .native_auth_host
-                .lock()
-                .map_err(|_| failure("native_auth_recovery_required"))?;
-            if registration.disabled {
-                return Err(failure("native_auth_host_unavailable"));
-            }
-            registration
-                .rcli_master_executable
-                .clone()
-                .ok_or_else(|| failure("native_auth_host_unavailable"))?
-        };
-        executable.verified_path()?;
-        Ok(executable)
+        current_harness(&self.authority.native_auth_host, |registration| {
+            &mut registration.rcli_master_executable
+        })?
+        .ok_or_else(|| failure("native_auth_host_unavailable"))
     }
 
     pub(crate) fn native_auth_owner_runtime_dir(&self) -> Result<PathBuf, EngineError> {
@@ -608,22 +664,10 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        let executable = {
-            let registration = self
-                .authority
-                .native_auth_host
-                .lock()
-                .map_err(|_| failure("native_auth_recovery_required"))?;
-            if registration.disabled {
-                return Err(failure("native_auth_host_unavailable"));
-            }
-            registration
-                .rcli_private_key_executable
-                .clone()
-                .ok_or_else(|| failure("native_auth_host_unavailable"))?
-        };
-        executable.verified_path()?;
-        Ok(executable)
+        current_harness(&self.authority.native_auth_host, |registration| {
+            &mut registration.rcli_private_key_executable
+        })?
+        .ok_or_else(|| failure("native_auth_host_unavailable"))
     }
 
     pub(crate) fn retain_native_auth_dispatch(

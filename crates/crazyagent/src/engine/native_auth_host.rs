@@ -5,6 +5,7 @@ use std::fs::{File, Metadata};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 
@@ -75,6 +76,7 @@ pub(crate) struct RegisteredNativeAuthHost {
     file: File,
     identity: ExecutableIdentity,
     digest: [u8; 32],
+    entry: Option<PathBuf>,
 }
 
 impl RegisteredNativeAuthHost {
@@ -128,7 +130,53 @@ impl RegisteredNativeAuthHost {
             file,
             identity,
             digest,
+            entry: None,
         })
+    }
+
+    /// Captures a harness the engine found through a PATH entry: the entry, often a link
+    /// into a versioned install, is resolved to its real file now and that file is pinned
+    /// as `capture` pins it; the entry is kept for `current`. Input: the absolute entry.
+    /// Output: the host, or `native_auth_host_unavailable` when no file is behind the entry.
+    pub(crate) fn capture_entry(entry: &Path) -> Result<Self, EngineError> {
+        let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
+            .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
+        let mut host = Self::capture(&real)?;
+        assert!(host.entry.is_none());
+        host.entry = Some(entry.to_path_buf());
+        Ok(host)
+    }
+
+    /// The host while its entry still leads to the pinned file and that file verifies;
+    /// a fresh capture when the entry leads to another path or a new inode, as after a
+    /// harness update. A rewrite in place of the pinned inode stays refused. Input: the
+    /// shared host. Output: the host to use, `native_auth_host_executable_changed`, the
+    /// verify error for a host with no entry, or `native_auth_host_unavailable`.
+    pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
+        let Some(entry) = self.entry.as_deref() else {
+            self.verified_path()?;
+            return Ok(self.clone());
+        };
+        let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
+            .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
+        if real == self.path && self.verified_path().is_ok() {
+            return Ok(self.clone());
+        }
+        let fresh = Self::capture_entry(entry)?;
+        assert_eq!(fresh.entry.as_deref(), Some(entry));
+        if fresh.path == self.path
+            && (fresh.identity.device, fresh.identity.inode)
+                == (self.identity.device, self.identity.inode)
+        {
+            return Err(EngineError("native_auth_host_executable_changed".into()));
+        }
+        Ok(Arc::new(fresh))
+    }
+
+    /// The PATH entry this host was captured through, which a launch resolves again each
+    /// time. Input: none. Output: the entry, or none for a host captured by its real path.
+    pub(crate) fn entry(&self) -> Option<&Path> {
+        self.entry.as_deref()
     }
 
     /// Returns the captured path while the retained file and the file at that path still

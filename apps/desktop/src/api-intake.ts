@@ -3,12 +3,12 @@ import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  githubUseCli, icloudCancel, icloudDownload, icloudProgress, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IntentReceipt, OnboardingView, ProjectsHome,
-  SetupStatus,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntentReceipt, OnboardingView,
+  ProjectsHome, SetupStatus,
 } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
@@ -57,6 +57,15 @@ const COPY: Record<string, string> = {
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
+  home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
+  home_permission_denied: "macOS didn't let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed.",
+  icloud_download_busy: "Another iCloud download is running. Wait for it to finish.",
+  icloud_folder_missing: "That folder isn't there anymore. Choose it again.",
+  icloud_folder_unsafe: "That folder can't be downloaded.",
+  icloud_folder_unreadable: "Some files in that folder can't be read.",
+  icloud_path_invalid: "Choose the folder again with Choose folder.",
+  icloud_outcome_unknown: "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again.",
+  icloud_owner_unavailable: "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again.",
   folder_size_path_invalid: "Choose the folder again with Choose folder.",
   folder_size_unsafe: "That folder can't be measured.",
   folder_size_unreadable: "Some files in that folder can't be read.",
@@ -229,6 +238,24 @@ export async function loadFoundProjects(): Promise<Result<FoundProject[]>> {
  * Input: an absolute folder path. Output: its size in bytes and the GitHub owner/name, if any. */
 export function loadFolderSize(path: string): Promise<Result<FolderSize>> {
   return wrap(() => folderSize(path));
+}
+
+/** Downloads every file of a folder that is only in iCloud, so it can then be moved or copied.
+ * Input: the absolute folder. Output: how many files it downloaded, or home_icloud_not_downloaded
+ * after a stop, a stall or the time limit. */
+export function downloadFromIcloud(path: string): Promise<Result<number>> {
+  return wrap(() => icloudDownload(path));
+}
+
+/** Reads how far the running iCloud download has come. Output: the counts, or null when none runs. */
+export function loadIcloudProgress(): Promise<Result<IcloudProgress | null>> {
+  return wrap(icloudProgress);
+}
+
+/** Stops the running iCloud download; its download call then ends with home_icloud_not_downloaded.
+ * Output: whether one was running. */
+export function cancelIcloudDownload(): Promise<Result<boolean>> {
+  return wrap(icloudCancel);
 }
 
 /** Moves or copies a folder into the projects folder, where it then shows as found.

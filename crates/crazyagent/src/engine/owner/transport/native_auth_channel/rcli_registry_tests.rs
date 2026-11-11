@@ -386,3 +386,85 @@ async fn rcli_registry_real_runtime_directory_drift_rejects_both_methods() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
+    registry_case(|host, root| async move {
+        let bin = root.join("bin");
+        let later = root.join("later");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&later).unwrap();
+        let codex = physical_file(&bin, "codex", b"codex-physical-file");
+        physical_file(&later, "codex", b"another-codex-file");
+        let claude = physical_file(&later, "claude", b"claude-physical-file");
+        let path = std::env::join_paths([bin]).unwrap();
+        let later = std::env::join_paths([later]).unwrap();
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+        let lookup = host.harness_lookup();
+        assert_eq!(lookup("codex"), None);
+        let frozen = host
+            .register_codex_executable(RegisteredNativeAuthHost::capture(&codex).unwrap())
+            .unwrap_err();
+        assert_eq!(frozen.0, "native_auth_host_registration_frozen");
+        assert!(host.registered_codex_executable().is_err());
+        assert!(!host.register_installed_harness("codex", None).unwrap());
+        assert!(
+            !host
+                .register_installed_harness("aider", Some(&path))
+                .unwrap()
+        );
+        assert!(
+            !host
+                .register_installed_harness("claude-code", Some(&path))
+                .unwrap()
+        );
+        assert!(
+            host.register_installed_harness("codex", Some(&path))
+                .unwrap()
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
+        assert_eq!(lookup("codex"), Some(codex.clone()));
+        assert_eq!(lookup("claude-code"), None);
+        assert_eq!(lookup("aider"), None);
+        assert!(
+            !host
+                .register_installed_harness("codex", Some(&later))
+                .unwrap()
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
+        host.authority.native_auth_host.lock().unwrap().disabled = true;
+        let disabled = host
+            .register_installed_harness("claude-code", Some(&later))
+            .unwrap_err();
+        assert_eq!(disabled.0, "native_auth_host_registration_frozen");
+        host.authority.native_auth_host.lock().unwrap().disabled = false;
+        assert!(
+            host.register_installed_harness("claude-code", Some(&later))
+                .unwrap()
+        );
+        assert_eq!(
+            host.registered_claude_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            claude
+        );
+        for spec in crate::harnesses::specs() {
+            let pinned = lookup(spec.id).is_some();
+            assert_eq!(pinned, spec.launch.is_none(), "{}", spec.id);
+        }
+    })
+    .await;
+}

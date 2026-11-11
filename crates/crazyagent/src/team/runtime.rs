@@ -175,7 +175,9 @@ struct Grant {
 }
 
 /// Everything about an agent's harness launch except the account, so a managed agent
-/// can start a fresh process for each turn. `pane` is the terminal host and the agent's
+/// can start a fresh process for each turn. `executable` is the harness file this agent
+/// runs; `entry` is the harness entry the engine keeps, which credential renewals resolve
+/// again each time, so an update during the agent's run never strands them. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
 /// conversation a live master continues instead of starting one; `toolchains` the families
 /// its sandbox profile, built once for every turn, lets it use; `native` marks a
@@ -192,6 +194,7 @@ struct Grant {
 struct Plan {
     harness: String,
     executable: PathBuf,
+    entry: PathBuf,
     working_dir: PathBuf,
     model: Option<String>,
     tools: bool,
@@ -576,6 +579,7 @@ pub struct TeamRuntime {
     root: PathBuf,
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
+    lookup: Option<crate::paths::HarnessLookup>,
     access: AccessSource,
     settings: Option<(PathBuf, PathBuf)>,
     limits: TeamLimits,
@@ -877,6 +881,7 @@ impl TeamRuntime {
             root,
             state: state.to_path_buf(),
             executables,
+            lookup: None,
             access,
             settings: None,
             limits,
@@ -924,6 +929,27 @@ impl TeamRuntime {
             #[cfg(test)]
             grant_waited: BTreeMap::new(),
         })
+    }
+
+    /// Lets the runtime find a harness the engine pinned after it started, as after an
+    /// install from the app. Only engine start sets it, so a runtime built without it never
+    /// looks past the executables it was given. Takes the engine's lookup. Returns the runtime.
+    pub fn with_harness_lookup(mut self, lookup: crate::paths::HarnessLookup) -> Self {
+        self.lookup = Some(lookup);
+        self
+    }
+
+    /// The entry of a launch harness: the one given at engine start, else the one the engine
+    /// pinned since, when the lookup is set. Takes the launch harness id. Returns the entry,
+    /// or none for a harness that is not installed.
+    fn harness(&self, launch: &str) -> Option<PathBuf> {
+        let entry = self
+            .executables
+            .get(launch)
+            .cloned()
+            .or_else(|| self.lookup.as_ref().and_then(|lookup| lookup(launch)))?;
+        assert!(entry.is_absolute());
+        Some(entry)
     }
 
     /// Lets the runtime wait for an account whose sign-in this engine run still re-checks
@@ -1118,10 +1144,10 @@ impl TeamRuntime {
             .map(|reach| matches!(reach, TeamReach::Endpoint { .. }));
         let managed = match reach {
             Some(true) => None,
-            Some(false) if live || native => match self.executables.get(launch) {
+            Some(false) if live || native => match self.harness(launch) {
                 Some(executable) => Some(Managed {
                     home: self.agent_folder(id).join("home"),
-                    executable: executable.clone(),
+                    executable,
                 }),
                 None => return Ok(Err("its harness is not installed".into())),
             },
@@ -2950,7 +2976,7 @@ impl TeamRuntime {
             return Err(format!("{harness} cannot run team agents yet"));
         };
         let accounts = eligible_accounts(access, project, launch);
-        if accounts != Accounts::NoPool && !self.executables.contains_key(launch) {
+        if accounts != Accounts::NoPool && self.harness(launch).is_none() {
             return Err(format!("{harness} is not installed"));
         }
         let Accounts::Usable(fitting) = accounts else {
@@ -7322,10 +7348,7 @@ impl TeamRuntime {
         layout: Layout,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
-        let executable = self
-            .executables
-            .get(launch)
-            .ok_or("harness is not installed")?;
+        let executable = &self.harness(launch).ok_or("harness is not installed")?;
         if let Some(line) = confined_unavailable(std::env::consts::OS) {
             return Err(line.to_owned());
         }
@@ -7490,9 +7513,9 @@ impl TeamRuntime {
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
-        let program = executable
-            .canonicalize()
-            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?;
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
+                .map_err(|_| "harness is not installed")?;
         let install = program
             .parent()
             .map(Path::to_path_buf)
@@ -7699,7 +7722,8 @@ impl TeamRuntime {
             .claude_display;
         let plan = Plan {
             harness: launch.into(),
-            executable: executable.to_path_buf(),
+            entry: executable.clone(),
+            executable: program,
             working_dir,
             model,
             tools,
@@ -9267,16 +9291,15 @@ fn live(
                     Ok(request) => request,
                     Err(problem) => return Some(problem),
                 };
-            let credential =
-                match profile.hand_to_agent(&home, plan.limits.run_time, &plan.executable) {
-                    Ok(credential) => credential,
-                    Err(problem) => {
-                        return Some(with_code(
-                            "The signed-in account could not reach the agent",
-                            Some(&problem.0),
-                        ));
-                    }
-                };
+            let credential = match profile.hand_to_agent(&home, plan.limits.run_time, &plan.entry) {
+                Ok(credential) => credential,
+                Err(problem) => {
+                    return Some(with_code(
+                        "The signed-in account could not reach the agent",
+                        Some(&problem.0),
+                    ));
+                }
+            };
             (
                 AgentSession::start_resuming(
                     request,
@@ -9663,7 +9686,7 @@ fn native_session(
             return Some(problem);
         }
     };
-    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.executable) {
+    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.entry) {
         Ok(credential) => credential,
         Err(problem) => {
             turn_closed(reports, taken, Some(problem.0.clone()));
@@ -10101,7 +10124,7 @@ fn per_turn(
         let process = rules.limit.map_or(plan.limits.run_time, |limit| {
             limit.min(plan.limits.run_time)
         });
-        let credential = match profile.hand_to_agent(home, process, &plan.executable) {
+        let credential = match profile.hand_to_agent(home, process, &plan.entry) {
             Ok(credential) => credential,
             Err(problem) => {
                 let _ = reports.send(Report::Finished {
@@ -11400,8 +11423,9 @@ pub fn agent_teammates_server_pid(state: &Path, id: i64) -> PathBuf {
 /// pool assignment read live from the engine's settings files on every tick.
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
 /// engine executable that serves masters their `delegate` tool, the engine's agent register
-/// that lists every team agent with its owner controls, the terminal host agents run in and
-/// the engine-start re-proof's flag, so agents wait for its sign-in re-checks (DEC-108).
+/// that lists every team agent with its owner controls, the terminal host agents run in,
+/// the engine-start re-proof's flag, so agents wait for its sign-in re-checks (DEC-108),
+/// and the engine's lookup of a harness it pinned after it started.
 /// Returns the service, or a plain reason.
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -11413,6 +11437,7 @@ pub fn start_for_engine(
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     reproving: Option<Arc<AtomicBool>>,
+    lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
@@ -11447,6 +11472,10 @@ pub fn start_for_engine(
     };
     let runtime = match reproving {
         Some(reproving) => runtime.with_reproof(reproving),
+        None => runtime,
+    };
+    let runtime = match lookup {
+        Some(lookup) => runtime.with_harness_lookup(lookup),
         None => runtime,
     };
     let runtime = match terminal {
