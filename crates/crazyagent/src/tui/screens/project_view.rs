@@ -11,6 +11,7 @@ use super::project::{
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
+use super::project_master::{activity_rows, last_activity};
 use super::project_time::{clock, duration};
 use super::sessions::Sessions;
 use crate::project_setup::{
@@ -1202,17 +1203,21 @@ fn transcript_lines(
             }
         }
     }
-    if let MasterStatus::Thinking { since_ms } = transcript.status {
-        lines.push(
-            Row::of(SPINNER, look.running)
-                .push(" Thinking...", look.fg)
-                .push(
-                    since_ms
-                        .map(|since| format!("  {}", duration(screen.now_ms - since)))
-                        .unwrap_or_default(),
-                    look.muted,
-                ),
-        );
+    if let MasterStatus::Thinking { since_ms, activity } = &transcript.status {
+        let detail = since_ms
+            .map(|since| duration(screen.now_ms - since))
+            .into_iter()
+            .chain(last_activity(activity, screen.now_ms))
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+        let mut row = Row::of(SPINNER, look.running).push(" Thinking...", look.fg);
+        if !detail.is_empty() {
+            row = row.push(format!("  {detail}"), look.muted);
+        }
+        lines.push(row);
+        for (age, text) in activity_rows(activity, screen.activity_open, screen.now_ms) {
+            lines.push(Row::of(format!("  {age:>10}  {text}"), look.muted));
+        }
     }
     lines
 }
@@ -1509,6 +1514,14 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         if !screen.typing {
             let at = help.len().saturating_sub(2);
             help.splice(at..at, Sessions::conversation_help());
+        }
+        if screen.more_activity() {
+            let label = if screen.activity_open {
+                "Less activity"
+            } else {
+                "All activity"
+            };
+            help.insert(help.len().saturating_sub(2), ("Ctrl-O", label));
         }
         let input = if screen.typing {
             prompt
