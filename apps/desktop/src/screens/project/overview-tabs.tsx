@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { loadRunMode } from "../../api-ide";
-import { loadOverview, overviewCopy, refreshOverview, saveOverviewTab, OVERVIEW_POLL_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
+import { acceptOverviewTab, loadOverview, overviewCopy, refreshOverview, rejectOverviewTab, saveOverviewTab, OVERVIEW_POLL_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
+import { lineDiff } from "../../api-process";
 import { failureCopy, openLink, receiptState, updateProjectSetup, type JobKind, type ResearchJob } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
@@ -10,6 +11,7 @@ import { MarkdownView } from "./markdown";
 import { ago } from "./research";
 import { RunCommand, type RunMode } from "./run-command";
 import { valueOf, type ProjectData } from "./shared";
+import "../process.css";
 import "./overview-tabs.css";
 
 /** One tab of the Overview strip: a generated tab, the project's README or today's activity. */
@@ -25,13 +27,22 @@ export const STRIP: { id: StripId; label: string }[] = [
   { id: "activity", label: "Activity" },
 ];
 
-/** What the strip can ask for: one writing run now, a save of the owner's text for a tab, and
- * a fresh read of the tabs. */
+/** What the strip can ask for: one writing run now, a save of the owner's text for a tab, an
+ * accept or a reject of a refresh's proposal, and a fresh read of the tabs. */
 export interface OverviewActions {
   refresh: () => Promise<Result<void>>;
   save: typeof saveOverviewTab;
+  accept: typeof acceptOverviewTab;
+  reject: typeof rejectOverviewTab;
   reload: () => void;
 }
+
+/** An open review of one tab's proposal: whether a choice is being sent and why the last one
+ * was refused. */
+export interface TabReview { busy: boolean; note: string }
+
+/** How an accept or a reject ended: done, or refused and why. */
+export interface ChoiceOutcome { done: boolean; note: string }
 
 /** An open editor of one tab: the version it opened at, the typed text, whether a save is
  * being sent, why the last save was refused, and whether the tab changed since it opened. */
@@ -202,6 +213,69 @@ export async function saveTab(projectId: string, opened: { tab: OverviewTabId; v
   return refused(overviewCopy(result), result.code === TAB_CHANGED);
 }
 
+/** Says how an accept or a reject ended. A tab changed since the diff was made gets its own
+ * sentence, since the page then shows a new diff. Input: the result. Output: the outcome. */
+function choiceOutcome(result: Result<void>): ChoiceOutcome {
+  if (result.kind === "ok") return { done: true, note: "" };
+  if (result.kind === "not_ready") return { done: false, note: `${NOT_READY} Nothing changed.` };
+  const note = result.code === TAB_CHANGED ? "This tab changed since this diff was made. The diff now shows the change against the tab as it is; choose again." : overviewCopy(result);
+  return { done: false, note };
+}
+
+/** Accepts a refresh's proposal for a tab at the version the shown diff was made from.
+ * Inputs: the project, the tab with that version and the accept call. Output: the outcome. */
+export async function acceptTab(projectId: string, shown: { tab: OverviewTabId; version: string }, accept: typeof acceptOverviewTab = acceptOverviewTab): Promise<ChoiceOutcome> {
+  return choiceOutcome(await accept(projectId, shown.tab, shown.version).catch((): Result<void> => ({ kind: "not_ready" })));
+}
+
+/** Rejects a refresh's proposal for a tab; the tab's text stays. Inputs: the project, the tab
+ * and the reject call. Output: the outcome. */
+export async function rejectTab(projectId: string, tab: OverviewTabId, reject: typeof rejectOverviewTab = rejectOverviewTab): Promise<ChoiceOutcome> {
+  return choiceOutcome(await reject(projectId, tab).catch((): Result<void> => ({ kind: "not_ready" })));
+}
+
+/** The review of a refresh's proposal for one tab: the proposal beside the tab's text as a
+ * line diff (both texts whole past the diff's line bound), with Accept, Reject and Close.
+ * Nothing changes until Accept; hidden characters show as visible escapes.
+ * Inputs: the tab's label, its state with a proposal, whether a choice is being sent, the
+ * refusal note and the three handlers. Output: the review. */
+export function ProposalReview({ label, state, busy, note, onAccept, onReject, onClose }: {
+  label: string;
+  state: TabState;
+  busy: boolean;
+  note: string;
+  onAccept: () => void;
+  onReject: () => void;
+  onClose: () => void;
+}) {
+  assert(state.proposal !== null, "a review was opened for a tab with no proposal");
+  const current = state.text ?? "";
+  const rows = lineDiff(current, state.proposal);
+  const removed = rows?.filter((row) => row.kind === "removed").length ?? 0;
+  const added = rows?.filter((row) => row.kind === "added").length ?? 0;
+  return <section className="pj-stack-s ov-review" aria-label={`Proposed changes to ${label}`}>
+    {state.edited && <p className="pj-note warn">You edited this tab. Accept replaces your text with the proposal; Reject keeps yours.</p>}
+    {rows !== null ? <>
+      <p className="pj-secondary">{`${removed} ${removed === 1 ? "line" : "lines"} removed, ${added} added. Nothing changes until you accept.`}</p>
+      <div className="process-text pr-diff" role="group" aria-label="Proposed changes">
+        {rows.map((row, index) => row.kind === "same" ? <span key={index} className="pr-diff-row">{displayText(row.text)}</span>
+          : row.kind === "removed" ? <del key={index} className="pr-diff-row removed"><span className="visually-hidden">Removed: </span>{displayText(row.text)}</del>
+            : <ins key={index} className="pr-diff-row added"><span className="visually-hidden">Added: </span>{displayText(row.text)}</ins>)}
+      </div>
+    </> : <>
+      <p className="pj-secondary">Too many lines to mark each change, so both texts are shown whole. Nothing changes until you accept.</p>
+      <div className="pr-sides">
+        <div><h3>The tab now</h3><pre className="process-text">{displayText(current)}</pre></div>
+        <div><h3>Proposed</h3><pre className="process-text">{displayText(state.proposal)}</pre></div>
+      </div>
+    </>}
+    {note && <p className="pj-error" role="alert">{note}</p>}
+    <div className="pj-row"><button type="button" className="btn primary" disabled={busy} onClick={onAccept}>Accept</button>
+      <button type="button" className="btn" disabled={busy} onClick={onReject}>Reject</button>
+      <button type="button" className="btn" disabled={busy} onClick={onClose}>Close</button></div>
+  </section>;
+}
+
 /** The editor of one tab: a labelled text box with Save and Cancel; Cmd or Ctrl with Enter
  * saves. It is locked while a save is sent and shows why the last one was refused.
  * Inputs: the tab's label, the typed text, whether a save is being sent, the refusal note and
@@ -324,19 +398,51 @@ function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
   return <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={state.tab === "install_and_use" ? commandAction(data.id, runMode) : undefined} />;
 }
 
+/** The banner of a tab whose refresh proposal waits, or the open review of it. Accept sends
+ * the version of the shown diff; either choice reads the tabs again, and a refused one keeps
+ * the review open on what the engine holds now.
+ * Inputs: the project data, the tab's label and state, the open review or null, the review
+ * handler and the actions. Output: the banner or the review. */
+function Proposal({ data, label, state, review, onReview, actions }: {
+  data: ProjectData;
+  label: string;
+  state: TabState;
+  review: TabReview | null;
+  onReview: (review: TabReview | null) => void;
+  actions: OverviewActions;
+}) {
+  assert(state.proposal !== null, "a proposal banner was shown for a tab with none");
+  if (review === null) return <div className="pj-need"><span>A refresh proposes changes to this tab.</span>
+    <button type="button" className="btn" onClick={() => onReview({ busy: false, note: "" })}>Review</button></div>;
+  const choose = async (send: () => Promise<ChoiceOutcome>, told: string) => {
+    assert(!review.busy, "a choice was made while another was still sent");
+    onReview({ busy: true, note: "" });
+    const outcome = await send();
+    onReview(outcome.done ? null : { busy: false, note: outcome.note });
+    if (outcome.done) data.notify(told);
+    actions.reload();
+  };
+  return <ProposalReview label={label} state={state} busy={review.busy} note={review.note} onClose={() => onReview(null)}
+    onAccept={() => void choose(() => acceptTab(data.id, { tab: state.tab, version: state.version }, actions.accept), `${label} now shows the refreshed text.`)}
+    onReject={() => void choose(() => rejectTab(data.id, state.tab, actions.reject), `The proposal for ${label} is rejected. The tab is unchanged.`)} />;
+}
+
 /** One generated tab: the move line for a project outside the CrazyAgent folder, why its file
- * can't be shown, or its body with Edit. An open editor takes the body's place; once the tab
- * changed under it, the changed tab shows above the editor so the owner can compare, and the
- * next Save is made against that shown version.
- * Inputs: the project data, the overview, the tab, its open editor or null, the editor
- * handler, the actions, the Run mode, the tab pick handler and how Quick info renders a text.
- * Output: the panel body. */
-function GeneratedPanel({ data, overview, tab, draft, onDraft, actions, runMode, onSelect, quickInfo }: {
+ * can't be shown, or its body with Edit and, when a refresh proposal waits, its banner or
+ * review. An open editor takes the body's place; once the tab changed under it, the changed
+ * tab shows above the editor so the owner can compare, and the next Save is made against
+ * that shown version.
+ * Inputs: the project data, the overview, the tab, its open editor and review or null with
+ * their handlers, the actions, the Run mode, the tab pick handler and how Quick info renders
+ * a text. Output: the panel body. */
+function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview, actions, runMode, onSelect, quickInfo }: {
   data: ProjectData;
   overview: ProjectOverview;
   tab: OverviewTabId;
   draft: TabDraft | null;
   onDraft: (draft: TabDraft | null) => void;
+  review: TabReview | null;
+  onReview: (review: TabReview | null) => void;
   actions: OverviewActions;
   runMode: RunMode;
   onSelect: (tab: StripId) => void;
@@ -348,7 +454,9 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, actions, runMode,
   if (!state) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
   if (state.blocked) return <><Blocked tab={tab} reason={state.blocked} />{facts && quickInfo(null)}</>;
   const body = <TabBody data={data} overview={overview} state={state} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />;
+  const label = STRIP.find((item) => item.id === tab)?.label ?? "";
   if (draft === null) return <>
+    {state.proposal !== null && <Proposal data={data} label={label} state={state} review={review} onReview={onReview} actions={actions} />}
     <div className="ov-edit-row"><button type="button" className="btn" onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false })}>Edit</button></div>
     {body}
   </>;
@@ -359,7 +467,6 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, actions, runMode,
     onDraft(outcome.saved ? null : { ...draft, busy: false, note: outcome.note, changed: draft.changed || outcome.changed });
     actions.reload();
   };
-  const label = STRIP.find((item) => item.id === tab)?.label ?? "";
   return <>
     {draft.changed && <section className="pj-stack-s ov-current" aria-label={`${label} as it is now`}><p className="pj-small pj-muted">The tab as it is now:</p>{body}</section>}
     <TabEditor label={label} text={draft.text} busy={draft.busy} note={draft.note} onText={(text) => onDraft({ ...draft, text })} onSave={() => void save()} onCancel={() => onDraft(null)} />
@@ -386,6 +493,7 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
 }) {
   const [asking, setAsking] = useState(false);
   const [drafts, setDrafts] = useState<Partial<Record<OverviewTabId, TabDraft>>>({});
+  const [reviews, setReviews] = useState<Partial<Record<OverviewTabId, TabReview>>>({});
   assert(STRIP.some((item) => item.id === selected), "the picked Overview tab is not in the strip");
   const status = overview === null ? null : checked(overview, now);
   const off = overview === null || overview.running || overview.refresh === "off" || overview.needs_home;
@@ -423,7 +531,8 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
       {overview === null && selected === "quick_info" && quickInfo(null)}
       {overview !== null && selected === "readme" && <ReadmePanel projectId={data.id} readme={overview.readme} />}
       {overview !== null && selected !== "readme" && selected !== "activity" && <GeneratedPanel data={data} overview={overview} tab={selected} draft={drafts[selected] ?? null}
-        onDraft={(draft) => setDrafts((open) => ({ ...open, [selected]: draft ?? undefined }))} actions={actions} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />}
+        onDraft={(draft) => setDrafts((open) => ({ ...open, [selected]: draft ?? undefined }))} review={reviews[selected] ?? null}
+        onReview={(review) => setReviews((open) => ({ ...open, [selected]: review ?? undefined }))} actions={actions} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />}
     </div>
   </section>;
 }
@@ -464,6 +573,6 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
     : read?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(read)}` : undefined;
   return <OverviewTabs data={data} overview={overview} problem={problem} now={data.now} selected={selected}
     onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); }}
-    actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, reload: () => setRound((count) => count + 1) }}
+    actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, accept: acceptOverviewTab, reject: rejectOverviewTab, reload: () => setRound((count) => count + 1) }}
     runMode={runMode} quickInfo={quickInfo} activity={activity} />;
 }

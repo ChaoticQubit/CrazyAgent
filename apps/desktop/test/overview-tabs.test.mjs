@@ -504,3 +504,88 @@ test("the editor refuses a text over the tab bound or an empty one before sendin
   assert.equal(full.saved, true);
   assert.equal(sent, 1);
 });
+
+const withProposal = (overview, id, proposal, edited = false) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, proposal, edited } : tab) });
+const featuresOf = (overview) => overview.tabs.find((tab) => tab.tab === "features");
+
+function review(state, props = {}) {
+  return renderToStaticMarkup(createElement(view.ProposalReview, { label: "Features", state, busy: false, note: "", onAccept: () => {}, onReject: () => {}, onClose: () => {}, ...props }));
+}
+
+test("a tab with a proposal shows a banner with Review, and a tab without one does not", () => {
+  const overview = withProposal(withTab(base(), "features", "- Search\n"), "features", "- Search\n- Share lists\n");
+  const html = page({ selected: "features", overview });
+  assert.match(html, /A refresh proposes changes to this tab\./);
+  assert.match(html, /<button[^>]*>Review<\/button>/);
+  assert.match(html, /Search/, "the tab's own text stays until Accept");
+  assert.doesNotMatch(html, /Share lists/, "the proposal is not shown as the tab");
+  assert.doesNotMatch(page({ selected: "features", overview: withTab(base(), "features", "- Search\n") }), /A refresh proposes changes/);
+  assert.doesNotMatch(page({ selected: "install_and_use", overview }), /A refresh proposes changes/, "only the tab with the proposal");
+  assert.doesNotMatch(page({ selected: "features", overview: blockedTab(overview, "features", "too_large") }), /A refresh proposes changes/, "a blocked tab cannot take a proposal");
+});
+
+test("the review shows the diff with Accept and Reject, and nothing changes until Accept", () => {
+  const state = featuresOf(withProposal(withTab(base(), "features", "- Search\n- Old\n"), "features", "- Search\n- Share lists\n"));
+  const html = review(state);
+  assert.match(html, /<ins[^>]*class="pr-diff-row added"[^>]*><span class="visually-hidden">Added: <\/span>- Share lists<\/ins>/);
+  assert.match(html, /<del[^>]*class="pr-diff-row removed"[^>]*><span class="visually-hidden">Removed: <\/span>- Old<\/del>/);
+  assert.match(html, /<span class="pr-diff-row">- Search<\/span>/);
+  assert.match(html, /1 line removed, 1 added\. Nothing changes until you accept\./);
+  assert.match(html, /<button[^>]*>Accept<\/button>/);
+  assert.match(html, /<button[^>]*>Reject<\/button>/);
+  assert.match(html, /<button[^>]*>Close<\/button>/);
+  assert.doesNotMatch(html, /You edited this tab/);
+});
+
+test("the review of an edited tab says the owner's edits are kept until Accept", () => {
+  const state = featuresOf(withProposal(withTab(base(), "features", "- mine\n"), "features", "- Search\n", true));
+  assert.match(review(state), /You edited this tab\. Accept replaces your text with the proposal; Reject keeps yours\./);
+});
+
+test("a proposal too long to mark line by line shows both texts whole", () => {
+  const long = "line\n".repeat(2001);
+  const html = review(featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", long)));
+  assert.match(html, /Too many lines to mark each change, so both texts are shown whole\./);
+  assert.match(html, />The tab now</);
+  assert.match(html, />Proposed</);
+  assert.doesNotMatch(html, /<ins/);
+});
+
+test("the review shows hidden characters of a proposal as visible escapes, locks while sending and says why a choice was refused", () => {
+  const sneaky = `- Share${String.fromCodePoint(0x202e)} lists\n`;
+  const html = review(featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", sneaky)));
+  assert.ok(!html.includes(String.fromCodePoint(0x202e)));
+  assert.ok(html.includes(`${String.fromCharCode(92)}u202e`));
+  const state = featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n"));
+  assert.equal((review(state, { busy: true }).match(/<button[^>]*disabled=""/g) ?? []).length, 3);
+  assert.match(review(state, { note: "There is no proposal for this tab any more." }), /role="alert"[^>]*>There is no proposal for this tab any more\./);
+});
+
+test("Accept sends the version the diff was made from", async () => {
+  const sent = [];
+  const outcome = await view.acceptTab("alpha", { tab: "features", version: "v7" }, (projectId, tab, version) => { sent.push([projectId, tab, version]); return Promise.resolve({ kind: "ok", value: undefined }); });
+  assert.deepEqual(sent, [["alpha", "features", "v7"]]);
+  assert.deepEqual(outcome, { done: true, note: "" });
+});
+
+test("an Accept on a tab that changed since the diff says the diff is new, and other refusals say why", async () => {
+  const changed = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
+  assert.equal(changed.done, false);
+  assert.match(changed.note, /This tab changed since this diff was made\./);
+  const gone = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.resolve({ kind: "error", code: "overview_no_proposal" }));
+  assert.equal(gone.note, api.overviewCopy("overview_no_proposal"));
+  const early = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.resolve({ kind: "not_ready" }));
+  assert.equal(early.done, false);
+  assert.notEqual(early.note, "");
+  const thrown = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.reject(new Error("bridge down")));
+  assert.equal(thrown.done, false);
+});
+
+test("Reject names the tab and keeps the tab's text", async () => {
+  const sent = [];
+  const outcome = await view.rejectTab("alpha", "features", (projectId, tab) => { sent.push([projectId, tab]); return Promise.resolve({ kind: "ok", value: undefined }); });
+  assert.deepEqual(sent, [["alpha", "features"]]);
+  assert.deepEqual(outcome, { done: true, note: "" });
+  const refused = await view.rejectTab("alpha", "features", () => Promise.resolve({ kind: "error", code: "overview_no_proposal" }));
+  assert.deepEqual(refused, { done: false, note: api.overviewCopy("overview_no_proposal") });
+});
