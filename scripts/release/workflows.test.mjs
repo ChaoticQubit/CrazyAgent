@@ -186,11 +186,9 @@ test("every badal job refuses to run under Rosetta before anything else", async 
 test("on a self-hosted runner CI and release install nothing globally, and CI keeps its build cache bounded", async () => {
   const ci = await workflow("ci.yml");
   const release = await workflow("release.yml");
-  for (const job of ["linux", "macos"]) {
-    const text = steps(ci, job).join("\n");
-    assert.match(text, /"\$RUNNER_TOOL_CACHE\/crazyagent-ci\/target"/, job);
-    assert.match(text, /\(\( size_kib > 20 \* 1024 \* 1024 \)\)/, job);
-  }
+  const linuxCache = steps(ci, "linux").join("\n");
+  assert.match(linuxCache, /"\$RUNNER_TOOL_CACHE\/crazyagent-ci\/target"/);
+  assert.match(linuxCache, /\(\( size_kib > 20 \* 1024 \* 1024 \)\)/);
   for (const [name, job] of [["ci.yml", "linux"], ["ci.yml", "macos"], ["release.yml", "build"]]) {
     const all = steps(name === "ci.yml" ? ci : release, job);
     const text = all.join("\n");
@@ -232,6 +230,7 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
   for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
+    ["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
     ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
     ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
@@ -275,15 +274,8 @@ test("a release on the owner's runner signs with pinned, checksum-checked Node, 
   }
   const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
   assert(rust, "the release on the owner's runner installs its own Rust");
-  assert.match(rust, /\n {8}if: runner\.environment != 'github-hosted'\n/);
-  assert.doesNotMatch(rust, /\brustup\b|\.rustup|RUSTUP_/, "no rustup, toolchain or proxy left on the runner");
-  for (const pin of ["RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) assert(rust.includes(`$${pin}`), pin);
-  assert.match(rust, /\n\s+if ! echo "\$sha  \$work\/\$archive" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n\s+curl [^\n]+\n\s+echo "\$sha  \$work\/\$archive" \| shasum -a 256 -c -\n/, "every Rust archive, cached or downloaded, matches its pin");
-  assert.match(rust, /\n\s+cp "\$work\/\$archive" "\$prefix\/\$archive\.\$\$"\n\s+mv "\$prefix\/\$archive\.\$\$" "\$prefix\/\$archive"\n/);
-  assert.match(rust, /\n\s+tar -xJf "\$work\/\$archive" -C "\$work"\n/, "it unpacks only the copy it just checked");
-  assert.match(rust, /dir="\$\(dirname "\$GITHUB_WORKSPACE"\)"\n\s+while :; do\n\s+for config in "\$dir\/\.cargo\/config\.toml" "\$dir\/\.cargo\/config"; do\n\s+if \[ -e "\$config" \]; then\n[^\n]+::error::[^\n]+\n\s+exit 1\n/, "Cargo settings above the checkout stop the release");
-  assert.match(rust, /test "\$\(command -v rustc\)" = "\$work\/bin\/rustc"\n\s+test "\$\(command -v cargo\)" = "\$work\/bin\/cargo"\n/);
-  assert.match(rust, /\n\s+echo "\$work\/bin" >> "\$GITHUB_PATH"\n?$/);
+  assertPinnedRust(rust, "release");
+  assert(rust.includes("$RUST_STD_DARWIN_X64_SHA256"), "RUST_STD_DARWIN_X64_SHA256");
   const node = at(/name: Install pinned Node on the owner's runner/);
   const bun = at(/id: bun-arm64\n/);
   for (const index of [node, bun]) assert.match(all[index], /\n {8}if: runner\.environment != 'github-hosted'\n/);
@@ -293,6 +285,96 @@ test("a release on the owner's runner signs with pinned, checksum-checked Node, 
   assert(at(/name: Install pinned Rust/) < at(/\bcargo build\b/), "no cargo run comes before the pinned Rust");
   assert.match(all[at(/name: Use a clean Rust build folder/)], /echo "BUN_INSTALL_CACHE_DIR=\$RUNNER_TEMP\/crazyagent-release\/bun-cache" >> "\$GITHUB_ENV"/);
   assert(at(/name: Use a clean Rust build folder/) < at(/install --frozen-lockfile/), "bun installs into a fresh cache");
+});
+
+/**
+ * Asserts that `step` installs Rust on the owner's runner from pinned, checksum-checked archives, never through rustup.
+ * Inputs: the step text and a label for the messages. Output: none; it throws on the first property the step lacks.
+ */
+function assertPinnedRust(step, label) {
+  assert.match(step, /\n {8}if: runner\.environment != 'github-hosted'\n/, label);
+  assert.doesNotMatch(step, /\brustup\b|\.rustup|RUSTUP_/, `${label}: no rustup, toolchain or proxy left on the runner`);
+  for (const pin of ["RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256"]) assert(step.includes(`$${pin}`), `${label}: ${pin}`);
+  assert.match(step, /\n\s+if ! echo "\$sha  \$work\/\$archive" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n\s+curl [^\n]+\n\s+echo "\$sha  \$work\/\$archive" \| shasum -a 256 -c -\n/, `${label}: every Rust archive, cached or downloaded, matches its pin`);
+  assert.match(step, /\n\s+cp "\$work\/\$archive" "\$prefix\/\$archive\.\$\$"\n\s+mv "\$prefix\/\$archive\.\$\$" "\$prefix\/\$archive"\n/, label);
+  assert.match(step, /\n\s+tar -xJf "\$work\/\$archive" -C "\$work"\n/, `${label}: it unpacks only the copy it just checked`);
+  assert.match(step, /dir="\$\(dirname "\$GITHUB_WORKSPACE"\)"\n\s+while :; do\n\s+for config in "\$dir\/\.cargo\/config\.toml" "\$dir\/\.cargo\/config"; do\n\s+if \[ -e "\$config" \]; then\n[^\n]+::error::[^\n]+\n\s+exit 1\n/, `${label}: Cargo settings above the checkout stop the job`);
+  assert.match(step, /test "\$\(command -v rustc\)" = "\$work\/bin\/rustc"\n\s+test "\$\(command -v cargo\)" = "\$work\/bin\/cargo"\n/, label);
+  assert.match(step, /\n\s+work="\$RUNNER_TEMP\/rust"\n/, label);
+  assert.match(step, /\n\s+echo "\$work\/bin" >> "\$GITHUB_PATH"\n?$/, label);
+}
+
+/**
+ * Returns the value of one workflow-level `env:` entry.
+ * Inputs: the workflow text and the variable name. Output: the text after `NAME: ` on its one line.
+ */
+function envValue(workflowText, name) {
+  const lines = block(workflowText, 0, "env").filter((line) => line.startsWith(`  ${name}: `));
+  assert.equal(lines.length, 1, `one ${name} in the workflow env`);
+  return lines[0].slice(`  ${name}: `.length);
+}
+
+const HOSTED_ONLY = /^ {6}- (?:id: \S+\n {8})?(?:name: [^\n]+\n {8})?if: runner\.environment == 'github-hosted'\n/;
+
+test("macOS CI on the owner's runner builds with the release's pinned, checksum-checked Node, bun and Rust, plus a pinned clippy", async () => {
+  const ci = await workflow("ci.yml");
+  const release = await workflow("release.yml");
+  for (const name of ["RUST_TOOLCHAIN", "NODE_VERSION", "BUN_VERSION", "NODE_DARWIN_ARM64_SHA256", "BUN_DARWIN_ARM64_SHA256",
+    "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256"]) {
+    assert.equal(envValue(ci, name), envValue(release, name), `CI and release pin the same ${name}`);
+  }
+  assert.match(envValue(ci, "CLIPPY_DARWIN_ARM64_SHA256"), /^[0-9a-f]{64}$/);
+  assert.doesNotMatch(ci, /crazyagent-release/, "CI never writes the release's tool cache");
+  const all = steps(ci, "macos");
+  const at = (pattern) => {
+    const index = all.findIndex((step) => pattern.test(step));
+    assert(index >= 0, String(pattern));
+    return index;
+  };
+  for (const shared of [/uses: actions\/setup-node@/, /uses: oven-sh\/setup-bun@/, /rustup toolchain install/]) {
+    assert.match(all[at(shared)], HOSTED_ONLY, `${shared} runs only on GitHub's fresh runners`);
+  }
+  const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
+  assertPinnedRust(rust, "CI");
+  assert(rust.includes('"clippy aarch64-apple-darwin $CLIPPY_DARWIN_ARM64_SHA256"'), "the pinned clippy is one of the checked archives");
+  assert.match(rust, /\n\s+prefix="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/rust\/\$RUST_TOOLCHAIN"\n/);
+  assert.match(rust, /\n\s+test "\$\(command -v cargo-clippy\)" = "\$work\/bin\/cargo-clippy"\n/);
+  assert.match(rust, /\n\s+test -d "\$\(rustc --print sysroot\)\/lib\/rustlib\/aarch64-apple-darwin\/lib"\n/);
+  const node = at(/name: Install pinned Node on the owner's runner/);
+  const bun = at(/id: bun-arm64\n/);
+  for (const index of [node, bun]) assert.match(all[index], /\n {8}if: runner\.environment != 'github-hosted'\n/);
+  assert.match(all[node], /\n\s+prefix="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/node\/\$NODE_VERSION\/arm64"\n[^]*node-v\$NODE_VERSION-darwin-arm64\.tar\.gz/);
+  assert.match(all[bun], /\n\s+prefix="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/bun\/\$BUN_VERSION\/arm64"\n[^]*bun-darwin-aarch64\.zip/);
+  assert(node < at(/\bnpm ci\b/) && node < at(/\bnode --input-type/), "no node or npm run comes before the pinned Node");
+  assert(bun < at(/\bbun install\b/), "no bun run comes before the pinned bun");
+  assert(at(/name: Install pinned Rust/) < at(/\bcargo fetch\b/) && at(/name: Install pinned Rust/) < at(/\bmake lint\b/), "no cargo run comes before the pinned Rust");
+  const bunPaths = all.join("\n").split("\n").filter((line) => line.includes("outputs.bun-path"));
+  assert.equal(bunPaths.length, 2, "the Node and Bun suites name their bun");
+  for (const line of bunPaths) assert.equal(line.trim(), "BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}");
+});
+
+test("nothing macOS CI runs on the owner's runner installs globally or reads or writes the runner user's home", async () => {
+  const all = steps(await workflow("ci.yml"), "macos");
+  const home = all[1];
+  assert.match(home, /^ {6}- name: Keep CI state out of the runner user's home\n {8}if: runner\.environment != 'github-hosted'\n/, "the second step, right after the Rosetta check");
+  assert.match(home, /\n\s+state="\$RUNNER_TOOL_CACHE\/crazyagent-ci"\n/);
+  assert.match(home, /\n\s+home="\$RUNNER_TEMP\/home"\n/);
+  assert.match(home, /\n\s+if \(\( size_kib > 20 \* 1024 \* 1024 \)\); then\n[^\n]+\n\s+rm -rf "\$state"\n\s+fi\n/, "the kept CI state stays under 20 GiB");
+  for (const line of ['echo "HOME=$home"', 'echo "CARGO_HOME=$state/cargo-home"', 'echo "CARGO_TARGET_DIR=$state/target"',
+    'echo "npm_config_cache=$state/npm-cache"', 'echo "BUN_INSTALL_CACHE_DIR=$state/bun-cache"']) {
+    assert(home.includes(`\n            ${line}\n`), line);
+  }
+  const owner = all.filter((step) => !HOSTED_ONLY.test(step));
+  assert(owner.length >= 10, "the filter keeps the steps badal runs");
+  const global = /\bsudo\b|\b(?:npm|bun|pnpm|yarn) (?:i|install|add)\b[^\n]*(?:\s-g\b|--global)|\bcargo install\b|\brustup\b|\$HOME\b|~\/|\/\.(?:claude|codex|rustup|npm|bun)\b|uses: (?:actions\/setup-node|oven-sh\/setup-bun)@/;
+  for (const step of owner) {
+    const title = step.split("\n")[0].trim();
+    assert.doesNotMatch(step, global, `${title}: nothing global and nothing under the runner user's home`);
+    for (const line of step.split("\n").filter((line) => line.includes('>> "$GITHUB_PATH"'))) {
+      assert.equal(line.trim(), 'echo "$work/bin" >> "$GITHUB_PATH"', title);
+      assert.match(step, /\n\s+work="\$RUNNER_TEMP\/[a-z0-9-]+"\n/, `${title}: PATH gains only a folder under RUNNER_TEMP`);
+    }
+  }
 });
 
 test("make test and test-rust-selected give every cargo test the native-auth host, desktop tests included", async () => {
