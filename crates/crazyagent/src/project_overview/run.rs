@@ -7,9 +7,10 @@ use crate::protocol::ProjectId;
 use crate::roadmap_status::{Claim, Runs};
 use rusqlite::{Connection, params};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// The longest one writing run may take; a run still marked running after it is closed.
+/// The longest one writing run may take, on the engine's steady clock, which does not
+/// count the time the machine sleeps; a run still open after it is closed.
 pub const RUN_TIME: Duration = Duration::from_secs(10 * 60);
 /// The most writing runs one tick starts.
 pub const STARTS_PER_TICK_MAX: usize = 4;
@@ -26,13 +27,75 @@ pub const NOT_WRITTEN: &str = "The Overview tabs could not be written";
 /// Why a run failed when no account of the project's pool can run it.
 pub const NO_ACCOUNT: &str = "No account in this project's pool can run the refresh";
 
-pub(super) const RUN_MS: i64 = RUN_TIME.as_millis() as i64;
-
-const _: () = assert!(RUN_MS > 0 && STARTS_PER_TICK_MAX >= 1);
+const _: () = assert!(!RUN_TIME.is_zero() && STARTS_PER_TICK_MAX >= 1);
 const _: () = assert!(UNFINISHED.len() <= FAILURE_BYTES_MAX && NO_TABS.len() <= FAILURE_BYTES_MAX);
 const _: () =
     assert!(NOT_WRITTEN.len() <= FAILURE_BYTES_MAX && NO_ACCOUNT.len() <= FAILURE_BYTES_MAX);
 const _: () = assert!(REPLY_TOO_LONG.len() <= FAILURE_BYTES_MAX && REPLY_BYTES_MAX > 0);
+
+/// The writing runs this engine claimed and when each began on the engine's steady clock:
+/// one entry per project, the newest claim, kept until its time is over. A run is closed
+/// for its time by this clock, so a run that sat through a sleeping machine is not closed
+/// while it still has its own time left, and a clock set forward closes none.
+#[derive(Debug, Default)]
+pub struct Started(Vec<(ProjectId, Claim, Instant)>);
+
+impl Started {
+    /// Notes a run that was just claimed. An earlier entry of the project goes: its run
+    /// was closed, or the project could not have been claimed again. Inputs: the project,
+    /// the claim and the steady time now.
+    fn began(&mut self, project: &ProjectId, claim: Claim, now: Instant) {
+        assert!(claim.ms() >= 0);
+        self.0.retain(|(open, _, _)| open != project);
+        self.0.push((project.clone(), claim, now));
+        assert_eq!(
+            self.0.iter().filter(|(open, _, _)| open == project).count(),
+            1,
+            "a project has one claimed run at a time"
+        );
+    }
+
+    /// Closes with [`UNFINISHED`] every noted run that began [`RUN_TIME`] or longer ago on
+    /// the steady clock, by its claim, so a run that already ended, or a newer run of the
+    /// project, is left alone; each such entry goes whether or not its run was still
+    /// open. An entry whose close fails stays for the next try. Inputs: the connection and
+    /// the steady time now. Output: how many open runs were closed, or
+    /// `overview_unavailable`.
+    fn close_overdue(&mut self, db: &Connection, now: Instant) -> Result<usize, EngineError> {
+        let mut closed = 0usize;
+        let mut failed = None;
+        self.0.retain(|(project, claim, began)| {
+            if now.saturating_duration_since(*began) < RUN_TIME {
+                return true;
+            }
+            let ended = db.execute(
+                "UPDATE project_overview SET running_ms=NULL, failure=?3
+                 WHERE project=?1 AND running_ms=?2",
+                params![project.as_str(), claim.ms(), UNFINISHED],
+            );
+            match ended {
+                Ok(count) => {
+                    assert!(count <= 1);
+                    closed += count;
+                    false
+                }
+                Err(error) => {
+                    failed = Some(unavailable(error));
+                    true
+                }
+            }
+        });
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(closed),
+        }
+    }
+
+    /// How many claimed runs are noted, at most one per project. Output: the count.
+    pub fn noted(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// How a writing run ended: the agent's reply with whether competitor research was in its
 /// evidence, the words saying why it failed, or nothing to do (the project cannot hold tab
@@ -108,28 +171,33 @@ pub(super) fn claim(
     Ok((claimed == 1).then_some(Claim::at(now_ms)))
 }
 
-/// Starts the writing runs that are due: a run past [`RUN_TIME`] is closed with
-/// [`UNFINISHED`], then each due project is claimed and handed to `runs`. A landing
-/// during a run marks the project stale again, so it is written once more after the run.
-/// Inputs: the connection, the runs and now. Output: how many runs started, or
-/// `overview_unavailable`.
-pub fn tick(db: &Connection, runs: &mut dyn Runs, now_ms: i64) -> Result<usize, EngineError> {
+/// Starts the writing runs that are due: a run that has been open for [`RUN_TIME`] of the
+/// engine's steady clock is closed with [`UNFINISHED`], then each due project is claimed,
+/// noted with the steady time and handed to `runs`. The wall clock only says which
+/// projects are due; it closes no run, so a machine that slept through a run's time does
+/// not end a run that can still report. A landing during a run marks the project stale
+/// again, so it is written once more after the run.
+/// Inputs: the connection, the runs, the runs this engine noted, the steady time now and
+/// the wall clock now. Output: how many runs started, or `overview_unavailable`.
+pub fn tick(
+    db: &Connection,
+    runs: &mut dyn Runs,
+    started: &mut Started,
+    now: Instant,
+    now_ms: i64,
+) -> Result<usize, EngineError> {
     assert!(now_ms >= 0);
-    db.execute(
-        "UPDATE project_overview SET running_ms=NULL, failure=?1
-         WHERE running_ms IS NOT NULL AND running_ms <= ?2",
-        params![UNFINISHED, now_ms.saturating_sub(RUN_MS)],
-    )
-    .map_err(unavailable)?;
-    let mut started = 0;
+    started.close_overdue(db, now)?;
+    let mut count = 0;
     for project in due(db, now_ms)? {
         if let Some(claimed) = claim(db, &project, now_ms)? {
+            started.began(&project, claimed, now);
             runs.start(&project, claimed);
-            started += 1;
+            count += 1;
         }
     }
-    assert!(started <= STARTS_PER_TICK_MAX);
-    Ok(started)
+    assert!(count <= STARTS_PER_TICK_MAX);
+    Ok(count)
 }
 
 /// What a claimed run asks its agent: the evidence and the prompt built on it, with each
@@ -220,13 +288,13 @@ fn offered(
 }
 
 /// Ends the run a claim names, and only that run. The run is closed first, by its claim:
-/// a run that was closed for its time, or whose project is gone, ends nothing and writes
-/// no tab. A reply's tabs are offered only after that, then the time is stored, with a
-/// line when some named tab could not be used; a failure stores one plain line and is not
-/// retried until the next landing or Refresh; a skip only closes the run. A reply whose
-/// offers do not finish leaves the run closed as unfinished. Inputs: the connection, the
-/// project, its folder, the claim, how the run ended and now. Output: whether this run
-/// was the one in flight, or `overview_unavailable`.
+/// a run that was closed for its time on the steady clock, or whose project is gone, ends
+/// nothing and writes no tab. A reply's tabs are offered only after that, then the time
+/// is stored, with a line when some named tab could not be used; a failure stores one
+/// plain line and is not retried until the next landing or Refresh; a skip only closes
+/// the run. A reply whose offers do not finish leaves the run closed as unfinished.
+/// Inputs: the connection, the project, its folder, the claim, how the run ended and now.
+/// Output: whether this run was the one in flight, or `overview_unavailable`.
 pub fn finish(
     db: &Connection,
     project: &ProjectId,

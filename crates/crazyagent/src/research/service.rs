@@ -248,6 +248,7 @@ struct StatusUpkeep {
     db: Option<rusqlite::Connection>,
     checks: Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
     left: Vec<crate::roadmap_status::run::RunLeft>,
+    overview_runs: crate::project_overview::Started,
     passes: u32,
     failed: bool,
     overview_failed: bool,
@@ -282,6 +283,7 @@ impl StatusUpkeep {
             db,
             checks: Vec::new(),
             left: Vec::new(),
+            overview_runs: crate::project_overview::Started::default(),
             passes: 0,
             failed: false,
             overview_failed: false,
@@ -348,7 +350,10 @@ impl StatusUpkeep {
             );
         }
         starts.upkeep = Upkeep::Overview;
-        if let Err(error) = crate::project_overview::tick(db, &mut starts, now)
+        let steady = std::time::Instant::now();
+        let ticked =
+            crate::project_overview::tick(db, &mut starts, &mut self.overview_runs, steady, now);
+        if let Err(error) = ticked
             && !self.overview_failed
         {
             self.overview_failed = true;
@@ -567,6 +572,7 @@ mod tests {
                 std::thread::spawn(|| None),
             ],
             left: Vec::new(),
+            overview_runs: crate::project_overview::Started::default(),
             passes: 0,
             failed: false,
             overview_failed: false,

@@ -100,6 +100,10 @@ const CLAUDE_ARGUMENTS: [&str; 8] = [
     "{\"disableAllHooks\":true}",
 ];
 
+/// The most bytes of one research report: the runner takes no longer report from an agent,
+/// and a reader of a stored report reads up to this many.
+pub const REPORT_BYTES_MAX: u64 = 512 * 1024;
+
 /// Bounds every research run obeys.
 #[derive(Debug, Clone)]
 pub struct ResearchLimits {
@@ -111,13 +115,13 @@ pub struct ResearchLimits {
 }
 
 impl Default for ResearchLimits {
-    /// Twenty minutes, 4 MiB of agent output, a 512 KiB report, three agents
-    /// per project at once and two attempts per job.
+    /// Twenty minutes, 4 MiB of agent output, a report of [`REPORT_BYTES_MAX`], three
+    /// agents per project at once and two attempts per job.
     fn default() -> Self {
         Self {
             wall_time: Duration::from_secs(20 * 60),
             output_bytes_max: 4 * 1024 * 1024,
-            report_bytes_max: 512 * 1024,
+            report_bytes_max: REPORT_BYTES_MAX,
             running_max: 3,
             attempts_max: 2,
         }

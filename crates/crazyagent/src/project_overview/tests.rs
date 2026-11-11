@@ -878,6 +878,45 @@ fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
 }
 
 #[test]
+fn a_competitor_report_as_long_as_the_runner_allows_reads_and_a_longer_one_does_not() {
+    use crate::project_setup::links::LINK_BYTES_MAX;
+    use crate::research::runner::REPORT_BYTES_MAX;
+    const LINE: &str = "Gamma leads.\n";
+    let (db, project, folder) = case();
+    let long = LINE.repeat(LINK_BYTES_MAX as usize / LINE.len() + 1);
+    assert!(long.len() as u64 > LINK_BYTES_MAX);
+    assert!(long.len() as u64 <= REPORT_BYTES_MAX);
+    let stored = job_report(&db, folder.path(), &long);
+    let report = folder.path().join(".crazyagent").join(&stored);
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Report {
+            path: stored.clone()
+        },
+        "a report over the linked file bound and within the runner's is the report"
+    );
+    assert_eq!(report_text(folder.path(), &stored), Some(long));
+
+    std::fs::write(&report, "x".repeat(REPORT_BYTES_MAX as usize)).unwrap();
+    assert_eq!(
+        report_text(folder.path(), &stored).map(|text| text.len() as u64),
+        Some(REPORT_BYTES_MAX)
+    );
+    std::fs::write(&report, "x".repeat(REPORT_BYTES_MAX as usize + 1)).unwrap();
+    assert_eq!(report_text(folder.path(), &stored), None);
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Missing,
+        "a report longer than the runner writes is not read"
+    );
+    assert_eq!(
+        crate::research::runner::ResearchLimits::default().report_bytes_max,
+        REPORT_BYTES_MAX,
+        "the runner writes under the bound the Overview reads under"
+    );
+}
+
+#[test]
 fn no_run_of_tildes_in_the_data_of_a_prompt_leaves_a_fence() {
     for run in [3, 4, 5, 6, 7, 9, 30, 31] {
         let tildes = "~".repeat(run);
@@ -1028,11 +1067,42 @@ fn accept_writes_only_the_proposal_the_owner_reviewed() {
 
 const REPLY: &str = "~~~quick-info\nAlpha reads papers.\n~~~\n~~~features\n- Search\n~~~\n~~~install-and-use\n## Install\n\n```sh\ncargo install alpha\n```\n~~~\n";
 
-/// Counts the runs a tick starts and keeps each claim, as the real runs keep theirs.
+/// Counts the runs a tick starts and keeps each claim, as the real runs keep theirs, with
+/// the runs the engine noted on its steady clock.
 #[derive(Default)]
 struct FakeTabRuns {
     started: usize,
     claims: Vec<(ProjectId, crate::roadmap_status::Claim)>,
+    clock: Started,
+}
+
+/// A steady time `ms` after one fixed moment of the test process. Input: the
+/// milliseconds. Output: the time.
+fn steady(ms: i64) -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    assert!(ms >= 0);
+    *EPOCH.get_or_init(std::time::Instant::now) + std::time::Duration::from_millis(ms as u64)
+}
+
+/// One tick of a machine that never sleeps: the steady clock and the wall clock both
+/// stand `now_ms` after their start. Inputs: the connection, the runs and the time.
+/// Output: how many runs started.
+fn tick(db: &Connection, runs: &mut FakeTabRuns, now_ms: i64) -> Result<usize, EngineError> {
+    tick_at(db, runs, now_ms, now_ms)
+}
+
+/// One tick with the two clocks apart, as after a sleep or a clock change. Inputs: the
+/// connection, the runs, the steady time and the wall clock. Output: how many runs started.
+fn tick_at(
+    db: &Connection,
+    runs: &mut FakeTabRuns,
+    steady_ms: i64,
+    wall_ms: i64,
+) -> Result<usize, EngineError> {
+    let mut clock = std::mem::take(&mut runs.clock);
+    let started = super::tick(db, runs, &mut clock, steady(steady_ms), wall_ms);
+    runs.clock = clock;
+    started
 }
 
 impl crate::roadmap_status::Runs for FakeTabRuns {
@@ -1295,6 +1365,110 @@ fn a_run_put_back_runs_again_when_its_time_comes_and_only_its_own_claim_counts()
     assert!(overview.stale && !overview.running && overview.failure.is_none());
     assert_eq!(tick(&db, &mut runs, 59_999).unwrap(), 0);
     assert_eq!(tick(&db, &mut runs, 60_000).unwrap(), 1);
+}
+
+#[test]
+fn a_run_that_sat_through_a_sleeping_machine_keeps_its_time_and_its_reply_is_taken() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let run_ms = RUN_TIME.as_millis() as i64;
+    let woke = 6 * run_ms;
+    refresh(&db, &project).unwrap();
+    assert_eq!(
+        tick_at(&db, &mut runs, 60_000, woke).unwrap(),
+        0,
+        "the wall clock alone closes no run, so no second run starts beside it"
+    );
+    let overview = read(&db, &project, folder.path(), woke).unwrap();
+    assert!(overview.running, "an open claim reads as running");
+    assert!(overview.failure.is_none());
+    assert_eq!(runs.clock.noted(), 1);
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, woke + 1), 1);
+    let overview = read(&db, &project, folder.path(), woke + 2).unwrap();
+    assert!(!overview.running);
+    assert!(overview.failure.is_none());
+    assert_eq!(overview.checked_ms, Some(woke + 1));
+    assert!(overview.tabs.iter().any(|tab| tab.text.is_some()));
+    assert_eq!(
+        tick_at(&db, &mut runs, 61_000, woke + 3).unwrap(),
+        1,
+        "the Refresh asked during the run starts once the run ended"
+    );
+}
+
+#[test]
+fn a_run_open_for_its_whole_time_on_the_steady_clock_is_closed_whatever_the_wall_clock_says() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 1_000_000).unwrap();
+    assert_eq!(tick_at(&db, &mut runs, 0, 1_000_000).unwrap(), 1);
+    let run_ms = RUN_TIME.as_millis() as i64;
+    assert_eq!(tick_at(&db, &mut runs, run_ms - 1, 5).unwrap(), 0);
+    assert!(read(&db, &project, folder.path(), 5).unwrap().running);
+    assert_eq!(
+        tick_at(&db, &mut runs, run_ms, 5).unwrap(),
+        0,
+        "a wall clock set back does not keep a run open past its time"
+    );
+    let overview = read(&db, &project, folder.path(), 6).unwrap();
+    assert!(!overview.running);
+    assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
+    assert_eq!(runs.clock.noted(), 0);
+    assert_eq!(
+        runs.end(&db, folder.path(), REPLIED, 7),
+        0,
+        "the closed run's late reply writes nothing"
+    );
+}
+
+#[test]
+fn a_run_that_ended_is_not_called_unfinished_once_its_time_is_over() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 1), 1);
+    let run_ms = RUN_TIME.as_millis() as i64;
+    assert_eq!(tick(&db, &mut runs, run_ms).unwrap(), 0);
+    let overview = read(&db, &project, folder.path(), run_ms).unwrap();
+    assert!(!overview.running);
+    assert!(overview.failure.is_none());
+    assert_eq!(overview.checked_ms, Some(1));
+    assert_eq!(
+        runs.clock.noted(),
+        0,
+        "a run whose time is over is no longer noted"
+    );
+}
+
+#[test]
+fn a_run_put_back_and_claimed_again_has_its_own_time_from_the_new_claim() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let (_, first) = runs.claims.remove(0);
+    assert!(requeue(&db, &project, first, 10).unwrap());
+    assert_eq!(tick(&db, &mut runs, 10).unwrap(), 1);
+    assert_eq!(
+        runs.clock.noted(),
+        1,
+        "one noted run per project, the newest"
+    );
+    let run_ms = RUN_TIME.as_millis() as i64;
+    assert_eq!(tick(&db, &mut runs, run_ms).unwrap(), 0);
+    let overview = read(&db, &project, folder.path(), run_ms).unwrap();
+    assert!(
+        overview.running,
+        "the first claim's time being over closes nothing of the second"
+    );
+    assert!(overview.failure.is_none());
+    assert_eq!(tick(&db, &mut runs, run_ms + 10).unwrap(), 0);
+    let overview = read(&db, &project, folder.path(), run_ms + 10).unwrap();
+    assert!(!overview.running);
+    assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
 }
 
 #[test]
