@@ -364,6 +364,21 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
         .filter(|id| matches!(*id, "codex" | "claude-code"))
 }
 
+/// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
+/// control (DEC-141 PA-15), word for word in the TUI and the desktop (PALOW-L2), short enough
+/// for a TUI row at 80 columns.
+pub const NO_SUB_AGENTS: &str = "Not available: runs only as a master";
+
+/// Tells why no sub-agent runs on a harness kind: a kind no launch adapter starts as a team
+/// agent, today rcli, keeps its Coordination rows, which say so (DEC-141 PA-15).
+/// Input: the harness kind. Output: [`NO_SUB_AGENTS`], or none for a kind sub-agents run on.
+pub fn sub_agents_unavailable(kind: crate::coord::settings::HarnessKind) -> Option<&'static str> {
+    match launch_harness(kind.as_str()) {
+        Some(_) => None,
+        None => Some(NO_SUB_AGENTS),
+    }
+}
+
 /// Maps a team plan master harness to the backend that runs the project's master on it.
 /// Takes the harness identifier or a connection name for it. Returns Codex, Claude or
 /// RCLI, the only harnesses a master runs on, or none for any other harness.

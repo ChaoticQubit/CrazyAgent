@@ -855,6 +855,7 @@ fn accounts() -> Vec<super::seam::AccountRow> {
                 name,
                 provider: provider.into(),
                 status: status.into(),
+                no_window: None,
             }
         })
         .collect()

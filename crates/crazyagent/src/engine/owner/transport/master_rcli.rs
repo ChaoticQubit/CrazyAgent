@@ -93,6 +93,19 @@ fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) ->
     text
 }
 
+/// What one rcli master turn's instruction file holds as things are now: the owner's app and
+/// project text is read again for every turn and put after the startup instruction, so a
+/// change made between turns reaches the next one, as RCLI keeps no session to resume
+/// (DEC-141 PA-18). Inputs: the startup instruction and the agent project. Output: the file
+/// text, or the read failure.
+fn turn_instruction_text(
+    instructions: &str,
+    project: &crate::agent_home::AgentProject,
+) -> Result<String, EngineError> {
+    let given = crate::agent_home::text(project).map_err(|problem| EngineError(problem.0))?;
+    Ok(instruction_file_text(instructions, given))
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
@@ -232,8 +245,7 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        let given = crate::agent_home::text(&prepared.agent_project)
-            .map_err(|problem| EngineError(problem.0))?;
+        let text = turn_instruction_text(&prepared.instructions, &prepared.agent_project)?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
         let _folder =
@@ -249,7 +261,6 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             &prepared.hidden_paths,
         )?;
-        let text = instruction_file_text(&prepared.instructions, given);
         if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(
                 &self.authority.root,

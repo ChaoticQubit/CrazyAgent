@@ -1974,6 +1974,29 @@ fn team_plan_harness_names_map_to_launch_adapters_and_delegation_paths() {
     assert_eq!(delegation_path("gemini", true), DelegationPath::Unavailable);
 }
 
+/// DEC-141 PA-15: every harness kind the Coordination settings list either runs sub-agents
+/// or carries the reason it cannot, and the reason follows the launch adapters, so a kind
+/// gains live rows the moment an adapter can launch it.
+#[test]
+fn every_coordination_harness_kind_runs_sub_agents_or_says_why_not() {
+    use crate::coord::settings::HarnessKind;
+    for kind in HarnessKind::ALL {
+        let reason = sub_agents_unavailable(kind);
+        assert_eq!(
+            reason.is_none(),
+            launch_harness(kind.as_str()).is_some(),
+            "{kind:?}"
+        );
+        assert!(reason.is_none_or(|text| text == NO_SUB_AGENTS), "{kind:?}");
+    }
+    assert_eq!(sub_agents_unavailable(HarnessKind::ClaudeCode), None);
+    assert_eq!(sub_agents_unavailable(HarnessKind::Codex), None);
+    assert_eq!(
+        sub_agents_unavailable(HarnessKind::Rcli),
+        Some(NO_SUB_AGENTS)
+    );
+}
+
 #[test]
 fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness() {
     let directory = tempfile::tempdir().unwrap();

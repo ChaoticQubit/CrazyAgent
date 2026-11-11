@@ -403,6 +403,40 @@ fn a_manual_reset_is_marked_and_an_empty_range_says_so() {
     ))
     .join("\n");
     assert!(all.contains("No limits read yet."), "{all}");
+
+    let mut keyed = names();
+    keyed
+        .accounts
+        .insert("acct-key".into(), "Team OpenAI key".into());
+    keyed
+        .accounts
+        .insert("acct-local".into(), "Ollama box".into());
+    keyed.no_window = vec![
+        ("acct-key".into(), crate::usage::NO_WINDOW_KEY),
+        ("acct-local".into(), crate::usage::NO_WINDOW_LOCAL),
+    ];
+    let all = text(&summary(
+        &none,
+        UsageRange::Today,
+        &keyed,
+        NOW,
+        0,
+        200,
+        &ctx,
+    ))
+    .join("\n");
+    for shown in [
+        "Team OpenAI key",
+        crate::usage::NO_WINDOW_KEY,
+        "Ollama box",
+        crate::usage::NO_WINDOW_LOCAL,
+    ] {
+        assert!(
+            all.contains(shown),
+            "DEC-141 PA-16: a key or local account says what it has: {all}"
+        );
+    }
+    assert!(!all.contains("No limits read yet."), "{all}");
 }
 
 /// PROTO-2 F1 TUI sibling: a reset time the owner set that has passed is not shown, so the

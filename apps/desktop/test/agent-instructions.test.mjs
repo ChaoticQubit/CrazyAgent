@@ -59,15 +59,19 @@ test("the view says which instruction files the harness loaded and which skills 
   for (const path of ["/w/agent-12/CLAUDE.md", "/w/agent-12/AGENTS.md", "/h/agent-12/CLAUDE.md"]) assert.ok(markup.includes(path), path);
   assert.ok(markup.indexOf("Skills used:") < markup.indexOf("No app or project instructions"), "the report leads the view");
 
-  assert.match(panel({ kind: "ok", value: { ...value, loaded: [], skills_used: [] } }),
-    /Instructions: none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt - Skills used: none/,
-    "Claude loads no instruction file itself, and the line says why");
-  assert.match(panel({ kind: "ok", value: { ...value, harness: "codex", loaded: [], skills_used: [] } }), /Instructions: none loaded by its harness - Skills used: none/);
-  const unreported = panel({ kind: "ok", value: { ...value, sessions: 0, loaded: [], skills_used: [] } });
-  assert.match(unreported, /Instructions: not reported yet - Skills used: not reported yet/);
-  assert.match(unreported, /A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off\./,
-    "a Claude run that keeps no session record is not left at not reported yet with no reason");
-  assert.doesNotMatch(panel({ kind: "ok", value: { ...value, harness: "codex", sessions: 0, loaded: [], skills_used: [] } }), /headless Claude/);
+  for (const harness of ["claude-code", "codex"]) {
+    assert.match(panel({ kind: "ok", value: { ...value, harness, loaded: [], skills_used: [] } }),
+      /Instructions: none loaded by the harness itself; CrazyAgent gives its instructions at launch - Skills used: none/,
+      `DEC-141 PA-14: one line for every harness, ${harness}`);
+    const unreported = panel({ kind: "ok", value: { ...value, harness, sessions: 0, loaded: [], skills_used: [] } });
+    assert.match(unreported, /Instructions: not reported yet - Skills used: not reported yet/, harness);
+    assert.match(unreported, /A headless run reports nothing here while it keeps no transcript\./, harness);
+    assert.doesNotMatch(unreported, /Claude run/, harness);
+  }
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/team.rs", import.meta.url), "utf8");
+  for (const line of ["none loaded by the harness itself; CrazyAgent gives its instructions at launch", "A headless run reports nothing here while it keeps no transcript."]) {
+    assert.ok(tui.includes(line), `the TUI says the same: ${line}`);
+  }
   assert.doesNotMatch(panel({ kind: "ok", value: { ...value, launched: false } }), /Skills used/, "an agent that never launched has no report");
 });
 

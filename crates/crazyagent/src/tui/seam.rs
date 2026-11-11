@@ -55,15 +55,17 @@ pub struct PoolScope {
     pub projects: Vec<CredentialRef>,
 }
 
-/// One account as lists show it: never a secret, only plain labels.
-/// Input: built from the engine's account list. Output: list and pool editor
-/// rows.
+/// One account as lists show it: never a secret, only plain labels, and for a key,
+/// URL or local account what it has in place of a 5-hour or weekly window.
+/// Input: built from the engine's account list. Output: list, pool editor and
+/// usage rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountRow {
     pub id: CredentialRef,
     pub name: String,
     pub provider: String,
     pub status: String,
+    pub no_window: Option<&'static str>,
 }
 
 /// The words an account goes by wherever a screen shows it outside its own row in Accounts:

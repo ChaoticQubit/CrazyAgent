@@ -1640,3 +1640,26 @@ fn the_device_code_screen_counts_the_code_s_minutes_down() {
         assert_eq!(code_left_line(Duration::from_secs(left)), line, "{left}");
     }
 }
+
+#[test]
+fn an_account_row_carries_what_a_key_url_or_local_account_has_in_place_of_limits() {
+    let row = |provider, method| {
+        account_row(&account(
+            1,
+            "Seat",
+            provider,
+            method,
+            AccountStatus::SignedIn,
+        ))
+        .no_window
+    };
+    assert_eq!(row(Provider::Claude, SignInMethod::Subscription), None);
+    assert_eq!(
+        row(Provider::OpenaiApi, SignInMethod::ApiKey),
+        Some(crate::usage::NO_WINDOW_KEY)
+    );
+    assert_eq!(
+        row(Provider::Local, SignInMethod::Url),
+        Some(crate::usage::NO_WINDOW_LOCAL)
+    );
+}

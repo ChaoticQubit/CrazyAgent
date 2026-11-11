@@ -148,8 +148,14 @@ impl EditDelivery {
     }
 }
 
+/// What Keep transcripts for headless runs set to Off means for each harness that runs
+/// headless agents (DEC-141 PA-14): Claude Code runs with --no-session-persistence, and Codex
+/// keeps its rollout because the engine counts a headless Codex run's usage only from it. The
+/// TUI and the desktop show this one sentence under the setting.
+pub const TRANSCRIPTS_OFF: &str = "Off: Claude Code keeps no transcript. Codex keeps its own session record, which CrazyAgent reads to count its usage.";
+
 /// One project's agent instruction settings: which instruction texts its agents get,
-/// whether headless Claude runs keep their transcript, how an instruction edit reaches
+/// whether headless runs keep their transcript, how an instruction edit reaches
 /// agents already running, whether project lines the app text already has are left out
 /// of the joined text and whether Edit with AI may send the project's instructions to a
 /// model. A project the owner never changed gets both texts, keeps transcripts, sends an

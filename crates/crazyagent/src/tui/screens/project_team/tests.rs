@@ -34,6 +34,7 @@ fn accounts() -> Vec<AccountRow> {
         name: name.into(),
         provider: String::new(),
         status: String::new(),
+        no_window: None,
     })
     .collect()
 }
@@ -791,6 +792,7 @@ fn two_accounts_with_one_name_show_their_ids() {
         name: name.into(),
         provider: String::new(),
         status: String::new(),
+        no_window: None,
     };
     let rows = [
         row("claude-account-1a", "Claude"),
@@ -3212,18 +3214,39 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         (SubagentMode::Native, Delivery::TypingOnly)
     );
 
-    view.key(press(KeyCode::Down));
-    assert_eq!(view.coord.as_ref().unwrap().row, 5);
-    assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
-    assert_eq!(
-        view.notice,
-        Some(Notice::plain(
-            crate::coord::settings::RCLI_NATIVE_UNAVAILABLE
-        ))
-    );
-    assert!(!view.busy(), "a refused mode sends nothing");
+    let (lines, _) = view.rows(116, 40, &accounts(), &Look::plain());
+    let shown: Vec<String> = lines.iter().map(Row::text).collect();
+    for label in ["rcli sub-agents", "Messages to rcli agents"] {
+        let line = shown
+            .iter()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{label} keeps its row: {shown:?}"));
+        assert!(
+            line.contains(crate::team::NO_SUB_AGENTS),
+            "{label} says it cannot apply in the desktop's words: {line}"
+        );
+    }
+    let before = harness_row(&view, HarnessKind::Rcli);
+    for (row, label) in [(5, "rcli sub-agents"), (6, "Messages to rcli agents")] {
+        view.key(press(KeyCode::Down));
+        assert_eq!(view.coord.as_ref().unwrap().row, row);
+        assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+        let said = format!("{label} - {}", crate::team::NO_SUB_AGENTS);
+        assert!(
+            view.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text == said),
+            "row {row}: {:?}",
+            view.notice
+        );
+        assert!(
+            !view.busy(),
+            "row {row}: a row that cannot apply sends nothing"
+        );
+    }
+    assert_eq!(harness_row(&view, HarnessKind::Rcli), before);
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 8);

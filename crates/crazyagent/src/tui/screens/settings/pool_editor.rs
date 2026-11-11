@@ -750,6 +750,7 @@ mod tests {
             name: format!("Seat {index:03}"),
             provider: "Claude".into(),
             status: "Signed in".into(),
+            no_window: None,
         }
     }
 

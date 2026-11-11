@@ -1,6 +1,6 @@
 use super::{
     failed_turn_code, instruction_file_text, rcli_failure_observation, require_rcli_connection,
-    timed_out,
+    timed_out, turn_instruction_text,
 };
 use crate::agent_home::Given;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
@@ -277,6 +277,37 @@ fn an_rcli_instruction_file_holds_the_startup_instruction_and_the_owner_text() {
     assert!(
         cut.ends_with(&section),
         "the instruction files section stays whole"
+    );
+}
+
+/// DEC-141 PA-18 (PALOW-L1): an RCLI master turn after the owner changed the instructions is
+/// given the new text and not the old, after the startup instruction, since every turn reads
+/// the owner's text again.
+#[test]
+fn an_rcli_master_turn_after_an_instruction_change_is_given_the_new_text() {
+    let data = tempfile::tempdir().unwrap();
+    let project = crate::agent_home::AgentProject {
+        data: data.path().canonicalize().unwrap(),
+        id: crate::protocol::ProjectId::new("rcli").unwrap(),
+        folder: None,
+        mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
+    };
+    let startup = "## Project\n\nThe brief.\n";
+
+    crate::agent_home::save_app(&project.data, "OWNER-ALPHA-41\n").unwrap();
+    let first = turn_instruction_text(startup, &project).unwrap();
+    crate::agent_home::save_app(&project.data, "OWNER-BETA-42\n").unwrap();
+    let second = turn_instruction_text(startup, &project).unwrap();
+
+    assert!(
+        first.starts_with(startup) && first.contains("OWNER-ALPHA-41"),
+        "{first}"
+    );
+    assert!(second.starts_with(startup), "{second}");
+    assert!(
+        second.contains("OWNER-BETA-42") && !second.contains("OWNER-ALPHA-41"),
+        "the next turn keeps the old text: {second}"
     );
 }
 

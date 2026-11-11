@@ -281,12 +281,14 @@ fn refusal(code: &str) -> &'static str {
     }
 }
 
-/// Names shown in place of ids: projects, pools and accounts by id.
+/// Names shown in place of ids: projects, pools and accounts by id, and each key, URL or
+/// local account by id with what it has in place of a 5-hour or weekly window.
 #[derive(Default)]
 pub struct Names {
     pub projects: HashMap<String, String>,
     pub pools: HashMap<String, String>,
     pub accounts: HashMap<String, String>,
+    pub no_window: Vec<(String, &'static str)>,
 }
 
 impl Names {
@@ -308,6 +310,10 @@ impl Names {
         }
         if let Some(accounts) = ctx.store.accounts.ready() {
             names.accounts = crate::tui::seam::account_labels(accounts);
+            names.no_window = accounts
+                .iter()
+                .filter_map(|row| row.no_window.map(|note| (row.id.as_str().to_owned(), note)))
+                .collect();
         }
         names
     }
@@ -639,7 +645,17 @@ pub fn summary(
     }
     lines.push(Line::default());
     lines.push(styled("Account limits", Role::Heading, theme));
-    if report.limits.is_empty() {
+    let plain: Vec<&(String, &'static str)> = names
+        .no_window
+        .iter()
+        .filter(|(account, _)| {
+            !report
+                .limits
+                .iter()
+                .any(|row| row.account.as_str() == account)
+        })
+        .collect();
+    if report.limits.is_empty() && plain.is_empty() {
         lines.push(styled(
             "  No limits read yet. Signed-in Claude and ChatGPT accounts show here after their first check.",
             Role::Muted,
@@ -651,6 +667,14 @@ pub fn summary(
             limits_lines(limits, names, now_ms, offset, limit, theme),
             2,
         ));
+    }
+    for (account, note) in plain {
+        lines.push(styled(
+            format!("  {}", shown(&names.accounts, account)),
+            Role::Heading,
+            theme,
+        ));
+        lines.push(styled(format!("    {note}"), Role::Muted, theme));
     }
     if total.headline() == 0 && report.lines.is_empty() && unreported.is_empty() {
         lines.push(Line::default());

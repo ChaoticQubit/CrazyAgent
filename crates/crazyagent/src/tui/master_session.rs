@@ -3538,6 +3538,7 @@ mod turn_line_tests {
             name: name.into(),
             provider: "Claude".into(),
             status: "Signed in".into(),
+            no_window: None,
         };
         let mut lines = Vec::new();
         turn_lines(

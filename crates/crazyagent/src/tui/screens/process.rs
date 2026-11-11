@@ -1650,11 +1650,7 @@ impl ProcessPage {
         let ai = if settings.edit_with_ai { "On" } else { "Off" };
         for (name, option, key) in [
             ("Agent instructions", mode_label(settings.mode), "Ctrl-F"),
-            (
-                "Keep transcripts for headless Claude runs",
-                transcripts,
-                "Ctrl-T",
-            ),
+            ("Keep transcripts for headless runs", transcripts, "Ctrl-T"),
             ("Instruction edits", edits_label(settings.edits), "Ctrl-R"),
             (
                 "Lines the project file repeats",
@@ -1674,11 +1670,16 @@ impl ProcessPage {
             ));
         }
         let repeated = repeated_note(&settings, repeats);
+        let transcripts_note =
+            (!settings.transcripts).then_some(crate::instruction_files::TRANSCRIPTS_OFF);
         for note in [
             mode_note(settings.mode),
             edits_note(settings.edits),
             repeated.as_str(),
-        ] {
+        ]
+        .into_iter()
+        .chain(transcripts_note)
+        {
             lines.extend(
                 wrap(note, width)
                     .into_iter()

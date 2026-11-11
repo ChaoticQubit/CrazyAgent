@@ -87,6 +87,25 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 /** Each coordination harness id with the name the app shows for it. */
 export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
+const NO_SUB_AGENTS = "Not available: runs only as a master";
+const SUB_AGENT_HARNESSES: readonly CoordHarness[] = ["claude-code", "codex"];
+
+/** Tells why no sub-agent runs on a harness kind: a kind the engine launches no team agent on,
+ * today rcli, keeps its rows, which say so instead of a live control (DEC-141 PA-15). The
+ * engine's team::launch_harness and NO_SUB_AGENTS are the source a test ties this to.
+ * Input: the harness kind. Output: the reason, or undefined for a kind sub-agents run on. */
+export function subAgentsUnavailable(harness: CoordHarness): string | undefined {
+  return SUB_AGENT_HARNESSES.includes(harness) ? undefined : NO_SUB_AGENTS;
+}
+
+function UnavailableRow({ label, reason, helper }: { label: string; reason: string; helper?: string }) {
+  return <SettingRow label={label}>
+    <span className="set-label">{label}</span>
+    <span className="tg-terminal-note">{reason}</span>
+    {helper && <span className="tg-terminal-note">{helper}</span>}
+  </SettingRow>;
+}
+
 /** Why a harness kind has no native sub-agents, in the engine's words (PA-7), or null for a kind
  * that runs them: Claude Code as agent teams, Codex as sub-agents of the lead's own session. */
 export const NATIVE_UNAVAILABLE: Record<CoordHarness, string | null> = {
@@ -227,6 +246,8 @@ export function DeliverySetting({ projectId, row, status, reload }: { projectId:
   const { note, change } = useChange(reload);
   const [delivery, hold] = useHeld<Delivery>(row.delivery, Object.is, status);
   const label = `Messages to ${HARNESS_NAMES[row.harness]} agents`;
+  const unavailable = subAgentsUnavailable(row.harness);
+  if (unavailable) return <UnavailableRow label={label} reason={unavailable} helper={DELIVERY_HELPER[row.harness]} />;
   return <SettingRow label={label}>
     <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={delivery} options={DELIVERY_OPTIONS}
       onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void change(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery", () => hold(value as Delivery)); }} />
@@ -296,6 +317,8 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
 function SubAgentModeSetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
   const { note, change } = useChange(reload);
   const [mode, hold] = useHeld<SubagentMode>(row.mode, Object.is, status);
+  const unavailable = subAgentsUnavailable(row.harness);
+  if (unavailable) return <UnavailableRow label={`${HARNESS_NAMES[row.harness]} sub-agents`} reason={unavailable} />;
   return <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
     <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.harness, row.native)}
       onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}

@@ -24,6 +24,30 @@ pub use rules::THIRD_PARTY_NOTICES;
 pub const PLAN_BYTES_MAX: usize = 64;
 pub const FAILURE_BYTES_MAX: usize = 64;
 pub const RESET_MS_MAX: i64 = 32_503_680_000_000;
+/// What an API key account shows in place of its limits (DEC-141 PA-16).
+pub const NO_WINDOW_KEY: &str = "API key: no 5-hour or weekly window. The provider limits a key by rate and spend, set at the provider.";
+/// What an account on an endpoint URL shows in place of its limits (DEC-141 PA-16).
+pub const NO_WINDOW_URL: &str =
+    "Endpoint: no 5-hour or weekly window. The endpoint sets its own limits.";
+/// What a local model account shows in place of its limits (DEC-141 PA-16).
+pub const NO_WINDOW_LOCAL: &str = "Local model: no plan or rate limit.";
+
+/// Tells what an account with no 5-hour or weekly window has instead, so the Limits panels
+/// of the TUI and the desktop show every account (DEC-141 PA-16). Inputs: the account's
+/// sign-in method and provider. Output: the sentence, or none for a subscription, whose
+/// windows the engine reads.
+pub fn no_window(
+    method: crate::accounts::SignInMethod,
+    provider: crate::accounts::Provider,
+) -> Option<&'static str> {
+    use crate::accounts::{Provider, SignInMethod};
+    match (method, provider) {
+        (SignInMethod::Subscription, _) => None,
+        (_, Provider::Local) => Some(NO_WINDOW_LOCAL),
+        (SignInMethod::ApiKey, _) => Some(NO_WINDOW_KEY),
+        (SignInMethod::Url, _) => Some(NO_WINDOW_URL),
+    }
+}
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_limits (
     account TEXT PRIMARY KEY,

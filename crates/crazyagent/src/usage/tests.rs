@@ -445,3 +445,45 @@ fn a_failed_poll_stores_only_a_code_shaped_failure() {
     assert_eq!(code(&"a".repeat(65)), "usage_poll_failed");
     assert_eq!(code(&"a".repeat(64)), "a".repeat(64));
 }
+
+/// DEC-141 PA-16: every sign-in method and provider either has 5-hour and weekly windows the
+/// engine reads (a subscription) or a sentence the Limits panels show in their place, one per
+/// kind of account: a key, an endpoint URL or a local model.
+#[test]
+fn every_account_kind_has_its_limits_read_or_says_what_it_has() {
+    use crate::accounts::{Provider, SignInMethod};
+    let providers = [
+        Provider::Chatgpt,
+        Provider::Claude,
+        Provider::Openrouter,
+        Provider::OpenaiApi,
+        Provider::AnthropicApi,
+        Provider::OpenaiCompatible,
+        Provider::Local,
+    ];
+    for provider in providers {
+        assert_eq!(
+            no_window(SignInMethod::Subscription, provider),
+            None,
+            "{provider:?}"
+        );
+        let local = provider == Provider::Local;
+        for method in [SignInMethod::ApiKey, SignInMethod::Url] {
+            let expected = match (local, method) {
+                (true, _) => NO_WINDOW_LOCAL,
+                (false, SignInMethod::ApiKey) => NO_WINDOW_KEY,
+                (false, _) => NO_WINDOW_URL,
+            };
+            assert_eq!(
+                no_window(method, provider),
+                Some(expected),
+                "{method:?} {provider:?}"
+            );
+        }
+    }
+    let sentences = [NO_WINDOW_KEY, NO_WINDOW_URL, NO_WINDOW_LOCAL];
+    for (index, sentence) in sentences.iter().enumerate() {
+        assert!(!sentence.is_empty() && !sentence.contains('\n'));
+        assert!(!sentences[index + 1..].contains(sentence), "{sentence}");
+    }
+}

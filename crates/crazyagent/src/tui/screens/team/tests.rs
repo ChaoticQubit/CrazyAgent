@@ -165,6 +165,7 @@ fn fresh(width: u16, height: u16) -> Shell {
             name: name.into(),
             provider: String::new(),
             status: String::new(),
+            no_window: None,
         })
         .collect(),
     );
@@ -3629,7 +3630,7 @@ fn switch_off_unswitched() -> Arrival {
 }
 
 #[test]
-fn the_instructions_box_says_why_claude_loads_no_file_and_when_a_headless_run_reports_nothing() {
+fn the_instructions_box_says_the_same_for_every_harness_when_none_is_loaded_or_reported() {
     let ctx = Ctx::new(
         Depth::NoColor,
         Colors::Dark,
@@ -3655,41 +3656,30 @@ fn the_instructions_box_says_why_claude_loads_no_file_and_when_a_headless_run_re
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let claude = text(view.clone());
-    assert!(
-        claude.contains(
-            "Instructions: none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt"
-        ),
-        "{claude}"
-    );
-    let codex = text(AgentInstructions {
-        harness: "codex".into(),
-        ..view.clone()
-    });
-    assert!(
-        codex.contains("Instructions: none loaded by its harness"),
-        "{codex}"
-    );
-    let unreported = text(AgentInstructions {
-        sessions: 0,
-        ..view.clone()
-    });
-    assert!(
-        unreported.contains("Instructions: not reported yet")
-            && unreported.contains(
-                "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off."
+    for harness in ["claude-code", "codex"] {
+        let reported = text(AgentInstructions {
+            harness: harness.into(),
+            ..view.clone()
+        });
+        assert!(
+            reported.contains(
+                "Instructions: none loaded by the harness itself; CrazyAgent gives its instructions at launch"
             ),
-        "{unreported}"
-    );
-    assert!(
-        !text(AgentInstructions {
-            harness: "codex".into(),
+            "DEC-141 PA-14: one line for every harness: {reported}"
+        );
+        let unreported = text(AgentInstructions {
+            harness: harness.into(),
             sessions: 0,
-            ..view
-        })
-        .contains("headless Claude"),
-        "a Codex run is never told about the Claude transcript setting"
-    );
+            ..view.clone()
+        });
+        assert!(
+            unreported.contains("Instructions: not reported yet")
+                && unreported
+                    .contains("A headless run reports nothing here while it keeps no transcript."),
+            "DEC-141 PA-14: {harness}: {unreported}"
+        );
+        assert!(!unreported.contains("Claude run"), "{unreported}");
+    }
 }
 
 #[test]

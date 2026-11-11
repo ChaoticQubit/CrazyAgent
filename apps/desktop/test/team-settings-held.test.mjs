@@ -22,7 +22,7 @@ const ROWS = [
   "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than",
   "Workflow nudges", "Task-start reminder", "Re-ask a sub-agent's empty reply",
   "Claude Code sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents",
-  "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents",
+  "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents",
   "Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget",
 ];
 
