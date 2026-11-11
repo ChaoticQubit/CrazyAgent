@@ -444,6 +444,20 @@ pub(crate) fn turn_started(connection: &Connection, agent: i64) -> Result<(), En
     Ok(())
 }
 
+/// Records that a live master's open turn was none: it closes with no number, no
+/// `team_master_turns` row and no count, so engine input reaches the master again. Takes
+/// the engine database and the agent. Returns any SQLite failure.
+pub(crate) fn turn_dropped(connection: &Connection, agent: i64) -> Result<(), EngineError> {
+    let closed = connection
+        .execute(
+            "UPDATE team_live_masters SET turn_open=0 WHERE agent=?1",
+            [agent],
+        )
+        .map_err(state)?;
+    assert!(closed <= 1);
+    Ok(())
+}
+
 /// Records that a live master's turn ended: the turn closes and one `team_master_turns`
 /// row keeps its number, start, end and outcome for usage. Takes the engine database, the
 /// project, the agent, when the turn started if seen, the time and the outcome name.

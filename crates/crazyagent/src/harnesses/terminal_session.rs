@@ -6,6 +6,7 @@ use super::launch::{
 };
 use super::leftovers::{FOLLOWER_PACE, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
+use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
@@ -63,6 +64,8 @@ pub struct TerminalSession {
     own_held: bool,
     live: bool,
     own: bool,
+    grown: (u64, Instant),
+    stale_told: bool,
     facts: VecDeque<TranscriptEvent>,
     background: BTreeSet<String>,
     exited: bool,
@@ -160,6 +163,17 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
                 .map(|path| KeyFile::new(path, key.reveal().as_bytes()))
         })
         .transpose()
+}
+
+/// Says whether an agent's app waits in its pane, by the rule the engine types into it: it
+/// drew nothing for `APP_QUIET` and no question or permission prompt is on its screen. A
+/// host that cannot tell and a failed look say no. Takes the host and the pane name.
+/// Returns the answer.
+fn waits(host: &dyn Host, agent: &AgentId) -> bool {
+    matches!(host.quiet(agent), Ok(Some(quiet)) if quiet >= APP_QUIET)
+        && host
+            .screen(agent)
+            .is_ok_and(|screen| crate::team::events::question(&screen).is_none())
 }
 
 fn host_failure(error: HostError) -> LaunchError {
@@ -336,6 +350,8 @@ impl TerminalSession {
             own_held: false,
             live: false,
             own: false,
+            grown: (0, Instant::now()),
+            stale_told: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
             exited: false,
@@ -552,6 +568,22 @@ impl TerminalSession {
         }
     }
 
+    /// Says whether the open turn of a session that follows every turn is no turn any more:
+    /// its record got no byte for the launch's `stale_turn` and its app waits in the pane
+    /// (see `waits`). A pane that does not wait restarts the wait; a yes is said once, until
+    /// the record grows again. Takes the session. Returns the answer.
+    pub fn turn_stale(&mut self) -> bool {
+        assert!(self.live);
+        if !self.turn || self.stale_told || self.grown.1.elapsed() < self.limits.stale_turn {
+            return false;
+        }
+        self.stale_told = waits(self.host.as_ref(), &self.agent);
+        if !self.stale_told {
+            self.grown.1 = Instant::now();
+        }
+        self.stale_told
+    }
+
     /// Ends the pane and every process its harness started, then removes the key file and
     /// the generated context. On macOS a sandboxed pane's keeper first has the run's warden
     /// kill every process in the sandbox, sessions of their own included; then every process
@@ -713,6 +745,10 @@ impl TerminalSession {
         if self.reader.bytes() > self.limits.output_bytes as u64 {
             self.halt();
             return Err(failure("launch_output_limit"));
+        }
+        if self.reader.bytes() != self.grown.0 {
+            self.grown = (self.reader.bytes(), Instant::now());
+            self.stale_told = false;
         }
         for fact in facts {
             if self.live {

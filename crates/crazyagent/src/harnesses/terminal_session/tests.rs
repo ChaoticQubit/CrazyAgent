@@ -305,6 +305,69 @@ mod own_turns {
         pane.session.follow_every_turn();
     }
 
+    /// Waits until the session says its open turn is stale. Takes the pane. Panics when it
+    /// does not within 20 seconds.
+    fn stale(pane: &mut Pane) {
+        let until = Instant::now() + Duration::from_secs(20);
+        while !pane.session.turn_stale() {
+            assert!(
+                Instant::now() < until,
+                "the open turn never counted as stale"
+            );
+            assert_eq!(
+                pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+                None
+            );
+        }
+    }
+
+    /// OB-1: in a session that follows every turn, an open turn whose record gets no byte
+    /// for the launch's `stale_turn`, on a pane whose app waits, is said stale once. A record
+    /// that grows starts the wait again, and a turn that ended is never stale.
+    #[test]
+    fn an_open_turn_with_a_silent_record_on_a_waiting_pane_is_said_stale_once() {
+        let mut pane = start("stale-turn-1");
+        pane.session.follow_every_turn();
+        pane.session.limits.stale_turn = Duration::from_secs(4);
+        assert!(!pane.session.turn_stale(), "no turn is open");
+        pane.write(&[&user("go")]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted)
+        );
+        assert!(!pane.session.turn_stale(), "the record just grew");
+        stale(&mut pane);
+        assert!(!pane.session.turn_stale(), "a stale turn is said once");
+
+        pane.write(&[TOOL]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_millis(500)).unwrap(),
+            None
+        );
+        assert!(
+            !pane.session.turn_stale(),
+            "a record that grew starts the wait again"
+        );
+        stale(&mut pane);
+
+        pane.write(&[&reply("done")]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(text("done"))
+        );
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(DONE)
+        );
+        std::thread::sleep(Duration::from_secs(5));
+        assert_eq!(
+            pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+            None
+        );
+        assert!(!pane.session.turn_stale(), "a turn that ended is not stale");
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
     const BACKGROUND_USE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 40","run_in_background":true}}],"stop_reason":"tool_use"}}"#;
     const BACKGROUND_STARTED: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}"#;
     const BACKGROUND_NOTICE: &str = r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<status>completed</status>\n</task-notification>"}}"#;

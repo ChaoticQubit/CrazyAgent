@@ -113,7 +113,8 @@ const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Re
 /// is checked, so none is set here. `output_bytes` caps the harness output of one process,
 /// `attempts_max` the tries per task, `master_idle_stop` the bound for an idle master, which
 /// the project's choice scales, once no work is in flight and `rate_limit_pause` how long an account that hit its limit
-/// is skipped.
+/// is skipped. `stale_turn` is how long a live master's turn may stay open with no new byte
+/// in its session record, on a pane whose app waits, before the engine closes it as no turn.
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLimits {
     pub output_bytes: usize,
@@ -121,6 +122,7 @@ pub struct TeamLimits {
     pub master_idle_stop: Duration,
     pub rate_limit_pause: Duration,
     pub stop_grace: Duration,
+    pub stale_turn: Duration,
 }
 
 impl Default for TeamLimits {
@@ -131,6 +133,7 @@ impl Default for TeamLimits {
             master_idle_stop: Duration::from_secs(super::MASTER_IDLE_STOP_SECS.into()),
             rate_limit_pause: Duration::from_secs(10 * 60),
             stop_grace: Duration::from_secs(2),
+            stale_turn: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -140,6 +143,7 @@ impl TeamLimits {
         let ok = (1..=64 * 1024 * 1024).contains(&self.output_bytes)
             && (1..=10).contains(&self.attempts_max)
             && !self.master_idle_stop.is_zero()
+            && !self.stale_turn.is_zero()
             && self.stop_grace <= Duration::from_secs(30);
         ok.then_some(())
             .ok_or_else(|| EngineError("team_limits_invalid".into()))
@@ -438,6 +442,9 @@ enum Report {
         end: Option<TurnEnd>,
         text: String,
     },
+    /// The turn a live master's pane was in is none: it stayed open with no new byte in the
+    /// session record on a pane whose app waits (OB-1).
+    NoTurn,
     Own {
         end: Option<TurnEnd>,
         text: String,
@@ -7759,6 +7766,7 @@ impl TeamRuntime {
             stop_grace: self.limits.stop_grace,
             output_bytes: self.limits.output_bytes,
             events: SESSION_EVENTS_MAX,
+            stale_turn: self.limits.stale_turn,
         }
     }
 
@@ -8319,6 +8327,19 @@ impl TeamRuntime {
                     "the live master's turn",
                     end,
                 )?;
+                self.mark_agent(id, AgentStatus::Idle, None)?;
+                Ok(false)
+            }
+            Report::NoTurn => {
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                if worker.turn_started.take().is_none() {
+                    return Ok(false);
+                }
+                worker.idle_since = Instant::now();
+                if let Some(hosted) = &worker.hosted {
+                    hosted.set_busy(false);
+                }
+                super::master::turn_dropped(&self.connection, id)?;
                 self.mark_agent(id, AgentStatus::Idle, None)?;
                 Ok(false)
             }
@@ -9394,7 +9415,9 @@ fn live_adopted(
 /// start; once the app reads keys by the rule a first prompt waits for, it tells the
 /// engine, which types no message before that, and a look that fails before the pane
 /// ends is tried again on the next pass, except Codex's folder access step running out,
-/// which ends the session. Takes the session, the worker's channels and
+/// which ends the session. A turn left open that is none any more (see
+/// `TerminalSession::turn_stale`) is reported as `Report::NoTurn`, and opens again when the
+/// model speaks in it after all. Takes the session, the worker's channels and
 /// flags, whether a later engine may take the pane over, and the account's credential copy
 /// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
@@ -9417,6 +9440,7 @@ fn live_serve(
     let mut problem = None;
     let mut named = false;
     let mut reads_keys = false;
+    let mut dropped = false;
     while !cancel.load(Ordering::SeqCst) {
         if !reads_keys {
             match session.poll_ready() {
@@ -9445,12 +9469,19 @@ fn live_serve(
             Ok(Some(TranscriptEvent::TurnStarted)) => {
                 text.clear();
                 (limited, interrupted) = (false, false);
+                dropped = false;
                 let _ = reports.send(Report::Turn {
                     end: None,
                     text: String::new(),
                 });
             }
             Ok(Some(TranscriptEvent::Text { text: said })) => {
+                if std::mem::take(&mut dropped) {
+                    let _ = reports.send(Report::Turn {
+                        end: None,
+                        text: String::new(),
+                    });
+                }
                 if text.len() + said.len() <= LIVE_REPLY_BYTES_MAX {
                     text.push_str(&said);
                 }
@@ -9458,6 +9489,7 @@ fn live_serve(
             Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
             Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
             Ok(Some(TranscriptEvent::TurnFinished { success })) => {
+                dropped = false;
                 let end = match (limited, interrupted, success) {
                     (true, ..) => TurnEnd::RateLimited,
                     (false, true, _) => TurnEnd::Interrupted,
@@ -9485,6 +9517,10 @@ fn live_serve(
                 problem = Some(with_code(PROCESS_CLOSED, Some(&closed.0)));
                 break;
             }
+        }
+        if session.turn_stale() {
+            dropped = true;
+            let _ = reports.send(Report::NoTurn);
         }
     }
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);

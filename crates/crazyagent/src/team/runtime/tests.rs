@@ -15511,6 +15511,79 @@ fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it()
     }
 }
 
+/// A live master's open turn its pane reports as none is closed as no turn (OB-1): the
+/// master is idle again, engine input is no longer held by an open turn, and no turn is
+/// numbered or kept for usage. The report changes nothing when no turn is open, and a turn
+/// that starts later opens as usual.
+#[test]
+fn a_live_master_turn_reported_as_none_closes_without_counting() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Master, true, true);
+    worker.live = true;
+    team.workers.insert(agent, worker);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    super::super::master::pane_ready(&fixture.connection, &project, agent).unwrap();
+    let shown = |fixture: &Fixture| -> (String, bool, i64, i64) {
+        let status = fixture
+            .connection
+            .query_row(
+                "SELECT status FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (open, turns) = fixture
+            .connection
+            .query_row(
+                "SELECT turn_open,turns FROM team_live_masters WHERE project=?1",
+                [PROJECT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let kept = fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM team_master_turns", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        (status, open, turns, kept)
+    };
+    let started = || Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+
+    team.apply(agent, started()).unwrap();
+    assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
+    assert!(super::super::master::turn_running(&fixture.connection, &project).unwrap());
+
+    team.apply(agent, Report::NoTurn).unwrap();
+    assert_eq!(shown(&fixture), ("idle".to_owned(), false, 0, 0));
+    assert!(!super::super::master::turn_running(&fixture.connection, &project).unwrap());
+    assert_eq!(team.workers[&agent].turn_started, None);
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [agent],
+        )
+        .unwrap();
+    team.apply(agent, Report::NoTurn).unwrap();
+    assert_eq!(
+        shown(&fixture),
+        ("starting".to_owned(), false, 0, 0),
+        "with no turn open the report changes nothing"
+    );
+
+    team.apply(agent, started()).unwrap();
+    assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
+    team.workers.clear();
+}
+
 /// A turn that starts after a good one and never ends leaves no good end to stand on, so a
 /// command outliving it still fails the agent (team-8 r1 M1).
 #[test]

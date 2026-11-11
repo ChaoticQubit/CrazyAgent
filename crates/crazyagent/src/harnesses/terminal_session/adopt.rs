@@ -318,6 +318,8 @@ impl TerminalSession {
             own_held: false,
             live: false,
             own: false,
+            grown: (0, Instant::now()),
+            stale_told: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
             exited: false,
