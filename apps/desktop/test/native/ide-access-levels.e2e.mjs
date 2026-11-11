@@ -38,9 +38,10 @@ const TRUST = `(() => ({
   asked: [...document.querySelectorAll(".monaco-dialog-box")].some((box) => (box.textContent ?? "").includes("Do you trust the authors of the files in this")),
   restricted: [...document.querySelectorAll(".part.banner")].some((banner) => (banner.textContent ?? "").includes("Restricted Mode is intended for safe code browsing.")),
 }))()`;
-const DISTRUST = `(() => {
+const TRUST_TERMINAL = `(() => {
   ${CENTRE}
-  const button = [...document.querySelectorAll(".monaco-dialog-box .monaco-button")].find((item) => (item.textContent ?? "").includes("No, I don't trust the authors"));
+  const box = [...document.querySelectorAll(".monaco-dialog-box")].find((item) => (item.textContent ?? "").includes("Creating a terminal process requires executing code"));
+  const button = box && [...box.querySelectorAll(".monaco-button")].find((item) => (item.textContent ?? "").includes("Trust Workspace & Continue"));
   return button ? centre(button) : null;
 })()`;
 const CRAZYAGENT_VIEWS = ["Memories", "Agents", "Change sets", "Brief and documents"];
@@ -180,11 +181,10 @@ async function atLevel(t, level, shared) {
     }
 
     if (level.access === "full") {
-      await t.test("Full access: workspace trust asks first and the extension's views load in Restricted Mode", async () => {
-        await ide.until("the workspace trust question", `${TRUST}.asked`);
-        await me.capture("level-full-trust-asked");
-        await keys.click(await ide.until("the answer that keeps the folder untrusted", DISTRUST));
+      await t.test("Full access: workspace trust is on, the IDE opens in Restricted Mode and the extension's views load there", async () => {
         await ide.until("the Restricted Mode banner", `${TRUST}.restricted`);
+        assert.deepEqual(await page.evaluate(TRUST), { asked: false, restricted: true }, "the pinned build asks nothing at start");
+        await me.capture("level-full-restricted-at-start");
         await ide.run("View: Show CrazyAgent");
         assert.deepEqual(await ide.until("the CrazyAgent views in Restricted Mode", CRAZYAGENT_PANES), CRAZYAGENT_VIEWS);
         await me.capture("level-full-restricted");
@@ -193,6 +193,11 @@ async function atLevel(t, level, shared) {
 
     await t.test(`${level.label}: the first terminal shows its panel`, async () => {
       await ide.run("Terminal: Create New Terminal");
+      if (level.access === "full") {
+        await keys.click(await ide.until("the trust question the first terminal asks", TRUST_TERMINAL));
+        await me.capture("level-full-terminal-trust");
+        await ide.until("the workspace trusted", `!${TRUST}.asked && !${TRUST}.restricted`);
+      }
       await pause(SETTLE_MS);
       if ((await page.evaluate(ide.rows))?.length) await ide.pick(FOLDER);
       await ide.until(`the first ${level.label} terminal in the panel`, PANEL_TERMINAL);
