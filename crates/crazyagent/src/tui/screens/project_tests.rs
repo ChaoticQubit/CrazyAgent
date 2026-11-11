@@ -201,6 +201,7 @@ async fn settle(
             SetupQuery::Item { .. } => "item",
             SetupQuery::Memories { .. } => "memories",
             SetupQuery::Log { .. } => "log",
+            SetupQuery::Overview { .. } => "overview",
             _ => "other",
         });
         let result = serve(controller, query.clone()).await;
@@ -271,7 +272,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "context", "memories"]
+        ["setup", "jobs", "overview", "context", "memories"]
     );
     assert_eq!(screen.name, "Notes CLI");
     assert_eq!(screen.problem, None);
@@ -1058,7 +1059,7 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "context", "memories"],
+        ["setup", "jobs", "overview", "context", "memories"],
         "no agent output is read outside the Agents tab"
     );
     screen.open(Tab::Agents);
@@ -2386,7 +2387,7 @@ async fn failed_and_empty_reads_settle_back_off_and_say_why() {
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "context", "memories"]
+        ["setup", "jobs", "overview", "context", "memories"]
     );
 
     screen.read("context/documents/empty.md");
