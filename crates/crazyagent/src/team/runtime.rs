@@ -6,7 +6,7 @@ use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy, TaskSource, TaskStatus, TeamAccount,
     TeamReach, admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness,
-    names, now_ms, parse_delegations, parse_wakes, pick_account, tool,
+    names, now_ms, parse_delegations, parse_wakes, pick_account_held, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -73,6 +73,16 @@ const JOIN_WAIT: Duration = Duration::from_secs(15);
 /// How often a project's running agents are checked for an owner instruction edit under
 /// the Restart and Badge choices (DEC-111 QR1).
 const INSTRUCTION_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// How often an idle live master's account is compared with its pool's top account under
+/// the Live master account choice Move when idle (DEC-139).
+const MOVE_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// The least time between two moves of one project's live master, so accounts that keep
+/// passing each other cost at most one restart in that time (LMA r1 F1).
+const MOVE_DWELL: Duration = Duration::from_secs(crate::scheduling::MOVE_DWELL_SECS);
+/// The one team note a live master's move to its pool's top account leaves (DEC-139). It is
+/// written after any note of the start itself, so it is the newest engine note, which the
+/// desktop master area shows.
+const LIVE_MASTER_MOVED: &str = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
 const SESSION_EVENTS_MAX: usize = 200_000;
 const HISTORY_MESSAGES_MAX: i64 = 12;
@@ -620,6 +630,8 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     instruction_restarts: BTreeMap<i64, ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
+    master_moves: BTreeMap<ProjectId, CredentialRef>,
+    moves_next: BTreeMap<ProjectId, Instant>,
     restarted_for: BTreeMap<i64, u64>,
     waited_for: BTreeMap<i64, u64>,
     #[cfg(test)]
@@ -927,6 +939,8 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             instruction_restarts: BTreeMap::new(),
             master_restarts: BTreeSet::new(),
+            master_moves: BTreeMap::new(),
+            moves_next: BTreeMap::new(),
             restarted_for: BTreeMap::new(),
             held_restarts: Vec::new(),
             unmanaged_ending: BTreeMap::new(),
@@ -2945,13 +2959,6 @@ impl TeamRuntime {
             .count()
     }
 
-    fn load(&self, connection: &CredentialRef) -> usize {
-        self.workers
-            .values()
-            .filter(|w| &w.connection == connection && !w.stopping)
-            .count()
-    }
-
     /// Picks the pool account an agent of a harness starts on. Takes the live access, the
     /// project, the harness and the paused accounts. Returns the account; none while no
     /// account can take the agent yet but one still waits for this engine run's sign-in
@@ -2963,6 +2970,33 @@ impl TeamRuntime {
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<Option<TeamAccount>, String> {
+        self.account_as(access, project, harness, paused, None)
+    }
+
+    /// Picks the pool account as `account_for` does, for a new agent or for one that
+    /// already runs. A running agent is not counted against any account and does not make
+    /// its own account used, and its account wins every tie, so the answer differs from the
+    /// account it holds only when the owner's schedule puts another clearly before it
+    /// (`Choice::clearly_before`) or its own can no longer take work. Takes the live
+    /// access, the project, the harness, the paused accounts and the running agent, none
+    /// for a new one. Returns as `account_for`.
+    fn account_as(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+        holder: Option<i64>,
+    ) -> Result<Option<TeamAccount>, String> {
+        let held = holder.map(|id| &self.workers[&id].connection);
+        let load = |connection: &CredentialRef| {
+            self.workers
+                .iter()
+                .filter(|(id, w)| {
+                    Some(**id) != holder && &w.connection == connection && !w.stopping
+                })
+                .count()
+        };
         let Some(launch) = launch_harness(harness) else {
             return Err(format!("{harness} cannot run team agents yet"));
         };
@@ -3027,28 +3061,16 @@ impl TeamRuntime {
         {
             let used: BTreeSet<&CredentialRef> = self
                 .workers
-                .values()
-                .filter(|w| &w.project == project && !w.stopping)
-                .map(|w| &w.connection)
-                .collect();
-            let unused: Vec<TeamAccount> = accounts
                 .iter()
-                .filter(|account| !used.contains(&account.connection))
-                .cloned()
+                .filter(|(id, w)| Some(**id) != holder && &w.project == project && !w.stopping)
+                .map(|(_, w)| &w.connection)
                 .collect();
-            assert!(unused.len() <= accounts.len());
-            if let Some(account) =
-                pick_account(&unused, &|c: &CredentialRef| self.load(c), paused, &choice)
-            {
+            let apart = super::spread_candidates(&accounts, &used, held);
+            if let Some(account) = pick_account_held(&apart, &load, paused, &choice, held) {
                 return Ok(Some(account.clone()));
             }
         }
-        if let Some(account) = pick_account(
-            &accounts,
-            &|c: &CredentialRef| self.load(c),
-            paused,
-            &choice,
-        ) {
+        if let Some(account) = pick_account_held(&accounts, &load, paused, &choice, held) {
             return Ok(Some(account.clone()));
         }
         if checking {
@@ -3587,12 +3609,15 @@ impl TeamRuntime {
             if on && !worker.briefed {
                 return self.brief(stored, access, id);
             }
-            return self.switch_when_idle(stored, access, paused, id);
+            self.switch_when_idle(stored, access, paused, id)?;
+            return self.move_when_idle(stored, access, paused, id);
         }
         let harness = stored.team.master.clone();
         let live_capable = launch_harness(&harness)
             .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
         let planned = self.master_restarts.remove(project);
+        let left = self.master_moves.remove(project);
+        assert!(left.is_none() || planned, "a move is a planned restart");
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
@@ -3612,6 +3637,9 @@ impl TeamRuntime {
             Ok(None) => {
                 if planned {
                     self.master_restarts.insert(project.clone());
+                }
+                if let Some(left) = left {
+                    self.master_moves.insert(project.clone(), left);
                 }
                 return self.wait_line(project, super::master::SIGN_INS_CHECKING);
             }
@@ -3634,6 +3662,9 @@ impl TeamRuntime {
                 if let Some(note) = note {
                     self.note(project, &note)?;
                 }
+                if left.is_some_and(|left| left != account.connection) {
+                    self.note(project, LIVE_MASTER_MOVED)?;
+                }
                 self.brief(stored, access, id)
             }
             Start::Held => {
@@ -3641,6 +3672,9 @@ impl TeamRuntime {
                     self.master_restarts.insert(project.clone());
                 } else if let Some(starts) = self.live_starts.get_mut(project) {
                     starts.pop();
+                }
+                if let Some(left) = left {
+                    self.master_moves.insert(project.clone(), left);
                 }
                 Ok(())
             }
@@ -3699,6 +3733,70 @@ impl TeamRuntime {
         worker.stopping = true;
         let _ = worker.orders.send(Order::Stop);
         self.master_restarts.insert(project.clone());
+        Ok(())
+    }
+
+    /// Moves a project's running live master to its pool's top usable account under the
+    /// owner's Live master account choice Move when idle (DEC-139). It moves only at an idle
+    /// point: no turn of its own, quiet, no unsent owner line however old, no work of the
+    /// project in flight and no harness change waiting for its next start. The account it
+    /// holds keeps it unless the schedule puts another account clearly before it
+    /// (`pick_account_held`) or its own can no longer take work, and a project's master
+    /// moves at most once per `MOVE_DWELL`. It then stops for a planned restart that
+    /// `keep_live` starts on the top account, with one team note. Under Keep start account
+    /// nothing moves, and the stored choice is read only once per `MOVE_CHECK_EVERY`. Takes
+    /// the setup, the access, the paused accounts and the master's id. Returns any SQLite
+    /// failure.
+    fn move_when_idle(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+        id: i64,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let worker = &self.workers[&id];
+        assert!(worker.role == AgentRole::Master && &worker.project == project);
+        let idle =
+            worker.busy.is_none() && worker.own_turn.is_none() && worker.turn_started.is_none();
+        if !worker.live
+            || worker.stopping
+            || !idle
+            || launch_harness(&worker.harness) != launch_harness(&stored.team.master)
+        {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self.moves_next.get(project).is_some_and(|next| now < *next) {
+            return Ok(());
+        }
+        self.moves_next
+            .insert(project.clone(), now + MOVE_CHECK_EVERY);
+        if crate::scheduling::live_master(&self.connection)?
+            != crate::scheduling::LiveMasterAccount::MoveWhenIdle
+        {
+            return Ok(());
+        }
+        let typing = self.agents.as_deref().map(Agents::typing);
+        let quiet = super::master::quiet(&self.connection, typing, project, now_ms())
+            && !super::master::unsent_line(&self.connection, typing, project);
+        if !quiet || self.work_in_flight(project)? {
+            return Ok(());
+        }
+        let Ok(Some(top)) = self.account_as(access, project, &worker.harness, paused, Some(id))
+        else {
+            return Ok(());
+        };
+        if top.connection == worker.connection {
+            return Ok(());
+        }
+        let left = worker.connection.clone();
+        let worker = self.workers.get_mut(&id).expect("master worker exists");
+        worker.stopping = true;
+        let _ = worker.orders.send(Order::Stop);
+        self.master_restarts.insert(project.clone());
+        self.master_moves.insert(project.clone(), left);
+        self.moves_next.insert(project.clone(), now + MOVE_DWELL);
         Ok(())
     }
 
