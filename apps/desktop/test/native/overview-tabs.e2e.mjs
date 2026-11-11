@@ -272,11 +272,11 @@ test("A tab file CrazyAgent can't show says why, names the file and has no Edit"
   await onEngine(t, "ca-overview-blocked-", async ({ project, me, page, site, bridge }) => {
     await openTab(page, site, me, project, "Features");
     await written(bridge, project);
-    writeFileSync(join(await repoOf(bridge, project), ".crazyagent", "overview", "features.md"), " \n");
-    const blocked = await until(bridge, project, "the engine never reported the blank file", (read) => tabOf(read, "features").blocked === "blank", STEP_MS);
+    writeFileSync(join(await repoOf(bridge, project), ".crazyagent", "overview", "features.md"), Buffer.from([0xff, 0xfe, 0x0a]));
+    const blocked = await until(bridge, project, "the engine never reported the unreadable file", (read) => tabOf(read, "features").blocked === "not_utf8", STEP_MS);
     assert.equal(tabOf(blocked, "features").text, null);
     await openTab(page, site, me, project, "Features");
-    const seen = await me.waitFor("the blocked line", (text) => text.includes("CrazyAgent can't show this tab: its file is empty."));
+    const seen = await me.waitFor("the blocked line", (text) => text.includes("CrazyAgent can't show this tab: its file is not plain text."));
     assert.ok(seen.includes(".crazyagent/overview/features.md"), "the line names the file");
     assert.equal(await button(page, "Edit"), null, "a blocked tab has no Edit");
     assert.equal(await refusal(bridge, "desktop_overview_save", { projectId: project, tab: "features", text: "- x\n", version: "" }), "overview_tab_blocked");

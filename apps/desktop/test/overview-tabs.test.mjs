@@ -13,7 +13,7 @@ const TAB_IDS = ["quick_info", "features", "competitors", "install_and_use"];
 const NOW = 10 * 60_000;
 
 const base = () => ({
-  readme: null, tabs: TAB_IDS.map((tab) => ({ tab, text: null, version: "", edited: false, proposal: null, blocked: null })),
+  readme: null, tabs: TAB_IDS.map((tab) => ({ tab, text: null, version: "", edited: false, proposal: null, proposal_version: "", blocked: null })),
   competitors: { kind: "missing" }, running: false, stale: false, checked_ms: null, failure: null, refresh: "after_landing", apply: "always_ask", needs_home: false,
 });
 const blockedTab = (overview, id, blocked) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, blocked } : tab) });
@@ -161,7 +161,7 @@ test("every Overview call names its bridge command, and each command is in the h
 });
 
 test("every Overview refusal has its own plain sentence", () => {
-  const codes = ["overview_tab_changed", "overview_tab_blocked", "overview_tab_too_large", "overview_tab_empty", "overview_no_proposal", "overview_off", "overview_project_unknown", "overview_unavailable"];
+  const codes = ["overview_tab_changed", "overview_tab_blocked", "overview_tab_too_large", "overview_tab_empty", "overview_no_proposal", "overview_proposal_changed", "overview_off", "overview_project_unknown", "overview_unavailable", "overview_needs_project_home"];
   for (const code of codes) {
     assert.notEqual(api.overviewCopy(code), api.overviewCopy("something_else"), code);
     assert.doesNotMatch(api.overviewCopy(code), /overview_|\u{2014}/u, code);
@@ -536,7 +536,7 @@ test("the editor refuses a text over the tab bound or an empty one before sendin
   assert.equal(sent, 1);
 });
 
-const withProposal = (overview, id, proposal, edited = false) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, proposal, edited } : tab) });
+const withProposal = (overview, id, proposal, edited = false, seal = "p1") => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, proposal, edited, proposal_version: seal } : tab) });
 const featuresOf = (overview) => overview.tabs.find((tab) => tab.tab === "features");
 
 function review(state, props = {}) {
@@ -592,23 +592,23 @@ test("the review shows hidden characters of a proposal as visible escapes, locks
   assert.match(review(state, { note: "There is no proposal for this tab any more." }), /role="alert"[^>]*>There is no proposal for this tab any more\./);
 });
 
-test("Accept sends the version the diff was made from", async () => {
+test("Accept sends the tab version and the proposal version the diff was made from", async () => {
   const sent = [];
-  const outcome = await view.acceptTab("alpha", { tab: "features", version: "v7" }, (projectId, tab, version) => { sent.push([projectId, tab, version]); return Promise.resolve({ kind: "ok", value: undefined }); });
-  assert.deepEqual(sent, [["alpha", "features", "v7"]]);
+  const outcome = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p3" }, (projectId, tab, version, seal) => { sent.push([projectId, tab, version, seal]); return Promise.resolve({ kind: "ok", value: undefined }); });
+  assert.deepEqual(sent, [["alpha", "features", "v7", "p3"]]);
   assert.deepEqual(outcome, { done: true, note: "" });
 });
 
 test("an Accept on a tab that changed since the diff says the diff is new, and other refusals say why", async () => {
-  const changed = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
+  const changed = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p3" }, () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
   assert.equal(changed.done, false);
   assert.match(changed.note, /This tab changed since this diff was made\./);
-  const gone = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.resolve({ kind: "error", code: "overview_no_proposal" }));
+  const gone = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p3" }, () => Promise.resolve({ kind: "error", code: "overview_no_proposal" }));
   assert.equal(gone.note, api.overviewCopy("overview_no_proposal"));
-  const early = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.resolve({ kind: "not_ready" }));
+  const early = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p3" }, () => Promise.resolve({ kind: "not_ready" }));
   assert.equal(early.done, false);
   assert.notEqual(early.note, "");
-  const thrown = await view.acceptTab("alpha", { tab: "features", version: "v7" }, () => Promise.reject(new Error("bridge down")));
+  const thrown = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p3" }, () => Promise.reject(new Error("bridge down")));
   assert.equal(thrown.done, false);
 });
 
@@ -619,6 +619,29 @@ test("Reject names the tab and keeps the tab's text", async () => {
   assert.deepEqual(outcome, { done: true, note: "" });
   const refused = await view.rejectTab("alpha", "features", () => Promise.resolve({ kind: "error", code: "overview_no_proposal" }));
   assert.deepEqual(refused, { done: false, note: api.overviewCopy("overview_no_proposal") });
+});
+
+test("an Accept is sent only for the proposal the owner opened; a newer one is shown first and needs a second Accept", () => {
+  const state = (seal) => featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n", false, seal));
+  assert.deepEqual(view.acceptStep({ busy: false, note: "", seen: "p1" }, state("p1")), { send: "p1" });
+  const held = view.acceptStep({ busy: false, note: "", seen: "p1" }, state("p2"));
+  assert.deepEqual(held, { hold: { busy: false, note: api.overviewCopy("overview_proposal_changed"), seen: "p2" } });
+  assert.deepEqual(view.acceptStep(held.hold, state("p2")), { send: "p2" }, "the second Accept sends the proposal now shown");
+  assert.deepEqual(view.acceptStep({ busy: false, note: "x", seen: null }, state("p9")), { send: "p9" }, "after the engine said it changed, the owner was told once");
+});
+
+test("a proposal the engine says was replaced keeps the review open with a sentence, and the next Accept takes the one shown", async () => {
+  const refused = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p1" }, () => Promise.resolve({ kind: "error", code: "overview_proposal_changed" }));
+  assert.deepEqual(refused, { done: false, note: api.overviewCopy("overview_proposal_changed"), replaced: true });
+  assert.equal(api.overviewCopy("overview_proposal_changed"), "A newer proposal replaced the one you opened. The diff now shows it; look it over and choose again.");
+  assert.deepEqual(view.afterChoice({ busy: true, note: "", seen: "p1" }, refused), { busy: false, note: refused.note, seen: null });
+  assert.deepEqual(view.afterChoice({ busy: true, note: "", seen: "p1" }, { done: false, note: "No." }), { busy: false, note: "No.", seen: "p1" });
+  assert.equal(view.afterChoice({ busy: true, note: "", seen: "p1" }, { done: true, note: "" }), null);
+});
+
+test("Review opens on the proposal version the banner was shown for", () => {
+  const state = featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n", false, "p4"));
+  assert.deepEqual(view.openReview(state), { busy: false, note: "", seen: "p4" });
 });
 
 test("opening the editor puts the keyboard in its text box, and the review in its panel", () => {

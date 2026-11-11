@@ -37,16 +37,18 @@ export interface OverviewActions {
   reload: () => void;
 }
 
-/** An open review of one tab's proposal: whether a choice is being sent and why the last one
- * was refused. */
-export interface TabReview { busy: boolean; note: string }
+/** An open review of one tab's proposal: whether a choice is being sent, why the last one was
+ * refused, and the proposal version the owner has seen, null once the engine said a newer one
+ * replaced it and the owner was told. */
+export interface TabReview { busy: boolean; note: string; seen: string | null }
 
 /** What one generated tab's panel shows for the keyboard's sake: its mode, and whether a
  * refresh proposal's banner is on it. */
 export interface PanelState { mode: "idle" | "editing" | "reviewing"; proposal: boolean }
 
-/** How an accept or a reject ended: done, or refused and why. */
-export interface ChoiceOutcome { done: boolean; note: string }
+/** How an accept or a reject ended: done, or refused and why; `replaced` marks the refusal of
+ * an accept whose proposal a newer one took the place of. */
+export interface ChoiceOutcome { done: boolean; note: string; replaced?: true }
 
 /** An open editor of one tab: the version it opened at, the typed text, whether a save is
  * being sent, why the last save was refused, and whether the tab changed since it opened. */
@@ -64,7 +66,7 @@ export interface TabStore {
 
 /** The most UTF-8 bytes of one tab's text: the engine's `TAB_BYTES_MAX`, which a test compares
  * with the engine source. The limit an owner reads is this number in KB. */
-export const TAB_BYTES_MAX = 64 * 1024;
+export const TAB_BYTES_MAX = 24 * 1024;
 
 /** The most command lines of one text that get Copy and Run. */
 export const COMMAND_LINES_MAX = 200;
@@ -78,6 +80,7 @@ const BLOCKED_BY_ENTRY = new Set(["not_a_file", "not_a_folder"]);
 const COMPETITOR = "competitor_research";
 const LINKS_SHOWN = 5;
 const TAB_CHANGED = "overview_tab_changed";
+const PROPOSAL_CHANGED = "overview_proposal_changed";
 const EDIT_OPEN = "ov-edit-open";
 const REVIEW_OPEN = "ov-review-open";
 const REVIEW_PANEL = "ov-review";
@@ -258,14 +261,44 @@ function useReturnFocus(current: PanelState): void {
 function choiceOutcome(result: Result<void>): ChoiceOutcome {
   if (result.kind === "ok") return { done: true, note: "" };
   if (result.kind === "not_ready") return { done: false, note: `${NOT_READY} Nothing changed.` };
+  if (result.code === PROPOSAL_CHANGED) return { done: false, note: overviewCopy(PROPOSAL_CHANGED), replaced: true };
   const note = result.code === TAB_CHANGED ? "This tab changed since this diff was made. The diff now shows the change against the tab as it is; choose again." : overviewCopy(result);
   return { done: false, note };
 }
 
-/** Accepts a refresh's proposal for a tab at the version the shown diff was made from.
- * Inputs: the project, the tab with that version and the accept call. Output: the outcome. */
-export async function acceptTab(projectId: string, shown: { tab: OverviewTabId; version: string }, accept: typeof acceptOverviewTab = acceptOverviewTab): Promise<ChoiceOutcome> {
-  return choiceOutcome(await accept(projectId, shown.tab, shown.version).catch((): Result<void> => ({ kind: "not_ready" })));
+/** Opens the review of a tab's proposal on the proposal version shown. Input: the tab's state
+ * with a proposal. Output: the review. */
+export function openReview(state: TabState): TabReview {
+  assert(state.proposal !== null, "a review was opened for a tab with no proposal");
+  return { busy: false, note: "", seen: state.proposal_version };
+}
+
+/** What an Accept does: sends the proposal version the owner has seen, or, when a re-read put
+ * a newer proposal under an open review, holds the Accept, says so and counts the newer one as
+ * seen, so the next Accept sends it. Inputs: the open review and the tab's state.
+ * Output: the version to send, or the review to show instead. */
+export function acceptStep(review: TabReview, state: TabState): { send: string } | { hold: TabReview } {
+  assert(state.proposal !== null, "an Accept was chosen for a tab with no proposal");
+  assert(!review.busy, "an Accept was chosen while another choice was still sent");
+  if (review.seen === null || review.seen === state.proposal_version) return { send: state.proposal_version };
+  return { hold: { busy: false, note: overviewCopy(PROPOSAL_CHANGED), seen: state.proposal_version } };
+}
+
+/** The review after a choice came back: closed when it was done, else open with the reason;
+ * after the engine said a newer proposal replaced the reviewed one, the owner has been told,
+ * so the next Accept takes the proposal then shown. Inputs: the review the choice was made in
+ * and the outcome. Output: the review, or null to close it. */
+export function afterChoice(review: TabReview, outcome: ChoiceOutcome): TabReview | null {
+  if (outcome.done) return null;
+  assert(outcome.note !== "", "a refused choice says why");
+  return { busy: false, note: outcome.note, seen: outcome.replaced ? null : review.seen };
+}
+
+/** Accepts a refresh's proposal for a tab at the tab version and the proposal version the
+ * shown diff was made from. Inputs: the project, the tab with both versions and the accept
+ * call. Output: the outcome. */
+export async function acceptTab(projectId: string, shown: { tab: OverviewTabId; version: string; proposal_version: string }, accept: typeof acceptOverviewTab = acceptOverviewTab): Promise<ChoiceOutcome> {
+  return choiceOutcome(await accept(projectId, shown.tab, shown.version, shown.proposal_version).catch((): Result<void> => ({ kind: "not_ready" })));
 }
 
 /** Rejects a refresh's proposal for a tab; the tab's text stays. Inputs: the project, the tab
@@ -443,8 +476,8 @@ function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
 }
 
 /** The banner of a tab whose refresh proposal waits, or the open review of it. Accept sends
- * the version of the shown diff; either choice reads the tabs again, and a refused one keeps
- * the review open on what the engine holds now.
+ * the tab version of the shown diff and the proposal version the owner has seen; either choice
+ * reads the tabs again, and a refused one keeps the review open on what the engine holds now.
  * Inputs: the project data, the tab's label and state, the open review or null, the review
  * handler and the actions. Output: the banner or the review. */
 function Proposal({ data, label, state, review, onReview, actions }: {
@@ -457,17 +490,21 @@ function Proposal({ data, label, state, review, onReview, actions }: {
 }) {
   assert(state.proposal !== null, "a proposal banner was shown for a tab with none");
   if (review === null) return <div className="pj-need"><span>A refresh proposes changes to this tab.</span>
-    <button type="button" className="btn" id={REVIEW_OPEN} onClick={() => onReview({ busy: false, note: "" })}>Review</button></div>;
+    <button type="button" className="btn" id={REVIEW_OPEN} onClick={() => onReview(openReview(state))}>Review</button></div>;
   const choose = async (send: () => Promise<ChoiceOutcome>, told: string) => {
     assert(!review.busy, "a choice was made while another was still sent");
-    onReview({ busy: true, note: "" });
+    onReview({ ...review, busy: true, note: "" });
     const outcome = await send();
-    onReview(outcome.done ? null : { busy: false, note: outcome.note });
+    onReview(afterChoice(review, outcome));
     if (outcome.done) data.notify(told);
     actions.reload();
   };
   return <ProposalReview label={label} state={state} busy={review.busy} note={review.note} onClose={() => onReview(null)}
-    onAccept={() => void choose(() => acceptTab(data.id, { tab: state.tab, version: state.version }, actions.accept), `${label} now shows the refreshed text.`)}
+    onAccept={() => {
+      const step = acceptStep(review, state);
+      if ("hold" in step) return onReview(step.hold);
+      void choose(() => acceptTab(data.id, { tab: state.tab, version: state.version, proposal_version: step.send }, actions.accept), `${label} now shows the refreshed text.`);
+    }}
     onReject={() => void choose(() => rejectTab(data.id, state.tab, actions.reject), `The proposal for ${label} is rejected. The tab is unchanged.`)} />;
 }
 
