@@ -3223,3 +3223,44 @@ fn a_claim_holding_a_line_separator_is_refused_by_name() {
         assert_eq!(code(normalize(raw)), "coord_claim_invalid", "{raw:?}");
     }
 }
+
+/// DEC-141 PA-12: every harness kind on every account kind gets each team protection or
+/// says why not, in one table both clients show. Claude Code on a sign-in and Codex on any
+/// account get receipts, the owner's hooks and the edit guard alike; Claude Code on an API
+/// key or URL account starts bare and says so; an rcli master has no hooks and says so.
+#[test]
+fn every_harness_kind_gets_each_protection_or_says_why_not() {
+    use super::settings::Protection;
+    for kind in HarnessKind::ALL {
+        for endpoint in [false, true] {
+            for protection in Protection::ALL {
+                let lacks = kind.lacks(endpoint, protection);
+                let case = format!("{kind:?} endpoint={endpoint} {protection:?}");
+                match kind {
+                    HarnessKind::Codex => assert_eq!(lacks, None, "{case}"),
+                    HarnessKind::ClaudeCode => assert_eq!(lacks.is_some(), endpoint, "{case}"),
+                    HarnessKind::Rcli => assert_eq!(
+                        lacks.is_some(),
+                        protection != Protection::Receipts,
+                        "{case}"
+                    ),
+                }
+                if let Some(words) = lacks {
+                    assert!(
+                        words.ends_with('.') && !words.contains('\u{2014}'),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        HarnessKind::ClaudeCode.lacks(true, Protection::EditGuard),
+        Some(super::settings::BARE_NO_HOOKS)
+    );
+    assert!(super::settings::BARE_NO_HOOKS.contains("API key or URL account"));
+    assert_eq!(
+        super::settings::BARE_NO_RECEIPTS,
+        format!("Receipts are {}.", super::adoption::HOOKLESS_WORDS)
+    );
+}

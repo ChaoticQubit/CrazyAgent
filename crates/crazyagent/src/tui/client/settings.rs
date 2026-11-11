@@ -1740,17 +1740,15 @@ mod tests {
         pump(&mut screen, &mut ctx, &mut native).await;
         screen.key(&Key::Enter, &mut ctx);
         let methods = text(&screen, &ctx).join("\n");
-        let order: Vec<usize> = [
-            "Sign in with ChatGPT",
-            "Use the Codex sign-in on this Mac",
-            "Use an API key",
-        ]
-        .iter()
-        .map(|title| methods.find(title).expect(&methods))
-        .collect();
+        let order: Vec<usize> = ["Sign in with ChatGPT", "Use an API key"]
+            .iter()
+            .map(|title| methods.find(title).expect(&methods))
+            .collect();
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{methods}");
-        assert!(methods.starts_with("OpenAI\n"), "{methods}");
-        screen.key(&Key::Down, &mut ctx);
+        assert!(
+            !methods.contains("on this Mac") && methods.starts_with("OpenAI\n"),
+            "{methods}"
+        );
         screen.key(&Key::Down, &mut ctx);
         screen.key(&Key::Enter, &mut ctx);
         screen.key(&Key::Tab, &mut ctx);

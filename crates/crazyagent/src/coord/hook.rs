@@ -25,6 +25,15 @@ const MEMBERS_MAX: usize = 64;
 const GRAPHIFY: &str = "graphify";
 const GRAPHED: &str = ".graphed";
 const NUDGED: &str = ".nudged";
+/// The most files of one Codex patch the edit guard checks, each one engine question.
+const PATCH_PATHS_MAX: usize = 32;
+const PATCH_BEGIN: &str = "*** Begin Patch";
+const PATCH_HEADS: [&str; 4] = [
+    "*** Add File: ",
+    "*** Update File: ",
+    "*** Delete File: ",
+    "*** Move to: ",
+];
 
 const _: () = assert!(CONTEXT_CHARS_MAX < 10_000 && CONTEXT_CHARS_MAX > 2 * super::BODY_BYTES_MAX);
 const _: () = assert!(ASK_WAIT.as_secs() < Event::Edit.timeout_seconds() as u64);
@@ -45,9 +54,10 @@ const _: () = assert!(
 /// Why an edit of a session the engine placed in no pane is held (DEC-111 Q18).
 const UNNAMED_EDIT: &str = "CrazyAgent: the engine could not tell which agent this session is, so this edit is held. Try again in a moment.";
 
-/// The Claude Code hook events the relay runs on, each named by its `coord-hook`
-/// argument: after every tool call, at a stop, before AskUserQuestion, on a permission
-/// prompt or elicitation notification, on a submitted prompt, and before a file edit.
+/// The hook events the relay runs on, each named by its `coord-hook` argument: Claude
+/// Code's after every tool call, at a stop, before AskUserQuestion, on a permission prompt
+/// or elicitation notification, on a submitted prompt and before a file edit, and Codex's
+/// before a patch or shell call, which runs the edit guard alone (DEC-141 PA-12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     PostTool,
@@ -56,6 +66,7 @@ pub enum Event {
     Notification,
     Prompt,
     Edit,
+    CodexEdit,
 }
 
 impl Event {
@@ -68,6 +79,7 @@ impl Event {
             Self::Notification => "notification",
             Self::Prompt => "prompt",
             Self::Edit => "edit",
+            Self::CodexEdit => "codex-edit",
         }
     }
 
@@ -80,6 +92,7 @@ impl Event {
             Self::Notification,
             Self::Prompt,
             Self::Edit,
+            Self::CodexEdit,
         ]
         .into_iter()
         .find(|event| event.as_str() == text)
@@ -89,7 +102,7 @@ impl Event {
     /// guard's question to the engine, short for the rest.
     pub const fn timeout_seconds(self) -> u32 {
         match self {
-            Self::Edit => 15,
+            Self::Edit | Self::CodexEdit => 15,
             Self::PostTool | Self::Stop => 10,
             Self::Asked | Self::Notification | Self::Prompt => 5,
         }
@@ -140,7 +153,7 @@ pub fn run(
 ) -> Result<(), String> {
     let Some(event) = Event::parse(event) else {
         return Err(format!(
-            "usage: crazyagent {} post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR",
+            "usage: crazyagent {} post-tool|stop|asked|notification|prompt|edit|codex-edit MAILBOX_DIR",
             relay::HOOK_COMMAND
         ));
     };
@@ -234,6 +247,7 @@ fn in_mailbox(event: Event, folder: &Mailbox, who: &Identity, input: &Value) -> 
             None
         }
         Event::Edit => edit_answer(folder, None, who, input),
+        Event::CodexEdit => guard(folder, None, who, input).map(denied),
     }
 }
 
@@ -298,6 +312,7 @@ fn teammate(
                 })
         }
         Event::Edit => edit_answer(folder, Some(mailbox), who, input),
+        Event::CodexEdit => guard(folder, Some(mailbox), who, input).map(denied),
     }
 }
 
@@ -648,11 +663,7 @@ fn edit_answer(
     input: &Value,
 ) -> Option<Value> {
     if let Some(reason) = guard(folder, socket, who, input) {
-        return Some(json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }}));
+        return Some(denied(reason));
     }
     first_edit(folder, socket, who).map(|text| {
         json!({"hookSpecificOutput": {
@@ -660,6 +671,17 @@ fn edit_answer(
             "additionalContext": text,
         }})
     })
+}
+
+/// The `PreToolUse` answer that refuses one call with the reason the session reads, the
+/// same JSON for Claude Code and Codex (PA-12 proof on Codex 0.167.1). Takes the reason.
+/// Returns the answer.
+fn denied(reason: String) -> Value {
+    json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }})
 }
 
 /// Hands a session the first-edit reminder once (DEC-111 R4): only under the project's
@@ -697,12 +719,75 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
     if who.unnamed {
         return Some(UNNAMED_EDIT.to_owned());
     }
+    edited_paths(input)
+        .iter()
+        .find_map(|path| guard_path(folder, socket, who, path))
+}
+
+/// The absolute files one edit call writes: Claude Code's `file_path` or `notebook_path`,
+/// or each file a Codex patch adds, updates, deletes or moves to, read from the patch
+/// tool's or a shell call's `command` and placed under the call's `cwd` (PA-12). Takes
+/// the hook input. Returns at most `PATCH_PATHS_MAX` paths, none for any other call.
+fn edited_paths(input: &Value) -> Vec<PathBuf> {
     let tool_input = &input["tool_input"];
-    let path = tool_input["file_path"]
+    if let Some(path) = tool_input["file_path"]
         .as_str()
         .or_else(|| tool_input["notebook_path"].as_str())
-        .map(Path::new)
-        .filter(|path| path.is_absolute())?;
+    {
+        return Some(PathBuf::from(path))
+            .filter(|path| path.is_absolute())
+            .into_iter()
+            .collect();
+    }
+    let (Some(command), Some(cwd)) = (
+        tool_input["command"].as_str(),
+        input["cwd"]
+            .as_str()
+            .map(Path::new)
+            .filter(|cwd| cwd.is_absolute()),
+    ) else {
+        return Vec::new();
+    };
+    let paths: Vec<PathBuf> = patch_paths(command)
+        .into_iter()
+        .map(|path| cwd.join(path))
+        .collect();
+    assert!(paths.len() <= PATCH_PATHS_MAX);
+    paths
+}
+
+/// The file names a Codex patch names on its `*** Add File:`, `*** Update File:`,
+/// `*** Delete File:` and `*** Move to:` lines, only when the text holds a
+/// `*** Begin Patch` line. Takes the patch or the shell command carrying it. Returns at most
+/// `PATCH_PATHS_MAX` names, as written.
+fn patch_paths(command: &str) -> Vec<&str> {
+    if !command.lines().any(|line| line.trim() == PATCH_BEGIN) {
+        return Vec::new();
+    }
+    command
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            PATCH_HEADS
+                .iter()
+                .find_map(|head| line.strip_prefix(head))
+                .map(str::trim)
+        })
+        .filter(|name| !name.is_empty())
+        .take(PATCH_PATHS_MAX)
+        .collect()
+}
+
+/// Decides one file of an edit: the native teammate's own worktree rule, then the
+/// Overlaps Block or Wait question to the engine. Takes the folder, the caller-socket
+/// mailbox, the identity and the absolute file. Returns the reason to deny, or None.
+fn guard_path(
+    folder: &Mailbox,
+    socket: Option<&Path>,
+    who: &Identity,
+    path: &Path,
+) -> Option<String> {
+    assert!(path.is_absolute());
     let target = resolved(path);
     let roster = relay::read_roster(folder, who.part);
     let root = roster

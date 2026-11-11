@@ -27,8 +27,12 @@ const LOCALE: &str = "en_US.UTF-8";
 /// the engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
 /// the home's `unix://` control socket; when it has not bound within 5 s, or exits, the
 /// TUI runs alone as before. Arguments: the Codex program, the conversation to resume or
-/// an empty word, then the `-c` settings both take. The app-server ends with the TUI.
+/// an empty word, `CODEX_HOOK_TRUST` when the launch wrote hooks, which only the TUI takes
+/// and hands its app-server session (PA-12), then the `-c` settings both take. The
+/// app-server ends with the TUI.
 const CODEX_BRIDGE_SCRIPT: &str = r#"e=$1; r=$2; shift 2
+h=
+if [ "$1" = --dangerously-bypass-hook-trust ]; then h=$1; shift; fi
 s=$CODEX_HOME/app-server-control/app-server-control.sock
 /bin/rm -f "$s"
 "$e" app-server --listen unix:// "$@" </dev/null >/dev/null 2>&1 &
@@ -36,6 +40,7 @@ a=$!
 i=0
 while [ ! -S "$s" ] && kill -0 "$a" 2>/dev/null && [ "$i" -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done
 if [ -S "$s" ]; then set -- --remote unix:// "$@"; else kill "$a" 2>/dev/null; fi
+if [ -n "$h" ]; then set -- "$h" "$@"; fi
 if [ -n "$r" ]; then "$e" "$@" resume "$r"; else "$e" "$@"; fi
 c=$?
 kill "$a" 2>/dev/null
@@ -46,6 +51,10 @@ exit "$c"
 /// tools-off settings turn unified exec off, so that agent would exit at its first line.
 /// The engine then reaches the agent by typing instead of the K2b bridge.
 const CODEX_NO_DAEMON: &str = "--no-daemon";
+/// Lets a Codex TUI run the hooks its launch wrote into `$CODEX_HOME/config.toml` without
+/// the trust review it would hold them for; Codex 0.167.1 skips untrusted user hooks
+/// otherwise (PA-12 proof). It is a TUI flag, never an app-server one.
+const CODEX_HOOK_TRUST: &str = "--dangerously-bypass-hook-trust";
 const CLAUDE_TOOLS_ON: [&str; 4] = [
     "--tools",
     "default",
@@ -327,6 +336,9 @@ pub fn command(
                     executable,
                     resume.unwrap_or_default(),
                 ]);
+                if installed.is_some_and(Installed::runs_hooks) {
+                    argv.push(CODEX_HOOK_TRUST.to_owned());
+                }
                 argv.extend(settings);
             } else {
                 argv.extend([executable, CODEX_NO_DAEMON.to_owned()]);

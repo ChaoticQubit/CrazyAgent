@@ -3223,6 +3223,13 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         let reply = view.key(press(KeyCode::Right));
         coord_send(&mut view, &mut controller, reply, generation).await;
         assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
+        let shown = frame(&view, 120, 40);
+        assert_eq!(
+            find(&shown, "Overlapping edits").contains(OVERLAPS_HOLD_NOTE.trim()),
+            matches!(overlaps, Overlaps::Block | Overlaps::Wait),
+            "only Block and Wait say Claude Code on a key or URL is not held:\n{}",
+            shown.join("\n")
+        );
     }
 
     for _ in 0..4 {

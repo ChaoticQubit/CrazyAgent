@@ -196,3 +196,135 @@ fn a_full_inbox_is_handed_over_within_the_context_budget() {
         .count();
     assert_eq!(waiting, INBOX_MAX - 2);
 }
+
+/// A Codex edit names its files in the patch it applies, whether through the patch tool or a
+/// shell call carrying `apply_patch` (PA-12 proof on Codex 0.167.1): every added, updated,
+/// deleted and moved-to file, placed under the call's own folder, at most
+/// `PATCH_PATHS_MAX`. Claude Code's edits keep their one absolute file, and a shell call
+/// with no patch or a folder that is not absolute names none.
+#[test]
+fn a_codex_patch_names_every_file_it_writes_under_its_cwd() {
+    let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** Update File: src/b.rs\n*** Move to: src/c.rs\n@@\n-x\n+y\n*** Delete File: /abs/d.rs\n*** End Patch\n";
+    let named = |tool: &str, command: String, cwd: &str| {
+        edited_paths(&json!({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}))
+    };
+    let expected: Vec<PathBuf> = ["/w/a.txt", "/w/src/b.rs", "/w/src/c.rs", "/abs/d.rs"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(named("apply_patch", patch.to_owned(), "/w"), expected);
+    assert_eq!(
+        named("Bash", format!("apply_patch <<'EOF'\n{patch}EOF\n"), "/w"),
+        expected
+    );
+    assert!(named("Bash", "ls -la".to_owned(), "/w").is_empty());
+    assert!(named("Bash", "echo '*** Add File: a.txt'".to_owned(), "/w").is_empty());
+    assert!(named("apply_patch", patch.to_owned(), "w").is_empty());
+    let many: String = (0..PATCH_PATHS_MAX + 5)
+        .map(|n| format!("*** Add File: f{n}.txt\n+x\n"))
+        .collect();
+    assert_eq!(
+        named(
+            "apply_patch",
+            format!("*** Begin Patch\n{many}*** End Patch\n"),
+            "/w"
+        )
+        .len(),
+        PATCH_PATHS_MAX
+    );
+    assert_eq!(
+        edited_paths(
+            &json!({"tool_name": "Write", "tool_input": {"file_path": "/w/e.rs", "content": ""}})
+        ),
+        [PathBuf::from("/w/e.rs")]
+    );
+    assert!(
+        edited_paths(&json!({"tool_name": "Write", "tool_input": {"file_path": "e.rs"}}))
+            .is_empty()
+    );
+}
+
+/// A Codex agent's edit hook runs the edit guard alone (PA-12): it never hands the
+/// first-edit reminder, which the engine gives Codex from its rollouts, it holds an edit of
+/// a session the engine placed nowhere, and it keeps a native teammate's patch inside the
+/// teammate's own worktree with the same answer Claude Code gets.
+#[test]
+fn a_codex_edit_runs_the_guard_alone() {
+    let (root, folder) = mailbox();
+    let base = root.path().to_path_buf();
+    let roster = |overlaps: Overlaps| {
+        let bytes = serde_json::to_vec(&relay::Roster {
+            overlaps,
+            nudges: Nudges::FirstEdit,
+            root: Some(base.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+        relay::put(&folder, relay::ROSTER_FILE, &bytes).unwrap();
+    };
+    let who = |teammate: Option<&str>, unnamed: bool| Identity {
+        inbox: Some(LEAD_TAG.to_owned()),
+        activity: Some(LEAD_TAG.to_owned()),
+        teammate: teammate.map(str::to_owned),
+        cwd: None,
+        unnamed,
+        part: relay::Part::Single,
+    };
+    let patch = |file: &str| {
+        json!({
+            "tool_name": "apply_patch",
+            "tool_input": {"command": format!("*** Begin Patch\n*** Add File: {file}\n+x\n*** End Patch\n")},
+            "cwd": base,
+        })
+    };
+    assert_eq!(Event::parse("codex-edit"), Some(Event::CodexEdit));
+    assert_eq!(
+        Event::CodexEdit.timeout_seconds(),
+        Event::Edit.timeout_seconds()
+    );
+
+    roster(Overlaps::Warn);
+    assert_eq!(
+        in_mailbox(Event::CodexEdit, &folder, &who(None, false), &patch("a.rs")),
+        None,
+        "no first-edit reminder from a Codex hook"
+    );
+    let claude = json!({"tool_name": "Edit", "tool_input": {"file_path": base.join("a.rs")}});
+    assert!(
+        in_mailbox(Event::Edit, &folder, &who(None, false), &claude).is_some(),
+        "Claude Code's edit hook still reminds"
+    );
+    let held = in_mailbox(Event::CodexEdit, &folder, &who(None, true), &patch("a.rs")).unwrap();
+    assert_eq!(held["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        held["hookSpecificOutput"]["permissionDecisionReason"],
+        UNNAMED_EDIT
+    );
+
+    roster(Overlaps::Block);
+    let outside = in_mailbox(
+        Event::CodexEdit,
+        &folder,
+        &who(Some("ana"), false),
+        &patch("a.rs"),
+    )
+    .unwrap();
+    assert_eq!(outside["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(outside["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        outside["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("CrazyAgent: you are teammate ana."),
+        "{outside}"
+    );
+    assert_eq!(
+        in_mailbox(
+            Event::CodexEdit,
+            &folder,
+            &who(None, false),
+            &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": base})
+        ),
+        None,
+        "a shell call with no patch edits nothing"
+    );
+}

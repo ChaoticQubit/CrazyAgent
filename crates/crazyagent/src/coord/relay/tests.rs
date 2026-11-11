@@ -777,3 +777,72 @@ fn a_letters_wake_line_holds_none_of_the_seven_breaks() {
         );
     }
 }
+
+/// A Codex agent's mailbox serves its edit guard alone (PA-12): the engine answers its
+/// overlap question with the other agent's claim, as for Claude Code, but writes it no
+/// letters, which its app-server bridge or typing delivers; its hook command runs the
+/// engine's `codex-edit` hook on that mailbox, and a path a shell could misread is refused.
+#[test]
+fn a_codex_mailbox_answers_overlap_questions_and_takes_no_letters() {
+    let team = Team::new();
+    let lead = team.agent("sub_agent", None, None);
+    let other = team.agent("sub_agent", None, None);
+    team.db
+        .execute("UPDATE team_agents SET harness='codex' WHERE id=?1", [lead])
+        .unwrap();
+    crate::coord::start_work(
+        &team.db,
+        &team.project,
+        other,
+        "Parser".to_owned(),
+        vec!["src/a.rs".to_owned()],
+        now(),
+    )
+    .unwrap();
+    let to_codex = team.note(other, lead, "Take the lexer.");
+    let held = format!("{:032x}", 1);
+    std::fs::write(
+        team.entry(&format!("{held}{ASK}")),
+        serde_json::to_vec(&Ask {
+            to: LEAD_TAG.to_owned(),
+            path: "src/a.rs".to_owned(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    team.serve(lead, false);
+
+    let bytes = std::fs::read(team.entry(&format!("{held}{ANSWER}"))).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Answer>(&bytes).unwrap().held,
+        [Held {
+            by: crate::team::events::label(&team.db, other).unwrap(),
+            pattern: "src/a.rs".to_owned(),
+        }]
+    );
+    assert_eq!(team.letter(to_codex), None, "no letter for a Codex agent");
+    assert_eq!(team.receipt(to_codex), Receipt::Sent);
+    assert!(
+        team.entry(ROSTER_FILE).is_file(),
+        "its guard reads the roster"
+    );
+
+    let engine = Path::new("/opt/crazy agent/bin/crazyagent");
+    let fresh = team.home.join("codex-calls");
+    assert_eq!(
+        codex_edit_hook(&fresh, engine).unwrap(),
+        format!(
+            "'/opt/crazy agent/bin/crazyagent' coord-hook codex-edit '{}'",
+            fresh.display()
+        )
+    );
+    assert_eq!(mode(&fresh) & 0o777, 0o700);
+    for bad in ["/tmp/it's", "/tmp/$HOME", "relative/calls"] {
+        assert_eq!(
+            codex_edit_hook(Path::new(bad), engine).unwrap_err().0,
+            "coord_relay_path_invalid"
+        );
+    }
+    assert_eq!(CODEX_EDIT_MATCHER, "apply_patch|Bash");
+}

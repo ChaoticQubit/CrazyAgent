@@ -209,6 +209,7 @@ const OVERLAPS: [Overlaps; 4] = [
     Overlaps::Off,
     Overlaps::Wait,
 ];
+const OVERLAPS_HOLD_NOTE: &str = "  except Claude Code on a key or URL";
 const COUNTED_TEXT_BYTES_MAX: usize = COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 2);
 const SKILL_NAMES_TEXT_BYTES_MAX: usize =
     ROLE_SKILLS_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 2);
@@ -2731,7 +2732,10 @@ impl TeamView {
                 CoordRow::Overlaps => (
                     "Overlapping edits".to_owned(),
                     overlaps_words(view.settings.overlaps).to_owned(),
-                    "",
+                    match view.settings.overlaps {
+                        Overlaps::Block | Overlaps::Wait => OVERLAPS_HOLD_NOTE,
+                        Overlaps::Warn | Overlaps::Off => "",
+                    },
                 ),
                 CoordRow::CatchUpMain => (
                     "Catch up with main".to_owned(),

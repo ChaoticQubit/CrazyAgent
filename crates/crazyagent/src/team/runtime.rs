@@ -4414,7 +4414,9 @@ impl TeamRuntime {
     /// mailbox, split into the lead's part and its teammates' for a native lead, applies
     /// their reported activity and waits, answers their overlap questions and, at most once
     /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts,
-    /// and those of each running Codex agent from its rollouts. A relay or receipt read that
+    /// and those of each running Codex agent from its rollouts; a Codex agent's mailbox,
+    /// when its launch made one, gets the roster and overlap answers its edit guard reads
+    /// (PA-12). A relay or receipt read that
     /// fails is skipped until the next tick, like the agents' team calls, and so is a relay
     /// whose agent's stored mode cannot be read, never served in the single layout a native
     /// lead's teammates could write into. Takes the project.
@@ -4440,13 +4442,26 @@ impl TeamRuntime {
             })
             .collect();
         for (id, kind) in served {
+            use crate::coord::settings::HarnessKind;
             let home = agent_home(&self.state, id);
-            if receipts && kind == Some(crate::coord::settings::HarnessKind::Codex) {
+            let codex = kind == Some(HarnessKind::Codex);
+            if receipts && codex {
                 let _ = crate::coord::relay::codex_receipts(&self.connection, id, &home, now_ms());
             }
-            if kind != Some(crate::coord::settings::HarnessKind::ClaudeCode)
-                || !crate::coord::relay::installed(&home)
-            {
+            if codex {
+                let _ = crate::coord::relay::serve(
+                    &self.connection,
+                    project,
+                    id,
+                    &home,
+                    &self.mailbox(id),
+                    crate::coord::relay::Layout::Single,
+                    false,
+                    now_ms(),
+                );
+                continue;
+            }
+            if kind != Some(HarnessKind::ClaudeCode) || !crate::coord::relay::installed(&home) {
                 continue;
             }
             let layout = match self.stored_mode(id) {
@@ -7573,9 +7588,14 @@ impl TeamRuntime {
                 (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
-        let hookless = crate::coord::settings::HarnessKind::from_harness(launch)
-            == Some(crate::coord::settings::HarnessKind::ClaudeCode)
-            && matches!(account.reach, TeamReach::Endpoint { .. });
+        let endpoint = matches!(account.reach, TeamReach::Endpoint { .. });
+        let hookless =
+            crate::coord::settings::HarnessKind::from_harness(launch).is_some_and(|kind| {
+                kind != crate::coord::settings::HarnessKind::Rcli
+                    && kind
+                        .lacks(endpoint, crate::coord::settings::Protection::EditGuard)
+                        .is_some()
+            });
         self.connection
             .execute(
                 "UPDATE team_agents SET hookless=?2 WHERE id=?1",

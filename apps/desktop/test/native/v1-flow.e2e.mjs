@@ -163,19 +163,19 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await shot("02-dashboard-empty");
   });
 
-  it("adds a managed Codex account from an existing signed-in profile", async () => {
+  it("adds a managed Codex account through the browser sign-in in its own profile, then checks that sign-in", async () => {
     await click("button=Add account");
     await click("text=ChatGPT / Codex");
-    await click("text=Use the Codex sign-in on this Mac");
+    await click("text=Sign in with ChatGPT");
+    assert.doesNotMatch(await text("dialog[open]"), /on this Mac/);
     await type("#account-name", CODEX_ACCOUNT);
-    await click("button=Use this sign-in");
-    await until(async () => await page("button=Try again") || await page("button=Check again") ||
-      (await text("dialog[open]")).includes("Account added"), 180000, "managed Codex sign-in did not settle");
-    if (!(await text("dialog[open]")).includes("Account added")) {
-      assert.equal(engineProfileHomes(root).length, 1, "the sign-in made one engine profile home");
-      borrowSignIn(source, root, ledger);
-      await click(await page("button=Try again") ? "button=Try again" : "button=Check again");
-    }
+    await click("button=Sign in in this browser instead");
+    await until(async () => (await text("dialog[open]")).includes("Open this page in your browser to sign in"), 180000, "managed Codex browser sign-in did not show its page");
+    await click("button=Cancel sign-in");
+    await until(async () => await page("button=Check this account's sign-in"), 180000, "cancelled Codex sign-in did not offer the check");
+    assert.equal(engineProfileHomes(root).length, 1, "the sign-in made one engine profile home");
+    borrowSignIn(source, root, ledger);
+    await click("button=Check this account's sign-in");
     await until(async () => (await text("dialog[open]")).includes("Account added"), 180000, "managed Codex account did not sign in");
     assert.match(await text("dialog[open] .success"), new RegExp(`${CODEX_ACCOUNT}[\\s\\S]*Signed in`));
     await shot("03-codex-account");

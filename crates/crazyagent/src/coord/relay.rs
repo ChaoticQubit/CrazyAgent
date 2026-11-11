@@ -198,17 +198,6 @@ pub(crate) struct Held {
 /// missing. Inputs: the home, the mailbox and the engine executable, all absolute.
 /// Output: the plugin folder to pass with `--plugin-dir`, or a plain refusal.
 pub fn install(home: &Path, mailbox: &Path, engine: &Path) -> Result<PathBuf, EngineError> {
-    let plain = |path: &Path| {
-        path.is_absolute()
-            .then(|| path.to_str())
-            .flatten()
-            .filter(|text| {
-                !text
-                    .chars()
-                    .any(|c| c.is_control() || matches!(c, '\'' | '$'))
-            })
-            .map(str::to_owned)
-    };
     let (Some(engine_text), Some(mailbox_text)) = (plain(engine), plain(mailbox)) else {
         return Err(failure("coord_relay_path_invalid"));
     };
@@ -274,6 +263,46 @@ pub fn install(home: &Path, mailbox: &Path, engine: &Path) -> Result<PathBuf, En
         .map_err(unwritable)?;
     assert!(plugin.starts_with(home));
     Ok(plugin)
+}
+
+/// The Codex tools a team agent's edit guard runs before (PA-12): the patch tool and the
+/// shell, which carries `apply_patch` when the model has no patch tool of its own (proof
+/// on Codex 0.167.1, `.local-state/flow-sprint/w-v231-pa1213/PA12-codex-hooks-proof.md`).
+pub const CODEX_EDIT_MATCHER: &str = "apply_patch|Bash";
+
+/// The command of a Codex team agent's edit guard hook, `'<engine>' coord-hook codex-edit
+/// '<mailbox>'`, which Codex runs through the shell before each `CODEX_EDIT_MATCHER` call;
+/// the mailbox folder is made 0700 when missing, so the engine serves it. Inputs: the
+/// mailbox and the engine executable, both absolute. Output: the command, or a plain
+/// refusal.
+pub fn codex_edit_hook(mailbox: &Path, engine: &Path) -> Result<String, EngineError> {
+    let (Some(engine_text), Some(mailbox_text)) = (plain(engine), plain(mailbox)) else {
+        return Err(failure("coord_relay_path_invalid"));
+    };
+    if !real_folder(mailbox) {
+        private_folder(mailbox)?;
+    }
+    let command = format!(
+        "'{engine_text}' {HOOK_COMMAND} {} '{mailbox_text}'",
+        Event::CodexEdit.as_str()
+    );
+    assert!(command.starts_with('\'') && !command.chars().any(char::is_control));
+    Ok(command)
+}
+
+/// An absolute path as hook text: valid UTF-8 with no control character, quote or `$`, so
+/// it sits inside single quotes in a shell command. Takes the path. Returns the text, or
+/// None.
+fn plain(path: &Path) -> Option<String> {
+    path.is_absolute()
+        .then(|| path.to_str())
+        .flatten()
+        .filter(|text| {
+            !text
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '\'' | '$'))
+        })
+        .map(str::to_owned)
 }
 
 /// Tells whether an agent's home holds a relay plugin, so the engine serves its mailbox.
@@ -390,18 +419,21 @@ pub fn serve(
 }
 
 /// Whether the relay hands a lead's team its messages: not under the Typing only delivery
-/// setting, nor for a master, which K2b feeds through its engine input. Takes the
-/// database, the project and the lead. Returns the answer or a SQLite failure.
+/// setting, nor for a master, which K2b feeds through its engine input, nor for a Codex
+/// agent, which its app-server bridge or typing feeds; its mailbox serves the edit guard
+/// alone (PA-12). Takes the database, the project and the lead. Returns the answer or a
+/// SQLite failure.
 fn posts(db: &Connection, project: &ProjectId, lead: AgentId) -> Result<bool, EngineError> {
     let delivery = settings::delivery(db, project, HarnessKind::ClaudeCode)?;
-    let master: bool = db
+    let (master, harness): (bool, String) = db
         .query_row(
-            "SELECT role='master' FROM team_agents WHERE id=?1",
+            "SELECT role='master', harness FROM team_agents WHERE id=?1",
             [lead],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(state)?;
-    Ok(delivery != Delivery::TypingOnly && !master)
+    let claude = HarnessKind::from_harness(&harness) == Some(HarnessKind::ClaudeCode);
+    Ok(delivery != Delivery::TypingOnly && !master && claude)
 }
 
 /// One relay request of a native teammate's session on its lead's caller socket (relay over

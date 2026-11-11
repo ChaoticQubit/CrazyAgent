@@ -2238,8 +2238,11 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
     drop(installed);
 }
 
+/// Every Claude Code launch gets the message relay plugin; a Codex launch gets no plugin
+/// but its edit guard hook in `config.toml` (PA-12): one `PreToolUse` group on the patch
+/// tool and the shell running the engine's `codex-edit` hook on its mailbox.
 #[test]
-fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_none() {
+fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_the_edit_guard_hook() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let engine = root.join("bin").join("crazyagent");
@@ -2265,13 +2268,49 @@ fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_none() {
     }
 
     let codex = private_home(&root, "codex");
+    let mailbox = root.join("mailbox-codex");
     let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
-        .with_relay(&engine, &root.join("mailbox-codex"))
+        .with_relay(&engine, &mailbox)
         .install("codex", &codex, true)
         .unwrap();
     assert!(installed.arguments().is_empty());
-    assert!(!installed.runs_hooks());
+    assert!(installed.runs_hooks());
     assert!(!codex.join(crate::coord::relay::PLUGIN_FOLDER).exists());
+    assert!(
+        mailbox.is_dir(),
+        "the engine serves the mailbox the guard asks through"
+    );
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let hooks = config["hooks"].as_table().unwrap();
+    assert_eq!(hooks.keys().collect::<Vec<_>>(), ["PreToolUse"]);
+    let group = &hooks["PreToolUse"].as_array().unwrap()[0];
+    assert_eq!(group["matcher"].as_str(), Some("apply_patch|Bash"));
+    let handler = &group["hooks"].as_array().unwrap()[0];
+    assert_eq!(handler["type"].as_str(), Some("command"));
+    assert_eq!(
+        handler["command"].as_str().unwrap(),
+        format!(
+            "'{}' coord-hook codex-edit '{}'",
+            engine.display(),
+            mailbox.display()
+        )
+    );
+    assert_eq!(handler["timeout"].as_integer(), Some(15));
+    drop(installed);
+
+    let plain = private_home(&root, "codex-plain");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("codex", &plain, true)
+        .unwrap();
+    assert!(!installed.runs_hooks());
+    let config: toml::Table = fs::read_to_string(plain.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(!config.contains_key("hooks"), "no relay, no guard hook");
     drop(installed);
 }
 
@@ -2887,10 +2926,68 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     assert!(!off.join(STATE).join("plugin").exists());
     drop(installed);
 
+    let mut both = context;
+    if let Some(process) = both.process.as_mut() {
+        process.hooks.push(hook("Notification", None, None));
+    }
     let codex = home("codex");
-    let installed = context.install("codex", &codex, true).unwrap();
-    assert!(!installed.runs_hooks(), "Codex launches get no hooks");
+    let installed = both.install("codex", &codex, true).unwrap();
+    assert!(
+        installed.runs_hooks(),
+        "Codex runs the owner's hooks on its own events (PA-12)"
+    );
     assert!(!codex.join(STATE).join("plugin").exists());
+    let copy = codex.join(STATE).join(HOOK_PLUGINS).join("hk-caveman");
+    assert_eq!(
+        fs::read_to_string(copy.join("hooks").join("start.sh")).unwrap(),
+        script
+    );
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let events = config["hooks"].as_table().unwrap();
+    assert_eq!(
+        events.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["PreToolUse", "SessionStart"],
+        "Notification is a Claude Code event Codex has not"
+    );
+    let search = &events["PreToolUse"].as_array().unwrap()[0];
+    assert_eq!(search["matcher"].as_str(), Some("Grep|Glob"));
+    assert_eq!(
+        search["hooks"].as_array().unwrap()[0]["timeout"].as_integer(),
+        Some(5)
+    );
+    let start = &events["SessionStart"].as_array().unwrap()[0];
+    assert!(start.get("matcher").is_none());
+    let command = start["hooks"].as_array().unwrap()[0]["command"]
+        .as_str()
+        .unwrap();
+    let ran = crate::spawn_gate::output(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(
+        String::from_utf8(ran.stdout).unwrap(),
+        format!("root={}\n", copy.display()),
+        "a Codex hook runs from its own copy with the plugin root set to it"
+    );
+    drop(installed);
+
+    let codex_off = home("codex-off");
+    let installed = both.install("codex", &codex_off, false).unwrap();
+    assert!(
+        !installed.runs_hooks(),
+        "tools off gives Codex no hooks either"
+    );
     drop(installed);
 }
 

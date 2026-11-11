@@ -47,11 +47,11 @@ const forbidden = () => { throw new Error("static rendering must not start, canc
 const panel = (state, props = {}) => renderToStaticMarkup(createElement(SignInPanel, {
   provider: "chatgpt", method: "codex_device_code", state, onStart: forbidden, onCancel: forbidden, onCheck: forbidden, onClaudeCode: forbidden, ...props }));
 
-test("step 2 lists catalog methods in order with Recommended first, and ChatGPT offers the Codex sign-in on this Mac", () => {
+test("step 2 lists catalog methods in order with Recommended first, and no subscription offers a sign-in taken from this Mac (PA-13)", () => {
   const chatgpt = methodOptions(catalog[0]);
   assert.deepEqual(chatgpt.map((option) => [option.title, option.recommended, option.native ?? null]), [
-    ["Sign in with ChatGPT", true, "codex_device_code"], ["Use the Codex sign-in on this Mac", false, "codex_existing"], ["Use an API key", false, null]]);
-  assert.equal(chatgpt[1].detail, "Reuses the account Codex is already signed in to.");
+    ["Sign in with ChatGPT", true, "codex_device_code"], ["Use an API key", false, null]]);
+  for (const option of [...chatgpt, ...methodOptions(catalog[1])]) assert.doesNotMatch(`${option.title} ${option.detail}`, /on this Mac|already signed in/);
   assert.deepEqual(methodOptions(catalog[1]).map((option) => option.native ?? null), ["claude_official", null]);
   const single = methodOptions(catalog[2]);
   assert.equal(single.length, 1);
@@ -89,7 +89,6 @@ test("Add account offers one OpenAI and one Anthropic entry, and each key method
     .map((option) => [option.title, option.recommended, option.provider.provider, option.entry.method, option.native ?? null]);
   assert.deepEqual(ways("OpenAI"), [
     ["Sign in with ChatGPT", true, "chatgpt", "subscription", "codex_device_code"],
-    ["Use the Codex sign-in on this Mac", false, "chatgpt", "subscription", "codex_existing"],
     ["Use an API key", false, "openai_api", "api_key", null]]);
   assert.deepEqual(ways("Anthropic"), [
     ["Sign in with your Claude subscription", true, "claude", "subscription", "claude_official"],
@@ -202,14 +201,34 @@ test("the device-code panel shows the code large with Copy code, the page as sel
   assert.ok(Buffer.byteLength(markup) < 65536);
 });
 
+test("a check that finds no sign-in says so for both harnesses and offers Sign in again (PA-13)", () => {
+  for (const [provider, harness, method] of [["chatgpt", "codex", "codex_existing"], ["claude", "claude", "claude_existing"]]) {
+    assert.equal(signInStage(begun(method, harness), provider).text, "Checking...");
+    const state = answered({ action: { kind: "sign_in", method }, phase: "unauthenticated_observed", challenge: null }, method, harness);
+    assert.deepEqual(signInStage(state, provider), { kind: "failed", text: "This account isn't signed in. Choose Sign in again.", hint: "sign_in" });
+    const markup = panel(state, { provider, method });
+    assert.match(markup, /This account isn&#x27;t signed in\. Choose Sign in again\.[\s\S]*>Sign in again<\/button>/);
+    assert.doesNotMatch(markup, /Check this account/);
+  }
+  for (const [provider, harness, method] of [["chatgpt", "codex", "codex_device_code"], ["claude", "claude", "claude_official"]]) {
+    const cancelled = answered({ action: { kind: "sign_in", method }, phase: "cancelled", challenge: null }, method, harness);
+    assert.match(panel(cancelled, { provider, method }), />Try again<\/button>[\s\S]*>Check this account&#x27;s sign-in<\/button>/);
+  }
+});
+
 test("the start panel offers each managed method with the design copy", () => {
   const idle = panel(undefined, { idle: true });
   assert.match(idle, />Get sign-in code<\/button>/);
   assert.match(idle, />Sign in in this browser instead<\/button>/);
-  const existing = panel(undefined, { idle: true, method: "codex_existing" });
-  assert.match(existing, /CrazyAgent copies this sign-in into its own private folder for this account\. Codex itself is not changed\./);
-  assert.match(existing, />Use this sign-in<\/button>/);
-  assert.match(panel(undefined, { idle: true, provider: "claude", method: "claude_official" }), />Open Claude sign-in<\/button>/);
+  for (const [provider, method] of [["chatgpt", "codex_existing"], ["claude", "claude_existing"]]) {
+    const check = panel(undefined, { idle: true, provider, method });
+    assert.match(check, /Checking the sign-in this account already has in CrazyAgent\. Nothing else on this Mac is read\./);
+    assert.match(check, />Check this account&#x27;s sign-in<\/button>/);
+    assert.doesNotMatch(check, /copies this sign-in|Use this sign-in/);
+  }
+  const claude = panel(undefined, { idle: true, provider: "claude", method: "claude_official" });
+  assert.match(claude, />Open Claude sign-in<\/button>[\s\S]*Claude Code has no sign-in code\. It signs in through your browser\./);
+  assert.doesNotMatch(idle, /has no sign-in code/);
   assert.match(panel(undefined), /Getting ready to sign in\.\.\./);
   assert.match(panel(begun()), /Getting a sign-in code\.\.\./);
 });
@@ -325,7 +344,7 @@ test("Add account starts provider-first: managed sign-in, key and URL providers,
   }
   const methods = renderToStaticMarkup(createElement(MethodMenu, { tile: providerTiles(catalog)[0], onPick: forbidden }));
   assert.match(methods, /Sign in with ChatGPT<span class="badge tone-info">Recommended<\/span>/);
-  assert.match(methods, /Use the Codex sign-in on this Mac/);
+  assert.doesNotMatch(methods, /on this Mac/);
   assert.match(methods, /Use an API key/);
   for (const markup of [tiles, methods]) {
     assert.doesNotMatch(markup, routing);

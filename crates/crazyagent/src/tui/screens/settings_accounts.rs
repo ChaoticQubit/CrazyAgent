@@ -967,6 +967,7 @@ pub struct AccountDetails {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
     SignIn,
+    CheckSignIn,
     ReplaceKey,
     CheckAgain,
     Rename,
@@ -977,6 +978,7 @@ impl Action {
     fn label(self) -> &'static str {
         match self {
             Self::SignIn => "Sign in again",
+            Self::CheckSignIn => super::settings_add_account::CHECK_TITLE,
             Self::ReplaceKey => "Replace key",
             Self::CheckAgain => "Check again",
             Self::Rename => "Rename",
@@ -1001,13 +1003,14 @@ impl AccountDetails {
     }
 
     fn actions(&self) -> Vec<Action> {
-        let first = match self.account.method {
-            SignInMethod::Subscription => Some(Action::SignIn),
-            SignInMethod::ApiKey => Some(Action::ReplaceKey),
-            SignInMethod::Url => Some(Action::CheckAgain),
+        let first: &[Action] = match self.account.method {
+            SignInMethod::Subscription => &[Action::SignIn, Action::CheckSignIn],
+            SignInMethod::ApiKey => &[Action::ReplaceKey],
+            SignInMethod::Url => &[Action::CheckAgain],
         };
         first
-            .into_iter()
+            .iter()
+            .copied()
             .chain([Action::Rename, Action::Remove])
             .collect()
     }
@@ -1024,6 +1027,9 @@ impl AccountDetails {
         match action {
             Action::SignIn => Flow::Replace(Box::new(
                 super::settings_add_account::AddAccount::again(self.account.clone()),
+            )),
+            Action::CheckSignIn => Flow::Replace(Box::new(
+                super::settings_add_account::AddAccount::check(self.account.clone()),
             )),
             Action::ReplaceKey => {
                 let field = TextField::secret("New API key", KEY_CHARS_MAX)

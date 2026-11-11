@@ -1621,3 +1621,68 @@ fn a_codex_folder_decides_the_trust_setting_on_both_launch_shapes() {
         );
     }
 }
+
+/// A tools-on Codex launch whose context wrote hooks (the edit guard or the owner's) hands
+/// the bridge `--dangerously-bypass-hook-trust` right after the resume word, and the real
+/// bridge gives that flag to the TUI alone, never to `codex app-server`, which does not take
+/// it; a launch without hooks passes no flag (PA-12).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_launch_with_hooks_lets_only_its_tui_pass_hook_trust() {
+    let case = Case::new();
+    let request = case.request("codex", case.subscription(), true);
+    let plain = command(&request, None, &run(None)).unwrap();
+    assert!(
+        !plain
+            .argv
+            .iter()
+            .any(|argument| argument == CODEX_HOOK_TRUST)
+    );
+
+    let engine = case.path().join("bin").join("crazyagent");
+    let hooked = project_context(&case, "codex-hooked")
+        .with_relay(&engine, &case.path().join("codex-calls"))
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(hooked.runs_hooks());
+    let built = command(&request, Some(&hooked), &run(None)).unwrap();
+    let bridge = built
+        .argv
+        .iter()
+        .position(|argument| argument == "codex-bridge")
+        .unwrap();
+    assert_eq!(built.argv[bridge + 2], "");
+    assert_eq!(built.argv[bridge + 3], CODEX_HOOK_TRUST);
+    assert_eq!(built.argv[bridge + 4], "-c");
+    drop(hooked);
+
+    let calls = case.path().join("calls");
+    let alone = case.executable(
+        "codex-trust",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 7\n",
+            calls.display()
+        ),
+    );
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", CODEX_BRIDGE_SCRIPT, "codex-bridge"])
+            .arg(&alone)
+            .args(["", CODEX_HOOK_TRUST, "-c", "model=\"gpt-5.5\""])
+            .env_clear()
+            .env("CODEX_HOME", case.home())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    let called = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(
+        called.lines().collect::<Vec<_>>(),
+        [
+            "app-server --listen unix:// -c model=\"gpt-5.5\"",
+            "--dangerously-bypass-hook-trust -c model=\"gpt-5.5\"",
+        ]
+    );
+}
