@@ -1,17 +1,22 @@
 use super::*;
-use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
+use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, Repeated, TEXT_BYTES_MAX};
 pub use crate::coord::adoption::Adoption;
+use crate::engine::native_auth_host::RegisteredNativeAuthHost;
+use crate::instruction_cleanup as cleanup;
 pub use crate::instruction_files::{
-    ImportCommit, ImportFile, Mode as InstructionMode, Record as InstructionRecord,
-    Settings as InstructionSettings, UncommittedImport,
+    AppSettings as AppInstructionSettings, ImportCommit, ImportFile, Mode as InstructionMode,
+    Record as InstructionRecord, Settings as InstructionSettings, UncommittedImport,
 };
-use crate::protocol::encode_frame;
+use crate::protocol::{CredentialRef, encode_frame};
 use crate::storage::versioned::{self, LastWriter, Refusal, Writer};
 use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
 const PAYLOAD_TIME: Duration = Duration::from_secs(5);
+/// How long an Edit with AI proposal may take end to end: the model run's own bound plus
+/// the time to start it and send the file back.
+pub(super) const PROPOSE_TIMEOUT: Duration = Duration::from_secs(cleanup::WALL_TIME.as_secs() + 30);
 
 /// Every code a Process request can answer an owner client with: the instruction
 /// store's refusals, this protocol's own, and the owner connection's it travels on.
@@ -23,6 +28,20 @@ pub const PROCESS_CODES: &[&str] = &[
     "instruction_settings_invalid",
     "instruction_settings_save_unavailable",
     "instruction_settings_unavailable",
+    "instructions_cleanup_busy",
+    "instructions_cleanup_empty",
+    "instructions_cleanup_failed",
+    "instructions_cleanup_no_account",
+    "instructions_cleanup_no_proposal",
+    "instructions_cleanup_off",
+    "instructions_cleanup_paused",
+    "instructions_cleanup_pool_needed",
+    "instructions_cleanup_pool_not_asked",
+    "instructions_cleanup_pool_unknown",
+    "instructions_cleanup_project_pool_missing",
+    "instructions_cleanup_timed_out",
+    "instructions_cleanup_too_large",
+    "instructions_cleanup_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
@@ -126,6 +145,14 @@ enum Action {
     Adoption {
         project: ProjectId,
     },
+    Propose {
+        project: Option<ProjectId>,
+        pool: Option<CredentialRef>,
+    },
+    AppSettings,
+    SaveAppSettings {
+        settings: AppInstructionSettings,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -169,9 +196,14 @@ enum Reply {
     Settings {
         settings: InstructionSettings,
         version: u64,
+        #[serde(default)]
+        repeats: u32,
     },
     Adoption {
         adoption: Adoption,
+    },
+    AppSettings {
+        settings: AppInstructionSettings,
     },
     Imports {
         files: Vec<ImportFile>,
@@ -212,11 +244,25 @@ pub struct AgentInstructions {
 
 /// One project's agent instruction settings and the version they were read at. A save names
 /// that version, so it never replaces settings saved since the owner's screen read them.
+/// `repeats` counts the project's lines the app text already has, which the joined text
+/// leaves out unless the project keeps them; zero when its agents do not get both texts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstructionView {
     pub settings: InstructionSettings,
     pub version: u64,
+    #[serde(default)]
+    pub repeats: u32,
+}
+
+/// A cleaned instructions file a model proposed and the version of the saved file it was
+/// made from, which accepting it names as the version read, so a save that landed since
+/// answers stale. Nothing is saved by a proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proposal {
+    pub text: String,
+    pub base_version: u64,
 }
 
 /// One instructions text and the version it was read at. A save names that version, so it
@@ -296,6 +342,7 @@ enum Answer {
     Saved(SavedText),
     Agent(AgentInstructions),
     Settings(InstructionView),
+    AppSettings(AppInstructionSettings),
     Adoption(Adoption),
     Imports(Vec<ImportFile>),
     Uncommitted(UncommittedImport),
@@ -315,6 +362,7 @@ fn read_kind(action: &Action) -> Option<&'static str> {
         Action::Agent { .. } => Some("process.agent"),
         Action::AgentText { .. } => Some("process.agent_text"),
         Action::Settings { .. } => Some("process.settings"),
+        Action::AppSettings => Some("process.app_settings"),
         Action::Adoption { .. } => Some("process.adoption"),
         _ => None,
     }
@@ -648,11 +696,77 @@ impl OwnerClient {
         }
     }
 
+    /// Asks for a cleaned version of the saved instructions from a model with tools off
+    /// (DEC-132 Q6). Inputs: none for the app text, or the project; and the pool the owner
+    /// picked for this run, which the app text needs and a project never takes. Output: the
+    /// proposal and the version it was made from, or an `instructions_cleanup_*` refusal.
+    /// Nothing is saved. Waits up to `PROPOSE_TIMEOUT`.
+    pub async fn propose_process(
+        &self,
+        project: Option<ProjectId>,
+        pool: Option<CredentialRef>,
+    ) -> Result<Proposal, EngineError> {
+        cleanup::cleanup_pool(project.as_ref(), pool.as_ref()).map_err(failure)?;
+        let limit = self.timeout.max(PROPOSE_TIMEOUT);
+        match self
+            .process_exchange_within(Action::Propose { project, pool }, None, limit)
+            .await?
+        {
+            (Reply::Current { version, .. }, Some(text)) if !text.trim().is_empty() => {
+                Ok(Proposal {
+                    text,
+                    base_version: version,
+                })
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the app-wide instruction settings: whether Edit with AI may send the app
+    /// instructions to a model. Output: the settings, on when never stored.
+    pub async fn app_instruction_settings(&self) -> Result<AppInstructionSettings, EngineError> {
+        self.process_app_settings_reply(Action::AppSettings).await
+    }
+
+    /// Stores the app-wide instruction settings whole. Input: the settings. Output: the
+    /// settings as stored, or a refusal after which nothing changed.
+    pub async fn save_app_instruction_settings(
+        &self,
+        settings: AppInstructionSettings,
+    ) -> Result<AppInstructionSettings, EngineError> {
+        let stored = self
+            .process_app_settings_reply(Action::SaveAppSettings { settings })
+            .await?;
+        if stored != settings {
+            return Err(unknown());
+        }
+        Ok(stored)
+    }
+
+    async fn process_app_settings_reply(
+        &self,
+        action: Action,
+    ) -> Result<AppInstructionSettings, EngineError> {
+        match self.process_exchange(action, None).await? {
+            (Reply::AppSettings { settings }, None) => Ok(settings),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn process_settings_reply(&self, action: Action) -> Result<InstructionView, EngineError> {
         match self.process_exchange(action, None).await? {
-            (Reply::Settings { settings, version }, None) => {
-                Ok(InstructionView { settings, version })
-            }
+            (
+                Reply::Settings {
+                    settings,
+                    version,
+                    repeats,
+                },
+                None,
+            ) if repeats as usize <= TEXT_BYTES_MAX => Ok(InstructionView {
+                settings,
+                version,
+                repeats,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -680,7 +794,18 @@ impl OwnerClient {
         action: Action,
         text: Option<String>,
     ) -> Result<(Reply, Option<String>), EngineError> {
-        tokio::time::timeout(self.timeout, async {
+        self.process_exchange_within(action, text, self.timeout)
+            .await
+    }
+
+    async fn process_exchange_within(
+        &self,
+        action: Action,
+        text: Option<String>,
+        limit: Duration,
+    ) -> Result<(Reply, Option<String>), EngineError> {
+        assert!(limit >= self.timeout && limit <= self.timeout.max(PROPOSE_TIMEOUT));
+        tokio::time::timeout(limit, async {
             let read = read_kind(&action);
             let envelope = Envelope {
                 process: action,
@@ -809,6 +934,20 @@ async fn read_payload<S: tokio::io::AsyncRead + Unpin>(
     String::from_utf8(buffer).map_err(|_| failure("process_text_invalid"))
 }
 
+/// Whether a request body asks for an Edit with AI proposal, which waits for a model run
+/// and so is served past the owner exchange; every other Process request is answered at
+/// once. Input: the body. Output: the answer, false for a body that does not parse.
+pub(super) fn deferred(bytes: &[u8]) -> bool {
+    bytes.len() <= REQUEST_BYTES_MAX
+        && matches!(
+            serde_json::from_slice::<Envelope>(bytes),
+            Ok(Envelope {
+                process: Action::Propose { .. },
+                text_bytes: None,
+            })
+        )
+}
+
 /// Encodes this protocol's refusal of a request the engine did not run.
 /// Input: the refusal code. Output: the reply frame.
 pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
@@ -874,9 +1013,11 @@ pub(super) async fn serve(
             Reply::Settings {
                 settings: view.settings,
                 version: view.version,
+                repeats: view.repeats,
             },
             None,
         ),
+        Ok(Answer::AppSettings(settings)) => (Reply::AppSettings { settings }, None),
         Ok(Answer::Adoption(adoption)) => (Reply::Adoption { adoption }, None),
         Ok(Answer::Imports(files)) => {
             assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
@@ -961,7 +1102,46 @@ async fn handle(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("process_unavailable"))?;
+    let harnesses = match &action {
+        Action::Propose { .. } => {
+            let (codex, claude) = authority
+                .native_auth_host
+                .lock()
+                .map_err(|_| failure(cleanup::UNAVAILABLE))?
+                .model_harnesses();
+            Some((engine.settings_files(), codex, claude))
+        }
+        _ => None,
+    };
     tokio::task::spawn_blocking(move || match action {
+        Action::Propose { project, pool } if text.is_none() => {
+            let (settings, codex, claude) =
+                harnesses.ok_or_else(|| failure(cleanup::UNAVAILABLE))?;
+            let (global, local) = settings.ok_or_else(|| failure(cleanup::UNAVAILABLE))?;
+            let path = |host: &Option<Arc<RegisteredNativeAuthHost>>| match host {
+                Some(host) => host.verified_path().map(|path| Some(path.to_path_buf())),
+                None => Ok(None),
+            };
+            let unavailable = |_| failure(cleanup::UNAVAILABLE);
+            let codex = path(&codex).map_err(unavailable)?;
+            let claude = path(&claude).map_err(unavailable)?;
+            propose(&root, project.as_ref(), pool.as_ref(), |prompt| {
+                cleanup::run(&cleanup::Request {
+                    root: &root,
+                    settings: (&global, &local),
+                    codex: codex.as_deref(),
+                    claude: claude.as_deref(),
+                    project: project.as_ref(),
+                    pool: pool.as_ref(),
+                    prompt,
+                })
+            })
+            .map(Answer::Current)
+        }
+        Action::AppSettings if text.is_none() => app_settings(&root, None).map(Answer::AppSettings),
+        Action::SaveAppSettings { settings } if text.is_none() => {
+            app_settings(&root, Some(settings)).map(Answer::AppSettings)
+        }
         Action::Agent { project, agent } if text.is_none() => {
             agent_instructions(&root, &project, agent).map(Answer::Agent)
         }
@@ -1254,7 +1434,7 @@ fn refuse_none_given(
             Err(_) => return Ok(()),
         },
     };
-    match crate::agent_home::render(&app, &own).is_empty() {
+    match crate::agent_home::render(&app, &own, agent.repeated).is_empty() {
         true => Err(failure(NONE_GIVEN)),
         false => Ok(()),
     }
@@ -1356,14 +1536,17 @@ const _: () = assert!(super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32
 /// sizes.
 fn sized(root: &Path, project: Option<&ProjectId>, saved: &str) -> ProcessSaved {
     let given = match project {
-        Some(_) => {
+        Some(project) => {
             let app = crate::agent_home::read_app(root).unwrap_or_default();
-            crate::agent_home::render(&app, saved).len()
+            crate::agent_home::render(&app, saved, repeated_choice(root, project)).len()
         }
         None => project_texts(root)
             .iter()
-            .map(|own| crate::agent_home::render(saved, own).len())
-            .fold(crate::agent_home::render(saved, "").len(), usize::max),
+            .map(|(own, repeated)| crate::agent_home::render(saved, own, *repeated).len())
+            .fold(
+                crate::agent_home::render(saved, "", Repeated::Keep).len(),
+                usize::max,
+            ),
     };
     assert!(given <= PROCESS_BYTES_MAX);
     ProcessSaved {
@@ -1372,10 +1555,23 @@ fn sized(root: &Path, project: Option<&ProjectId>, saved: &str) -> ProcessSaved 
     }
 }
 
+/// Reads whether a project's joined text leaves out the lines the app text already has,
+/// for the size a save reports. Settings that cannot be read count as Keep, the larger
+/// text, so the Claude warning never understates. Inputs: the engine root and the project.
+/// Output: the choice.
+fn repeated_choice(root: &Path, project: &ProjectId) -> Repeated {
+    let stored = read_only(root).ok().and_then(|connection| {
+        let tx = connection.unchecked_transaction().ok()?;
+        crate::instruction_files::load(&tx, project).ok()
+    });
+    stored.map_or(Repeated::Keep, |settings| settings.repeated)
+}
+
 /// Reads the instructions of the set-up projects, at most `SAVED_PROJECTS_MAX`, so an app
 /// save can tell whether it pushes one past what a Claude master takes. A project whose
-/// folder or text cannot be read is left out. Input: the engine root. Output: the texts.
-fn project_texts(root: &Path) -> Vec<String> {
+/// folder or text cannot be read is left out. Input: the engine root. Output: each text
+/// with whether its project leaves repeated lines out.
+fn project_texts(root: &Path) -> Vec<(String, Repeated)> {
     let Ok(connection) = read_only(root) else {
         return Vec::new();
     };
@@ -1394,10 +1590,9 @@ fn project_texts(root: &Path) -> Vec<String> {
     ids.iter()
         .filter_map(|id| {
             let project = ProjectId::new(id).ok()?;
-            let folder = crate::launch_context::agent_project(&tx, &project)
-                .ok()?
-                .folder?;
-            crate::agent_home::read_project(&folder).ok()
+            let agent = crate::launch_context::agent_project(&tx, &project).ok()?;
+            let text = crate::agent_home::read_project(&agent.folder?).ok()?;
+            Some((text, agent.repeated))
         })
         .collect()
 }
@@ -1549,6 +1744,7 @@ fn instruction_settings(
     let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
     let version = current(&tx)?;
     assert!(expected.is_none_or(|expected| expected == (stored, version)));
+    let repeats = repeats(&tx, project, stored);
     tx.commit().map_err(|_| match expected {
         Some(_) => unknown(),
         None => failure("instruction_settings_unavailable"),
@@ -1556,7 +1752,128 @@ fn instruction_settings(
     Ok(InstructionView {
         settings: stored,
         version,
+        repeats,
     })
+}
+
+/// Reads the app-wide instruction settings, or stores them whole first. Inputs: the engine
+/// root and the settings to store, none for a read. Output: the settings as stored, on when
+/// never stored, `instruction_settings_save_unavailable` for a store that did not happen or
+/// `instruction_settings_unavailable`.
+fn app_settings(
+    root: &Path,
+    save: Option<AppInstructionSettings>,
+) -> Result<AppInstructionSettings, EngineError> {
+    let Some(settings) = save else {
+        return crate::instruction_files::load_app(&read_only(root)?).map_err(failure);
+    };
+    let unsaved = |_| failure("instruction_settings_save_unavailable");
+    let mut connection = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(unsaved)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(unsaved)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(unsaved)?;
+    crate::instruction_files::save_app(&tx, settings).map_err(unsaved)?;
+    let stored = crate::instruction_files::load_app(&tx).map_err(failure)?;
+    assert!(stored == settings);
+    tx.commit().map_err(|_| unknown())?;
+    Ok(stored)
+}
+
+/// Makes one Edit with AI proposal (DEC-132 Q6, Q8): checks the pool rule and the scope's
+/// Edit with AI setting, reads the saved text and its version, hands the prompt to the model
+/// run and reads the proposed file out of the reply. A project's prompt also holds the app
+/// text, so the model drops what it repeats, unless the project's agents get the project
+/// file alone or the app-wide Edit with AI setting is off, which keeps the app text from
+/// every model run made for editing. Inputs: the engine root, none for the app text or the
+/// project, the pool the owner picked for this run and the model run, given the prompt.
+/// Output: the proposed text with the version of the saved text it was made from, or an
+/// `instructions_cleanup_*` code. Nothing is written.
+fn propose(
+    root: &Path,
+    project: Option<&ProjectId>,
+    pool: Option<&CredentialRef>,
+    run: impl FnOnce(&str) -> Result<String, &'static str>,
+) -> Result<ProcessText, EngineError> {
+    cleanup::cleanup_pool(project, pool).map_err(failure)?;
+    let compared = {
+        let connection = read_only(root)?;
+        match project {
+            None => {
+                let settings = crate::instruction_files::load_app(&connection).map_err(failure)?;
+                if !settings.edit_with_ai {
+                    return Err(failure(cleanup::OFF));
+                }
+                false
+            }
+            Some(project) => {
+                let settings =
+                    crate::instruction_files::load(&connection, project).map_err(failure)?;
+                if !settings.edit_with_ai {
+                    return Err(failure(cleanup::OFF));
+                }
+                settings.mode != InstructionMode::ProjectOnly
+                    && crate::instruction_files::load_app(&connection)
+                        .map_err(failure)?
+                        .edit_with_ai
+            }
+        }
+    };
+    let saved = current_text(root, project)?;
+    if saved.text.trim().is_empty() {
+        return Err(failure(cleanup::EMPTY));
+    }
+    let prompt = match project {
+        None => cleanup::prompt(cleanup::Scope::App, &saved.text, ""),
+        Some(_) => {
+            let app = match compared {
+                true => current_text(root, None)?.text,
+                false => String::new(),
+            };
+            cleanup::prompt(cleanup::Scope::Project, &app, &saved.text)
+        }
+    };
+    let reply = run(&prompt).map_err(failure)?;
+    let text = cleanup::proposal(&reply).map_err(failure)?;
+    assert!(!text.trim().is_empty() && text.len() <= TEXT_BYTES_MAX);
+    Ok(ProcessText {
+        text,
+        version: saved.version,
+    })
+}
+
+/// Counts the project's lines the app text already has, for the note beside the repeated
+/// lines choice. Zero when the project's agents do not get both texts or a text cannot be
+/// read: the count is a note, never a refusal. Inputs: the settings read's transaction, the
+/// project and its stored settings. Output: the count, at most `TEXT_BYTES_MAX`.
+fn repeats(
+    tx: &rusqlite::Transaction<'_>,
+    project: &ProjectId,
+    settings: InstructionSettings,
+) -> u32 {
+    if settings.mode != InstructionMode::Both {
+        return 0;
+    }
+    let Ok(agent) = crate::launch_context::agent_project(tx, project) else {
+        return 0;
+    };
+    let (Some(folder), Ok(app)) = (&agent.folder, crate::agent_home::read_app(&agent.data)) else {
+        return 0;
+    };
+    let Ok(own) = crate::agent_home::read_project(folder) else {
+        return 0;
+    };
+    let lines = crate::agent_home::repeated_lines(&app, &own);
+    assert!(lines <= TEXT_BYTES_MAX && TEXT_BYTES_MAX <= u32::MAX as usize);
+    lines as u32
 }
 
 /// Reads one set-up project's workflow adoption from the engine store, read-only, with a

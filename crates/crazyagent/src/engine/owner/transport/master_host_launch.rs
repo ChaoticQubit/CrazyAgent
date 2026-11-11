@@ -1487,7 +1487,11 @@ mod tests {
 
     #[test]
     fn a_claude_master_prompt_carries_the_owner_instructions_after_its_context() {
-        let process = crate::agent_home::render("APP-RULE\n", "PROJECT-RULE\n");
+        let process = crate::agent_home::render(
+            "APP-RULE\n",
+            "PROJECT-RULE\n",
+            crate::agent_home::Repeated::LeaveOut,
+        );
         let prompt = master_prompt("# Project context from CrazyAgent\n", &process);
         assert_eq!(
             prompt,
@@ -1501,7 +1505,7 @@ mod tests {
         let full = "a".repeat(crate::agent_home::TEXT_BYTES_MAX);
         let largest = master_prompt(
             &"x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX),
-            &crate::agent_home::render(&full, &full),
+            &crate::agent_home::render(&full, &full, crate::agent_home::Repeated::Keep),
         );
         let host_limit =
             usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();

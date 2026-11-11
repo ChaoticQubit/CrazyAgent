@@ -33,12 +33,43 @@ test("the top shows Process and the app's purpose line, with no action", async (
   assert.deepEqual(seen.actions, []);
 });
 
-test("three sections in the approved order, each with the purpose line it has", async () => {
+test("four sections in order, each with the purpose line it has", async () => {
   const sections = await onProcess({}, read);
-  assert.deepEqual(sections.map((section) => section.heading), ["Start from", "Instructions for agents", "As agents read it"]);
+  assert.deepEqual(sections.map((section) => section.heading), ["Start from", "Instructions for agents", "Edit with AI", "As agents read it"]);
   assert.equal(sections[0].about, "Both open a preview first. Nothing changes until you save.");
   assert.equal(sections[1].about, "");
-  assert.equal(sections[2].about, "Highlighted names are skills. Each opens its own details.");
+  assert.equal(sections[2].about, "A model proposes a cleaned file. You review every change before anything is saved.");
+  assert.equal(sections[3].about, "Highlighted names are skills. Each opens its own details.");
+});
+
+test("the app-wide Edit with AI switch: On shows the button and asks for a pool on every click, Off hides it, and a click on the switch saves the choice", async () => {
+  await onProcess({}, async (page) => {
+    const state = () => page.evaluate(`({
+      button: [...document.querySelectorAll("button")].some((node) => node.textContent.trim() === "Edit with AI"),
+      on: document.getElementById("process-edit-with-ai")?.getAttribute("aria-checked") ?? null,
+      asks: document.body.innerText.includes("Which pool runs this edit?"),
+      picked: [...document.querySelectorAll('input[name="pr-ai-pool"]')].filter((node) => node.checked).length,
+    })`);
+    assert.deepEqual(await state(), { button: true, on: "true", asks: false, picked: 0 });
+    for (const round of [1, 2]) {
+      await button(page, "Edit with AI");
+      await page.evaluate("new Promise((done) => setTimeout(done, 50))");
+      assert.deepEqual(await state(), { button: true, on: "true", asks: true, picked: 0 }, `click ${round} asks for the pool with none picked`);
+      assert.ok(!(await sent(page)).includes("desktop_process_propose"), "nothing is sent before a pool is picked");
+      await button(page, "Cancel");
+    }
+    assert.ok(!(await sent(page)).includes("desktop_save_app_instruction_settings"));
+    await page.evaluate('document.getElementById("process-edit-with-ai").click()');
+    await page.evaluate("new Promise((done) => setTimeout(done, 50))");
+    assert.ok((await sent(page)).includes("desktop_save_app_instruction_settings"), "the switch saves at once");
+  });
+  await onProcess({ ai: "off" }, async (page) => {
+    const shown = await page.evaluate(`({
+      button: [...document.querySelectorAll("button")].some((node) => node.textContent.trim() === "Edit with AI"),
+      on: document.getElementById("process-edit-with-ai")?.getAttribute("aria-checked") ?? null,
+    })`);
+    assert.deepEqual(shown, { button: false, on: "false" }, "Off hides the button and keeps the switch");
+  });
 });
 
 test("Start from has one line per seed, its words left and its button right", async () => {
@@ -116,7 +147,7 @@ test("Save sends the draft and nothing is saved before the click", async () => {
 
 test("As agents read it follows the draft, tags skills, and goes away with an empty draft", async () => {
   await onProcess({ saved: "empty" }, async (page) => {
-    assert.deepEqual((await read(page)).map((section) => section.heading), ["Start from", "Instructions for agents"]);
+    assert.deepEqual((await read(page)).map((section) => section.heading), ["Start from", "Instructions for agents", "Edit with AI"]);
     await typed(page, "Run tdd now.");
     const sections = await read(page);
     assert.equal(sections.at(-1).heading, "As agents read it");
@@ -243,9 +274,9 @@ test("the read still running keeps the top line and draws no sections", async ()
   assert.equal(seen.field, 0);
 });
 
-test("real Tab keys walk the seeds, the field, then the skill link, past the waiting Save", async () => {
-  const walked = await onProcess({}, (page) => tabWalk(page, 4));
-  assert.deepEqual(walked, ["Import from file", "Use the CrazyAgent default process", "Use tdd for every change.", "Skill tdd: Test first."]);
+test("real Tab keys walk the seeds, the field, Edit with AI and its switch, then the skill link, past the waiting Save", async () => {
+  const walked = await onProcess({}, (page) => tabWalk(page, 6));
+  assert.deepEqual(walked, ["Import from file", "Use the CrazyAgent default process", "Use tdd for every change.", "Edit with AI", "Edit with AI for the app instructions", "Skill tdd: Test first."]);
 });
 
 for (const theme of ["light", "dark"]) {

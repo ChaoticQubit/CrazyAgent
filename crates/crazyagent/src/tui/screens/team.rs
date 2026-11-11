@@ -963,7 +963,9 @@ impl Team {
                 | ProcessReply::Adoption(_)
                 | ProcessReply::Files(_)
                 | ProcessReply::Uncommitted(_)
-                | ProcessReply::Committed(_),
+                | ProcessReply::Committed(_)
+                | ProcessReply::Proposal(_)
+                | ProcessReply::AppSettings(_),
             ) => return,
             Err(code) if code == NOT_READY => Load::NotReady,
             Err(code) => Load::Failed(code.clone()),

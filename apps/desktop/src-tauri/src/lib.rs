@@ -3832,6 +3832,41 @@ async fn desktop_instruction_settings(
 }
 
 #[tauri::command]
+async fn desktop_process_propose(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    pool: Option<String>,
+) -> Result<crazyagent::engine::owner::Proposal, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.propose_process(project_id, pool)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_instruction_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::engine::owner::AppInstructionSettings, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_instruction_settings()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_app_instruction_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: crazyagent::engine::owner::AppInstructionSettings,
+) -> Result<crazyagent::engine::owner::AppInstructionSettings, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .save_app_instruction_settings(settings)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_retry_recovery(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4426,6 +4461,9 @@ native_commands! {
     desktop_ide_window_out,
     desktop_instruction_settings,
     desktop_save_instruction_settings,
+    desktop_process_propose,
+    desktop_app_instruction_settings,
+    desktop_save_app_instruction_settings,
     desktop_adoption,
     desktop_usage_report,
     desktop_usage_metrics,
