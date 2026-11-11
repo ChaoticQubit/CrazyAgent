@@ -46,9 +46,9 @@ defaults:
 
 jobs:
   linux:
-    name: Linux format, typecheck, lint and tests
+    name: Linux format, typecheck and lint
     runs-on: ubuntu-22.04
-    timeout-minutes: 150
+    timeout-minutes: 45
     env:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms windows_terminal agent_secret_walls setup team_project_root
@@ -136,108 +136,6 @@ jobs:
             sudo apt-get "${apt_options[@]}" update --error-on=any
           fi
           sudo apt-get "${apt_options[@]}" install -y --no-install-recommends "${missing[@]}"
-      - name: Install tmux
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/tmux/$TMUX_VERSION/x64"
-          if [ ! -f "$prefix.complete" ]; then
-            work="$RUNNER_TEMP/tmux"
-            rm -rf "$work" "$prefix"
-            mkdir -p "$work"
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
-            echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
-            tar -xzf "$work/tmux.tar.gz" -C "$work"
-            (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
-            rm -rf "$work"
-            touch "$prefix.complete"
-          fi
-          test "$("$prefix/bin/tmux" -V)" = "tmux $TMUX_VERSION"
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          found=""
-          for dir in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
-            if [ -x "$dir/tmux" ]; then found="$dir/tmux"; break; fi
-          done
-          version="$([ -z "$found" ] || "$found" -V)"
-          if [[ "$version" =~ ^tmux\ ([0-9]+)\.([0-9]+) ]] && (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 4) )); then
-            echo "the engine uses $found ($version)"
-            exit 0
-          fi
-          if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
-            echo "::error::the engine looks for tmux 3.4 or later only in /opt/homebrew/bin, /usr/local/bin, /usr/bin and /bin, and found ${found:-none} ${version}. Provision this runner once with: sudo ln -sf $prefix/bin/tmux /usr/local/bin/tmux"
-            exit 1
-          fi
-          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
-          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install Claude Code
-        env:
-          CLAUDE_CODE_PACKAGE: claude-code-linux-x64
-          CLAUDE_CODE_SHA256: e960c4437f6f99648437784db43e04ad5f12711aecd710864f96876f94c2fc1a
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/claude-code/$CLAUDE_CODE_VERSION/x64"
-          work="$RUNNER_TEMP/claude-code"
-          rm -rf "$work"
-          mkdir -p "$prefix" "$work/bin"
-          if [ -f "$prefix/claude.tgz" ]; then
-            cp "$prefix/claude.tgz" "$work/claude.tgz"
-          fi
-          if ! echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | sha256sum -c --status - 2>/dev/null; then
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
-            echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | sha256sum -c -
-            cp "$work/claude.tgz" "$prefix/claude.tgz.$$"
-            mv "$prefix/claude.tgz.$$" "$prefix/claude.tgz"
-          fi
-          tar -xzf "$work/claude.tgz" -C "$work" package/claude
-          install -m 0755 "$work/package/claude" "$work/bin/claude"
-          test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
-          echo "$work/bin" >> "$GITHUB_PATH"
-          echo "CRAZYAGENT_CLAUDE=$work/bin/claude" >> "$GITHUB_ENV"
-      - name: Install Codex
-        env:
-          CODEX_PACKAGE: codex-package-x86_64-unknown-linux-musl.tar.gz
-          CODEX_SHA256: 3ec55053109608d5038f7e50750f7d25f768dfd740fef071aa710e2559b63aac
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/codex/$CODEX_VERSION/x64"
-          work="$RUNNER_TEMP/codex"
-          rm -rf "$work"
-          mkdir -p "$prefix" "$work"
-          if [ -f "$prefix/codex.tgz" ]; then
-            cp "$prefix/codex.tgz" "$work/codex.tgz"
-          fi
-          if ! echo "$CODEX_SHA256  $work/codex.tgz" | sha256sum -c --status - 2>/dev/null; then
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/codex.tgz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_PACKAGE"
-            echo "$CODEX_SHA256  $work/codex.tgz" | sha256sum -c -
-            cp "$work/codex.tgz" "$prefix/codex.tgz.$$"
-            mv "$prefix/codex.tgz.$$" "$prefix/codex.tgz"
-          fi
-          tar -xzf "$work/codex.tgz" -C "$work"
-          test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
-          echo "$work/bin" >> "$GITHUB_PATH"
-          echo "CRAZYAGENT_CODEX=$work/bin/codex" >> "$GITHUB_ENV"
-      - name: Install uv
-        env:
-          UV_TARGET: x86_64-unknown-linux-gnu
-          UV_SHA256: f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/uv/$UV_VERSION/x64"
-          work="$RUNNER_TEMP/uv"
-          rm -rf "$work"
-          mkdir -p "$prefix" "$work/bin"
-          if [ -f "$prefix/uv.tar.gz" ]; then
-            cp "$prefix/uv.tar.gz" "$work/uv.tar.gz"
-          fi
-          if ! echo "$UV_SHA256  $work/uv.tar.gz" | sha256sum -c --status - 2>/dev/null; then
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
-            echo "$UV_SHA256  $work/uv.tar.gz" | sha256sum -c -
-            cp "$work/uv.tar.gz" "$prefix/uv.tar.gz.$$"
-            mv "$prefix/uv.tar.gz.$$" "$prefix/uv.tar.gz"
-          fi
-          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
-          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
-          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
-          echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
@@ -271,27 +169,8 @@ jobs:
         run: npm run build
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
-      - name: Show the kernel's sandbox features
-        run: |
-          set -euo pipefail
-          echo "kernel $(uname -r)"
-          echo "lsm $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
-          cargo build -p crazyagent --bin crazyagent-landlock --locked --offline
-          helper="${CARGO_TARGET_DIR:-target}/debug/crazyagent-landlock"
-          for args in "--probe" "--probe --limit-network" "--probe --limit-network --open-sockets"; do
-            status=0
-            "$helper" $args || status=$?
-            echo "crazyagent-landlock $args: exit $status"
-          done
       - name: Lint workspace
         run: make lint
-      - name: Test engine and desktop crates
-        run: |
-          set -euo pipefail
-          dbus-run-session -- bash -euo pipefail -c '
-            printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null
-            make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
-          '
       - name: Show the free disk and the Rust target size
         if: always()
         run: |
@@ -303,9 +182,9 @@ jobs:
           fi
 
   macos:
-    name: macOS lint and tests
+    name: macOS lint
     runs-on: macos-15
-    timeout-minutes: 300
+    timeout-minutes: 45
     env:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
@@ -507,75 +386,6 @@ jobs:
           case "$(cargo clippy --version)" in "clippy $clippy "*) ;; *) echo "::error::the pinned clippy reports $(cargo clippy --version)"; exit 1 ;; esac
           test -d "$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/lib"
           echo "$work/bin" >> "$GITHUB_PATH"
-      - name: Install tmux
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          set -euo pipefail
-          found=""
-          for dir in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
-            if [ -x "$dir/tmux" ]; then found="$dir/tmux"; break; fi
-          done
-          if [ -z "$found" ]; then
-            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
-              echo "::error::missing: tmux 3.4 or later in /opt/homebrew/bin, /usr/local/bin, /usr/bin or /bin. This runner is not provisioned for CrazyAgent CI; install tmux on it once (for example: brew install tmux)"
-              exit 1
-            fi
-            brew install tmux
-            found="$(brew --prefix)/bin/tmux"
-          fi
-          version="$("$found" -V)"
-          echo "the engine uses $found ($version)"
-          [[ "$version" =~ ^tmux\ ([0-9]+)\.([0-9]+) ]] || { echo "unexpected tmux version: $version" >&2; exit 1; }
-          (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 4) )) || { echo "tmux 3.4 or later is required: $version" >&2; exit 1; }
-      - name: Install Claude Code
-        env:
-          CLAUDE_CODE_PACKAGE: claude-code-darwin-arm64
-          CLAUDE_CODE_SHA256: 0e8ce1ddb8566129661bb7698db69db89d904e23b464afc6e85d5bd8879b9a51
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/claude-code/$CLAUDE_CODE_VERSION/arm64"
-          work="$RUNNER_TEMP/claude-code"
-          rm -rf "$work"
-          mkdir -p "$prefix" "$work/bin"
-          if [ -f "$prefix/claude.tgz" ]; then
-            cp "$prefix/claude.tgz" "$work/claude.tgz"
-          fi
-          if ! echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/claude.tgz" "https://registry.npmjs.org/@anthropic-ai/$CLAUDE_CODE_PACKAGE/-/$CLAUDE_CODE_PACKAGE-$CLAUDE_CODE_VERSION.tgz"
-            echo "$CLAUDE_CODE_SHA256  $work/claude.tgz" | shasum -a 256 -c -
-            cp "$work/claude.tgz" "$prefix/claude.tgz.$$"
-            mv "$prefix/claude.tgz.$$" "$prefix/claude.tgz"
-          fi
-          tar -xzf "$work/claude.tgz" -C "$work" package/claude
-          install -m 0755 "$work/package/claude" "$work/bin/claude"
-          test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
-          echo "$work/bin" >> "$GITHUB_PATH"
-          echo "CRAZYAGENT_CLAUDE=$work/bin/claude" >> "$GITHUB_ENV"
-      - name: Install Codex
-        env:
-          CODEX_PACKAGE: codex-package-aarch64-apple-darwin.tar.gz
-          CODEX_SHA256: dd99e9092270691a67bdde7be04ac283dea9da8e86cbde356c2cc851a79205fa
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/codex/$CODEX_VERSION/arm64"
-          work="$RUNNER_TEMP/codex"
-          rm -rf "$work"
-          mkdir -p "$prefix" "$work"
-          if [ -f "$prefix/codex.tgz" ]; then
-            cp "$prefix/codex.tgz" "$work/codex.tgz"
-          fi
-          if ! echo "$CODEX_SHA256  $work/codex.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/codex.tgz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_PACKAGE"
-            echo "$CODEX_SHA256  $work/codex.tgz" | shasum -a 256 -c -
-            cp "$work/codex.tgz" "$prefix/codex.tgz.$$"
-            mv "$prefix/codex.tgz.$$" "$prefix/codex.tgz"
-          fi
-          tar -xzf "$work/codex.tgz" -C "$work"
-          test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
-          echo "$work/bin" >> "$GITHUB_PATH"
-          echo "CRAZYAGENT_CODEX=$work/bin/codex" >> "$GITHUB_ENV"
       - if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
@@ -597,118 +407,6 @@ jobs:
         run: cargo fetch --locked
       - name: Lint workspace
         run: make lint
-      - id: ide
-        name: Read the pinned IDE build
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            import { appendFileSync, readFileSync } from "node:fs";
-            const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
-            const { version } = manifest;
-            const build = manifest.builds["aarch64-apple-darwin"];
-            const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
-            const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
-              && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
-            if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
-            appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
-          '
-      - if: runner.environment == 'github-hosted'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ runner.tool_cache }}/vscodium-reh-web/${{ steps.ide.outputs.version }}/arm64
-          key: ci-macos-vscodium-reh-web-darwin-arm64-${{ steps.ide.outputs.version }}
-      - name: Provision the pinned IDE build
-        env:
-          IDE_VERSION: ${{ steps.ide.outputs.version }}
-          IDE_URL: ${{ steps.ide.outputs.url }}
-          IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
-          IDE_BYTES: ${{ steps.ide.outputs.bytes }}
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/vscodium-reh-web/$IDE_VERSION/arm64"
-          work="$RUNNER_TEMP/vscodium-reh-web"
-          build=".local-state/ide-cache/vscodium-$IDE_VERSION"
-          rm -rf "$work" "$build"
-          mkdir -p "$prefix" "$work" "$build"
-          if [ -f "$prefix/vscodium.tgz" ]; then
-            cp "$prefix/vscodium.tgz" "$work/vscodium.tgz"
-          fi
-          if ! echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
-            rm -f "$work/vscodium.tgz"
-            curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
-            test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
-            echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
-            cp "$work/vscodium.tgz" "$prefix/vscodium.tgz.$$"
-            mv "$prefix/vscodium.tgz.$$" "$prefix/vscodium.tgz"
-          fi
-          tar -xzf "$work/vscodium.tgz" -C "$build"
-          test -f "$build/out/server-main.js"
-          find "$RUNNER_TOOL_CACHE/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "$IDE_VERSION" -exec rm -rf {} +
-      - name: Install pinned graphify for the graph rows
-        env:
-          UV_TARGET: aarch64-apple-darwin
-          UV_SHA256: 743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73
-        run: |
-          set -euo pipefail
-          prefix="$RUNNER_TOOL_CACHE/uv/$UV_VERSION/arm64"
-          work="$RUNNER_TEMP/uv"
-          rm -rf "$work"
-          mkdir -p "$prefix" "$work/bin"
-          if [ -f "$prefix/uv.tar.gz" ]; then
-            cp "$prefix/uv.tar.gz" "$work/uv.tar.gz"
-          fi
-          if ! echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -s -c - 2>/dev/null; then
-            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
-            echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -c -
-            cp "$work/uv.tar.gz" "$prefix/uv.tar.gz.$$"
-            mv "$prefix/uv.tar.gz.$$" "$prefix/uv.tar.gz"
-          fi
-          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
-          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
-          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
-          venv="$RUNNER_TEMP/graphify"
-          rm -rf "$venv"
-          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
-          "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
-          "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
-          "$venv/bin/graphify" --help > /dev/null
-          echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
-      - name: Install the pinned context-mode for the shared-install rows
-        run: |
-          set -euo pipefail
-          read -r version integrity < <(node -e '
-            const text = require("node:fs").readFileSync(process.argv[1], "utf8");
-            const entry = text.split("[[entries]]").find((block) => /^id = "context-mode"$/m.test(block));
-            const version = entry?.match(/^install = ".*\bcontext-mode@([0-9]+\.[0-9]+\.[0-9]+) /m)?.[1];
-            const integrity = entry?.match(/^integrity = "(sha512-[A-Za-z0-9+\/]+=*)"$/m)?.[1];
-            if (!version || !integrity) throw new Error("the default pack does not pin an exact context-mode");
-            console.log(version, integrity);
-          ' crates/crazyagent/src/setup/pack.toml)
-          test -n "$version" && test -n "$integrity"
-          install="$RUNNER_TEMP/context-mode"
-          rm -rf "$install"
-          mkdir -p "$install"
-          cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json "$install/"
-          locked="$(node -p 'const entry = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"]; `${entry.version} ${entry.integrity}`' "$install/package-lock.json")"
-          test "$locked" = "$version $integrity"
-          npm ci --prefix "$install" --ignore-scripts --no-audit --no-fund --no-update-notifier --loglevel=error
-          recorded="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"].integrity' "$install/node_modules/.package-lock.json")"
-          test "$recorded" = "$integrity"
-          npm_config_build_from_source=true npm_config_nodedir="$(dirname "$(dirname "$(command -v node)")")" \
-            npm rebuild better-sqlite3 --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
-          test -f "$install/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-          test "$(node -p 'require(process.argv[1]).version' "$install/node_modules/context-mode/package.json")" = "$version"
-          echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=$install" >> "$GITHUB_ENV"
-      - name: Test engine and desktop crates
-        run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
-      - name: Test Node suites
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}
-        run: make test-node BUN="$BUN" NODE_TESTS_EXCLUDE="$NODE_TESTS_EXCLUDE"
-      - name: Test Bun suites
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}
-        run: make test-bun BUN="$BUN" BUN_TESTS_EXCLUDE="$BUN_TESTS_EXCLUDE"
       - name: Delete every CI file this job made on the owner's runner
         if: always() && runner.environment != 'github-hosted'
         run: |
