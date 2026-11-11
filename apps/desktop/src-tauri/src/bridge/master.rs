@@ -980,7 +980,29 @@ fallback_allowed = false
                 )
                 .await
                 .map_err(|error| error.code)?;
-            assert_eq!(stopped.outcome, ActionOutcome::Applied);
+            match stopped.outcome {
+                ActionOutcome::Applied => {}
+                ActionOutcome::Rejected => {
+                    assert_eq!(
+                        stopped.rejection.as_deref(),
+                        Some("master_turn_not_current"),
+                        "a cancel is refused only for a turn the engine already ended"
+                    );
+                    let current = bridge
+                        .master_state(&ticket)
+                        .await
+                        .map_err(|error| error.code)?
+                        .session
+                        .ok_or("the session is gone after its turn ended")?
+                        .current_turn;
+                    assert_ne!(
+                        current.as_ref().map(|turn| turn.as_str()),
+                        Some(sent.intent.operation_id.as_str()),
+                        "a refused cancel leaves no turn {round} running"
+                    );
+                }
+                other => panic!("the cancel of turn {round} ended {other:?}"),
+            }
             ids.push(sent.intent.operation_id);
         }
         let first = bridge

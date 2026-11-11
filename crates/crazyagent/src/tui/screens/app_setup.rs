@@ -1514,7 +1514,10 @@ impl AppSetup {
         lines
     }
 
-    fn account_rows(&self, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// Lists the projects home, GitHub and app-wide setting rows of Settings. Takes the
+    /// line width, whether each setting's explaining note goes under it, and the context.
+    /// Returns the rows; a GitHub problem is listed with or without notes.
+    fn account_rows(&self, limit: usize, notes: bool, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
         let label = |text: &str, value: Line<'static>| {
@@ -1580,6 +1583,8 @@ impl AppSetup {
         if let Some(problem) = problem {
             lines.extend(under(&problem));
         }
+        let note =
+            |text: &str| -> Vec<Line<'static>> { if notes { under(text) } else { Vec::new() } };
         let (sockets, detail) = match &self.sandbox {
             Load::Ready(settings) => {
                 let (title, detail) = sockets_words(settings.linux_sockets);
@@ -1598,25 +1603,25 @@ impl AppSetup {
         };
         lines.push(label("Linux sockets", sockets));
         if let Some(detail) = detail {
-            lines.extend(under(detail));
+            lines.extend(note(detail));
         }
         lines.push(label("Finished agents", self.cleanup_value(ctx)));
         if matches!(self.cleanup, Load::Ready(_)) {
-            lines.extend(under(CLEANUP_NOTE));
+            lines.extend(note(CLEANUP_NOTE));
         }
         lines.push(label("When quitting", self.quit_value(ctx)));
         if let Load::Ready(settings) = &self.quit {
             let title = left_running_title(settings.left_running, settings.hours);
             lines.push(label("Left running", Line::raw(title)));
-            lines.extend(under(LEFT_RUNNING_NOTE));
+            lines.extend(note(LEFT_RUNNING_NOTE));
         }
         lines.push(label("Master steps", self.steps_value(ctx)));
         if matches!(self.steps, Load::Ready(_)) {
-            lines.extend(under(STEPS_NOTE));
+            lines.extend(note(STEPS_NOTE));
         }
         lines.push(label("Master time", self.time_value(ctx)));
         if matches!(self.time, Load::Ready(_)) {
-            lines.extend(under(TIME_NOTE));
+            lines.extend(note(TIME_NOTE));
         }
         lines
     }
@@ -1770,10 +1775,19 @@ impl AppSetup {
             top.push(self.pack_heading(limit, ctx));
             bottom.extend(self.pack_notes(limit, ctx));
         }
-        if !self.first_run {
-            bottom.extend(self.account_rows(limit, ctx));
-        }
         let (asked, at) = self.ask_rows(limit, ctx);
+        if !self.first_run {
+            let full = self.account_rows(limit, true, ctx);
+            let window_min = if ready.is_some() { WINDOW_MIN } else { 0 };
+            let used = top.len() + bottom.len() + asked.len() + window_min;
+            if used + full.len() <= height {
+                bottom.extend(full);
+            } else {
+                let lean = self.account_rows(limit, false, ctx);
+                assert!(lean.len() <= full.len());
+                bottom.extend(lean);
+            }
+        }
         let asked_from = bottom.len();
         bottom.extend(asked);
         if ready.is_some() {
