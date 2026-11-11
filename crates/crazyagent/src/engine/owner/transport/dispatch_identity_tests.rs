@@ -127,3 +127,33 @@ fn dispatch_files_accepts_a_uniform_renumber_and_refuses_a_mixed_one() {
         "dispatch_filesystem_identity_changed"
     );
 }
+
+#[test]
+fn dispatch_reads_a_repository_config_larger_than_64_kib_and_still_refuses_its_keys() {
+    use std::fmt::Write;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let repository = root.join("repo");
+    std::fs::create_dir(&repository).unwrap();
+    git(&repository, &["init", "-b", "main"]);
+    let config = repository.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    for branch in 0..1000 {
+        let name = format!("feature/scholar-scope-{branch:04}");
+        write!(
+            text,
+            "[branch \"{name}\"]\n\tremote = origin\n\tmerge = refs/heads/{name}\n"
+        )
+        .unwrap();
+    }
+    std::fs::write(&config, &text).unwrap();
+    assert!(text.len() > 100_000);
+    dispatch_config(&repository).unwrap();
+    text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+    std::fs::write(&config, &text).unwrap();
+    assert_eq!(
+        dispatch_config(&repository).unwrap_err().0,
+        "dispatch_git_config_unsupported"
+    );
+}
