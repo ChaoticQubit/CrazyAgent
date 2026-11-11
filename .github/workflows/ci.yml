@@ -296,8 +296,8 @@ jobs:
 
   macos:
     name: macOS lint and tests
-    runs-on: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
-    timeout-minutes: 150
+    runs-on: macos-15
+    timeout-minutes: 300
     env:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
@@ -335,6 +335,15 @@ jobs:
             exit 1
           fi
           echo "native $(uname -m)"
+      - name: Use line tables only for debug info on the GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          df -h /
+          {
+            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+            echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
+          } >> "$GITHUB_ENV"
       - name: Keep CI state out of the runner user's home
         if: runner.environment != 'github-hosted'
         run: |
