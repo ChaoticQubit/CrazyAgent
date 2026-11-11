@@ -732,6 +732,34 @@ fn the_bridge_is_given_the_agents_own_pane_from_the_host() {
     assert_eq!(pane_of(&hostless, agent), None);
 }
 
+/// OB1R2-F1: the typing rule holds an idle agent a dropped turn left on a screen that is no
+/// idle prompt, and types again once a turn started in its pane ended the hold.
+#[test]
+fn typing_waits_while_a_dropped_turn_holds_input_on_an_unknown_screen() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let agent = fixture.agent("master", "codex", "idle", None);
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, agent, READ_ONE_LINE, &out);
+    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let now = now_ms();
+    let try_type =
+        || typing::type_into(&fixture.db, &host, Some(&owner), agent, false, "work", now).unwrap();
+
+    crate::team::master::turn_dropped(&fixture.db, agent).unwrap();
+    assert_eq!(try_type(), Typing::Held("coord_agent_waiting"));
+    assert!(std::fs::read_to_string(&out).is_err(), "nothing was typed");
+    crate::team::master::turn_started(&fixture.db, agent).unwrap();
+    assert_eq!(try_type(), Typing::Typed);
+    until("the typed line", || {
+        std::fs::read_to_string(&out).is_ok_and(|line| line == "work\n")
+    });
+}
+
 /// K2b: the engine types into an agent's terminal only while the agent is idle, the
 /// owner's keys do not hold it, no question waits on its screen or in the records and its
 /// app drew nothing for `APP_QUIET`; a stopped agent or a missing pane is gone.

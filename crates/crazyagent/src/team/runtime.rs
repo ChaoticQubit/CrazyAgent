@@ -113,7 +113,8 @@ const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Re
 /// is checked, so none is set here. `output_bytes` caps the harness output of one process,
 /// `attempts_max` the tries per task, `master_idle_stop` the bound for an idle master, which
 /// the project's choice scales, once no work is in flight and `rate_limit_pause` how long an account that hit its limit
-/// is skipped.
+/// is skipped. `stale_turn` is how long a live master's turn may stay open with no new byte
+/// in its session record, on a pane whose app waits, before the engine closes it as no turn.
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLimits {
     pub output_bytes: usize,
@@ -121,6 +122,7 @@ pub struct TeamLimits {
     pub master_idle_stop: Duration,
     pub rate_limit_pause: Duration,
     pub stop_grace: Duration,
+    pub stale_turn: Duration,
 }
 
 impl Default for TeamLimits {
@@ -131,6 +133,7 @@ impl Default for TeamLimits {
             master_idle_stop: Duration::from_secs(super::MASTER_IDLE_STOP_SECS.into()),
             rate_limit_pause: Duration::from_secs(10 * 60),
             stop_grace: Duration::from_secs(2),
+            stale_turn: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -140,6 +143,7 @@ impl TeamLimits {
         let ok = (1..=64 * 1024 * 1024).contains(&self.output_bytes)
             && (1..=10).contains(&self.attempts_max)
             && !self.master_idle_stop.is_zero()
+            && !self.stale_turn.is_zero()
             && self.stop_grace <= Duration::from_secs(30);
         ok.then_some(())
             .ok_or_else(|| EngineError("team_limits_invalid".into()))
@@ -438,6 +442,12 @@ enum Report {
         end: Option<TurnEnd>,
         text: String,
     },
+    /// The turn a live master's pane was in is none: it stayed open with no new byte in the
+    /// session record on a pane whose app works on nothing, or a takeover found it so
+    /// (OB-1). The master is idle again whatever its screen shows, and engine input to it is
+    /// held until `master::input_released` lets it go. Its start was counted once for the
+    /// Sessions list, so the next turn that starts takes that count and adds none.
+    NoTurn,
     Own {
         end: Option<TurnEnd>,
         text: String,
@@ -538,6 +548,7 @@ struct Worker {
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
+    counted_none: bool,
     session: Option<String>,
     seed: Option<String>,
     bound: Option<TurnBound>,
@@ -6262,6 +6273,7 @@ impl TeamRuntime {
                 own_turn: None,
                 own_rules: None,
                 turn_started: None,
+                counted_none: false,
                 session: None,
                 seed: None,
                 bound: None,
@@ -7764,6 +7776,7 @@ impl TeamRuntime {
             stop_grace: self.limits.stop_grace,
             output_bytes: self.limits.output_bytes,
             events: SESSION_EVENTS_MAX,
+            stale_turn: self.limits.stale_turn,
         }
     }
 
@@ -8260,10 +8273,11 @@ impl TeamRuntime {
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
+                let counted = std::mem::take(&mut worker.counted_none);
                 let live_session = worker
                     .session
                     .clone()
-                    .filter(|_| worker.live)
+                    .filter(|_| worker.live && !counted)
                     .map(|session| (worker.project.clone(), session));
                 super::master::turn_started(&self.connection, id)?;
                 if let Some((project, session)) = live_session {
@@ -8278,6 +8292,7 @@ impl TeamRuntime {
             } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let started = worker.turn_started.take();
+                worker.counted_none = false;
                 worker.idle_since = Instant::now();
                 worker.worked = true;
                 worker.ended_well = end == TurnEnd::Success;
@@ -8324,6 +8339,20 @@ impl TeamRuntime {
                     "the live master's turn",
                     end,
                 )?;
+                self.mark_agent(id, AgentStatus::Idle, None)?;
+                Ok(false)
+            }
+            Report::NoTurn => {
+                super::master::turn_dropped(&self.connection, id)?;
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                if worker.turn_started.take().is_none() {
+                    return Ok(false);
+                }
+                worker.counted_none = worker.live && worker.session.is_some();
+                worker.idle_since = Instant::now();
+                if let Some(hosted) = &worker.hosted {
+                    hosted.set_busy(false);
+                }
                 self.mark_agent(id, AgentStatus::Idle, None)?;
                 Ok(false)
             }
@@ -9198,9 +9227,15 @@ fn work(
                 agent,
                 record,
                 limits,
+                live,
                 ..
             } = *adoption;
-            AgentSession::adopt(host.clone(), agent.clone(), &record, limits).map_err(|problem| {
+            let taken = if live {
+                AgentSession::adopt_live(host.clone(), agent.clone(), &record, limits)
+            } else {
+                AgentSession::adopt(host.clone(), agent.clone(), &record, limits)
+            };
+            taken.map_err(|problem| {
                 let ended = problem.0 == "launch_adopt_unsettled"
                     || matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(true));
                 if !ended {
@@ -9369,7 +9404,7 @@ fn live_adopted(
         }
     };
     let held = Some((credential, profile));
-    match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+    match AgentSession::adopt_live(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
             live_serve(*session, orders, reports, cancel, leave, true, held)
         }
@@ -9399,7 +9434,9 @@ fn live_adopted(
 /// start; once the app reads keys by the rule a first prompt waits for, it tells the
 /// engine, which types no message before that, and a look that fails before the pane
 /// ends is tried again on the next pass, except Codex's folder access step running out,
-/// which ends the session. Takes the session, the worker's channels and
+/// which ends the session. A turn left open that is none any more (see
+/// `TerminalSession::turn_stale`) is reported as `Report::NoTurn`, and starts again as a
+/// turn when the model works in it after all. Takes the session, the worker's channels and
 /// flags, whether a later engine may take the pane over, and the account's credential copy
 /// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
@@ -9417,6 +9454,9 @@ fn live_serve(
         group: session.process_group(),
         pane: session.record().filter(|_| keep).cloned().map(Box::new),
     });
+    if session.took_none() {
+        let _ = reports.send(Report::NoTurn);
+    }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
     let mut problem = None;
@@ -9490,6 +9530,9 @@ fn live_serve(
                 problem = Some(with_code(PROCESS_CLOSED, Some(&closed.0)));
                 break;
             }
+        }
+        if session.turn_stale() {
+            let _ = reports.send(Report::NoTurn);
         }
     }
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
