@@ -3,14 +3,14 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
+use super::claude::SeenIds;
 use super::{LINE_BYTES_MAX, clip_text};
 
 pub const FRAME_BYTES_MAX: usize = 65_536;
-const EVENTS_MAX: usize = 128;
 const APPROVALS_MAX: usize = 16;
-const SERVER_IDS_MAX: usize = 1024;
 const TURNS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;
+const _: () = assert!(ID_BYTES_MAX <= SeenIds::ID_BYTES_MAX);
 pub const DEVELOPER_INSTRUCTIONS_BYTES_MAX: usize = 48 * 1024;
 const LOGINS_MAX: usize = 16;
 const CHILDREN_MAX: usize = 16;
@@ -262,11 +262,60 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, 
     Value::deserialize(deserializer).map(Some)
 }
 
+/// One turn as a turn frame names it. Its items are checked to be a list and not kept: a
+/// long turn lists thousands, and the line they arrive on is bounded by `LINE_BYTES_MAX`,
+/// not by their count (OB-5e).
 #[derive(Deserialize)]
 struct Turn {
     id: String,
     status: TurnStatus,
-    items: Vec<Value>,
+    #[serde(rename = "items")]
+    _items: Vec<serde::de::IgnoredAny>,
+}
+
+/// The server request ids one protocol remembers to refuse a request sent twice, numbers
+/// and texts apart so the number 7 and the text "7" stay two ids. Bounded by bytes, not by
+/// count: each store forgets its oldest ids past its byte bound (OB-5e).
+#[derive(Default)]
+struct SeenRequests {
+    numbers: SeenIds,
+    texts: SeenIds,
+}
+
+impl SeenRequests {
+    /// Whether a request id is among the remembered ones. Input: the id. Output: the answer.
+    fn contains(&self, id: &WireId) -> bool {
+        match id {
+            WireId::Number(number) => self.numbers.contains(&number.to_string()),
+            WireId::Text(text) => self.texts.contains(text),
+        }
+    }
+
+    /// Remembers one request id. Input: the id, a text one as the wire admits it: not empty
+    /// and at most `ID_BYTES_MAX` bytes. Output: none.
+    fn insert(&mut self, id: &WireId) {
+        match id {
+            WireId::Number(number) => self.numbers.insert(&number.to_string()),
+            WireId::Text(text) => self.texts.insert(text),
+        }
+        assert!(self.contains(id));
+        self.check();
+    }
+
+    /// Asserts both stores are within their byte bounds. Input: the stores. Output: none.
+    fn check(&self) {
+        self.numbers.check();
+        self.texts.check();
+    }
+}
+
+/// Whether a request id is one the wire admits: a number, or a text that is not empty and
+/// at most `ID_BYTES_MAX` bytes. Input: the id. Output: the answer.
+fn admitted(id: &WireId) -> bool {
+    match id {
+        WireId::Number(_) => true,
+        WireId::Text(text) => !text.is_empty() && text.len() <= ID_BYTES_MAX,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,7 +336,7 @@ pub struct CodexProtocol {
     thread_id: Option<String>,
     turn: Option<Turn>,
     seen_turns: BTreeSet<String>,
-    seen_server_ids: BTreeSet<WireId>,
+    seen_server_ids: SeenRequests,
     server_requests: BTreeMap<WireId, Option<ApprovalKind>>,
     login_ids: BTreeMap<String, LoginState>,
     refused: Option<String>,
@@ -311,7 +360,7 @@ impl CodexProtocol {
             thread_id: None,
             turn: None,
             seen_turns: BTreeSet::new(),
-            seen_server_ids: BTreeSet::new(),
+            seen_server_ids: SeenRequests::default(),
             server_requests: BTreeMap::new(),
             login_ids: BTreeMap::new(),
             refused: None,
@@ -630,7 +679,7 @@ impl CodexProtocol {
         assert!(self.next_id > 0);
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_turns.len() <= TURNS_MAX);
-        assert!(self.seen_server_ids.len() <= SERVER_IDS_MAX);
+        self.seen_server_ids.check();
         assert!(self.server_requests.len() <= APPROVALS_MAX);
         assert!(self.login_ids.len() <= LOGINS_MAX);
         assert!(self.login_ids.keys().all(|id| {
@@ -657,11 +706,7 @@ impl CodexProtocol {
         {
             assert_eq!(self.login_ids.get(id), Some(&LoginState::Completed));
         }
-        assert!(
-            self.server_requests
-                .keys()
-                .all(|id| self.seen_server_ids.contains(id))
-        );
+        assert!(self.server_requests.keys().all(admitted));
         if let Some((id, _)) = &self.pending {
             assert!(*id > 0 && *id < self.next_id);
             assert!(!self.child_interrupts.contains_key(id));
@@ -763,9 +808,6 @@ impl CodexProtocol {
                 self.buffer.push(*byte);
                 continue;
             }
-            if frames == EVENTS_MAX {
-                return Err(ProtocolError::Capacity);
-            }
             frames += 1;
             let parsed = match super::claude::parse_line(&self.buffer) {
                 Ok(value) => serde_json::from_value::<Envelope>(value)
@@ -790,7 +832,7 @@ impl CodexProtocol {
             }
             assert!(events.len() <= frames);
         }
-        assert!(events.len() <= EVENTS_MAX);
+        assert!(frames <= bytes.len());
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
         Ok(events)
     }
@@ -1004,9 +1046,6 @@ impl CodexProtocol {
         let turn: Turn =
             serde_json::from_value(value.clone()).map_err(|_| ProtocolError::InvalidMessage)?;
         identifier(&json!(turn.id))?;
-        if turn.items.len() > EVENTS_MAX {
-            return Err(ProtocolError::Capacity);
-        }
         if let Some(existing) = &self.turn {
             if existing.id != turn.id {
                 return Err(ProtocolError::StaleMessage);
@@ -1324,12 +1363,13 @@ impl CodexProtocol {
         method: String,
         params: Value,
     ) -> Result<Event, ProtocolError> {
-        if self.seen_server_ids.contains(&id) {
+        if !admitted(&id) {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        if self.seen_server_ids.contains(&id) || self.server_requests.contains_key(&id) {
             return Err(ProtocolError::StaleMessage);
         }
-        if self.server_requests.len() == APPROVALS_MAX
-            || self.seen_server_ids.len() == SERVER_IDS_MAX
-        {
+        if self.server_requests.len() == APPROVALS_MAX {
             return Err(ProtocolError::Capacity);
         }
         let kind = match method.as_str() {
@@ -1359,9 +1399,9 @@ impl CodexProtocol {
                 return Err(ProtocolError::InvalidMessage);
             }
         }
-        let inserted = self.seen_server_ids.insert(id.clone());
+        self.seen_server_ids.insert(&id);
         let previous = self.server_requests.insert(id.clone(), kind);
-        assert!(inserted);
+        assert!(self.seen_server_ids.contains(&id));
         assert!(previous.is_none());
         match kind {
             Some(kind) => Ok(Event::ApprovalRequired { id, kind, params }),
@@ -1669,18 +1709,17 @@ mod tests {
         protocol.turn = Some(Turn {
             id: "orphan-unit".into(),
             status: TurnStatus::InProgress,
-            items: Vec::new(),
+            _items: Vec::new(),
         });
         protocol.assert_consistent();
     }
 
     #[test]
     #[should_panic(expected = "assertion failed: self.server_requests.keys()")]
-    fn request_membership_invariant_detects_an_untracked_native_id() {
+    fn request_membership_invariant_detects_an_id_the_wire_never_admits() {
         let mut protocol = CodexProtocol::new();
-        protocol
-            .server_requests
-            .insert(WireId::Text("orphan-unit".into()), None);
+        let long = "x".repeat(ID_BYTES_MAX + 1);
+        protocol.server_requests.insert(WireId::Text(long), None);
         protocol.assert_consistent();
     }
 
@@ -1702,21 +1741,55 @@ mod tests {
         assert!(protocol.pending.is_none());
     }
 
+    /// A run is never refused for how many server requests it made (OB-5e): 10,000 are
+    /// taken, where the 1,025th used to be refused as over capacity. One sent twice is still
+    /// refused, a number and a text of the same digits are two ids, and a text id longer
+    /// than the wire admits is refused.
     #[test]
-    fn remembered_native_ids_have_a_connection_lifetime_bound() {
+    fn remembered_request_ids_have_no_count_bound_and_still_refuse_a_request_sent_twice() {
         let mut protocol = CodexProtocol::new();
-        for id in 0..SERVER_IDS_MAX {
-            protocol.seen_server_ids.insert(WireId::Number(id as i64));
+        for number in 0..10_000 {
+            let id = WireId::Number(number);
+            let asked = protocol.server_request(id.clone(), "unsupported".into(), json!({}));
+            assert!(asked.is_ok(), "request {number}");
+            protocol.deny_request(&id).unwrap();
         }
-        assert_eq!(
-            protocol.server_request(
-                WireId::Number(SERVER_IDS_MAX as i64),
-                "unsupported".into(),
-                json!({})
-            ),
-            Err(ProtocolError::Capacity)
-        );
-        assert_eq!(protocol.seen_server_ids.len(), SERVER_IDS_MAX);
         assert!(protocol.server_requests.is_empty());
+        let again = |protocol: &mut CodexProtocol, id: WireId| {
+            protocol.server_request(id, "unsupported".into(), json!({}))
+        };
+        for number in [0, 5_000, 9_999] {
+            let twice = again(&mut protocol, WireId::Number(number));
+            assert_eq!(twice, Err(ProtocolError::StaleMessage), "{number}");
+        }
+        let text = WireId::Text("9999".into());
+        assert!(again(&mut protocol, text.clone()).is_ok());
+        assert_eq!(
+            again(&mut protocol, text),
+            Err(ProtocolError::StaleMessage),
+            "a request still waiting for its answer"
+        );
+        let long = WireId::Text("x".repeat(ID_BYTES_MAX + 1));
+        assert_eq!(
+            again(&mut protocol, long),
+            Err(ProtocolError::InvalidMessage)
+        );
+        protocol.assert_consistent();
+    }
+
+    /// The remembered request ids are bounded by bytes: of 6,000 text ids of 200 bytes the
+    /// oldest are forgotten, the newest are kept, and the store stays within its bound.
+    #[test]
+    fn remembered_request_ids_forget_the_oldest_past_their_byte_bound() {
+        let mut seen = SeenRequests::default();
+        let id = |index: usize| WireId::Text(format!("{index:0200}"));
+        for index in 0..6_000 {
+            seen.insert(&id(index));
+        }
+        seen.check();
+        assert!(!seen.contains(&id(0)), "the oldest id was forgotten");
+        assert!(seen.contains(&id(5_999)));
+        assert!(seen.contains(&id(2_000)), "4,000 ids back is still known");
+        assert!(!seen.contains(&WireId::Number(5_999)));
     }
 }

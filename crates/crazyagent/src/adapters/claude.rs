@@ -218,25 +218,36 @@ fn auth_status_string_bounds(value: &Value) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// The native message ids a protocol has taken, oldest first, kept to refuse a message sent
-/// twice. Bounded by bytes, not by count: `insert` forgets the oldest ids once the kept ones
-/// cost more than `SEEN_BYTES_MAX`, so a long turn is never refused for its message count.
+/// The native ids a protocol has taken, oldest first, kept to refuse one sent twice: Claude
+/// message ids and Codex server request ids. Bounded by bytes, not by count: `insert`
+/// forgets the oldest ids once the kept ones cost more than `SEEN_BYTES_MAX`, so a long
+/// turn is never refused for how many it sent.
 #[derive(Default)]
-struct SeenIds {
+pub(super) struct SeenIds {
     order: VecDeque<Arc<str>>,
     known: BTreeSet<Arc<str>>,
     bytes: usize,
 }
 
 impl SeenIds {
+    /// The longest id the store takes.
+    pub(super) const ID_BYTES_MAX: usize = ID_BYTES_MAX;
+
     /// Whether an id is among the remembered ones. Input: the id. Output: the answer.
-    fn contains(&self, id: &str) -> bool {
+    pub(super) fn contains(&self, id: &str) -> bool {
         self.known.contains(id)
+    }
+
+    /// Asserts the store is within its byte bound and that its two views of the ids agree.
+    /// Input: the store. Output: none.
+    pub(super) fn check(&self) {
+        assert!(self.bytes <= SEEN_BYTES_MAX);
+        assert_eq!(self.order.len(), self.known.len());
     }
 
     /// Remembers one id and forgets the oldest ids past the byte bound. Input: the id, at
     /// most `ID_BYTES_MAX` bytes. Output: none; an id already kept changes nothing.
-    fn insert(&mut self, id: &str) {
+    pub(super) fn insert(&mut self, id: &str) {
         assert!(!id.is_empty());
         assert!(id.len() <= ID_BYTES_MAX);
         let id: Arc<str> = Arc::from(id);
@@ -385,8 +396,7 @@ impl ClaudeProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
-        assert!(self.seen_events.bytes <= SEEN_BYTES_MAX);
-        assert_eq!(self.seen_events.order.len(), self.seen_events.known.len());
+        self.seen_events.check();
         assert!(self.seen_requests.len() <= REQUESTS_MAX);
         assert_eq!(self.provenance.harness, NativeHarness::Claude);
         if let Some(request) = &self.active_request {

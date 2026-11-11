@@ -21,8 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-const EVENTS_MAX: usize = 128;
-
 pub(in crate::engine) struct CodexHost {
     protocol: CodexHostProtocol,
     process: CodexHostProcess,
@@ -185,6 +183,10 @@ impl CodexHost {
         Ok(())
     }
 
+    /// Takes one chunk of the harness's output, or its exit, into the host's queues. No count
+    /// of events ends a run (OB-5e): one chunk holds at most as many frames as bytes, a turn
+    /// takes the next chunk only once it has read these events, and the process holds the
+    /// rest back. Input: the host. Output: Ok, or a plain code.
     async fn pump(&mut self) -> Result<(), EngineError> {
         self.flush_outbound().await?;
         if self.disconnected {
@@ -197,18 +199,13 @@ impl CodexHost {
                     self.diagnostic.fault = Some(error.0.clone());
                     self.diagnostic.message = self.protocol.refused().map(str::to_owned);
                 })?;
-                if self.events.len() + batch.events.len() > EVENTS_MAX
-                    || self.auth.len() + batch.auth.len() > EVENTS_MAX
-                    || self.outbound.len() + batch.outbound.len() > EVENTS_MAX
-                {
-                    return Err(EngineError("codex_host_event_capacity".into()));
-                }
+                assert!(batch.events.len() + batch.auth.len() <= bytes.len());
+                assert!(batch.outbound.len() <= batch.events.len());
                 self.events.extend(batch.events);
                 self.auth.extend(batch.auth);
                 self.outbound.extend(batch.outbound);
                 self.flush_outbound().await?;
-                assert!(self.events.len() <= EVENTS_MAX);
-                assert!(self.auth.len() <= EVENTS_MAX);
+                assert!(self.outbound.is_empty());
             }
             CodexHostOutput::Exited => {
                 self.events.push_back(self.protocol.disconnect());
