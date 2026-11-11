@@ -747,7 +747,9 @@ pub fn accept(
     let _writing = writing();
     let (_, proposal) = tab_row(db, project, tab)?;
     let proposal = proposal.ok_or_else(|| failure(NO_PROPOSAL))?;
-    let _ = proposal_version;
+    if overview_seal(&proposal) != proposal_version {
+        return Err(failure(PROPOSAL_CHANGED));
+    }
     checked(&proposal)?;
     let place = place(folder)?;
     let found = found_in(&place, tab);
