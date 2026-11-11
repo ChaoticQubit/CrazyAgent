@@ -38,6 +38,13 @@ pub struct MasterInputs {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MasterMessages {
+    pub ticket: String,
+    pub revision: String,
+    pub page: crazyagent::master_sessions::SessionMessagePage,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MasterTurns {
     pub ticket: String,
     pub revision: String,
@@ -332,6 +339,60 @@ impl NativeBridge {
             ticket: ticket.into(),
             revision: state.revision.value().to_string(),
             config_id: state.config_id.as_str().into(),
+            page,
+        })
+    }
+
+    /// Reads one page of the stored messages of any session of the selected project, live
+    /// or parked, whatever harness or master mode wrote them: the newest when `before` is
+    /// absent, else those with a sequence number below it. Inputs: the selection ticket,
+    /// the session id, the cursor and the page size, 1 to 64. Output: the page, oldest
+    /// first, or `master_messages_page_limit` for a size out of bounds.
+    pub async fn master_messages(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        before: Option<u64>,
+        limit: u8,
+    ) -> Result<MasterMessages, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        if !(1..=crazyagent::master_sessions::MESSAGES_PAGE_MAX).contains(&limit) {
+            return Err(failure("master_messages_page_limit"));
+        }
+        let state = self
+            .controller()?
+            .read(OwnerRead::ProjectMasterMessages {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                before,
+                limit,
+            })
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        let OwnerData::ProjectMasterMessages { page } = state.data else {
+            return Err(failure("unexpected_reply"));
+        };
+        let rising = page
+            .messages
+            .windows(2)
+            .all(|pair| pair[0].seq < pair[1].seq);
+        let below = before.is_none_or(|before| page.messages.iter().all(|row| row.seq < before));
+        let older = page
+            .next
+            .is_none_or(|next| page.messages.first().is_some_and(|row| row.seq == next));
+        if page.project_id != project_id
+            || page.session_id != session_id
+            || page.messages.len() > usize::from(limit)
+            || !rising
+            || !below
+            || !older
+        {
+            return Err(failure("unexpected_reply"));
+        }
+        bounded(MasterMessages {
+            ticket: ticket.into(),
+            revision: state.revision.value().to_string(),
             page,
         })
     }
@@ -965,6 +1026,134 @@ fallback_allowed = false
             .await
             .unwrap_err();
         assert_eq!(stale.code, "resync_required");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_master_messages_read_a_session_s_page_and_refuse_a_size_or_session_out_of_bounds()
+    {
+        let root = tempfile::Builder::new()
+            .prefix("ca-desktop-messages-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g.toml");
+        std::fs::write(&global, CATALOG).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let path = root.path().to_path_buf();
+        let mut body = tokio::spawn(async move { real_messages_flow(&path).await });
+        let result = tokio::time::timeout(Duration::from_secs(60), &mut body).await;
+        if result.is_err() {
+            body.abort();
+            let _ = body.await;
+        }
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "actual engine cleanup failed"
+        );
+        result
+            .expect("real master messages case exceeded 60 seconds")
+            .expect("real master messages assertion failed after engine cleanup")
+            .expect("real master messages setup or readback failed");
+    }
+
+    async fn real_messages_flow(root: &Path) -> Result<(), String> {
+        let mut observer =
+            OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .map_err(|error| error.to_string())?;
+        observer
+            .read(OwnerRead::Capabilities)
+            .await
+            .map_err(|error| error.to_string())?;
+        observer
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: ProjectId::new("p").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Stored messages".into(),
+                        repositories: vec![
+                            root.join("p")
+                                .to_str()
+                                .ok_or("private path encoding")?
+                                .into(),
+                        ],
+                    },
+                },
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        let created = observer
+            .send_pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+        );
+        let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+        bridge.connect().await.map_err(|error| error.code)?;
+        let ticket = bridge
+            .open_project("p")
+            .await
+            .map_err(|error| error.code)?
+            .ticket;
+        let opened = bridge
+            .open_default_master(&ticket, 1)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(opened.outcome, ActionOutcome::Applied);
+        let session = bridge
+            .master_state(&ticket)
+            .await
+            .map_err(|error| error.code)?
+            .session
+            .ok_or("Start master left no configured session")?;
+        let session_id = session.session_id.as_str();
+
+        let read = bridge
+            .master_messages(&ticket, session_id, None, 32)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(read.ticket, ticket);
+        assert_eq!(read.page.project_id.as_str(), "p");
+        assert_eq!(read.page.session_id.as_str(), session_id);
+        assert_eq!(
+            read.page.count,
+            u64::try_from(read.page.messages.len()).unwrap(),
+            "a session with no turn yet holds no message outside its newest page"
+        );
+        assert_eq!(read.page.next, None);
+
+        for limit in [0, crazyagent::master_sessions::MESSAGES_PAGE_MAX + 1] {
+            let refused = bridge
+                .master_messages(&ticket, session_id, None, limit)
+                .await
+                .err()
+                .ok_or("a page size out of bounds was read")?;
+            assert_eq!(refused.code, "master_messages_page_limit");
+        }
+        let missing = bridge
+            .master_messages(&ticket, "no-such-session", None, 32)
+            .await;
+        assert!(
+            missing.is_err(),
+            "a session the project does not have was read"
+        );
+        let stale = bridge
+            .master_messages("not-a-ticket", session_id, None, 32)
+            .await;
+        assert!(stale.is_err(), "a ticket the bridge never gave was taken");
         Ok(())
     }
 

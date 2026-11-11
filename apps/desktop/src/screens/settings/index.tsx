@@ -5,6 +5,7 @@ import { Accounts } from "./accounts";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { GitHubSettings } from "./github";
 import { Harnesses } from "./harnesses";
+import { MasterSettings } from "./master";
 import { MemorySettings } from "./memory";
 import { PackSettings } from "./pack";
 import { PluginsAndSkills } from "./plugins";
@@ -33,6 +34,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
     { id: "process", label: "Process" }, { id: "pack", label: "Pack" }, { id: "memory", label: "Memory" },
     { id: "finished", label: "Finished agents" }, { id: "quit", label: "Quitting" },
+    { id: "master", label: "Master" },
   ] },
   { title: "App", items: [
     { id: "home", label: "Projects folder" }, { id: "sandbox", label: "Sandbox" },
@@ -90,6 +92,7 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
       : tab === "memory" ? <MemorySettings />
       : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "quit" ? <QuittingSettings />
+      : tab === "master" ? <MasterSettings />
       : tab === "alerts" ? <TeamAlertsSettings />
       : tab === "updates" ? <UpdatesSettings />
       : <ProfileSettings />}

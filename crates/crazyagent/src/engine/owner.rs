@@ -267,6 +267,12 @@ pub enum OwnerMutation {
     SetQuitSettings {
         settings: crate::quit_settings::QuitSettings,
     },
+    SetMasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    SetMasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -575,6 +581,12 @@ impl OwnerMutation {
             Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
                 settings: *settings,
             },
+            Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
+                settings: *settings,
+            },
+            Self::SetMasterTimeSettings { settings } => Command::OwnerMasterTime {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -675,6 +687,12 @@ pub enum OwnerRead {
     ProjectMasterSessions {
         project_id: ProjectId,
     },
+    ProjectMasterMessages {
+        project_id: ProjectId,
+        session_id: SessionId,
+        before: Option<u64>,
+        limit: u8,
+    },
     ProjectMasterInputs {
         project_id: ProjectId,
         session_id: SessionId,
@@ -767,6 +785,8 @@ pub enum OwnerRead {
     SandboxSettings,
     CleanupSettings,
     QuitSettings,
+    MasterStepSettings,
+    MasterTimeSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -842,6 +862,7 @@ impl OwnerRead {
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
             | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterMessages { .. }
             | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
@@ -866,6 +887,8 @@ impl OwnerRead {
             | Self::SandboxSettings
             | Self::CleanupSettings
             | Self::QuitSettings
+            | Self::MasterStepSettings
+            | Self::MasterTimeSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1052,6 +1075,9 @@ impl OwnerRequest {
                 if let OwnerRead::ProjectMasterTurns { cursor, limit, .. } = query {
                     crate::master_session::validate_page(cursor.as_ref(), *limit)?;
                 }
+                if let OwnerRead::ProjectMasterMessages { before, limit, .. } = query {
+                    crate::master_sessions::validate_messages_page(*before, *limit)?;
+                }
                 if let OwnerRead::ModelAccessPage { limit, cursor, .. } = query {
                     if !(1..=16).contains(limit) {
                         return Err(failure("model_access_page_limit"));
@@ -1199,6 +1225,9 @@ pub enum OwnerData {
     ProjectMasterSessions {
         sessions: Vec<crate::master_sessions::MasterSessionSummary>,
     },
+    ProjectMasterMessages {
+        page: crate::master_sessions::SessionMessagePage,
+    },
     ProjectMasterInputs {
         entries: Vec<crate::conversation::ConversationEntry>,
     },
@@ -1304,6 +1333,12 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    MasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    MasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

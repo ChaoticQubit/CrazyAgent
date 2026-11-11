@@ -7,6 +7,7 @@ use crate::scheduling::{
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Modal, hint};
 use crate::tui::keys::Key;
+use crate::tui::seam::{AccountRow, account_label};
 use ratatui::text::Line;
 
 const RESERVE_STEP: u8 = 5;
@@ -173,12 +174,27 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
     }
 }
 
+/// Names one pool account as Accounts does. Takes the account's id, its provider word when
+/// it is a member of the pool, and the owner's account rows. Returns the account's words
+/// ([`account_label`]: the name, with the id after a name two accounts share) or, while no
+/// name is known, the provider word and the id, or the id alone.
+fn shown_name(id: &CredentialRef, provider: Option<&str>, accounts: &[AccountRow]) -> String {
+    account_label(id.as_str(), accounts).unwrap_or_else(|| {
+        provider.map_or_else(
+            || id.as_str().to_owned(),
+            |provider| format!("{provider} {}", id.as_str()),
+        )
+    })
+}
+
 /// The "Next accounts" lines for one pool: each account work would try now, numbered in
 /// order, then each held account with why, each followed by one line per project that holds
-/// it. Takes the pool, its ranking read, now and the UTC offset. Returns the lines.
+/// it. Takes the pool, its ranking read, the owner's account rows for the names, now and the
+/// UTC offset. Returns the lines.
 pub fn ranking_lines(
     pool: &PoolSummary,
     ranking: Option<&Result<Vec<PoolRanking>, String>>,
+    accounts: &[AccountRow],
     now_ms: i64,
     offset: i64,
 ) -> Vec<String> {
@@ -200,14 +216,15 @@ pub fn ranking_lines(
     };
     let mut place = 0;
     for account in &found.accounts {
-        let name = pool
+        let member = pool
             .members
             .iter()
-            .find(|member| member.id == account.connection)
-            .map_or_else(
-                || account.connection.as_str().to_owned(),
-                |member| format!("{} {}", member.provider, member.id.as_str()),
-            );
+            .find(|member| member.id == account.connection);
+        let name = shown_name(
+            &account.connection,
+            member.map(|member| member.provider.as_str()),
+            accounts,
+        );
         let mark = if matches!(account.standing, Standing::Next { .. }) {
             place += 1;
             format!("{place:>2}.")
@@ -339,6 +356,7 @@ impl ChoiceEditor {
         ctx: &Ctx,
     ) -> (Modal, Vec<Hint>) {
         let mark = |row: usize| if row == self.row { "> " } else { "  " };
+        let accounts = ctx.store.accounts.ready().map_or(&[][..], Vec::as_slice);
         let app = schedule.strategy;
         let own = pool_strategy(schedule, &pool.id);
         let mut body = vec![
@@ -372,7 +390,7 @@ impl ChoiceEditor {
                 "{}{}{}",
                 mark(index + 2),
                 clipped(
-                    &format!("{} {}", member.provider, member.id.as_str()),
+                    &shown_name(&member.id, Some(&member.provider), accounts),
                     NAME_WIDTH
                 ),
                 plan_line(&schedule.plan(&member.id))
@@ -383,6 +401,7 @@ impl ChoiceEditor {
             ranking_lines(
                 pool,
                 ranking,
+                accounts,
                 crate::tui::clock::now_ms(),
                 crate::tui::clock::local_offset(),
             )

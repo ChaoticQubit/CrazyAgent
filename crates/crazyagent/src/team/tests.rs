@@ -641,13 +641,16 @@ fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_clear
         "the held account wins a tie"
     );
     let mut behind = crate::scheduling::Choice::default();
-    behind.schedule.accounts.push(crate::scheduling::AccountEntry {
-        connection: held.clone(),
-        plan: crate::scheduling::AccountPlan {
-            pin: Some(crate::scheduling::Pin::UseLast),
-            ..crate::scheduling::AccountPlan::default()
-        },
-    });
+    behind
+        .schedule
+        .accounts
+        .push(crate::scheduling::AccountEntry {
+            connection: held.clone(),
+            plan: crate::scheduling::AccountPlan {
+                pin: Some(crate::scheduling::Pin::UseLast),
+                ..crate::scheduling::AccountPlan::default()
+            },
+        });
     assert_eq!(
         pick(&behind, &paused, Some(&held)).as_deref(),
         Some("local-a"),
@@ -657,13 +660,16 @@ fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_clear
         strategy: crate::scheduling::Strategy::ManualRank,
         ..crate::scheduling::Choice::default()
     };
-    ranked.schedule.accounts.push(crate::scheduling::AccountEntry {
-        connection: reference("local-a"),
-        plan: crate::scheduling::AccountPlan {
-            rank: Some(1),
-            ..crate::scheduling::AccountPlan::default()
-        },
-    });
+    ranked
+        .schedule
+        .accounts
+        .push(crate::scheduling::AccountEntry {
+            connection: reference("local-a"),
+            plan: crate::scheduling::AccountPlan {
+                rank: Some(1),
+                ..crate::scheduling::AccountPlan::default()
+            },
+        });
     assert_eq!(
         pick(&ranked, &paused, Some(&held)).as_deref(),
         Some("local-a"),
@@ -704,13 +710,16 @@ fn under_spread_work_on_a_shared_account_leaves_it_only_for_an_unused_one_clearl
     };
     let used_last = |connection: &CredentialRef| {
         let mut choice = crate::scheduling::Choice::default();
-        choice.schedule.accounts.push(crate::scheduling::AccountEntry {
-            connection: connection.clone(),
-            plan: crate::scheduling::AccountPlan {
-                pin: Some(crate::scheduling::Pin::UseLast),
-                ..crate::scheduling::AccountPlan::default()
-            },
-        });
+        choice
+            .schedule
+            .accounts
+            .push(crate::scheduling::AccountEntry {
+                connection: connection.clone(),
+                plan: crate::scheduling::AccountPlan {
+                    pin: Some(crate::scheduling::Pin::UseLast),
+                    ..crate::scheduling::AccountPlan::default()
+                },
+            });
         choice
     };
     let level = crate::scheduling::Choice::default();

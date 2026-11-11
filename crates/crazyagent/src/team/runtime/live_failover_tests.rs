@@ -755,17 +755,22 @@ impl Team {
             .and_then(|worker| worker.session.clone())
     }
 
-    /// What the Sessions list counts for one master session from its live terminal: its
-    /// turns and its last reply line. Input: the session. Output: both, or None before any.
+    /// What the message store holds of one master session's live terminal: its turns and
+    /// its newest reply. Input: the session. Output: both, or None before any turn.
     pub(crate) fn session_turns(&self, session: &str) -> Option<(i64, Option<String>)> {
         self.db
             .query_row(
-                "SELECT turns,last_line FROM session_owner_turns WHERE session=?1 AND project=?2",
+                "SELECT COUNT(*),(SELECT r.text FROM session_messages r
+                                  WHERE r.session=?1 AND r.project=?2 AND r.speaker='master' AND r.mode='live'
+                                  ORDER BY r.seq DESC LIMIT 1)
+                 FROM session_messages t
+                 WHERE t.session=?1 AND t.project=?2 AND t.speaker IN ('owner','engine') AND t.mode='live'",
                 params![session, self.project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .unwrap()
+            .filter(|(turns, _): &(i64, Option<String>)| *turns > 0)
     }
 }
 

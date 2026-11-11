@@ -168,7 +168,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &profile,
         &codex,
         &connection,
-        Duration::from_secs(3600),
+        Some(Duration::from_secs(3600)),
         None,
         &[],
     )
@@ -237,7 +237,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &profile,
         &codex,
         &connection,
-        Duration::from_secs(3600),
+        Some(Duration::from_secs(3600)),
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
     )

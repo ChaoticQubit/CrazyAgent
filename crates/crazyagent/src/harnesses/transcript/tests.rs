@@ -123,6 +123,114 @@ fn claude_meta_lines_and_unknown_lines_are_ignored() {
     assert_eq!(reader.read().unwrap(), Vec::new());
 }
 
+/// OB-6 merge-up with OB-1: the typed lines read for a live turn's words are the prompts
+/// that start a turn and no other user line, so a line that starts no turn is never read
+/// as the words of the turn after it. Each typed line comes with the offset just past it.
+#[test]
+fn claude_typed_lines_past_an_offset_are_only_the_prompts_that_start_a_turn() {
+    let case = Case::new();
+    let file = case.path().join("typed.jsonl");
+    let summary = r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}"#;
+    let sidechain =
+        r#"{"type":"user","isSidechain":true,"message":{"content":"Search the repository"}}"#;
+    let first = r#"{"type":"user","message":{"content":"Plan the launch"}}"#;
+    let second = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(
+        &file,
+        &format!("{summary}\n{first}\n{sidechain}\n{second}\n"),
+    );
+    let first_end = u64::try_from(summary.len() + 1 + first.len() + 1).unwrap();
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let all = typed_past("claude-code", &file, 0).unwrap();
+    let rest = typed_past("claude-code", &file, first_end).unwrap();
+
+    assert_eq!(
+        all,
+        (
+            vec![
+                (first_end, "Plan the launch".to_owned()),
+                (length, "Ship it".to_owned()),
+            ],
+            length,
+        )
+    );
+    assert_eq!(rest, (vec![(length, "Ship it".to_owned())], length));
+}
+
+/// OB6R2-M1: typed lines are read on to the record's end, however much a turn wrote
+/// between two of them, here one 5 MiB tool result that is longer than any one read.
+#[test]
+fn claude_typed_lines_are_read_to_the_record_s_end_past_a_turn_of_megabytes() {
+    let case = Case::new();
+    let file = case.path().join("long-turn.jsonl");
+    let first = r#"{"type":"user","message":{"content":"Plan the launch"}}"#;
+    let result = format!(
+        r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{}"}}]}}}}"#,
+        "x".repeat(5 * 1024 * 1024)
+    );
+    let second = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(&file, &format!("{first}\n{result}\n{second}\n"));
+    let first_end = u64::try_from(first.len() + 1).unwrap();
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let all = typed_past("claude-code", &file, 0).unwrap();
+    let rest = typed_past("claude-code", &file, first_end).unwrap();
+    let none = typed_past("claude-code", &file, length).unwrap();
+
+    assert_eq!(
+        all,
+        (
+            vec![
+                (first_end, "Plan the launch".to_owned()),
+                (length, "Ship it".to_owned()),
+            ],
+            length,
+        )
+    );
+    assert_eq!(rest, (vec![(length, "Ship it".to_owned())], length));
+    assert_eq!(none, (Vec::new(), length));
+}
+
+/// OB6R2-M1: a record with no typed line past the offset is read to its last finished
+/// line, which is where a turn with no typed words is bound, and a line the harness has
+/// not finished is left for the next read.
+#[test]
+fn claude_a_record_with_no_typed_line_reads_to_its_last_finished_line() {
+    let case = Case::new();
+    let file = case.path().join("no-typed.jsonl");
+    let result = format!(
+        r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{}"}}]}}}}"#,
+        "x".repeat(5 * 1024 * 1024)
+    );
+    append(&file, &format!("{result}\n"));
+    let finished = std::fs::metadata(&file).unwrap().len();
+    append(&file, r#"{"type":"user","message":{"content":"Half a li"#);
+
+    let read = typed_past("claude-code", &file, 0).unwrap();
+
+    assert_eq!(read, (Vec::new(), finished));
+}
+
+/// OB6R2-M1: a line longer than `LINE_BYTES_MAX`, which the turn reader refuses too, is
+/// passed over without being held in memory, and the typed line after it is read.
+#[test]
+fn claude_a_line_longer_than_the_reader_takes_is_passed_over_not_read() {
+    let case = Case::new();
+    let file = case.path().join("long-line.jsonl");
+    let long = format!(
+        r#"{{"type":"user","message":{{"content":"{}"}}}}"#,
+        "x".repeat(LINE_BYTES_MAX)
+    );
+    let typed = r#"{"type":"user","message":{"content":"Ship it"}}"#;
+    append(&file, &format!("{long}\n{typed}\n"));
+    let length = std::fs::metadata(&file).unwrap().len();
+
+    let read = typed_past("claude-code", &file, 0).unwrap();
+
+    assert_eq!(read, (vec![(length, "Ship it".to_owned())], length));
+}
+
 /// A Claude Code user line that is no prompt to the model starts no turn, whatever text it
 /// carries, and the prompt typed after it starts one as before (OB-1: such a line opened a
 /// live master's turn that nothing closed). One shape per entry, each on a fresh record.

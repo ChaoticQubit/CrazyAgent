@@ -3,6 +3,7 @@ use crate::engine::bootstrap::NativeProfileUse;
 use crate::protocol::RequestId;
 use crate::rcli_host::{RcliMasterHost, RcliMasterLaunch, RcliMasterObservation};
 use crate::sandbox::InstalledSandbox;
+use std::time::Duration;
 
 pub(super) struct RcliCustody {
     host: Option<RcliMasterHost>,
@@ -11,17 +12,21 @@ pub(super) struct RcliCustody {
 }
 
 impl RcliCustody {
+    /// Starts the rcli master host and keeps it with its profile. Inputs: the launch, the
+    /// sandbox, the profile in use and the host's run clock, none for no master time limit.
+    /// Output: the custody, or `master_runtime_cleanup_uncertain` with the host's refusal.
     pub(super) fn launch(
         launch: RcliMasterLaunch,
         sandbox: InstalledSandbox,
         profile: NativeProfileUse,
+        run_time: Option<Duration>,
     ) -> Result<Self, EngineError> {
         let mut custody = Self {
             host: None,
             profile: Some(profile),
             uncertain: false,
         };
-        match RcliMasterHost::launch(launch, &sandbox) {
+        match RcliMasterHost::launch(launch, &sandbox, run_time) {
             Ok(host) => {
                 custody.host = Some(host);
                 assert!(custody.profile.is_some());

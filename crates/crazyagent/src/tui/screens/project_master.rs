@@ -1,27 +1,155 @@
 use super::project::{ACTIVITY_MAX, ACTIVITY_SHOWN, MasterStatus, Message, Speaker, Transcript};
+use super::project_markdown::sanitize;
 use super::project_time::{clock, duration};
 use crate::conversation::ConversationEntry;
 use crate::master_session::{
     MasterActivityLine, MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView,
 };
+use crate::master_sessions::{MasterMode, MessageSource, MessageSpeaker, SessionMessage};
+use crate::master_step_limit::steps_of_cause;
+use crate::master_time_limit::minutes_of_cause;
 
 pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
 pub(in crate::tui) const ACTIVITY_QUIET_MS: i64 = 60_000;
 
 /// The engine's master conversation for one project, as read through the owner connection.
-/// Holds the session phase (none before the master is opened), its turns in order and the owner's messages.
+/// Holds the session phase (none before the master is opened), its turns in order, the owner's
+/// messages and every stored message of the session, empty when the client does not hold them all.
 /// The Conversation tab turns it into a transcript with `transcript_from`.
 pub(in crate::tui) struct MasterRead<'a> {
     pub session: Option<MasterSessionPhase>,
     pub turns: &'a [MasterTurnView],
     pub inputs: &'a [ConversationEntry],
+    pub messages: &'a [SessionMessage],
 }
 
-/// Builds the Conversation transcript from the engine's master turns.
-/// Takes the read, the master harness name, the account label, whether tools are on and the UTC offset.
-/// Returns the transcript: the owner's messages, or the engine's plain line for a turn it asked
-/// for, the master's real replies, a notice per task a reply handed to the team, the engine's note
-/// when a turn's edits wait in Changes and a plain notice for a stopped turn.
+/// What an owner row of a terminal turn shows when its typed words were not read.
+pub(in crate::tui) const TYPED_IN_TERMINAL: &str =
+    "Typed in the master's terminal. The words were not read.";
+
+/// What marks a stored message whose words the engine did not see typed.
+pub(in crate::tui) const FROM_RECORD: &str = "read from the harness record";
+/// What leads the owner's words in the transcript when they were read from the harness record.
+pub(in crate::tui) const RECORD_TYPED: &str =
+    "Typed in the master's terminal, as the harness record has it:";
+
+/// Whether a stored message holds words the engine did not see typed: text read from the
+/// harness's own record, or a row that stands for a terminal turn an older engine only
+/// counted. Input: the row. Output: whether a view marks it.
+pub(in crate::tui) fn from_record(row: &SessionMessage) -> bool {
+    matches!(row.source, MessageSource::Record | MessageSource::Counter)
+}
+
+/// One stored message as the transcript shows it: the owner's words, the master's reply,
+/// or a notice for a request the engine typed, for the divider where another master took
+/// the conversation over and for a terminal turn whose typed words were not read. Owner
+/// words read from the harness record are a notice that says so, never the owner's own
+/// message. Input: the row. Output: the message, or none for any other row with no text.
+/// Stored text is untrusted: its terminal escapes and control characters are removed here,
+/// before the transcript wraps or measures it.
+fn stored_message(row: &SessionMessage) -> Option<Message> {
+    let (speaker, text) = match (row.speaker, &row.text) {
+        (MessageSpeaker::Owner, Some(text)) if from_record(row) => (
+            Speaker::Notice,
+            format!("{RECORD_TYPED} {}", sanitize(text)),
+        ),
+        (MessageSpeaker::Owner, Some(text)) => (Speaker::You, sanitize(text)),
+        (MessageSpeaker::Owner, None) => (Speaker::Notice, TYPED_IN_TERMINAL.to_owned()),
+        (MessageSpeaker::Master, Some(text)) => (Speaker::Master, sanitize(text)),
+        (MessageSpeaker::Engine | MessageSpeaker::Switch, Some(text)) => {
+            (Speaker::Notice, sanitize(text))
+        }
+        (_, None) => return None,
+    };
+    Some(Message {
+        speaker,
+        time: None,
+        text,
+        error: false,
+    })
+}
+
+/// Adds the messages of one master turn: the owner's message, or the engine's plain line
+/// for a turn it asked for, the master's reply, a notice per task the reply handed to the
+/// team, the engine's note when the turn's edits wait in Changes and a plain notice for a
+/// stopped turn. Inputs: the read, the turn's index in it, the master harness name, the
+/// UTC offset and the messages to add to.
+fn turn_messages(
+    read: &MasterRead<'_>,
+    index: usize,
+    harness: &str,
+    offset: i64,
+    messages: &mut Vec<Message>,
+) {
+    let turn = &read.turns[index];
+    let latest = index + 1 == read.turns.len();
+    if let Some(entry) = read
+        .inputs
+        .iter()
+        .find(|entry| entry.event_cursor == turn.input_cursor)
+    {
+        messages.push(Message {
+            speaker: Speaker::You,
+            time: None,
+            text: entry.text.clone(),
+            error: false,
+        });
+    } else if let Some(request) = &turn.engine_request {
+        messages.push(Message {
+            speaker: Speaker::Notice,
+            time: None,
+            text: request.line.clone(),
+            error: false,
+        });
+    }
+    if let Some(reply) = &turn.reply {
+        let time = turn
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.completion.as_ref())
+            .and_then(|completion| i64::try_from(completion.finished_at_ms).ok())
+            .map(|at| clock(at, offset));
+        messages.push(Message {
+            speaker: Speaker::Master,
+            time,
+            text: reply.text.clone(),
+            error: false,
+        });
+    }
+    for task in &turn.tasks {
+        messages.push(Message {
+            speaker: Speaker::Task,
+            time: None,
+            text: task.line(),
+            error: false,
+        });
+    }
+    if let Some(changes) = &turn.changes {
+        messages.push(Message {
+            speaker: Speaker::Notice,
+            time: None,
+            text: changes.clone(),
+            error: false,
+        });
+    }
+    if let Some(text) = notice(turn, harness, latest) {
+        messages.push(Message {
+            speaker: Speaker::Notice,
+            time: None,
+            text,
+            error: !asks_approval(turn),
+        });
+    }
+}
+
+/// Builds the Conversation transcript from the engine's master turns and the session's
+/// stored messages. Takes the read, the master harness name, the account label, whether
+/// tools are on and the UTC offset. Returns the transcript: each turn's messages as
+/// `turn_messages` gives them, and, where the store holds them, what a live terminal master
+/// said and the divider of each master switch between the turns. The stored rows that open
+/// a one-turn turn are matched to the turns in order from the session's first message; a
+/// turn with no row yet comes last and a row with no turn shows as stored. With no stored
+/// message the transcript is the turns alone.
 pub(in crate::tui) fn transcript_from(
     read: &MasterRead<'_>,
     harness: &str,
@@ -32,67 +160,35 @@ pub(in crate::tui) fn transcript_from(
     let start = read.turns.len().saturating_sub(TURNS_SHOWN_MAX);
     let turns = &read.turns[start..];
     let mut messages = Vec::new();
-    for (index, turn) in turns.iter().enumerate() {
-        let latest = index + 1 == turns.len();
-        if let Some(entry) = read
-            .inputs
-            .iter()
-            .find(|entry| entry.event_cursor == turn.input_cursor)
-        {
-            messages.push(Message {
-                speaker: Speaker::You,
-                time: None,
-                text: entry.text.clone(),
-                error: false,
-            });
-        } else if let Some(request) = &turn.engine_request {
-            messages.push(Message {
-                speaker: Speaker::Notice,
-                time: None,
-                text: request.line.clone(),
-                error: false,
-            });
+    let mut placed = 0;
+    let mut plain = true;
+    for row in read.messages {
+        let one_turn = row.mode == MasterMode::OneTurn && row.speaker != MessageSpeaker::Switch;
+        let opens = one_turn && row.speaker != MessageSpeaker::Master;
+        if opens && placed < read.turns.len() {
+            if placed >= start {
+                turn_messages(read, placed, harness, offset, &mut messages);
+            }
+            placed += 1;
+            plain = false;
+            continue;
         }
-        if let Some(reply) = &turn.reply {
-            let time = turn
-                .attempt
-                .as_ref()
-                .and_then(|attempt| attempt.completion.as_ref())
-                .and_then(|completion| i64::try_from(completion.finished_at_ms).ok())
-                .map(|at| clock(at, offset));
-            messages.push(Message {
-                speaker: Speaker::Master,
-                time,
-                text: reply.text.clone(),
-                error: false,
-            });
+        plain = plain || opens;
+        if (one_turn && !plain) || placed < start {
+            continue;
         }
-        for task in &turn.tasks {
-            messages.push(Message {
-                speaker: Speaker::Task,
-                time: None,
-                text: task.line(),
-                error: false,
-            });
-        }
-        if let Some(changes) = &turn.changes {
-            messages.push(Message {
-                speaker: Speaker::Notice,
-                time: None,
-                text: changes.clone(),
-                error: false,
-            });
-        }
-        if let Some(text) = notice(turn, harness, latest) {
-            messages.push(Message {
-                speaker: Speaker::Notice,
-                time: None,
-                text,
-                error: !asks_approval(turn),
-            });
-        }
+        messages.extend(stored_message(row));
     }
-    assert!(messages.len() <= turns.len() * 4 + turns.iter().map(|t| t.tasks.len()).sum::<usize>());
+    assert!(placed <= read.turns.len());
+    for index in placed.max(start)..read.turns.len() {
+        turn_messages(read, index, harness, offset, &mut messages);
+    }
+    assert!(
+        messages.len()
+            <= turns.len() * 4
+                + turns.iter().map(|t| t.tasks.len()).sum::<usize>()
+                + read.messages.len()
+    );
     let status = match (read.session, turns.last()) {
         (None, _) => MasterStatus::NotReady,
         (
@@ -247,6 +343,20 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             "It is not known whether {harness} finished this turn. ({code}) Press r to try again."
         ));
     }
+    if turn.reason == Some(MasterReason::StepLimit)
+        && let Some(steps) = turn.cause.as_deref().and_then(steps_of_cause)
+    {
+        return Some(format!(
+            "Stopped after {steps} steps; reply with 'continue' to go on. ({code})"
+        ));
+    }
+    if turn.reason == Some(MasterReason::TimeLimit)
+        && let Some(minutes) = turn.cause.as_deref().and_then(minutes_of_cause)
+    {
+        return Some(format!(
+            "Stopped after {minutes} minutes; reply with 'continue' to go on. ({code})"
+        ));
+    }
     let retry = if latest { " Press r to try again." } else { "" };
     if turn.reason == Some(MasterReason::RepositoryConfigRefused)
         && let Some(detail) = &turn.detail
@@ -279,7 +389,10 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             "it could not start. Check it in Settings, Harnesses."
         }
         Some(MasterReason::CaptureIncomplete) => "its reply was cut off.",
-        Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
+        Some(MasterReason::NoReply) => "it ended its turn without writing a reply.",
+        Some(MasterReason::StepLimit) => "it used every step its limit allows.",
+        Some(MasterReason::TimeLimit) => "it reached its time limit.",
+        Some(MasterReason::OutputLimit) => "this turn's output was too large to keep.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
         Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
         Some(MasterReason::RepositoryConfigRefused) => {
@@ -404,12 +517,251 @@ mod tests {
         turns: &[MasterTurnView],
         inputs: &[ConversationEntry],
     ) -> Transcript {
+        build_stored(session, turns, inputs, &[])
+    }
+
+    fn build_stored(
+        session: Option<MasterSessionPhase>,
+        turns: &[MasterTurnView],
+        inputs: &[ConversationEntry],
+        messages: &[SessionMessage],
+    ) -> Transcript {
         let read = MasterRead {
             session,
             turns,
             inputs,
+            messages,
         };
         transcript_from(&read, "Codex", Some("Main".into()), true, 0)
+    }
+
+    fn stored(
+        seq: u64,
+        speaker: MessageSpeaker,
+        mode: MasterMode,
+        text: Option<&str>,
+    ) -> SessionMessage {
+        SessionMessage {
+            seq,
+            speaker,
+            mode,
+            harness: Some(
+                if mode == MasterMode::Live {
+                    "claude-code"
+                } else {
+                    "rcli"
+                }
+                .into(),
+            ),
+            text: text.map(str::to_owned),
+            at_ms: 1_000 + seq,
+            source: match (speaker, mode) {
+                (MessageSpeaker::Switch, _) => crate::master_sessions::MessageSource::Switch,
+                (_, MasterMode::Live) => crate::master_sessions::MessageSource::Terminal,
+                (_, MasterMode::OneTurn) => crate::master_sessions::MessageSource::Turn,
+            },
+        }
+    }
+
+    fn replied(ordinal: u64, input: u64, text: &str) -> MasterTurnView {
+        use crate::master_session::{MasterReply, MasterReplyProvenance};
+        let mut turn = turn(ordinal, input, MasterTurnPhase::Succeeded, None);
+        turn.reply = Some(MasterReply {
+            text: text.into(),
+            provenance: MasterReplyProvenance {
+                attempt_id: RequestId::new("attempt-1").unwrap(),
+                runtime_ref: RequestId::new("runtime-1").unwrap(),
+                capture_ref: RequestId::new("capture-1").unwrap(),
+                capture_sequence: 1,
+            },
+        });
+        turn
+    }
+
+    const SWITCHED: &str = "Switched to Claude Code. The conversation continues: Claude Code got its earlier turns, newest first, and the open tasks.";
+    const BACK: &str = "Switched to One-turn master (RCLI). The conversation continues.";
+
+    #[test]
+    fn a_move_from_the_one_turn_master_to_claude_code_keeps_the_earlier_turns_above_the_divider() {
+        use MasterMode::{Live, OneTurn};
+        use MessageSpeaker::{Master, Owner, Switch};
+        let inputs = [entry(3, "Plan the launch.")];
+        let turns = [replied(1, 3, "Launch planned.")];
+        let rows = [
+            stored(1, Owner, OneTurn, Some("Plan the launch.")),
+            stored(2, Master, OneTurn, Some("Launch planned.")),
+            stored(3, Switch, Live, Some(SWITCHED)),
+            stored(4, Owner, Live, None),
+            stored(5, Master, Live, Some("Launch shipped.")),
+        ];
+        let transcript = build_stored(Some(MasterSessionPhase::Configured), &turns, &inputs, &rows);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Plan the launch.", false),
+                (Speaker::Master, "Launch planned.", false),
+                (Speaker::Notice, SWITCHED, false),
+                (Speaker::Notice, TYPED_IN_TERMINAL, false),
+                (Speaker::Master, "Launch shipped.", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_move_from_claude_code_to_the_one_turn_master_shows_the_terminal_turns_then_the_divider() {
+        use MasterMode::{Live, OneTurn};
+        use MessageSpeaker::{Master, Owner, Switch};
+        let inputs = [entry(3, "Now publish it.")];
+        let turns = [turn(1, 3, MasterTurnPhase::Running, None)];
+        let rows = [
+            stored(1, Owner, Live, Some("Draft the page.")),
+            stored(2, Master, Live, Some("Page drafted.")),
+            stored(3, Switch, OneTurn, Some(BACK)),
+        ];
+        let transcript = build_stored(Some(MasterSessionPhase::Configured), &turns, &inputs, &rows);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, "Draft the page.", false),
+                (Speaker::Master, "Page drafted.", false),
+                (Speaker::Notice, BACK, false),
+                (Speaker::You, "Now publish it.", false),
+            ],
+            "the running turn the store has no row for yet comes last"
+        );
+        assert_eq!(
+            transcript.status,
+            MasterStatus::Thinking {
+                since_ms: None,
+                activity: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_session_only_the_one_turn_master_ran_reads_as_its_turns_and_a_row_with_no_turn_as_stored()
+    {
+        use MasterMode::OneTurn;
+        use MessageSpeaker::{Engine, Master, Owner};
+        let inputs = [entry(3, "Plan the page."), entry(7, "Add a theme.")];
+        let turns = [
+            replied(1, 3, "Page planned."),
+            replied(2, 7, "Theme added."),
+        ];
+        let rows = [
+            stored(1, Owner, OneTurn, Some("Plan the page.")),
+            stored(2, Master, OneTurn, Some("Page planned.")),
+            stored(3, Owner, OneTurn, Some("Add a theme.")),
+            stored(4, Master, OneTurn, Some("Theme added.")),
+        ];
+        let alone = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
+        let both = build_stored(Some(MasterSessionPhase::Configured), &turns, &inputs, &rows);
+        assert_eq!(said(&both), said(&alone));
+        assert_eq!(
+            both.messages.len(),
+            4,
+            "each reply shows once, through its turn"
+        );
+
+        let ahead = [
+            rows[0].clone(),
+            rows[1].clone(),
+            stored(3, Engine, OneTurn, Some("A result came in.")),
+            stored(4, Master, OneTurn, Some("Noted.")),
+        ];
+        let behind = build_stored(
+            Some(MasterSessionPhase::Configured),
+            &turns[..1],
+            &inputs,
+            &ahead,
+        );
+        assert_eq!(
+            said(&behind),
+            [
+                (Speaker::You, "Plan the page.", false),
+                (Speaker::Master, "Page planned.", false),
+                (Speaker::Notice, "A result came in.", false),
+                (Speaker::Master, "Noted.", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn stored_text_reaches_the_transcript_without_terminal_escapes_or_control_characters() {
+        use MasterMode::Live;
+        use MessageSpeaker::{Engine, Master, Owner, Switch};
+        let hostile = "\u{1b}[2J\u{1b}[31mRed\u{1b}[0m\u{7}\u{0} text\r\n\u{1b}]52;c;cGF5bG9hZA==\u{7}clip\u{9b}31m\u{202e}evil\ttab";
+        let clean = "Red text\nclip31m\\u202eevil    tab";
+        let rows = [
+            stored(1, Owner, Live, Some(hostile)),
+            stored(2, Master, Live, Some(hostile)),
+            stored(3, Engine, Live, Some(hostile)),
+            stored(4, Switch, Live, Some(hostile)),
+        ];
+        let transcript = build_stored(Some(MasterSessionPhase::Configured), &[], &[], &rows);
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::You, clean, false),
+                (Speaker::Master, clean, false),
+                (Speaker::Notice, clean, false),
+                (Speaker::Notice, clean, false),
+            ]
+        );
+        for message in &transcript.messages {
+            assert!(
+                message
+                    .text
+                    .chars()
+                    .all(|character| character == '\n' || !character.is_control()),
+                "{:?}",
+                message.text
+            );
+        }
+    }
+
+    #[test]
+    fn owner_words_read_from_the_harness_record_are_a_notice_and_never_the_owner_s_message() {
+        use MasterMode::Live;
+        use MessageSpeaker::{Engine, Master, Owner};
+        let from = |source: MessageSource, row: SessionMessage| SessionMessage { source, ..row };
+        let rows = [
+            from(
+                MessageSource::Record,
+                stored(1, Owner, Live, Some("Ship it.\u{1b}[2J")),
+            ),
+            from(
+                MessageSource::Record,
+                stored(2, Master, Live, Some("Shipped.")),
+            ),
+            from(MessageSource::Counter, stored(3, Owner, Live, None)),
+            from(
+                MessageSource::Counter,
+                stored(4, Master, Live, Some("Last line.")),
+            ),
+            stored(5, Engine, Live, Some("A result came in.")),
+            stored(6, Owner, Live, Some("Seen typed.")),
+            stored(7, Master, Live, Some("Done.")),
+        ];
+        assert_eq!(
+            rows.iter().map(from_record).collect::<Vec<_>>(),
+            [true, true, true, true, false, false, false]
+        );
+        let transcript = build_stored(Some(MasterSessionPhase::Configured), &[], &[], &rows);
+        let typed = format!("{RECORD_TYPED} Ship it.");
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::Notice, typed.as_str(), false),
+                (Speaker::Master, "Shipped.", false),
+                (Speaker::Notice, TYPED_IN_TERMINAL, false),
+                (Speaker::Master, "Last line.", false),
+                (Speaker::Notice, "A result came in.", false),
+                (Speaker::You, "Seen typed.", false),
+                (Speaker::Master, "Done.", false),
+            ],
+            "only the words the engine saw typed are the owner's message"
+        );
     }
 
     fn said(transcript: &Transcript) -> Vec<(Speaker, &str, bool)> {
@@ -654,6 +1006,9 @@ mod tests {
             (MasterReason::ProfileBusy, "profile_busy"),
             (MasterReason::RuntimeUnavailable, "runtime_unavailable"),
             (MasterReason::CaptureIncomplete, "capture_incomplete"),
+            (MasterReason::NoReply, "no_reply"),
+            (MasterReason::StepLimit, "step_limit"),
+            (MasterReason::TimeLimit, "time_limit"),
             (MasterReason::OutputLimit, "output_limit"),
             (
                 MasterReason::UnsupportedCapability,
@@ -696,6 +1051,110 @@ mod tests {
             assert!(last.contains(&format!(" ({code}) Press r")), "{last}");
             assert!(!last.contains("unknown"), "{last}");
         }
+    }
+
+    #[test]
+    fn a_turn_that_ended_without_reply_text_is_not_called_cut_off() {
+        let turns = [turn(
+            1,
+            3,
+            MasterTurnPhase::Failed,
+            Some(MasterReason::NoReply),
+        )];
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &turns,
+            &[entry(3, "Go.")],
+        );
+        let last = &transcript.messages.last().unwrap().text;
+        assert!(
+            last.contains("stopped: it ended its turn without writing a reply. (no_reply)"),
+            "{last}"
+        );
+        assert!(!last.contains("cut off"), "{last}");
+    }
+
+    #[test]
+    fn a_turn_stopped_at_each_step_limit_names_its_steps_and_how_to_go_on() {
+        for steps in [50_u16, 100, 200] {
+            let mut stopped = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::StepLimit));
+            stopped.cause = Some(format!("master_step_limit_{steps}"));
+            let transcript = build(
+                Some(MasterSessionPhase::Configured),
+                &[stopped],
+                &[entry(3, "Go.")],
+            );
+            let last = &transcript.messages.last().unwrap().text;
+            let line = format!("Stopped after {steps} steps; reply with 'continue' to go on.");
+            assert!(last.contains(&line), "{last}");
+            assert!(
+                last.contains(&format!("(master_step_limit_{steps})")),
+                "{last}"
+            );
+            assert!(!last.contains("cut off"), "{last}");
+            assert!(!last.contains("Press r"), "{last}");
+        }
+    }
+
+    #[test]
+    fn a_turn_stopped_at_each_time_limit_names_its_minutes_and_how_to_go_on() {
+        for minutes in [10_u16, 30, 60] {
+            let mut stopped = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::TimeLimit));
+            stopped.cause = Some(format!("master_time_limit_{minutes}"));
+            let transcript = build(
+                Some(MasterSessionPhase::Configured),
+                &[stopped],
+                &[entry(3, "Go.")],
+            );
+            let last = &transcript.messages.last().unwrap().text;
+            let line = format!("Stopped after {minutes} minutes; reply with 'continue' to go on.");
+            assert!(last.contains(&line), "{last}");
+            assert!(
+                last.contains(&format!("(master_time_limit_{minutes})")),
+                "{last}"
+            );
+            assert!(!last.contains("ran out of time"), "{last}");
+            assert!(!last.contains("at most"), "{last}");
+            assert!(!last.contains("cut off"), "{last}");
+            assert!(!last.contains("Press r"), "{last}");
+        }
+    }
+
+    #[test]
+    fn a_turn_a_clock_ended_with_no_minutes_named_claims_no_ten_minutes() {
+        let mut late = turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::TimeLimit));
+        late.cause = Some("codex_host_deadline".into());
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[late],
+            &[entry(3, "Go.")],
+        );
+        let last = &transcript.messages.last().unwrap().text;
+        let line = "stopped: it reached its time limit. (codex_host_deadline)";
+        assert!(last.contains(line), "{last}");
+        assert!(!last.contains("10 minutes"), "{last}");
+        assert!(!last.contains("cut off"), "{last}");
+    }
+
+    #[test]
+    fn a_turn_with_more_output_than_the_app_keeps_says_so_plainly() {
+        let mut large = turn(
+            1,
+            3,
+            MasterTurnPhase::Failed,
+            Some(MasterReason::OutputLimit),
+        );
+        large.cause = Some("claude_host_stdout_limit".into());
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[large],
+            &[entry(3, "Go.")],
+        );
+        let last = &transcript.messages.last().unwrap().text;
+        let line = "stopped: this turn's output was too large to keep. (claude_host_stdout_limit)";
+        assert!(last.contains(line), "{last}");
+        assert!(!last.contains("something went wrong"), "{last}");
+        assert!(!last.contains("cut off"), "{last}");
     }
 
     #[test]

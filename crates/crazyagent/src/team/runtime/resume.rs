@@ -174,15 +174,18 @@ impl TeamRuntime {
         if !worker.live || !worker.briefed || worker.stopping {
             return Ok(());
         }
+        let line = note(run, None);
         let typed = master::master_input(
             &self.connection,
             host.as_ref(),
             self.agents.as_deref().map(Agents::typing),
             project,
-            &note(run, None),
+            &line,
         );
         match typed {
             Ok(()) => {
+                self.workers.get_mut(&id).expect("master worker exists").fed =
+                    Some(crate::master_sessions::Fed::Engine(line));
                 recovery::mark(
                     &self.connection,
                     run.id,

@@ -6,7 +6,7 @@ use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::model_access::{BOUNDED_QUOTA, STRICT_QUOTA, provider_quota_policy_name};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
-use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request, new_pool_id};
+use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request, account_label, new_pool_id};
 use crate::tui::text::{cells, join, list_row, restyle, row, status, styled, thumb, with_bar};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, checkbox};
@@ -407,6 +407,7 @@ impl PoolEditor {
             }
         };
         let view = self.view(ctx);
+        let all = ctx.store.accounts.ready().map_or(&[][..], Vec::as_slice);
         if view.is_empty() {
             let text = if total == 0 {
                 "No accounts yet. Add one in Settings, Accounts."
@@ -425,7 +426,11 @@ impl PoolEditor {
                     cells(
                         &WIDTHS,
                         vec![
-                            Line::raw(checkbox(self.members.contains(&account.id), &account.name)),
+                            Line::raw(checkbox(
+                                self.members.contains(&account.id),
+                                &account_label(account.id.as_str(), all)
+                                    .unwrap_or_else(|| account.name.clone()),
+                            )),
                             Line::raw(format!(
                                 "{} {}",
                                 glyphs.provider(&account.provider),

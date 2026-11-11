@@ -36,6 +36,8 @@ use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
+use crazyagent::master_step_limit::MasterStepSettings;
+use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
@@ -2487,6 +2489,22 @@ async fn desktop_master_inputs(
 }
 
 #[tauri::command]
+async fn desktop_master_messages(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    before: Option<u64>,
+    limit: u8,
+) -> Result<bridge::master::MasterMessages, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .master_messages(&ticket, &session_id, before, limit)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_session_turns(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2799,6 +2817,52 @@ async fn desktop_set_quit_settings(
     lock(&state)
         .await?
         .set_quit_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_step_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<MasterStepSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.master_step_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_master_step_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MasterStepSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_master_step_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_master_time_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<MasterTimeSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.master_time_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_master_time_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MasterTimeSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_master_time_settings(settings, generation)
         .await
 }
 
@@ -4578,6 +4642,7 @@ native_commands! {
     desktop_master_sessions,
     desktop_master_session_turns,
     desktop_master_inputs,
+    desktop_master_messages,
     desktop_new_master_session,
     desktop_resume_master_session,
     desktop_delete_master_session,
@@ -4608,6 +4673,10 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_master_step_settings,
+    desktop_set_master_step_settings,
+    desktop_master_time_settings,
+    desktop_set_master_time_settings,
     desktop_pool_summaries,
     desktop_account_schedule,
     desktop_account_ranking,

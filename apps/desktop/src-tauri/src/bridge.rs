@@ -644,6 +644,8 @@ impl NativeBridge {
             OwnerMutation::SetSandboxSettings { .. } => ("sandbox_settings", None, None),
             OwnerMutation::SetCleanupSettings { .. } => ("cleanup_settings", None, None),
             OwnerMutation::SetQuitSettings { .. } => ("quit_settings", None, None),
+            OwnerMutation::SetMasterStepSettings { .. } => ("master_step_settings", None, None),
+            OwnerMutation::SetMasterTimeSettings { .. } => ("master_time_settings", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
