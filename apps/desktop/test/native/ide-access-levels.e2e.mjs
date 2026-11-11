@@ -279,7 +279,7 @@ async function atLevel(t, level, shared) {
 
     if (level.access === "full") {
       await t.test("Full access: a process its terminal left running is named when the IDE opens again", async () => {
-        const said = await ran("level-left.txt", `nohup node -e "setInterval(() => {}, 1000)" > /dev/null 2>&1 & echo $!`);
+        const said = await ran("level-left.txt", `/usr/bin/python3 -c "import os,time; r,w=os.pipe(); p=os.fork(); (os.close(w), print(os.read(r,32).decode(), flush=True), os._exit(0)) if p else (os.close(r), os.setsid(), os.write(w, str(os.getpid()).encode()), os.close(w), os.close(1), os.close(2), time.sleep(600))"`);
         const pid = said.split("\n")[0];
         assert.match(pid, /^\d+$/, said);
         try {
