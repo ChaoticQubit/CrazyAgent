@@ -16,13 +16,18 @@ pub const TOO_LONG: &str = "ide_run_too_long";
 pub const NOT_ONE_LINE: &str = "ide_run_not_one_line";
 /// The refusal of a command with a control, bidirectional or invisible character.
 pub const CONTROL: &str = "ide_run_control_character";
-/// The refusal of a command that chains, pipes, redirects, substitutes or recalls history.
+/// The refusal of a command that is anything but plain words: it chains, pipes, redirects,
+/// substitutes, expands, globs or recalls history, or holds any other shell character.
 pub const CHAINED: &str = "ide_run_chained";
 /// The refusal of a run while the project's setting is Off.
 pub const OFF: &str = "ide_run_off";
 /// The refusal of a run the project's IDE did not acknowledge within `REVEAL_WAIT`.
 pub const UNANSWERED: &str = "ide_run_unanswered";
-const CHAINING: [char; 7] = [';', '|', '&', '`', '<', '>', '!'];
+/// The characters a bare word may hold beside ASCII letters and digits. The shared rule
+/// table pins them for the engine, the desktop and the IDE extension.
+pub const BARE: &str = "-_./:=,@+%";
+/// The characters a quoted word may not hold, since a shell still acts on them there.
+pub const QUOTED_REFUSED: &str = "$`\\!";
 const REQUEST_PREFIX: &str = "run-";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_run_settings (
     project TEXT PRIMARY KEY,
@@ -59,8 +64,9 @@ impl RunMode {
     }
 }
 
-/// Says why a command may not be typed into a project terminal, or that it may. The text is
-/// checked as written, with no shell parsing, so a quoted `;` is refused too.
+/// Says why a command may not be typed into a project terminal, or that it may. Only plain
+/// words pass, so the shell that receives the line expands, substitutes and chains nothing:
+/// the line the owner confirmed is one program with the arguments as written.
 /// Input: the command as the owner saw it. Output: None for one plain single command, else
 /// the refusal code.
 pub fn problem(command: &str) -> Option<&'static str> {
@@ -76,31 +82,61 @@ pub fn problem(command: &str) -> Option<&'static str> {
     if command.chars().any(hidden) {
         return Some(CONTROL);
     }
-    if command.contains(CHAINING) || command.contains("$(") || command.trim_start().starts_with('^')
-    {
+    if !plain(command) {
         return Some(CHAINED);
     }
     assert!(command.len() <= COMMAND_BYTES_MAX);
-    assert!(!command.contains('\n'));
+    assert!(
+        !command.contains(['\n', '$', '`', '\\', '!']),
+        "a line that passed holds nothing a shell expands, bare or quoted"
+    );
     None
 }
 
+/// Whether a line is only plain words: bare words of ASCII letters, digits and the `BARE`
+/// characters, separated by spaces, and closed single- or double-quoted words that hold no
+/// `QUOTED_REFUSED` character. Input: the line, at most `COMMAND_BYTES_MAX` bytes.
+/// Output: the answer.
+fn plain(command: &str) -> bool {
+    assert!(command.len() <= COMMAND_BYTES_MAX);
+    let mut quote: Option<char> = None;
+    for character in command.chars() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) if QUOTED_REFUSED.contains(character) => return false,
+            Some(_) => {}
+            None if character == '\'' || character == '"' => quote = Some(character),
+            None if character == ' ' || character.is_ascii_alphanumeric() => {}
+            None if BARE.contains(character) => {}
+            None => return false,
+        }
+    }
+    quote.is_none()
+}
+
 /// Whether a character can hide or reorder what the owner reads: a control character, a
-/// bidirectional mark, a line or paragraph separator, or an invisible format character.
+/// bidirectional mark, a line or paragraph separator, an invisible format character, a blank
+/// filler or a variation selector.
 /// Input: the character. Output: the answer.
 fn hidden(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
             '\u{ad}'
+                | '\u{34f}'
                 | '\u{61c}'
+                | '\u{115f}'..='\u{1160}'
                 | '\u{180e}'
                 | '\u{200b}'..='\u{200f}'
                 | '\u{2028}'..='\u{202e}'
                 | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
                 | '\u{feff}'
+                | '\u{ffa0}'
                 | '\u{fff9}'..='\u{fffb}'
                 | '\u{e0000}'..='\u{e007f}'
+                | '\u{e0100}'..='\u{e01ef}'
         )
 }
 

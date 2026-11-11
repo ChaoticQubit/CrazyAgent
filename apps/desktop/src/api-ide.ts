@@ -86,7 +86,7 @@ const OPEN_FAILURES: Record<string, string> = {
 
 const RUN_FAILURES: Record<string, string> = {
   ide_run_off: "Run in project terminal is off for this project. Copy the command, or turn it on in the project's settings.",
-  ide_run_chained: "This line chains commands, so it wasn't run. Copy it and run it yourself.",
+  ide_run_chained: "This line has shell syntax CrazyAgent won't type for you, so it wasn't run. Copy it and run it yourself.",
   ide_run_not_one_line: "This is more than one line, so it wasn't run. Copy it and run it yourself.",
   ide_run_control_character: "This line holds a hidden character, so it wasn't run. Copy it and run it yourself.",
   ide_run_too_long: "This line is too long to run from here. Copy it and run it yourself.",

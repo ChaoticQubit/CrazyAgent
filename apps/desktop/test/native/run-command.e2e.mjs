@@ -126,7 +126,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await pause(SETTLE_MS * 2);
 
       await t.test("Type and run: the command runs once in a new IDE terminal", async () => {
-        assert.equal(await ask(bridge, project, `sed -i '' -e 's/$/-once/' ${COUNT_FILE}`, true), null);
+        assert.equal(await ask(bridge, project, `sed -i '' -e 's/run/run-once/' ${COUNT_FILE}`, true), null);
         for (const deadline = Date.now() + STEP_MS; readFileSync(join(repo, COUNT_FILE), "utf8") !== COUNT_ONCE; await pause(POLL_MS)) {
           assert.ok(Date.now() < deadline, `the command never ran: ${JSON.stringify(readFileSync(join(repo, COUNT_FILE), "utf8"))}`);
         }
@@ -145,11 +145,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(!existsSync(outside), "a Sandboxed project's terminal wrote outside the project");
       });
 
-      await t.test("a chained line is refused by the engine and nothing is typed", async () => {
+      await t.test("a chained line and a line that hides a second command are refused by the engine and nothing is typed", async () => {
         assert.equal(await ask(bridge, project, "touch run-a; touch run-b"), "ide_run_chained");
         assert.equal(await ask(bridge, project, "touch run-a\ntouch run-b"), "ide_run_not_one_line");
+        for (const hidden of ["cat =(touch run-hidden)", "ls *(e:'touch run-hidden':)", "eval $'touch run-a\\x3b touch run-hidden'", 'eval "touch run-a${IFS:2:1}touch run-hidden"']) {
+          assert.equal(await ask(bridge, project, hidden), "ide_run_chained", hidden);
+        }
         await pause(SETTLE_MS * 2);
-        assert.ok(!existsSync(join(repo, "run-a")) && !existsSync(join(repo, "run-b")), "a refused line reached the terminal");
+        for (const name of ["run-a", "run-b", "run-hidden"]) assert.ok(!existsSync(join(repo, name)), `a refused line reached the terminal: ${name}`);
       });
 
       await t.test("Type only: the command is typed and runs only once the owner presses Enter", async () => {

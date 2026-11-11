@@ -1,13 +1,31 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.READY_WAIT_MS = exports.COMMAND_BYTES_MAX = void 0;
+exports.QUOTED_REFUSED = exports.BARE = exports.READY_WAIT_MS = exports.COMMAND_BYTES_MAX = void 0;
 exports.typed = typed;
 exports.handle = handle;
 exports.COMMAND_BYTES_MAX = 512;
 exports.READY_WAIT_MS = 4000;
 const BLANK = /^[\t-\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*$/u;
-const HIDDEN = /[\p{Cc}\u{ad}\u{61c}\u{180e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{feff}\u{fff9}-\u{fffb}\u{e0000}-\u{e007f}]/u;
-const CHAINING = [";", "|", "&", "`", "<", ">", "!", "$("];
+const HIDDEN = /[\p{Cc}\u{ad}\u{34f}\u{61c}\u{115f}\u{1160}\u{180e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{3164}\u{fe00}-\u{fe0f}\u{feff}\u{ffa0}\u{fff9}-\u{fffb}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/u;
+exports.BARE = "-_./:=,@+%";
+exports.QUOTED_REFUSED = "$`\\!";
+const WORD = /^[A-Za-z0-9 ]$/;
+function plain(command) {
+    let quote = "";
+    for (const mark of command) {
+        if (quote !== "") {
+            if (mark === quote)
+                quote = "";
+            else if (exports.QUOTED_REFUSED.includes(mark))
+                return false;
+        }
+        else if (mark === "'" || mark === '"')
+            quote = mark;
+        else if (!WORD.test(mark) && !exports.BARE.includes(mark))
+            return false;
+    }
+    return quote === "";
+}
 function typed(command, pressEnter) {
     if (typeof command !== "string" || BLANK.test(command))
         return null;
@@ -15,7 +33,7 @@ function typed(command, pressEnter) {
         return null;
     if (/[\n\r]/.test(command) || HIDDEN.test(command))
         return null;
-    if (CHAINING.some((mark) => command.includes(mark)) || command.trimStart().startsWith("^"))
+    if (!plain(command))
         return null;
     return { text: command, addNewLine: pressEnter === true };
 }

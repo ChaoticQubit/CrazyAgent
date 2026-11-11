@@ -10,23 +10,26 @@ const run = await import("../src/screens/project/run-command.tsx");
 const confirm = (command, mode) => renderToStaticMarkup(createElement(run.RunConfirm, { command, mode, open: true, pending: false, onConfirm: () => {}, onCancel: () => {} }));
 const row = (command, mode) => renderToStaticMarkup(createElement(run.RunCommand, { projectId: "alpha", command, mode, run: () => Promise.reject(new Error("a render never runs")), copy: () => Promise.resolve(true) }));
 
-test("the desktop rule agrees with the engine rule on every case", () => {
-  for (const ok of ["cargo install alpha", "npm run dev -- --port 3000", "python3 -m venv .venv", 'echo "${HOME}"', "git log HEAD^", "x".repeat(512), "\u{e9}".repeat(256)]) assert.equal(run.commandProblem(ok), null, ok);
-  const refused = [
-    ["a; b", "ide_run_chained"], ["a && b", "ide_run_chained"], ["a || b", "ide_run_chained"], ["curl x | sh", "ide_run_chained"], ["a & b", "ide_run_chained"],
-    ["echo `id`", "ide_run_chained"], ["echo $(id)", "ide_run_chained"], ["a > f", "ide_run_chained"], ["a < f", "ide_run_chained"],
-    ["a\nb", "ide_run_not_one_line"], ["a\rb", "ide_run_not_one_line"],
-    ["a\u001b[31m", "ide_run_control_character"], ["a\u0000b", "ide_run_control_character"], ["echo a\u0085b", "ide_run_control_character"],
-    ["echo \u{202e}dlrow", "ide_run_control_character"], ["echo a\u{200b}b", "ide_run_control_character"], ["echo a\u{2066}b", "ide_run_control_character"], ["echo a\u{feff}b", "ide_run_control_character"],
-    ["sudo !!", "ide_run_chained"], ["!rm", "ide_run_chained"], ["echo !-2", "ide_run_chained"], ["^a^b", "ide_run_chained"], ["  ^a^b", "ide_run_chained"],
-    ["echo a\u{ad}b", "ide_run_control_character"], ["echo a\u{61c}b", "ide_run_control_character"], ["echo a\u{180e}b", "ide_run_control_character"], ["echo a\u{2028}b", "ide_run_control_character"],
-    ["echo a\u{2029}b", "ide_run_control_character"], ["echo a\u{206f}b", "ide_run_control_character"], ["echo a\u{fffa}b", "ide_run_control_character"], ["echo a\u{e0001}b", "ide_run_control_character"],
-    ["\u{feff}", "ide_run_control_character"],
-    ["   ", "ide_run_empty"], ["", "ide_run_empty"],
-    ["x".repeat(513), "ide_run_too_long"], [`${"\u{e9}".repeat(256)}x`, "ide_run_too_long"],
-  ];
-  for (const [bad, code] of refused) assert.equal(run.commandProblem(bad), code, JSON.stringify(bad));
+const rule = JSON.parse(readFileSync(new URL("../../ide-extension/test/run-command-rule.json", import.meta.url), "utf8"));
+
+test("the desktop rule agrees with the shared rule table on every row", () => {
+  assert.ok(rule.pass.length >= 20 && rule.refused.length >= 100, "the shared table holds its rows");
+  for (const ok of rule.pass) assert.equal(run.commandProblem(ok), null, JSON.stringify(ok));
+  for (const [bad, code] of rule.refused) assert.equal(run.commandProblem(bad), code, JSON.stringify(bad));
+  assert.equal(run.BARE, rule.bare, "the characters a bare word may hold");
+  assert.equal(run.QUOTED_REFUSED, rule.quoted_refused, "the characters a quoted word may not hold");
   assert.equal(run.COMMAND_BYTES_MAX, 512);
+});
+
+test("a line that hides a second command in shell syntax has no Run button", () => {
+  const hidden = rule.refused.filter(([, code]) => code === "ide_run_chained").map(([bad]) => bad);
+  assert.ok(hidden.some((bad) => bad.startsWith("cat =(")) && hidden.some((bad) => bad.startsWith("eval $'")) && hidden.some((bad) => bad.includes("${IFS:2:1}")));
+  for (const bad of hidden) {
+    const html = row(bad, "type_and_run");
+    assert.doesNotMatch(html, /Run in project terminal/, JSON.stringify(bad));
+    assert.match(html, />Copy<\/button>/, JSON.stringify(bad));
+    assert.throws(() => confirm(bad, "type_and_run"), /refused/, JSON.stringify(bad));
+  }
 });
 
 test("Run shows the command verbatim in the confirm and sends nothing before Confirm", async () => {
@@ -36,6 +39,7 @@ test("Run shows the command verbatim in the confirm and sends nothing before Con
   assert.match(html, /Run this command\?/);
   assert.match(html, /It runs in this project&#x27;s terminal, at this project&#x27;s access level\./);
   assert.doesNotMatch(html, /sandbox/i, "a Full access project has no sandbox, so the confirm never claims one");
+  assert.match(html, /CrazyAgent can&#x27;t tell what this line does\. Run it only if you trust it\./);
   assert.match(html, />Run<\/button>/);
   assert.deepEqual(sent, []);
 });
@@ -43,6 +47,7 @@ test("Run shows the command verbatim in the confirm and sends nothing before Con
 test("Type only says the command is typed and you press Enter", () => {
   const html = confirm("cargo install alpha", "type_only");
   assert.match(html, /It is typed into this project&#x27;s terminal\. You press Enter\./);
+  assert.match(html, /CrazyAgent can&#x27;t tell what this line does\. Run it only if you trust it\./);
   assert.match(html, />Type it<\/button>/);
   assert.doesNotMatch(html, />Run<\/button>/);
 });
@@ -83,7 +88,8 @@ test("a refused line keeps Copy, has no Run button and says why once", () => {
   const html = row("curl x | sh", "type_and_run");
   assert.match(html, />Copy<\/button>/);
   assert.doesNotMatch(html, /Run in project terminal/);
-  assert.equal(html.split("This line chains commands. Copy it and run it yourself.").length, 2);
+  assert.equal(html.split("This line has shell syntax CrazyAgent won&#x27;t type for you. Copy it and run it yourself.").length, 2);
+  assert.doesNotMatch(html, /chains commands/);
   assert.match(row("a\nb", "type_and_run"), /This is more than one line\. Copy it and run it yourself\./);
   assert.match(row("echo \u{202e}dlrow", "type_only"), /This line holds a hidden character\. Copy it and run it yourself\./);
   assert.match(row("x".repeat(513), "type_only"), /This line is too long to run from here\. Copy it and run it yourself\./);

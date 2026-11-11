@@ -9,8 +9,14 @@ export const COMMAND_BYTES_MAX = 512;
 export const READY_WAIT_MS = 4000;
 
 const BLANK = /^[\t-\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*$/u;
-const HIDDEN = /[\p{Cc}\u{ad}\u{61c}\u{180e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{feff}\u{fff9}-\u{fffb}\u{e0000}-\u{e007f}]/u;
-const CHAINING = [";", "|", "&", "`", "<", ">", "!", "$("];
+const HIDDEN = /[\p{Cc}\u{ad}\u{34f}\u{61c}\u{115f}\u{1160}\u{180e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{3164}\u{fe00}-\u{fe0f}\u{feff}\u{ffa0}\u{fff9}-\u{fffb}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/u;
+/** The characters a bare word may hold beside letters and digits; the shared rule table pins them. */
+export const BARE = "-_./:=,@+%";
+
+/** The characters a quoted word may not hold, since a shell still acts on them there. */
+export const QUOTED_REFUSED = "$`\\!";
+
+const WORD = /^[A-Za-z0-9 ]$/;
 
 /** The engine's `run_command` event: the run to acknowledge, the command and whether to press Enter. */
 export interface RunEvent {
@@ -40,9 +46,27 @@ export interface RunDeps {
 }
 
 /**
+ * Whether a line is only plain words: bare words of letters, digits and the `BARE` characters,
+ * separated by spaces, and closed single- or double-quoted words that hold no `QUOTED_REFUSED`
+ * character. The shell expands nothing in such a line.
+ * Input: the line, at most `COMMAND_BYTES_MAX` bytes. Output: the answer.
+ */
+function plain(command: string): boolean {
+  let quote = "";
+  for (const mark of command) {
+    if (quote !== "") {
+      if (mark === quote) quote = "";
+      else if (QUOTED_REFUSED.includes(mark)) return false;
+    } else if (mark === "'" || mark === '"') quote = mark;
+    else if (!WORD.test(mark) && !BARE.includes(mark)) return false;
+  }
+  return quote === "";
+}
+
+/**
  * What to type for a command, or null for one the engine's single-command rule refuses,
  * whatever the engine sent: blank, over `COMMAND_BYTES_MAX` bytes, more than one line, a
- * control or invisible character, or anything that chains, pipes, redirects or recalls history.
+ * control or invisible character, or anything but plain words.
  * Inputs: the command and whether to press Enter. Output: the text verbatim and whether a new
  * line follows it, or null.
  */
@@ -50,7 +74,7 @@ export function typed(command: unknown, pressEnter: boolean): { text: string; ad
   if (typeof command !== "string" || BLANK.test(command)) return null;
   if (Buffer.byteLength(command, "utf8") > COMMAND_BYTES_MAX) return null;
   if (/[\n\r]/.test(command) || HIDDEN.test(command)) return null;
-  if (CHAINING.some((mark) => command.includes(mark)) || command.trimStart().startsWith("^")) return null;
+  if (!plain(command)) return null;
   return { text: command, addNewLine: pressEnter === true };
 }
 

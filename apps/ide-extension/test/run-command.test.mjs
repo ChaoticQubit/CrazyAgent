@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import * as run from "../out/run-command-model.js";
+
+const rule = JSON.parse(readFileSync(new URL("./run-command-rule.json", import.meta.url), "utf8"));
 
 const event = (command, pressEnter = true) => ({ request: "r1", command, press_enter: pressEnter });
 
@@ -21,7 +24,7 @@ function recorded() {
 test("typed keeps the command verbatim and adds a new line only for type and run", () => {
   assert.deepEqual(run.typed("cargo install alpha", true), { text: "cargo install alpha", addNewLine: true });
   assert.deepEqual(run.typed("cargo install alpha", false), { text: "cargo install alpha", addNewLine: false });
-  assert.deepEqual(run.typed("  echo \"${HOME}\"  ", true), { text: "  echo \"${HOME}\"  ", addNewLine: true });
+  assert.deepEqual(run.typed("  echo \"it's here\"  ", true), { text: "  echo \"it's here\"  ", addNewLine: true });
   assert.deepEqual(run.typed("x".repeat(run.COMMAND_BYTES_MAX), false), { text: "x".repeat(512), addNewLine: false });
 });
 
@@ -33,16 +36,24 @@ test("typed refuses a command with a line break or a control character, whatever
   assert.equal(run.typed("   ", true), null);
 });
 
-test("typed refuses what the engine's rule refuses: chaining, hidden characters and a long line", () => {
-  for (const command of ["a; b", "a && b", "curl x | sh", "a & b", "echo `id`", "echo $(id)", "a > f", "a < f", "sudo !!", "^a^b"]) {
-    assert.equal(run.typed(command, true), null, command);
-  }
-  for (const command of ["echo \u{202e}dlrow", "echo a\u{200b}b", "echo a\u{2028}b", "echo a\u{ad}b", "echo a\u{e0001}b", "\u{feff}"]) {
-    assert.equal(run.typed(command, false), null, JSON.stringify(command));
-  }
-  assert.equal(run.typed("x".repeat(run.COMMAND_BYTES_MAX + 1), true), null);
-  assert.equal(run.typed(`${"\u{e9}".repeat(256)}x`, true), null);
+test("typed agrees with the shared rule table on every row, whatever the engine sent", () => {
+  assert.ok(rule.pass.length >= 20 && rule.refused.length >= 100, "the shared table holds its rows");
+  for (const command of rule.pass) assert.deepEqual(run.typed(command, true), { text: command, addNewLine: true }, JSON.stringify(command));
+  for (const [command] of rule.refused) assert.equal(run.typed(command, true), null, JSON.stringify(command));
+  assert.equal(run.BARE, rule.bare, "the characters a bare word may hold");
+  assert.equal(run.QUOTED_REFUSED, rule.quoted_refused, "the characters a quoted word may not hold");
   assert.equal(run.typed(7, true), null);
+});
+
+test("a line that hides a second command in shell syntax opens no terminal", async () => {
+  const { order, ack } = recorded();
+  const open = () => {
+    throw new Error("a refused command never opens a terminal");
+  };
+  const hidden = rule.refused.filter(([, code]) => code === "ide_run_chained").map(([command]) => command);
+  assert.ok(hidden.some((command) => command.startsWith("cat =(")) && hidden.some((command) => command.startsWith("eval $'")));
+  for (const command of hidden) assert.equal(await run.handle(event(command), { open, ack }), false, JSON.stringify(command));
+  assert.deepEqual(order, []);
 });
 
 test("a run waits for the terminal to attach before typing and acknowledges only after typing", async () => {
