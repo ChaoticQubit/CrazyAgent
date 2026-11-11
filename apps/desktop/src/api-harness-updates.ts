@@ -32,6 +32,11 @@ const COPY: Record<string, string> = {
   harness_update_check_unreadable: "Couldn't read the newer version from the vendor's site.",
   harness_update_unknown_harness: "CrazyAgent doesn't know this harness.",
   harness_update_outcome_unknown: "The update ended in a way CrazyAgent doesn't know.",
+  harness_install_no_tool: "CrazyAgent installs with Homebrew or npm and found no way to install this one.",
+  harness_install_off: "Install from the app is off in settings.",
+  harness_install_already: "It's already installed on this Mac.",
+  harness_install_not_found: "The install finished, but CrazyAgent can't find the harness. Choose Check again.",
+  harness_install_failed: "The install didn't finish.",
 };
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -51,6 +56,13 @@ export function harnessVersions(id: string, look: boolean): Promise<Result<Harne
 export function updateHarness(id: string): Promise<Result<void>> {
   assert(id.length > 0, "harness id");
   return call<void>("desktop_harness_update", { id });
+}
+
+/** Starts the install the confirm showed, for a harness that is not on this Mac; the engine runs
+ * it in the background. Input: the harness id. Output: ok once started, or a plain error with its code. */
+export function installHarness(id: string): Promise<Result<void>> {
+  assert(id.length > 0, "harness id");
+  return call<void>("desktop_harness_install", { id });
 }
 
 /** Reads the harness update settings. Output: the four settings, not ready, or a plain error. */

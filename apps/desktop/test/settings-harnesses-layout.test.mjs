@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CONTRAST_MIN, argsOf, contrasts, count, onTab, press, read, say, tabStops, top } from "./settings-agents-page.mjs";
 
-const PURPOSE = "CrazyAgent finds harnesses installed on this Mac. It does not install them. It can update one with that harness's own updater when you choose Update.";
+const PURPOSE = "CrazyAgent finds harnesses installed on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
 const on = (scene, check, width, theme) => onTab("harnesses", scene, check, width, theme);
 const CHECK = ".settings-top button";
 

@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
 import { openLink } from "../../api-projects";
 import {
-  harnessVersions, installedWith, loadHarnessUpdateSettings, pollWhileRunning, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
-  UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessVersions, type OnlineLookup, type UpdateMode, type UpdateSettings,
+  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
+  UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
 } from "../../api-harness-updates";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
@@ -36,8 +36,13 @@ const LOOKUPS: { value: OnlineLookup; label: string }[] = [
   { value: "on", label: "Look them up on the vendor's site" },
   { value: "off", label: "Don't look them up" },
 ];
+const INSTALLS: { value: InstallFromApp; label: string }[] = [
+  { value: "on", label: "Offer Install for harnesses that are not installed" },
+  { value: "off", label: "Don't offer Install" },
+];
+const INSTALL_HELP = "Install runs Homebrew when it is on this Mac, else npm. It never uses sudo or a script from a website.";
 const LOOKUP_HELP = "Claude Code's own installer and Codex's standalone installer have no check command, so CrazyAgent reads one small public file from downloads.claude.ai or releases.openai.com. It sends no account, project or file details. It never downloads or runs anything from there.";
-const PURPOSE = "CrazyAgent finds harnesses installed on this Mac. It does not install them. It can update one with that harness's own updater when you choose Update.";
+const PURPOSE = "CrazyAgent finds harnesses installed on this Mac. It can install one with Homebrew or npm and update one with that harness's own updater, each only when you choose it.";
 
 type Save = (settings: UpdateSettings) => Promise<Result<void>>;
 
@@ -59,14 +64,22 @@ export function chooseOnline(current: UpdateSettings, online: OnlineLookup, save
   return save({ ...current, online });
 }
 
+/** Saves a new Install from the app choice and keeps the other settings as they are.
+ * Inputs: the shown settings, the choice and the save call. Output: the save's result. */
+export function chooseInstall(current: UpdateSettings, install: InstallFromApp, save: Save): Promise<Result<void>> {
+  return save({ ...current, install });
+}
+
 function statusWord(entry: HarnessEntry): string {
   return entry.status.kind === "ready" ? "Ready" : entry.status.kind === "not_installed" ? "Not installed" : `Limited control: ${entry.status.reason}`;
 }
 
-function lastLine(versions: HarnessVersions): string | null {
+function lastLine(versions: HarnessVersions, name: string): string | null {
   const last = versions.last;
   if (last === null) return null;
-  if (last.ok) return `Updated from ${last.from ?? "an unknown version"} to ${last.to ?? "an unknown version"}. New agents use it now; no restart needed.`;
+  if (last.ok && last.from === null) return last.to === null ? "Installed. No restart needed." : `Installed version ${last.to}. No restart needed.`;
+  if (last.ok) return `Updated from ${last.from} to ${last.to ?? "an unknown version"}. New agents use it now; no restart needed.`;
+  if (last.code === "harness_install_not_found") return `The install finished, but CrazyAgent can't find ${name}. Choose Check again.`;
   return updateCopy(last.code ?? "harness_update_failed");
 }
 
@@ -78,20 +91,26 @@ function refusalLine(versions: HarnessVersions): string | null {
 }
 
 /** One harness line: what it is, its version, and Check for updates and Update when the settings
- * and the install allow them. Inputs: the catalog entry, its versions (null until read), the
- * update mode, a failure to show, whether a check runs, and the actions. Output: the row. */
-export function HarnessRowView({ entry, versions, mode, problem, checking = false, onCheck, onUpdate, onGuide }: {
+ * and the install allow them, or Install for one that is not on this Mac. Inputs: the catalog
+ * entry, its versions (null until read), the update mode, a failure to show, whether a check
+ * runs, and the actions. Output: the row. */
+export function HarnessRowView({ entry, versions, mode, problem, checking = false, onCheck, onUpdate, onInstall, onGuide }: {
   entry: HarnessEntry; versions: HarnessVersions | null; mode: UpdateMode; problem?: string; checking?: boolean;
-  onCheck: () => void; onUpdate: () => void; onGuide: (url: string) => void;
+  onCheck: () => void; onUpdate: () => void; onInstall: () => void; onGuide: (url: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const shown = entry.status.kind !== "not_installed" && versions !== null && mode !== "off" ? versions : null;
+  const missing = entry.status.kind === "not_installed";
+  const shown = !missing && versions !== null && mode !== "off" ? versions : null;
+  const absent = missing ? versions : null;
   const checkable = shown !== null && shown.method.kind !== "with_app" && shown.method.kind !== "unknown";
   const updatable = shown !== null && mode === "check_and_update" && shown.command !== null;
-  const running = shown?.running === true;
-  const refusal = shown === null ? null : refusalLine(shown);
-  const last = shown === null || running ? null : lastLine(shown);
-  const guide = shown?.guide ?? null;
+  const installable = absent !== null && absent.install !== null;
+  const read = shown ?? absent;
+  const running = read?.running === true;
+  const refusal = shown !== null ? refusalLine(shown) : absent !== null && absent.install === null && absent.refusal !== null ? updateCopy(absent.refusal) : null;
+  const last = read === null || running ? null : lastLine(read, entry.name);
+  const guide = shown?.guide ?? (absent !== null && absent.install === null ? absent.guide : null);
+  const said = read?.last?.code?.startsWith("harness_install_") ? "What the installer said" : "What the updater said";
   return <>
     <SettingRow label={entry.name}>
       <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>
@@ -100,20 +119,21 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
         <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
         {shown !== null && shown.method.kind !== "with_app" && <span>{versionLine(shown)}</span>}
         {refusal !== null && <span>{refusal}</span>}
-        {running && <span role="status">Updating...</span>}
+        {running && <span role="status">{missing ? "Installing..." : "Updating..."}</span>}
         {last !== null && <span role="status">{last}</span>}
         {problem && <span className="pj-error" role="alert">{problem}</span>}
-        {guide !== null && <span><a href={guide} onClick={(event) => { event.preventDefault(); onGuide(guide); }}>How to update it yourself</a></span>}
+        {guide !== null && <span><a href={guide} onClick={(event) => { event.preventDefault(); onGuide(guide); }}>{missing ? "How to install it yourself" : "How to update it yourself"}</a></span>}
       </span>
       <div className="set-ctl set-line-ctl">
         {checkable && <Button aria-label={`Check ${entry.name} for updates`} disabled={running || checking} onClick={onCheck}>Check for updates</Button>}
         {updatable && <Button aria-label={`Update ${entry.name}`} disabled={running || checking} onClick={onUpdate}>Update</Button>}
+        {installable && <Button aria-label={`Install ${entry.name}`} disabled={running} onClick={onInstall}>Install</Button>}
         <StatusBadge word={statusWord(entry)} />
       </div>
     </SettingRow>
-    {shown?.last && !shown.last.ok && shown.last.output && !running && <details className="set-body">
-      <summary>What the updater said</summary>
-      <pre className="mono">{shown.last.output}</pre>
+    {read?.last && !read.last.ok && read.last.output && !running && <details className="set-body">
+      <summary>{said}</summary>
+      <pre className="mono">{read.last.output}</pre>
     </details>}
     {open && <dl className="details-grid">
       <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</dd>
@@ -138,7 +158,21 @@ export function UpdateConfirm({ versions, name, open, pending, onConfirm, onCanc
   </Dialog>;
 }
 
-/** The Updates section: the three harness update settings, each saved as soon as it is chosen.
+/** Asks before an install: the exact line CrazyAgent runs, what it never does and when agents can
+ * use the harness. Inputs: the versions with the install line, the harness name, open, pending and
+ * the two actions. Output: the dialog, focus starting on Cancel. */
+export function InstallConfirm({ versions, name, open, pending, onConfirm, onCancel }: {
+  versions: HarnessVersions; name: string; open: boolean; pending: boolean; onConfirm: () => void; onCancel: () => void;
+}) {
+  return <Dialog open={open} title={`Install ${name}?`} onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel} data-autofocus>Cancel</Button><Button variant="primary" pending={pending} onClick={onConfirm}>Install</Button></>}>
+    <p>CrazyAgent runs exactly this line. It never uses sudo and never runs a script from a website.</p>
+    <pre className="mono">{versions.install}</pre>
+    <p>When it finishes, new agents can use {name} with no engine restart.</p>
+  </Dialog>;
+}
+
+/** The Updates section: the four harness update and install settings, each saved as soon as it is chosen.
  * Inputs: the shown settings, a save failure to show and the save call. Output: the section. */
 export function UpdateSettingsView({ settings, problem, save }: { settings: UpdateSettings; problem?: string; save: Save }) {
   return <SettingSection title="Updates">
@@ -151,13 +185,16 @@ export function UpdateSettingsView({ settings, problem, save }: { settings: Upda
     <SettingLine wide label="Newer versions of self-updating installs" help={LOOKUP_HELP} changed={settings.online !== UPDATE_SETTINGS_DEFAULT.online}>
       <Segmented label="Newer versions of self-updating installs" value={settings.online} options={LOOKUPS} onValue={(online) => void chooseOnline(settings, online, save)} />
     </SettingLine>
+    <SettingLine wide label="Install from the app" help={INSTALL_HELP} changed={settings.install !== UPDATE_SETTINGS_DEFAULT.install}>
+      <Segmented label="Install from the app" value={settings.install} options={INSTALLS} onValue={(install) => void chooseInstall(settings, install, save)} />
+    </SettingLine>
     {problem && <div className="set-body"><p className="pj-error" role="alert">{problem}</p></div>}
   </SettingSection>;
 }
 
 function failureCopy(result: Exclude<Result<unknown>, { kind: "ok" }>): string | undefined {
   if (result.kind === "not_ready") return undefined;
-  return result.code.startsWith("harness_update_") ? updateCopy(result.code) : result.message;
+  return result.code.startsWith("harness_update_") || result.code.startsWith("harness_install_") ? updateCopy(result.code) : result.message;
 }
 
 function wait(ms: number): Promise<void> {
@@ -170,19 +207,21 @@ function HarnessRow({ entry, settings, onCatalog }: { entry: HarnessEntry; setti
   const [checking, setChecking] = useState(false);
   const [asking, setAsking] = useState(false);
   const [pending, setPending] = useState(false);
+  const [adding, setAdding] = useState(false);
   const mode = settings?.mode ?? "off";
   const look = settings?.when === "on_open";
+  const known = settings !== null;
   const installed = entry.status.kind !== "not_installed";
   const show = (read: Result<HarnessVersions>) => {
     if (read.kind === "ok") { setVersions(read.value); setProblem(undefined); } else setProblem(failureCopy(read));
     return read;
   };
   useEffect(() => {
-    if (!installed || mode === "off") return;
+    if (!known || (installed && mode === "off")) return;
     let live = true;
-    void harnessVersions(entry.id, look).then((read) => { if (live) show(read); });
+    void harnessVersions(entry.id, installed && look).then((read) => { if (live) show(read); });
     return () => { live = false; };
-  }, [entry.id, installed, mode, look]);
+  }, [entry.id, known, installed, mode, look]);
   const check = async () => {
     setChecking(true);
     show(await harnessVersions(entry.id, true));
@@ -197,11 +236,22 @@ function HarnessRow({ entry, settings, onCatalog }: { entry: HarnessEntry; setti
     show(await pollWhileRunning(entry.id, (id, again) => harnessVersions(id, again).then(show), wait));
     onCatalog();
   };
+  const install = async () => {
+    setPending(true);
+    const started = await installHarness(entry.id);
+    setPending(false);
+    setAdding(false);
+    if (started.kind !== "ok") { setProblem(failureCopy(started)); return; }
+    show(await pollWhileRunning(entry.id, (id, again) => harnessVersions(id, again).then(show), wait));
+    onCatalog();
+  };
   return <>
     <HarnessRowView entry={entry} versions={versions} mode={mode} problem={problem} checking={checking}
-      onCheck={() => void check()} onUpdate={() => setAsking(true)} onGuide={(url) => void openLink(url)} />
+      onCheck={() => void check()} onUpdate={() => setAsking(true)} onInstall={() => setAdding(true)} onGuide={(url) => void openLink(url)} />
     {versions?.command && <UpdateConfirm versions={versions} name={entry.name} open={asking} pending={pending}
       onConfirm={() => void update()} onCancel={() => setAsking(false)} />}
+    {versions?.install && <InstallConfirm versions={versions} name={entry.name} open={adding} pending={pending}
+      onConfirm={() => void install()} onCancel={() => setAdding(false)} />}
   </>;
 }
 
