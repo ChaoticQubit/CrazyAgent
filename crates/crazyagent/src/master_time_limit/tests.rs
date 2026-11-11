@@ -59,7 +59,7 @@ fn each_option_is_saved_and_read_back_with_its_clock_and_its_cause() {
         assert_eq!(load(&reader).unwrap(), settings);
     }
     let rows: i64 = connection
-        .query_row("SELECT count(*) FROM master_time_settings", [], |row| {
+        .query_row("SELECT count(*) FROM configured_master_time", [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -99,7 +99,7 @@ fn a_stored_value_this_engine_does_not_know_fails_closed() {
     assert!(
         connection
             .execute(
-                "INSERT INTO master_time_settings(singleton,time_limit) VALUES(1,'minutes5')",
+                "INSERT INTO configured_master_time(singleton,time_limit) VALUES(1,'minutes5')",
                 [],
             )
             .is_err(),
@@ -107,7 +107,7 @@ fn a_stored_value_this_engine_does_not_know_fails_closed() {
     );
     connection
         .execute_batch(
-            "DROP TABLE master_time_settings; CREATE TABLE master_time_settings (singleton INTEGER PRIMARY KEY, time_limit TEXT NOT NULL); INSERT INTO master_time_settings VALUES(1,'minutes5');",
+            "DROP TABLE configured_master_time; CREATE TABLE configured_master_time (singleton INTEGER PRIMARY KEY, time_limit TEXT NOT NULL); INSERT INTO configured_master_time VALUES(1,'minutes5');",
         )
         .unwrap();
     assert_eq!(

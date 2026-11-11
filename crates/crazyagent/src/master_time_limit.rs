@@ -17,7 +17,7 @@ pub const RUN_TIME_MAX: Duration = Duration::from_secs(60 * 60);
 pub const START_TIME_MAX: Duration = Duration::from_secs(10 * 60);
 
 #[cfg(any(unix, test))]
-const TABLE: &str = "CREATE TABLE IF NOT EXISTS master_time_settings (
+const TABLE: &str = "CREATE TABLE IF NOT EXISTS configured_master_time (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     time_limit TEXT NOT NULL CHECK(time_limit IN ('no_limit', 'minutes10', 'minutes30', 'minutes60'))
 )";
@@ -121,7 +121,7 @@ pub(crate) fn save(
     };
     let stored = connection
         .execute(
-            "INSERT INTO master_time_settings(singleton,time_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET time_limit=excluded.time_limit",
+            "INSERT INTO configured_master_time(singleton,time_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET time_limit=excluded.time_limit",
             rusqlite::params![limit],
         )
         .map_err(error)?;
@@ -136,7 +136,7 @@ pub(crate) fn save(
 pub fn load(connection: &Connection) -> Result<MasterTimeSettings, EngineError> {
     let stored: Option<String> = connection
         .query_row(
-            "SELECT time_limit FROM master_time_settings WHERE singleton=1",
+            "SELECT time_limit FROM configured_master_time WHERE singleton=1",
             [],
             |row| row.get(0),
         )

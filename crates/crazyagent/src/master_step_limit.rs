@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 const CAUSE_PREFIX: &str = "master_step_limit_";
 
 #[cfg(any(unix, test))]
-const TABLE: &str = "CREATE TABLE IF NOT EXISTS master_step_settings (
+const TABLE: &str = "CREATE TABLE IF NOT EXISTS configured_master_steps (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     step_limit TEXT NOT NULL CHECK(step_limit IN ('no_limit', 'steps50', 'steps100', 'steps200'))
 )";
@@ -104,7 +104,7 @@ pub(crate) fn save(
     };
     let stored = connection
         .execute(
-            "INSERT INTO master_step_settings(singleton,step_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET step_limit=excluded.step_limit",
+            "INSERT INTO configured_master_steps(singleton,step_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET step_limit=excluded.step_limit",
             rusqlite::params![limit],
         )
         .map_err(error)?;
@@ -119,7 +119,7 @@ pub(crate) fn save(
 pub fn load(connection: &Connection) -> Result<MasterStepSettings, EngineError> {
     let stored: Option<String> = connection
         .query_row(
-            "SELECT step_limit FROM master_step_settings WHERE singleton=1",
+            "SELECT step_limit FROM configured_master_steps WHERE singleton=1",
             [],
             |row| row.get(0),
         )
