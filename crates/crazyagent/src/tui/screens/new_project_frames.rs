@@ -3,6 +3,7 @@ use super::new_project_input::cells;
 use super::new_project_tests::{key, load_catalog, type_text, wizard};
 use super::new_project_view::{Look, Row, Screen, research_glyph, spread, wizard_screen};
 use crate::project_setup::ResearchKind;
+use crate::sandbox::policy::AgentAccess;
 use crate::tui::frame::{footer, header, hint};
 use crate::tui::glyphs::{ASCII, UNICODE};
 use crate::tui::theme::{Appearance, Colors, Depth, Theme};
@@ -133,6 +134,8 @@ fn about() -> Wizard {
     wizard
 }
 
+/// Draws each wizard step at both reviewed sizes. The review step shows the level a new
+/// project starts at, set here, since Linux preselects another one. Output: frames by id.
 fn wizard_frames() -> Vec<(String, String)> {
     let look = Look::plain();
     let mut drawn = Vec::new();
@@ -167,6 +170,7 @@ fn wizard_frames() -> Vec<(String, String)> {
     draw("wiz-team-80", &wizard, 80, 24);
     wizard.done[Step::Team.index()] = true;
     wizard.go(Step::Review);
+    wizard.access = AgentAccess::NEW_PROJECT;
     draw("wiz-review-120", &wizard, 120, 36);
     draw("wiz-review-80", &wizard, 80, 24);
     drawn
