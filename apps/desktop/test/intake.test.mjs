@@ -9,7 +9,7 @@ const intake = await import("../src/screens/intake/intake.ts");
 const router = await import("../src/ui/router.ts");
 const { HomeFolderView } = await import("../src/screens/intake/home-folder.tsx");
 const { FoundProjectsView, SetUpDialogBody } = await import("../src/screens/intake/found.tsx");
-const { AddFolderView, AnywayDialog, MoveConfirmDialog } = await import("../src/screens/intake/add-folder.tsx");
+const { AddFolderView, AnywayDialog, ICloudDialog, MoveConfirmDialog } = await import("../src/screens/intake/add-folder.tsx");
 const intakeApi = await import("../src/api-intake.ts");
 const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/clone.tsx");
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
@@ -886,4 +886,75 @@ test("a soft engine refusal asks again only when the override for it was not sen
   assert.equal(intake.asksAgain("home_destination_exists", []), false);
   assert.equal(intake.asksAgain("home_move_project", ["worktrees", "too_large"]), false);
   assert.equal(intake.asksAgain("constructor", []), false);
+});
+
+const icloudProps = (extra = {}) => ({
+  open: true, name: "shop", source: "/Users/mira/Desktop/shop", placeholders: 3, way: "move", downloading: false, progress: null, stopping: false,
+  onDownload: noop, onStop: noop, onCancel: noop, ...extra,
+});
+const footerButtons = (dialog) => {
+  const footer = dialog.props.footer;
+  return typeof footer.type === "function" ? [footer] : [].concat(footer.props.children ?? []).filter(Boolean);
+};
+const footerButton = (dialog, label) => footerButtons(dialog).find((button) => button.props.children === label);
+
+test("the iCloud question names the files, the download and what a move does on other Macs", () => {
+  const page = html(ICloudDialog, icloudProps());
+  assert.match(page, /Download shop from iCloud first\?/);
+  assert.match(page, /3 files are only in iCloud; CrazyAgent downloads them first \(needs internet, can take a while\)\./);
+  assert.match(page, /Moving takes the folder out of iCloud Desktop on your other Macs too\./);
+  const order = ["Download and move", "Download and copy", "Cancel"].map((label) => page.indexOf(label));
+  assert.ok(order.every((at) => at >= 0), page);
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  assert.equal(footerButton(ICloudDialog(icloudProps()), "Download and move").props.variant, "primary");
+  assert.equal(footerButton(ICloudDialog(icloudProps({ way: "copy" })), "Download and copy").props.variant, "primary");
+  assert.match(html(ICloudDialog, icloudProps({ placeholders: null })), /Some files are only in iCloud/);
+  assert.equal(html(ICloudDialog, icloudProps({ open: false })), "");
+});
+
+test("Download and move in the iCloud question downloads, then moves", () => {
+  const calls = [];
+  footerButton(ICloudDialog(icloudProps({ onDownload: (way) => calls.push(way) })), "Download and move").props.onClick();
+  assert.deepEqual(calls, ["move"]);
+});
+
+test("Download and copy in the iCloud question downloads, then copies, even when Move was picked", () => {
+  const calls = [];
+  footerButton(ICloudDialog(icloudProps({ onDownload: (way) => calls.push(way) })), "Download and copy").props.onClick();
+  assert.deepEqual(calls, ["copy"]);
+});
+
+test("Cancel in the iCloud question closes it and downloads nothing", () => {
+  const calls = [];
+  const dialog = ICloudDialog(icloudProps({ onDownload: (way) => calls.push(way), onCancel: () => calls.push("cancel") }));
+  footerButton(dialog, "Cancel").props.onClick();
+  assert.deepEqual(calls, ["cancel"]);
+});
+
+test("a running iCloud download shows its progress and only Stop download, which stops it", () => {
+  const calls = [];
+  const props = icloudProps({ downloading: true, progress: { total: 3, done: 1 }, onStop: () => calls.push("stop") });
+  const page = html(ICloudDialog, props);
+  assert.match(page, /Downloading from iCloud: 1 of 3 files/);
+  assert.doesNotMatch(page, /Download and move|Download and copy/);
+  const dialog = ICloudDialog(props);
+  assert.equal(dialog.props.busy, true);
+  footerButton(dialog, "Stop download").props.onClick();
+  assert.deepEqual(calls, ["stop"]);
+  assert.match(html(ICloudDialog, icloudProps({ downloading: true })), /Downloading from iCloud\.\.\./);
+  assert.match(html(ICloudDialog, icloudProps({ downloading: true, stopping: true })), /Stopping the download\.\.\./);
+});
+
+test("the iCloud lines count files, name the iCloud place and read progress", () => {
+  assert.equal(intake.icloudCountLine(1), "1 file is only in iCloud; CrazyAgent downloads them first (needs internet, can take a while).");
+  assert.throws(() => intake.icloudCountLine(0));
+  assert.match(intake.icloudMoveLine("/Users/mira/Documents/shop"), /out of iCloud Documents on/);
+  assert.match(intake.icloudMoveLine("/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop"), /out of iCloud Drive on/);
+  assert.match(intake.icloudMoveLine("/Volumes/Work/shop"), /out of iCloud Drive on/);
+  assert.equal(intake.icloudProgressLine({ total: 0, done: 0 }), "Downloading from iCloud...");
+  assert.throws(() => intake.icloudProgressLine({ total: 1, done: 2 }));
+  assert.equal(intake.icloudPlaceholders({ kind: "ok", value: { bytes: 1, placeholders: 7 } }), 7);
+  assert.equal(intake.icloudPlaceholders({ kind: "ok", value: { bytes: 1 } }), 0);
+  assert.equal(intake.icloudPlaceholders({ kind: "loading" }), 0);
+  assert.equal(intake.icloudPlaceholders(null), 0);
 });

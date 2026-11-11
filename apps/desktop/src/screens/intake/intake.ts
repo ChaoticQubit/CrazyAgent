@@ -1,8 +1,8 @@
 import { ADD_WARNINGS, measuredLine } from "../../api-intake";
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts,
-  MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
+  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntentReceipt,
+  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import type { IconName, Tone } from "../../ui";
@@ -124,6 +124,48 @@ export function sizeLine(mode: AddWay, bytes: number | null, home: string, unmea
 export function worktreesLine(count: number): string {
   const many = count !== 1;
   return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
+}
+
+/** How often Add folder reads the running iCloud download's progress. */
+export const ICLOUD_PROGRESS_MS = 1000;
+
+/** What Add folder says once the owner stopped an iCloud download. */
+export const ICLOUD_STOPPED = "The download stopped. Nothing was moved or copied.";
+
+/** How many of a folder's files the size read found only in iCloud. Input: the read, if any.
+ * Output: the count, 0 while it is not read or could not be measured. */
+export function icloudPlaceholders(size: Loaded<FolderSize> | null): number {
+  const count = size?.kind === "ok" ? size.value.placeholders ?? 0 : 0;
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error(`iCloud placeholder count must be a whole number, got ${count}`);
+  return count;
+}
+
+/** Says how many of a folder's files are only in iCloud and that CrazyAgent downloads them first.
+ * Input: the count, or null when only the engine's refusal said some are. Output: one sentence. */
+export function icloudCountLine(placeholders: number | null): string {
+  if (placeholders !== null && (!Number.isSafeInteger(placeholders) || placeholders < 1)) {
+    throw new Error(`an iCloud question needs at least one file, got ${placeholders}`);
+  }
+  const files = placeholders === null ? "Some files are" : placeholders === 1 ? "1 file is" : `${placeholders} files are`;
+  return `${files} only in iCloud; CrazyAgent downloads them first (needs internet, can take a while).`;
+}
+
+/** Says that a Move takes the folder out of iCloud on the owner's other Macs: iCloud Desktop for a
+ * folder in ~/Desktop, iCloud Documents for one in ~/Documents, iCloud Drive otherwise.
+ * Input: the absolute folder. Output: one sentence. */
+export function icloudMoveLine(source: string): string {
+  const parts = source.split("/");
+  const place = parts[1] !== "Users" || parts.length < 5 ? "iCloud Drive"
+    : parts[3] === "Desktop" ? "iCloud Desktop" : parts[3] === "Documents" ? "iCloud Documents" : "iCloud Drive";
+  return `Moving takes the folder out of ${place} on your other Macs too.`;
+}
+
+/** The running iCloud download's status line. Input: the last progress read, or null before the
+ * first. Output: one sentence, with the counts once the engine has them. */
+export function icloudProgressLine(progress: IcloudProgress | null): string {
+  if (progress === null || progress.total === 0) return "Downloading from iCloud...";
+  if (progress.done > progress.total) throw new Error(`iCloud progress done ${progress.done} is past total ${progress.total}`);
+  return `Downloading from iCloud: ${progress.done} of ${progress.total} files`;
 }
 
 /** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */
