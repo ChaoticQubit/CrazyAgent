@@ -30,7 +30,18 @@ use ratatui::text::{Line, Span};
 mod tests;
 
 const PAGE_STEP: usize = 10;
-const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
+/// The plugin names the engine accepts before a skill name: `crazyagent:tdd` names the same
+/// skill as `tdd`.
+const SKILL_NAMESPACES: [&str; 3] = ["crazyagent:", "superpowers:", "software-practices:"];
+const NAMESPACE_BYTES_MAX: usize = 19;
+const _: () = {
+    let mut index = 0;
+    while index < SKILL_NAMESPACES.len() {
+        assert!(SKILL_NAMESPACES[index].len() <= NAMESPACE_BYTES_MAX);
+        index += 1;
+    }
+};
+const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2 + NAMESPACE_BYTES_MAX;
 const EDITOR_ROWS_MIN: usize = 3;
 const _: () = assert!(EDITOR_ROWS_MIN >= 2);
 const EDITOR_CHROME_ROWS: usize = 2;
@@ -181,8 +192,33 @@ fn ends_at(chars: &[char], end: usize) -> bool {
     }
 }
 
+/// Finds the catalog skill written at one position of a line: its name, or its name after
+/// an engine namespace such as `crazyagent:`, which tags the whole written text. A catalog
+/// name that itself holds a colon wins, and an unknown namespace is no tag. Inputs: the
+/// line's characters, the position and the tags, longest first. Output: the tag and the
+/// character after the written name, or none.
+fn skill_at(chars: &[char], at: usize, skills: &[Skill]) -> Option<(usize, usize)> {
+    let named = |start: usize| {
+        skills
+            .iter()
+            .position(|skill| {
+                chars[start..].starts_with(&skill.name) && ends_at(chars, start + skill.name.len())
+            })
+            .map(|index| (index, start + skills[index].name.len()))
+    };
+    named(at).or_else(|| {
+        SKILL_NAMESPACES.iter().find_map(|namespace| {
+            let start = at + namespace.len();
+            let written =
+                start <= chars.len() && chars[at..start].iter().copied().eq(namespace.chars());
+            written.then(|| named(start)).flatten()
+        })
+    })
+}
+
 /// Finds the catalog skill names in one line that touch a range of characters: a whole
-/// name, not part of a longer name, with sentence punctuation after it allowed.
+/// name, bare or after an engine namespace, not part of a longer name, with sentence
+/// punctuation after it allowed.
 /// Inputs: the line's characters, the range and the tags, longest first.
 /// Output: each name's first character, the character after it and its tag, in order.
 fn skill_ranges(
@@ -196,16 +232,10 @@ fn skill_ranges(
     let mut at = from.saturating_sub(NAME_REACH);
     while at < to {
         let free = at == 0 || !name_char(chars[at - 1]);
-        let hit = free
-            .then(|| {
-                skills.iter().position(|skill| {
-                    chars[at..].starts_with(&skill.name) && ends_at(chars, at + skill.name.len())
-                })
-            })
-            .flatten();
+        let hit = free.then(|| skill_at(chars, at, skills)).flatten();
         match hit {
-            Some(index) => {
-                let end = at + skills[index].name.len();
+            Some((index, end)) => {
+                assert!(at < end && end <= chars.len());
                 found.push((at, end, index));
                 at = end;
             }
