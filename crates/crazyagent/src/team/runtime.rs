@@ -1141,6 +1141,11 @@ impl TeamRuntime {
                 };
                 match ModelProxy::bind(id, hosts, Some(port), &[]) {
                     Ok(proxy) => Some(Arc::new(proxy)),
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                        return Ok(Err(format!(
+                            "its model proxy port {port} is outside the ports CrazyAgent uses now"
+                        )));
+                    }
                     Err(_) => return Ok(Err(format!("its model proxy port {port} is taken"))),
                 }
             }
