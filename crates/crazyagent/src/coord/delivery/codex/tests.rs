@@ -173,6 +173,34 @@ fn a_ping_at_the_control_limit_is_answered_and_one_byte_more_is_refused() {
     assert_eq!(ping_of(126), (Err("codex_bridge_reply_too_large"), None));
 }
 
+/// G4 F2: a bridge that answers the upgrade with a ping and closes at once is named closed
+/// every time, whether the read meets its end first or a timeout is set on the socket after
+/// its peer went, which macOS refuses with EINVAL.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bridge_that_closes_right_after_its_answer_is_always_named_closed() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    for _ in 0..20 {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = base.join("p");
+        let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = accepted(&listener);
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let mut answer = b"HTTP/1.1 101 Switching Protocols\r\n\r\n".to_vec();
+            answer.extend([0x89, 0x01, b'p']);
+            stream.write_all(&answer).unwrap();
+        });
+        let answer = super::wire::deliver(&socket, "dummy", true, own_group());
+        server.join().unwrap();
+        assert_eq!(answer, Err("codex_bridge_closed"));
+    }
+}
+
 /// A pane's script that starts a stand-in app-server in its background, as the bridge
 /// script starts the real one. The stand-in listens on the socket named by `$1`, takes two
 /// connections in turn and writes the length of each one's first read to `$1.got`.
