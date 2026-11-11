@@ -302,6 +302,9 @@ test("the Overview keeps Needs you above the tabs and today's activity under the
   assert.doesNotMatch(markup, /id="pj-research"/, "research progress waits under the Activity tab");
   assert.doesNotMatch(markup, /Recent activity/, "recent activity waits under the Activity tab");
   assert.match(markup, />Refresh</);
+  const activity = renderToStaticMarkup(createElement(overview.ActivityPanel, { data: { ...tabData([job("needs_pool")]), setup } }));
+  assert.match(activity, /Recent activity/, "the Activity tab holds recent activity");
+  assert.match(activity, /id="pj-research"/, "the Activity tab holds research progress");
 });
 
 test("a failed research row shows its plain reason and Try again", async () => {
