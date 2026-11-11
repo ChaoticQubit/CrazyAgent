@@ -19,7 +19,7 @@ pub(super) fn ide_error(error: EngineError) -> BridgeError {
 }
 
 impl NativeBridge {
-    fn reveal_client(&self) -> Result<Arc<OwnerClient>, BridgeError> {
+    pub(super) fn reveal_client(&self) -> Result<Arc<OwnerClient>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }

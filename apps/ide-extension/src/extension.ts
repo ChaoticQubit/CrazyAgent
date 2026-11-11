@@ -7,6 +7,7 @@ import { remoteGit } from "./git.js";
 import { startLock } from "./lock.js";
 import { readonly } from "./readonly.js";
 import { reveal } from "./reveal.js";
+import { runCommand } from "./run-command.js";
 import { sidebarAgents } from "./sidebar/agents.js";
 import { sidebarChanges } from "./sidebar/changes.js";
 import { sidebarContext } from "./sidebar/context.js";
@@ -32,6 +33,7 @@ const features: Feature[] = [
   readonly,
   extensions,
   reveal,
+  runCommand,
   sandboxedTerminal,
   terminalMenu,
   terminalGit,
