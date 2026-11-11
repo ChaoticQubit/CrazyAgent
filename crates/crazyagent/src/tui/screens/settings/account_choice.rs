@@ -12,11 +12,17 @@ use ratatui::text::Line;
 const RESERVE_STEP: u8 = 5;
 const NAME_WIDTH: usize = 28;
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MODAL_WIDTH: u16 = 76;
+
+/// The room for one line of a choice's help text: the modal less its border, its padding
+/// and the four spaces the help is set in by.
+const DETAIL_WIDTH: usize = MODAL_WIDTH as usize - 8;
 
 /// The account choice editor over one pool, shown as a modal on Settings, Pools: row 0 is
 /// the app strategy, row 1 the pool's own strategy and each later row one member's rank,
 /// reserve and pin. The app-wide Live master account choice (DEC-139) shows under the
-/// strategies and changes with `m` from any row. Each change goes to the engine at once.
+/// strategies with its help wrapped to the box, and changes with `m` from any row. Each
+/// change goes to the engine at once.
 pub struct ChoiceEditor {
     pub pool: CredentialRef,
     pub row: usize,
@@ -356,9 +362,11 @@ impl ChoiceEditor {
                 clipped("Live master account", NAME_WIDTH),
                 schedule.live_master.label()
             )),
-            Line::raw(format!("    {}", schedule.live_master.detail())),
-            Line::default(),
         ];
+        for line in crate::tui::text::wrap(schedule.live_master.detail(), DETAIL_WIDTH) {
+            body.push(Line::raw(format!("    {line}")));
+        }
+        body.push(Line::default());
         for (index, member) in pool.members.iter().enumerate() {
             body.push(Line::raw(format!(
                 "{}{}{}",
@@ -384,7 +392,7 @@ impl ChoiceEditor {
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         (
             Modal {
-                width: 76,
+                width: MODAL_WIDTH,
                 title: format!("Account choice: {}", pool.name),
                 body,
                 top: None,

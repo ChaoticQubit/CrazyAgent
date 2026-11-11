@@ -1109,17 +1109,29 @@ mod tests {
                 .map(str::to_owned)
                 .unwrap_or_else(|| panic!("{shown}"))
         };
+        let help = |shown: &str| {
+            let lines: Vec<&str> = shown
+                .lines()
+                .skip_while(|line| !line.contains("Live master account"))
+                .skip(1)
+                .take_while(|line| !line.trim().is_empty())
+                .collect();
+            let fits = lines.iter().all(|line| line.chars().count() <= 76 - 4);
+            assert!(fits, "the box cuts a help line: {shown}");
+            let words: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+            words.join(" ")
+        };
         assert!(
             line(&shown).ends_with("Keep start account"),
             "nothing stored reads the default: {shown}"
         );
-        assert!(shown.contains(LiveMasterAccount::Keep.detail()), "{shown}");
+        assert_eq!(help(&shown), LiveMasterAccount::Keep.detail());
         for choice in [LiveMasterAccount::MoveWhenIdle, LiveMasterAccount::Keep] {
             screen.key(&Key::Char('m'), &mut ctx);
             assert_eq!(change(&mut ctx), ScheduleChange::LiveMaster { choice });
             let shown = body(&screen.modal(&ctx).unwrap().0);
             assert!(line(&shown).ends_with(choice.label()), "{shown}");
-            assert!(shown.contains(choice.detail()), "{shown}");
+            assert_eq!(help(&shown), choice.detail(), "{shown}");
         }
         assert_eq!(ctx.queued(), 0);
         screen.key(&Key::Down, &mut ctx);
