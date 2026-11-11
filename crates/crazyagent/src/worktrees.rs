@@ -3037,4 +3037,75 @@ mod tests {
             assert!(worktree_config_on(&listing));
         }
     }
+
+    /// Appends tracked branch sections to a repository's config, as a repository with many
+    /// branches holds them. Inputs: the repository and how many branches. Output: none; the
+    /// config file grows by about 105 bytes a branch.
+    #[cfg(unix)]
+    fn track_branches(repository: &Path, count: usize) {
+        use std::fmt::Write;
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        for branch in 0..count {
+            let name = format!("feature/scholar-scope-{branch:04}");
+            write!(
+                text,
+                "[branch \"{name}\"]\n\tremote = origin\n\tmerge = refs/heads/{name}\n"
+            )
+            .unwrap();
+        }
+        std::fs::write(&config, text).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_config_lists_more_than_64_kib_is_inspected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        track_branches(&repository, 1000);
+        let listing = git(
+            &repository,
+            &["config", "--local", "--no-includes", "--null", "--list"],
+        )
+        .unwrap();
+        assert!(listing.len() > 100_000);
+        let admission = inspect(repository.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&admission.repository), repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_key_after_64_kib_of_config_is_still_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        track_branches(&repository, 1000);
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "repository_config_refused:core_fsmonitor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_listing_past_the_git_output_bound_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[user]\n\tname = ");
+        text.push_str(&"n".repeat(OUTPUT_BYTES_MAX + 1));
+        text.push('\n');
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "git_operation_failed_or_output_capacity"
+        );
+    }
 }

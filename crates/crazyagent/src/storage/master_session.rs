@@ -5773,6 +5773,33 @@ fallback_allowed = false
     }
 
     #[tokio::test]
+    async fn a_master_turn_is_prepared_on_a_repository_whose_config_lists_more_than_64_kib() {
+        use std::fmt::Write;
+        let case = Fixture::onboarded().await;
+        case.register().await;
+        let config = case.repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        for branch in 0..1000 {
+            let name = format!("feature/scholar-scope-{branch:04}");
+            write!(
+                text,
+                "[branch \"{name}\"]\n\tremote = origin\n\tmerge = refs/heads/{name}\n"
+            )
+            .unwrap();
+        }
+        std::fs::write(&config, &text).unwrap();
+        assert!(text.len() > 100_000);
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a repository with many branches must prepare its master turn"),
+            Err(failure) => panic!("many branches must not stop a master turn: {failure:?}"),
+        };
+        assert_eq!(prepared.repository, case.repository);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        case.close().await;
+    }
+
+    #[tokio::test]
     async fn unregistered_local_rcli_is_configuration_required_without_admission_or_allocation() {
         let case = Fixture::new(false).await;
         let before = case.snapshot();
