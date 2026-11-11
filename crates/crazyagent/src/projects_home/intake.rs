@@ -130,6 +130,7 @@ impl AddPlan {
         let verified = copy_into(&self.source, &self.destination, Copying::Exact, self.bounds)?;
         Ok(Placed::Copied(OldSource {
             source: self.source,
+            landed: self.destination,
             verified,
             bounds: self.bounds,
         }))
@@ -144,11 +145,13 @@ pub enum Placed {
     Copied(OldSource),
 }
 
-/// The source of a move that went by copy: the folder, what the check of the copy matched
-/// and the bounds of the walk. Clearing it deletes only what the check matched.
+/// The source of a move that went by copy: the folder, the copy it landed as, what the
+/// check of the copy matched and the bounds of the walk. Clearing it deletes only what the
+/// check matched and what still equals its landed copy.
 #[derive(Debug)]
 pub struct OldSource {
     source: PathBuf,
+    landed: PathBuf,
     verified: Verified,
     bounds: CopyBounds,
 }
@@ -164,8 +167,9 @@ impl OldSource {
     /// `home_move_source_left` with every other entry kept in place.
     pub fn clear(self) -> Result<(), EngineError> {
         assert!(self.source.is_absolute());
+        assert!(self.landed.is_absolute());
         make_writable(&self.source).map_err(|_| source_left(1))?;
-        remove_verified(&self.source, &self.verified, self.bounds)
+        remove_verified(&self.source, &self.landed, &self.verified, self.bounds)
     }
 }
 
