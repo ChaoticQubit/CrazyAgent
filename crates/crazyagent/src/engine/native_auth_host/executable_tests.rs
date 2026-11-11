@@ -125,6 +125,27 @@ fn native_auth_registered_executable_rejects_symlink() {
 }
 
 #[test]
+fn native_auth_registered_entry_pins_the_real_file_behind_its_link() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = RegisteredNativeAuthHost::capture_entry(&link).unwrap();
+    assert_eq!(
+        registered.verified_path().unwrap(),
+        std::fs::canonicalize(&real).unwrap()
+    );
+    std::fs::remove_file(&link).unwrap();
+    assert_eq!(
+        RegisteredNativeAuthHost::capture_entry(&link)
+            .map(|_| ())
+            .unwrap_err()
+            .0,
+        "native_auth_host_unavailable"
+    );
+}
+
+#[test]
 fn native_auth_registered_executable_rejects_directory() {
     let root = tempfile::tempdir().unwrap();
     assert!(RegisteredNativeAuthHost::capture(root.path()).is_err());

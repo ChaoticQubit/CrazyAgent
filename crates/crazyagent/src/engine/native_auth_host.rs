@@ -131,6 +131,16 @@ impl RegisteredNativeAuthHost {
         })
     }
 
+    /// Captures a harness the engine found through a PATH entry: the entry, often a link
+    /// into a versioned install, is resolved to its real file now and that file is pinned
+    /// as `capture` pins it. Input: the absolute entry. Output: the host, or
+    /// `native_auth_host_unavailable` when no installed file is behind the entry.
+    pub(crate) fn capture_entry(entry: &Path) -> Result<Self, EngineError> {
+        let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
+            .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
+        Self::capture(&real)
+    }
+
     /// Returns the captured path while the retained file and the file at that path still
     /// have the identity hashed at capture. Every content write changes ctime, so equal
     /// identity means the hashed bytes, without re-reading a harness of hundreds of MB.

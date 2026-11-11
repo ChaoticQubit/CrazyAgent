@@ -20,6 +20,12 @@ impl RegisteredNativeAuthHost {
         Err(EngineError("native_auth_host_unavailable".into()))
     }
 
+    /// Refuses to pin a native sign-in host found through a PATH entry on this platform.
+    /// Takes the entry, unused. Returns `native_auth_host_unavailable`.
+    pub(crate) fn capture_entry(_entry: &Path) -> Result<Self, EngineError> {
+        Err(EngineError("native_auth_host_unavailable".into()))
+    }
+
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         match *self {}
     }

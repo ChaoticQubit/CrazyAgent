@@ -606,7 +606,7 @@ impl EngineService {
             return Err(fail("engine_service_closed"));
         }
         self.live()?;
-        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         self.owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?
@@ -618,7 +618,7 @@ impl EngineService {
             return Err(fail("engine_service_closed"));
         }
         self.live()?;
-        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         self.owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?
@@ -638,9 +638,9 @@ impl EngineService {
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?;
         let master =
-            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         let writer =
-            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         runtime.register_rcli_master_executable(master)?;
         runtime.register_rcli_private_key_executable(writer)
     }
