@@ -46,6 +46,7 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+mod icloud;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
@@ -497,6 +498,7 @@ struct Authority {
     ide_servers: crate::ide::server::Servers,
     ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
+    icloud: crate::projects_home::icloud::Downloads,
 }
 
 impl Authority {
@@ -1343,6 +1345,7 @@ impl OwnerServer {
                 ide_servers,
                 ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                icloud: crate::projects_home::icloud::Downloads::default(),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -2203,6 +2206,7 @@ enum Protocol {
     Process,
     Ide,
     IdeTab,
+    Icloud,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -2235,6 +2239,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("process", Protocol::Process),
         ("ide", Protocol::Ide),
         ("ide_tab", Protocol::IdeTab),
+        ("icloud", Protocol::Icloud),
     ];
     Ok(named
         .into_iter()
@@ -2321,6 +2326,12 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
+            Protocol::Icloud if icloud::deferred(body) => return Ok(Some(Deferred::Icloud(a))),
+            Protocol::Icloud => {
+                return icloud::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2493,6 +2504,10 @@ async fn serve_admitted(
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
+        Deferred::Icloud(a) => {
+            let served = icloud::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2543,7 +2558,8 @@ struct Tasks {
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, and Usage requests, which read and write the usage store. Each
+/// copy skill folders, Usage requests, which read and write the usage store, and iCloud
+/// downloads, which wait for macOS to bring a folder's files to this Mac. Each
 /// carries the admission, and the projects home its validated request; the others read
 /// the request frame.
 enum Deferred {
@@ -2561,6 +2577,7 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
+    Icloud(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2606,6 +2623,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Process => process::refusal(code)?,
         Protocol::Ide => ide::refusal(code)?,
         Protocol::IdeTab => ide_tab::refusal(code)?,
+        Protocol::Icloud => icloud::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

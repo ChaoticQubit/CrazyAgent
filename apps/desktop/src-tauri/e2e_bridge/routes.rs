@@ -1568,6 +1568,27 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.clone_repo(full_name)?; call.await }.await;
             routed(result)
         }
+        "desktop_icloud_download" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                path: String,
+            }
+            let Args { path } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_download(path)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_icloud_progress" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_progress()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_icloud_cancel" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_cancel()?; call.await }.await;
+            routed(result)
+        }
         "desktop_setup_status" => {
             let result: Result<_, BridgeError> = async { read(state).await?.setup_status().await }.await;
             routed(result)

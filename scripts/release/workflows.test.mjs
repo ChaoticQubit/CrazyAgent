@@ -76,7 +76,8 @@ test("every release, dev or stable, builds only after the whole CI workflow pass
   assert.deepEqual(release.split("\n").filter((line) => /^\s+if: .*(always|cancelled|failure)\(\)/.test(line)).map((line) => line.trim()), ["if: always() && matrix.os == 'macos'"], "only the keychain cleanup step runs after a failure");
 });
 
-const GUARD = "github.event_name == 'push'";
+const OWN_REPO = "github.event.pull_request.head.repo.full_name == github.repository";
+const GUARD = `(github.event_name == 'push' || (github.event_name == 'pull_request' && ${OWN_REPO}))`;
 const RUNNERS = Object.freeze({
   linux: "ubuntu-22.04",
   macos: `\${{ fromJSON(${GUARD} && '["self-hosted","macOS","badal"]' || '"macos-15"') }}`,
@@ -92,14 +93,17 @@ function steps(workflowText, job) {
   return block(block(workflowText, 0, "jobs").join("\n"), 2, job).join("\n").split(/\n(?= {6}- )/).slice(1);
 }
 
-test("CI runs on the owner's runners only for the release workflow's pushes, and every pull request, fork or same-repository, stays on GitHub", async () => {
+test("CI runs macOS on the owner's runner for pushes and same-repository pull requests, and a fork pull request stays on GitHub", async () => {
   const ci = await workflow("ci.yml");
   const jobs = block(ci, 0, "jobs").join("\n");
   for (const [job, runner] of Object.entries(RUNNERS)) assert(block(jobs, 2, job).includes(`    runs-on: ${runner}`), job);
   for (const name of ["ci.yml", "release.yml"]) {
     const text = await workflow(name);
     assert.doesNotMatch(text, /pull_request_target/, name);
-    assert.doesNotMatch(text, /head\.repo/, `${name}: no pull request reaches a self-hosted runner by its head repository`);
+    assert.deepEqual(text.split("\n").filter((line) => line.includes("head.repo")), name === "ci.yml" ? [`    runs-on: ${RUNNERS.macos}`] : [],
+      `${name}: only the macOS runner choice reads a pull request's head repository`);
+    assert.deepEqual(text.split("\n").filter((line) => line.includes("github.event_name == 'push'")), name === "ci.yml" ? [`    runs-on: ${RUNNERS.macos}`] : [],
+      `${name}: the runner choice is made once; badal steps follow runner.environment`);
     for (const line of text.split("\n").filter((line) => /^\s+runs-on:/.test(line) && line.includes("self-hosted"))) {
       assert(line.includes(`fromJSON(${GUARD} && `), `${name}: ${line.trim()}`);
       assert(/\|\| '"(ubuntu|macos|windows)-[0-9.]+"'\) \}\}$/.test(line), `${name}: pull requests fall back to a GitHub-hosted runner`);

@@ -150,7 +150,7 @@ impl Owner {
             .await
         {
             Ok(state) => match state.data {
-                OwnerData::FolderSize { bytes } => Ok(bytes),
+                OwnerData::FolderSize { bytes, .. } => Ok(bytes),
                 other => panic!("{other:?}"),
             },
             Err(e) => Err(e.0),

@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 fn executable(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
@@ -122,6 +123,65 @@ fn native_auth_registered_executable_rejects_symlink() {
     let link = root.path().join("link");
     symlink(real, &link).unwrap();
     assert!(RegisteredNativeAuthHost::capture(&link).is_err());
+}
+
+#[test]
+fn native_auth_registered_entry_pins_the_real_file_behind_its_link() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = RegisteredNativeAuthHost::capture_entry(&link).unwrap();
+    assert_eq!(
+        registered.verified_path().unwrap(),
+        std::fs::canonicalize(&real).unwrap()
+    );
+    std::fs::remove_file(&link).unwrap();
+    assert_eq!(
+        RegisteredNativeAuthHost::capture_entry(&link)
+            .map(|_| ())
+            .unwrap_err()
+            .0,
+        "native_auth_host_unavailable"
+    );
+}
+
+#[test]
+fn native_auth_registered_entry_refuses_a_rewrite_of_its_pinned_file_in_place() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
+    let mut file = OpenOptions::new().write(true).open(&real).unwrap();
+    file.write_all(b"tampered-host-bytes").unwrap();
+    drop(file);
+    assert_eq!(
+        registered.current().map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+}
+
+#[test]
+fn native_auth_registered_entry_moves_to_a_new_install_while_the_old_one_is_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let old = executable(root.path(), "claude-2.1.309");
+    let new = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&old, &link).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
+    assert!(Arc::ptr_eq(&registered, &registered.current().unwrap()));
+    std::fs::remove_file(&link).unwrap();
+    symlink(&new, &link).unwrap();
+    let current = registered.current().unwrap();
+    assert_eq!(
+        current.verified_path().unwrap(),
+        std::fs::canonicalize(&new).unwrap()
+    );
+    assert_eq!(
+        registered.verified_path().unwrap(),
+        std::fs::canonicalize(&old).unwrap()
+    );
 }
 
 #[test]

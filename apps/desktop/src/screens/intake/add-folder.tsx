@@ -1,16 +1,18 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { nextGeneration, pickFolder } from "../../api";
-import { ADD_WARNINGS, addExistingFolder, intakeCopy, loadFolderSize, loadProjectsHome } from "../../api-intake";
+import {
+  ADD_WARNINGS, addExistingFolder, cancelIcloudDownload, downloadFromIcloud, intakeCopy, loadFolderSize, loadIcloudProgress, loadProjectsHome,
+} from "../../api-intake";
 import { receiptState } from "../../api-projects";
-import type { AddFolderMode, AddOverride, FolderSize, ProjectsHome } from "../../engine-client";
+import type { AddFolderMode, AddOverride, FolderSize, IcloudProgress, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, formatRoute, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  addWay, anywayIssues, anywayOverrides, asksAgain, anywayWarnings, folderName, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld,
-  worktreesLine, type AddWay, type AnywayWarning,
+  ICLOUD_PROGRESS_MS, addWay, anywayIssues, anywayOverrides, asksAgain, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  icloudOutcome, icloudPlaceholders, icloudProgressLine, icloudRun, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -152,11 +154,44 @@ export function MoveConfirmDialog({ open, way, name, source, root, sameVolume, b
   </Dialog>;
 }
 
+/** The question before a Move or Copy of a folder with files only in iCloud: how many, that
+ * CrazyAgent downloads them first, and that a move takes the folder out of iCloud on the owner's
+ * other Macs; then Download and move, Download and copy or Cancel, the owner's way first in focus.
+ * While the download runs it shows the progress and Stop download instead, and cannot be closed.
+ * Inputs: whether it is open, the folder name and path, the count (null when only the engine's
+ * refusal said some are), the way, the download state and the handlers. Output: the dialog. */
+export function ICloudDialog({ open, name, source, placeholders, way, downloading, progress, stopping, onDownload, onStop, onCancel }: {
+  open: boolean;
+  name: string;
+  source: string;
+  placeholders: number | null;
+  way: AddFolderMode;
+  downloading: boolean;
+  progress: IcloudProgress | null;
+  stopping: boolean;
+  onDownload: (way: AddFolderMode) => void;
+  onStop: () => void;
+  onCancel: () => void;
+}) {
+  const choice = (option: AddFolderMode, label: string) => <Button variant={option === way ? "primary" : "secondary"}
+    icon={option === "move" ? "folder-input" : "copy"} onClick={() => onDownload(option)} data-autofocus={option === way || undefined}>{label}</Button>;
+  const footer = downloading
+    ? <Button pending={stopping} pendingLabel="Stopping..." onClick={onStop}>Stop download</Button>
+    : <>{choice("move", "Download and move")}{choice("copy", "Download and copy")}<Button onClick={onCancel}>Cancel</Button></>;
+  return <Dialog open={open} title={`Download ${name} from iCloud first?`} onClose={onCancel} busy={downloading} footer={footer}>
+    <p>{icloudCountLine(placeholders)}</p>
+    <Notice tone="info">{icloudMoveLine(source)}</Notice>
+    {downloading && <p className="pj-secondary" role="status">{stopping ? "Stopping the download..." : icloudProgressLine(progress)}</p>}
+  </Dialog>;
+}
+
 /** Add an existing folder: picks it in the macOS chooser and reads its size and git links. By
  * default it is set up where it is on a chosen pool; Move and Copy are offered once the read is
  * done. A Move or Copy with issues asks "Move anyway?" first: yes sends an override for exactly
  * those issues, Use where it is opens the setup in place. A Move with none asks to confirm with
- * the target shown, and a moved or copied folder shows on Home as found. */
+ * the target shown, and a moved or copied folder shows on Home as found. A folder with files only
+ * in iCloud asks before all of that whether to download them and then move or copy, shows the
+ * download's progress with a stop, and goes on with the chosen way once every file is here. */
 export function AddFolder() {
   const session = useAppSession();
   const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
@@ -170,6 +205,13 @@ export function AddFolder() {
   const [refused, setRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
+  const [icloud, setIcloud] = useState<{ placeholders: number | null } | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [progress, setProgress] = useState<IcloudProgress | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const run = useRef<ReturnType<typeof icloudRun> | null>(null);
+  const downloaded = useRef<string | null>(null);
+  useEffect(() => () => run.current?.leave(), []);
   const root = home.kind === "ok" ? home.value.path : null;
   const way = addWay(mode, size);
 
@@ -178,6 +220,7 @@ export function AddFolder() {
     setConfirming(false);
     setAsking(false);
     setRefused(null);
+    setIcloud(null);
     const result = await pickFolder("project");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
     if (result.value === null) return;
@@ -192,11 +235,11 @@ export function AddFolder() {
     if (picks.current === pick) setSize(measured);
   };
 
-  const add = async (overrides: AddOverride[]) => {
-    if (!source || busy || way === "here") return;
+  const add = async (overrides: AddOverride[], chosen: AddWay = way) => {
+    if (!source || busy || chosen === "here") return;
     setBusy(true);
     setProblem("");
-    const result = await addExistingFolder(source, way, overrides, nextGeneration());
+    const result = await addExistingFolder(source, chosen, overrides, nextGeneration());
     setBusy(false);
     setConfirming(false);
     setAsking(false);
@@ -205,6 +248,7 @@ export function AddFolder() {
     const state = result.kind === "ok" ? receiptState(result.value) : null;
     const code = result.kind === "error" ? result.code : state?.kind === "rejected" ? state.code : null;
     if (code !== null && asksAgain(code, overrides)) { setRefused(code); setAsking(true); return; }
+    if (code === "home_icloud_not_downloaded" && downloaded.current !== source) { setIcloud({ placeholders: null }); return; }
     if (result.kind === "error") { setProblem(intakeCopy(result)); return; }
     if (state?.kind === "rejected") { setProblem(intakeCopy(state)); return; }
     if (state?.kind === "unconfirmed") { setProblem("We couldn't confirm the folder was added. Check Home before trying again."); return; }
@@ -212,11 +256,45 @@ export function AddFolder() {
     navigate({ name: "home" });
   };
 
+  const proceed = (chosen: AddFolderMode) => {
+    if (anywayIssues(chosen, size, null).length > 0) setAsking(true);
+    else if (chosen === "move") setConfirming(true);
+    else void add([], chosen);
+  };
+
   const start = () => {
+    const placeholders = icloudPlaceholders(size);
     if (way === "here") setSettingUp(true);
-    else if (anywayIssues(way, size, null).length > 0) setAsking(true);
-    else if (way === "move") setConfirming(true);
-    else void add([]);
+    else if (placeholders > 0 && downloaded.current !== source) setIcloud({ placeholders });
+    else proceed(way);
+  };
+
+  const download = async (chosen: AddFolderMode) => {
+    if (!source || downloading) return;
+    setMode(chosen);
+    setDownloading(true);
+    setProgress(null);
+    setProblem("");
+    const watching = icloudRun(
+      () => void cancelIcloudDownload(),
+      () => void loadIcloudProgress().then((read) => { if (read.kind === "ok" && read.value) setProgress(read.value); }),
+      ICLOUD_PROGRESS_MS,
+    );
+    run.current = watching;
+    const result = await downloadFromIcloud(source);
+    const outcome = icloudOutcome(watching.end(), result);
+    run.current = null;
+    if (outcome.next === "none") return;
+    setDownloading(false);
+    setStopping(false);
+    setIcloud(null);
+    if (outcome.next === "add") { downloaded.current = source; proceed(chosen); return; }
+    setProblem(outcome.text);
+  };
+
+  const stop = () => {
+    setStopping(true);
+    run.current?.stop();
   };
 
   const anyway = () => {
@@ -242,5 +320,8 @@ export function AddFolder() {
       onCancel={() => setConfirming(false)} onConfirm={() => void add([])} />
     {way !== "here" && <AnywayDialog open={asking} way={way} name={name} size={size} refused={refused} busy={busy}
       onUseHere={useHere} onAnyway={anyway} onCancel={() => { setAsking(false); setRefused(null); }} />}
+    {way !== "here" && source && icloud && <ICloudDialog open name={name} source={source} placeholders={icloud.placeholders} way={way}
+      downloading={downloading} progress={progress} stopping={stopping} onDownload={(chosen) => void download(chosen)} onStop={stop}
+      onCancel={() => setIcloud(null)} />}
   </>;
 }
