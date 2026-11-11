@@ -547,9 +547,14 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             "{name}"
         );
     }
+    let caches = default_master_tool_caches(&root.path, &repository);
+    let turn_tmp = turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
-        [&worktree, &home, &turn.join("tmp")]
+        [&worktree, &home, &turn_tmp]
+            .into_iter()
+            .chain(&caches)
+            .collect::<Vec<_>>()
     );
     assert!(sandbox.sandbox().read_roots().contains(&install));
     assert!(sandbox.sandbox().read_roots().contains(&repository));

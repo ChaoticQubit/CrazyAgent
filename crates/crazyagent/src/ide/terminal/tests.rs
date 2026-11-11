@@ -312,7 +312,8 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
 /// DEC-124: an engine-run IDE terminal keeps to the project's agent folders choice at
 /// Sandboxed and Own branch, like the IDE server: Allow all changes deletes, No delete or
 /// rename keeps an agent file and folder but lets an edit land, Read only refuses the edit
-/// too. The owner's own files stay changeable.
+/// too. At every choice the base profile keeps the agent's checkout from being moved aside.
+/// The owner's own files stay changeable.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_ide_terminal_keeps_to_the_agent_folders_choice() {
@@ -378,12 +379,7 @@ fn an_ide_terminal_keeps_to_the_agent_folders_choice() {
         );
         let delete = in_terminal_holding(
             &case,
-            &format!(
-                "rm -f {} && mv {} {}-aside",
-                quoted(&file),
-                quoted(&agent),
-                quoted(&agent)
-            ),
+            &format!("rm -f {}", quoted(&file)),
             level,
             AgentNetwork::Open,
             &[],
@@ -391,9 +387,18 @@ fn an_ide_terminal_keeps_to_the_agent_folders_choice() {
         );
         assert_eq!(delete.status.success(), deletes, "{choice:?} {level:?}");
         assert_eq!(file.exists(), !deletes, "{choice:?} {level:?}");
-        if deletes {
-            std::fs::rename(agent.with_file_name("agent-1-aside"), &agent).unwrap();
-        }
+        let aside = agent.with_file_name("agent-1-aside");
+        let moved = in_terminal_holding(
+            &case,
+            &format!("mv {} {}", quoted(&agent), quoted(&aside)),
+            level,
+            AgentNetwork::Open,
+            &[],
+            rule,
+        );
+        assert!(!moved.status.success(), "{choice:?} {level:?}");
+        assert!(agent.is_dir(), "{choice:?} {level:?}");
+        assert!(!aside.exists(), "{choice:?} {level:?}");
         let owner = in_terminal_holding(
             &case,
             &format!(

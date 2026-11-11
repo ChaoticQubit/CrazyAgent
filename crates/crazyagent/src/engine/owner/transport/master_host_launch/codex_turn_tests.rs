@@ -203,9 +203,14 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         off: &[],
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
+    let caches = default_master_tool_caches(&root.path, &repository);
+    let off_tmp = off_turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
-        [&worktree, &home, &off_turn.join("tmp")]
+        [&worktree, &home, &off_tmp]
+            .into_iter()
+            .chain(&caches)
+            .collect::<Vec<_>>()
     );
     assert!(sandbox.sandbox().read_roots().contains(&repository));
     drop(credential);
@@ -322,9 +327,13 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     ))
     .unwrap();
     assert_eq!(parsed, expected);
+    let turn_tmp = turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
-        [&worktree, &home, &turn.join("tmp")]
+        [&worktree, &home, &turn_tmp]
+            .into_iter()
+            .chain(&caches)
+            .collect::<Vec<_>>()
     );
     assert!(sandbox.sandbox().read_roots().contains(&install));
     assert!(sandbox.sandbox().read_roots().contains(&repository));
