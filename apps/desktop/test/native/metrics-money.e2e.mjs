@@ -58,9 +58,11 @@ async function eventually(what, check) {
   }
 }
 
-/** Reads each figure on the page. Input: the page. Output: [main number, tooltip] pairs. */
+/** Reads each figure on the page, those in folded All columns tables too, whose rendered
+ * text is empty until the owner opens them. Input: the page. Output: [main number, tooltip]
+ * pairs. */
 function figures(page) {
-  return page.evaluate(`[...document.querySelectorAll(".mx-figure")].map((node) => [node.querySelector("b")?.innerText ?? "", node.title])`);
+  return page.evaluate(`[...document.querySelectorAll(".mx-figure")].map((node) => [node.querySelector("b")?.textContent ?? "", node.title])`);
 }
 
 /** Opens Metrics on a priced transcript, then runs the steps. Inputs: the test context, the
