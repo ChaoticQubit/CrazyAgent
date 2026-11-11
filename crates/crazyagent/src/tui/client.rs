@@ -1252,6 +1252,7 @@ impl NativeOwner {
                 confirmation,
                 sessions,
                 known,
+                before,
             } => {
                 let result = match self.master_controller(&context.identity) {
                     Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
@@ -1264,6 +1265,7 @@ impl NativeOwner {
                                 confirmation.as_deref(),
                                 sessions,
                                 &known,
+                                before,
                             )
                             .await
                             {

@@ -682,6 +682,7 @@ impl ProjectPage {
             session: session.map(|session| session.phase),
             turns,
             inputs: self.master.inputs(),
+            messages: self.master.messages(),
         };
         let harness = match session {
             Some(session) => backend_name(session.selection.backend),
