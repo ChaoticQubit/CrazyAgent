@@ -823,6 +823,8 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
         json!({"question": "Pick?", "options": "a"}),
         json!({"question": "Pick?", "recommended": 3}),
         json!({"question": "Pick?", "options": ["a", "b"], "recommended": "c"}),
+        json!({"question": "Pick?", "options": ["a"], "recommended": "a"}),
+        json!({"question": "Pick?", "options": ["a", "b"]}),
         json!({"question": "Pick?", "recommended": "r".repeat(crate::questions::RECOMMENDED_BYTES_MAX + 1)}),
         json!({"question": "Pick \u{202e}one?"}),
         json!({"question": "Pick?", "context": "zero\u{200b}width"}),
@@ -831,6 +833,15 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
         json!({"id": 7, "answer": "yes"}),
     ] {
         assert_eq!(ask(arguments.clone()), Err(ASK_INVALID), "{arguments}");
+    }
+    for rule in [
+        "2 to 6 distinct one-line options",
+        "one of them as recommended",
+    ] {
+        assert!(
+            ASK_INVALID.contains(rule),
+            "the refusal names the rule: {rule}"
+        );
     }
     for arguments in [
         json!({}),
@@ -1305,4 +1316,78 @@ fn a_work_title_holding_any_line_break_is_refused_by_name() {
             "{line_break:?}"
         );
     }
+}
+
+#[test]
+fn an_ask_call_with_a_multi_kind_reads_as_a_multi_question() {
+    let call = ask_call(Some(&json!({
+        "question": "Which platforms ship in V1?", "kind": "multi",
+        "options": ["Web", "Desktop", "Mobile"], "recommended": "Web"
+    })));
+    assert!(matches!(
+        call,
+        Some(Call::Ask {
+            kind: crate::questions::QuestionKind::Multi,
+            ..
+        })
+    ));
+    let call = call.unwrap();
+    assert_eq!(
+        checked(call.clone()),
+        Ok(call),
+        "the engine reads the kind back"
+    );
+}
+
+#[test]
+fn an_ask_call_with_options_and_no_recommended_one_is_refused() {
+    let call = ask_call(Some(&json!({
+        "question": "Which database?", "options": ["Postgres", "SQLite"]
+    })));
+    assert!(call.is_none());
+}
+
+#[test]
+fn an_ask_call_names_single_or_text_and_a_kind_that_does_not_fit_is_refused() {
+    use crate::questions::QuestionKind;
+    let kind_of = |arguments: Value| match ask_call(Some(&arguments)) {
+        Some(Call::Ask { kind, .. }) => Some(kind),
+        _ => None,
+    };
+    let options = json!(["Postgres", "SQLite"]);
+    assert_eq!(
+        kind_of(json!({"question": "Which?", "options": options, "recommended": "SQLite"})),
+        Some(QuestionKind::Single),
+        "options without a kind read as single"
+    );
+    assert_eq!(
+        kind_of(
+            json!({"question": "Which?", "kind": "single", "options": options, "recommended": "SQLite"})
+        ),
+        Some(QuestionKind::Single)
+    );
+    assert_eq!(
+        kind_of(json!({"question": "Which name?", "kind": "text", "recommended": "Atlas"})),
+        Some(QuestionKind::Text)
+    );
+    assert_eq!(
+        kind_of(json!({"question": "Which name?", "kind": null})),
+        Some(QuestionKind::Text),
+        "no options and no kind read as text"
+    );
+    for refused in [
+        json!({"question": "Which?", "kind": "text", "options": options, "recommended": "SQLite"}),
+        json!({"question": "Which?", "kind": "multi"}),
+        json!({"question": "Which?", "kind": "single", "options": ["Postgres"], "recommended": "Postgres"}),
+        json!({"question": "Which?", "kind": "", "options": options, "recommended": "SQLite"}),
+        json!({"question": "Which?", "kind": "choice", "options": options, "recommended": "SQLite"}),
+        json!({"question": "Which?", "kind": 1, "options": options, "recommended": "SQLite"}),
+    ] {
+        assert_eq!(kind_of(refused.clone()), None, "{refused}");
+    }
+    let schema = ask_tool();
+    assert_eq!(
+        schema["inputSchema"]["properties"]["kind"]["enum"],
+        json!(["single", "multi", "text"])
+    );
 }

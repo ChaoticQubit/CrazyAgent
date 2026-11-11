@@ -1,5 +1,6 @@
 use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
 use crate::coord::{Finish, QuestionFor, Severity};
+use crate::questions::QuestionKind;
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
@@ -120,9 +121,9 @@ const RECALL_INVALID: &str = "Not searched: give plain words on one line of up t
 const ACTIVITY_INVALID: &str = "Not logged: give the goal on one plain line of up to 120 bytes, one plain line of up to 600 bytes saying what happened, and a kind of phase or test.";
 const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
-const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
+const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters. For kind single or multi give 2 to 6 distinct one-line options of up to 200 bytes and one of them as recommended; for kind text give no options. Context may be up to 4096 bytes.";
 const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
-const ASK_KEYS: [&str; 4] = ["question", "options", "recommended", "context"];
+const ASK_KEYS: [&str; 5] = ["question", "kind", "options", "recommended", "context"];
 const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -242,7 +243,7 @@ pub enum Call {
     },
     Ask {
         question: String,
-        kind: crate::questions::QuestionKind,
+        kind: QuestionKind,
         options: Vec<String>,
         recommended: Option<String>,
         context: Option<String>,
@@ -678,13 +679,14 @@ pub fn record_tool() -> Value {
 pub fn ask_tool() -> Value {
     json!({
         "name": ASK_TOOL,
-        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
+        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. Prefer single or multi with a recommended option; use text only when no short list of answers fits. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": {"type": "string", "description": "One plain question for the owner."},
-                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "Up to 6 short one-line answers the owner can pick from."},
-                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer when there are none."},
+                "kind": {"type": "string", "enum": ["single", "multi", "text"], "description": "single: the owner picks one option. multi: the owner picks any. text: only when the answer is genuinely free text. single and multi need 2 to 6 options and one recommended option; the owner can always add a comment."},
+                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "2 to 6 short one-line answers the owner can pick from, for kind single or multi."},
+                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer for kind text."},
                 "context": {"type": "string", "description": "What the owner needs to know to answer."},
             },
             "required": ["question"],
@@ -988,9 +990,10 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
     })
 }
 
-/// Reads one `ask` call: a question with its options, recommendation and context, each
-/// checked as the questions log checks it. Takes the arguments. Returns the call, or none
-/// when a part is missing, unknown or outside its bounds.
+/// Reads one `ask` call: a question with its kind, options, recommendation and context,
+/// each checked as the questions log checks it. A call without a kind is single when it has
+/// options and text when it has none. Takes the arguments. Returns the call, or none when a
+/// part is missing, unknown or outside its bounds.
 fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     let arguments = arguments?.as_object()?;
     if arguments
@@ -1012,9 +1015,14 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
             .collect::<Option<_>>()?,
         Some(_) => return None,
     };
+    let kind = match arguments.get("kind") {
+        None | Some(Value::Null) => QuestionKind::stored("", options.len())?,
+        Some(Value::String(name)) if !name.is_empty() => QuestionKind::stored(name, options.len())?,
+        Some(_) => return None,
+    };
     let ask = crate::questions::Ask {
         question: text("question")??,
-        kind: crate::questions::QuestionKind::stored("", options.len())?,
+        kind,
         options,
         recommended: text("recommended")?,
         context: text("context")?,
@@ -1101,12 +1109,12 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         }
         Call::Ask {
             question,
-            kind: _,
+            kind,
             options,
             recommended,
             context,
         } => {
-            json!({"question": question, "options": options, "recommended": recommended, "context": context})
+            json!({"question": question, "kind": kind.as_str(), "options": options, "recommended": recommended, "context": context})
         }
         Call::RecordAnswer {
             question,
