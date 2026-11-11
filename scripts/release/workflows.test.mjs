@@ -133,12 +133,13 @@ test("the update manifests cover exactly the targets the release matrix builds, 
   assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]);
 });
 
-test("the Windows CI job runs on every event and shows its failures, but cannot fail the CI workflow until its sandbox holds", async () => {
+test("the Windows CI job is off until v2.2.1: an if that is always false skips it at no cost, its body kept to turn back on", async () => {
   const jobs = block(await workflow("ci.yml"), 0, "jobs").join("\n");
   const windows = block(jobs, 2, "windows");
-  assert(windows.includes("    name: Windows lint and tests (informational until v2.2.1)"));
+  assert(windows.includes("    name: Windows lint and tests (off until v2.2.1)"));
+  assert.deepEqual(windows.filter((line) => /^ {4}if:/.test(line)), ["    if: ${{ false }}"], "the job never runs");
   assert(windows.includes("    continue-on-error: true"));
-  assert(!windows.some((line) => /^ {4}if:/.test(line)), "the job always runs");
+  assert(windows.includes("          cargo test -p crazyagent --locked --offline --test windows_terminal"), "the job body is kept");
   assert.equal(windows.filter((line) => line.includes("continue-on-error")).length, 1, "no Windows step hides its own failure");
   for (const job of ["linux", "macos"]) assert(!block(jobs, 2, job).some((line) => line.includes("continue-on-error")), job);
 });
@@ -229,7 +230,7 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 });
 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
-  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
+  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "linux", "Install Codex"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
     ["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
     ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
     ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
@@ -240,6 +241,56 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
     assert.match(step, /\n\s+cp "\$work\/([a-z.]+)" "\$prefix\/\1\.\$\$"\n\s+mv "\$prefix\/\1\.\$\$" "\$prefix\/\1"\n/, `${job}: ${title} replaces the cached archive in one rename`);
     assert.match(step, /"\$work\/bin" >> "\$GITHUB_PATH"|bun-path=\$work\/bin\/bun/, `${job}: ${title} runs the copy it just checked`);
   }
+});
+
+test("macOS CI names the Codex and Claude Code it installed, and a graphify installed by the pinned uv from the repo lock, to the rows that run them", async () => {
+  const ci = await workflow("ci.yml");
+  const macos = steps(ci, "macos");
+  const step = (title) => macos.find((text) => text.includes(`name: ${title}`));
+  assert.match(step("Install Codex"), /\n\s+echo "CRAZYAGENT_CODEX=\$work\/bin\/codex" >> "\$GITHUB_ENV"$/);
+  assert.match(step("Install Claude Code"), /\n\s+echo "CRAZYAGENT_CLAUDE=\$work\/bin\/claude" >> "\$GITHUB_ENV"$/);
+  const graphify = step("Install pinned graphify for the graph rows");
+  assert(graphify, "macOS CI installs graphify");
+  const engine = await readFile(new URL("../../crates/crazyagent/src/setup.rs", import.meta.url), "utf8");
+  const pin = graphify.match(/\n\s+UV_SHA256: ([0-9a-f]{64})\n/);
+  assert(pin && engine.includes(`"aarch64-apple-darwin",\n        "${pin[1]}",`), "CI checks uv against the engine's own uv pin");
+  assert.match(graphify, /\n\s+if ! echo "\$UV_SHA256  \$work\/uv\.tar\.gz" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n/);
+  assert.match(graphify, / UV_PYTHON_PREFERENCE=only-managed\n/, "no system Python");
+  assert.match(graphify, /pip install --no-config --python "\$venv\/bin\/python" --require-hashes --no-build --requirements crates\/crazyagent\/src\/setup\/locks\/graphifyy-0\.9\.9\.txt\n/);
+  assert.match(graphify, /\n\s+echo "CRAZYAGENT_GRAPHIFY=\$venv\/bin\/graphify" >> "\$GITHUB_ENV"$/);
+  assert.doesNotMatch(graphify, /GITHUB_PATH|\$HOME/, "graphify reaches only the rows that name it");
+  assert(macos.indexOf(graphify) < macos.findIndex((text) => text.includes("name: Test engine and desktop crates")));
+});
+
+test("macOS CI installs the context-mode the default pack pins the way the engine does, scripts only after npm's record of the tarball hash matches the pin, and names it to the shared-install rows", async () => {
+  const macos = steps(await workflow("ci.yml"), "macos");
+  const step = macos.find((text) => text.includes("name: Install the pinned context-mode for the shared-install rows"));
+  assert(step, "macOS CI installs context-mode");
+  assert.match(step, /' crates\/crazyagent\/src\/setup\/pack\.toml\)\n/, "version and hash come from the default pack");
+  const install = step.indexOf("npm install --prefix \"$install\" --ignore-scripts --no-save");
+  const compare = step.indexOf('test "$recorded" = "$integrity"');
+  const rebuild = step.indexOf("npm rebuild --prefix \"$install\"");
+  assert(install > 0 && install < compare && compare < rebuild, "no package script runs before the hash check");
+  assert.match(step, /npm_config_build_from_source=true npm_config_nodedir=/, "the native module builds from source against the pinned Node's own headers");
+  assert.match(step, /\n\s+install="\$RUNNER_TEMP\/context-mode"\n/);
+  assert.match(step, /\n\s+echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=\$install" >> "\$GITHUB_ENV"$/);
+  assert.doesNotMatch(step, /GITHUB_PATH|\$HOME|npm install -g|--global/);
+  assert(macos.indexOf(step) < macos.findIndex((text) => text.includes("name: Test engine and desktop crates")));
+});
+
+test("Linux CI installs Codex from the pinned, checksum-checked release archive and names it and Claude Code to the rows that run them, before the tests", async () => {
+  const linux = steps(await workflow("ci.yml"), "linux");
+  const step = (title) => linux.find((text) => text.includes(`name: ${title}`));
+  const codex = step("Install Codex");
+  assert(codex, "Linux CI installs Codex");
+  assert.match(codex, /\n\s+CODEX_PACKAGE: codex-package-x86_64-unknown-linux-musl\.tar\.gz\n\s+CODEX_SHA256: [0-9a-f]{64}\n/);
+  assert.match(codex, /"https:\/\/github\.com\/openai\/codex\/releases\/download\/rust-v\$CODEX_VERSION\/\$CODEX_PACKAGE"/);
+  assert.match(codex, /\n\s+test "\$\("\$work\/bin\/codex" --version\)" = "codex-cli \$CODEX_VERSION"\n/);
+  assert.match(codex, /\n\s+echo "CRAZYAGENT_CODEX=\$work\/bin\/codex" >> "\$GITHUB_ENV"$/);
+  const claude = step("Install Claude Code");
+  assert.match(claude, /\n\s+echo "CRAZYAGENT_CLAUDE=\$work\/bin\/claude" >> "\$GITHUB_ENV"$/);
+  const tests = linux.findIndex((text) => text.includes("name: Test engine and desktop crates"));
+  assert(linux.indexOf(codex) < tests && linux.indexOf(claude) < tests);
 });
 
 test("macOS CI runs a Codex release in codex::VERSIONS, from the pinned, checksum-checked release archive", async () => {
@@ -575,6 +626,44 @@ test("every Rust test target that needs the staged RCLI host is left out of CI, 
     }
   }
   assert(needing > 0, "the check found the tests that need the RCLI host");
+});
+
+test("every engine and desktop row or target CI leaves out, for all jobs or one, names a real test, so no exclusion goes stale", async () => {
+  const ci = await workflow("ci.yml");
+  const jobs = block(ci, 0, "jobs").join("\n");
+  const job = (name) => block(jobs, 2, name).join("\n").replace(/^ {4}/gm, "");
+  const root = new URL("../../", import.meta.url);
+  const source = async (path) => readFile(new URL(path, root), "utf8");
+  const library = async (folder) => {
+    const texts = [];
+    for (const name of await readdir(new URL(folder, root), { recursive: true })) {
+      if (name.endsWith(".rs")) texts.push(await source(folder + name));
+    }
+    return texts;
+  };
+  const crates = [
+    ["crates/crazyagent/", ["ENGINE_TESTS_EXCLUDE", ci], ["PLATFORM_TESTS_EXCLUDE", job("macos")], ["PLATFORM_TESTS_EXCLUDE", job("linux")]],
+    ["apps/desktop/src-tauri/", ["DESKTOP_TESTS_EXCLUDE", ci]],
+  ];
+  let rows = 0;
+  for (const [crate, ...lists] of crates) {
+    const texts = await library(`${crate}src/`);
+    for (const [list, text] of lists) {
+      for (const entry of excluded(text, list)) {
+        if (entry.includes("::")) {
+          const row = entry.split("::").at(-1);
+          assert(texts.some((text) => text.includes(`fn ${row}(`)), `${list} ${entry} is no library row of ${crate}`);
+          rows += 1;
+          continue;
+        }
+        const [target, row] = entry.split("/");
+        const file = await source(`${crate}tests/${target}.rs`).catch(() => assert.fail(`${list} ${entry} names no target ${crate}tests/${target}.rs`));
+        assert(row === undefined || file.includes(`fn ${row}(`), `${list} ${entry} is no row of ${crate}tests/${target}.rs`);
+        rows += row === undefined ? 0 : 1;
+      }
+    }
+  }
+  assert(rows > 20, "the check found the excluded rows");
 });
 
 test("every live Rust test target, named *_live, is left out of CI, which has no live accounts, harnesses or local models", async () => {

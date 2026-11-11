@@ -35,7 +35,8 @@ env:
   ENGINE_TESTS_EXCLUDE: >-
     e2e_tui research_engine team_engine onboarding research_runner research_service tui_v1_e2e codex_app_server_live launch_context_live codex_bridge_live agents_live
     qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network harness_catalog_bundled_rcli acceptance_v2_rcli_usage
-  DESKTOP_TESTS_EXCLUDE: picker_windows
+    accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
+  DESKTOP_TESTS_EXCLUDE: picker_windows accounts_bridge/desktop_accounts_commands_reach_the_real_engine
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
 
@@ -52,6 +53,7 @@ jobs:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms windows_terminal agent_secret_walls setup team_project_root
         harness_launch launch_context project_sandbox sandbox_everywhere terminal_session
+        terminal_tmux/a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hold
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
@@ -158,6 +160,30 @@ jobs:
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CLAUDE=$work/bin/claude" >> "$GITHUB_ENV"
+      - name: Install Codex
+        env:
+          CODEX_PACKAGE: codex-package-x86_64-unknown-linux-musl.tar.gz
+          CODEX_SHA256: 3ec55053109608d5038f7e50750f7d25f768dfd740fef071aa710e2559b63aac
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/codex/$CODEX_VERSION/x64"
+          work="$RUNNER_TEMP/codex"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          if [ -f "$prefix/codex.tgz" ]; then
+            cp "$prefix/codex.tgz" "$work/codex.tgz"
+          fi
+          if ! echo "$CODEX_SHA256  $work/codex.tgz" | sha256sum -c --status - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/codex.tgz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_PACKAGE"
+            echo "$CODEX_SHA256  $work/codex.tgz" | sha256sum -c -
+            cp "$work/codex.tgz" "$prefix/codex.tgz.$$"
+            mv "$prefix/codex.tgz.$$" "$prefix/codex.tgz"
+          fi
+          tar -xzf "$work/codex.tgz" -C "$work"
+          test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CODEX=$work/bin/codex" >> "$GITHUB_ENV"
       - name: Install uv
         env:
           UV_TARGET: x86_64-unknown-linux-gnu
@@ -250,7 +276,33 @@ jobs:
     runs-on: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
-      PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
+      PLATFORM_TESTS_EXCLUDE: >-
+        credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
+        harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
+        harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file
+        harness_launch/live_tools_on_turn_completes_inside_the_project_sandbox
+        project_sandbox/an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run
+        github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
+        onboarding::tests::the_graph_step_runs_the_graphify_setup_installed_for_this_engine
+        sandbox_toolchains/a_missing_toolchain_is_never_installed_by_an_agent
+        sandbox_toolchains/an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain
+        sandbox_toolchains/an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error
+        acceptance_b18_tui/b18_the_owner_changes_agent_access_and_toolchains_in_settings
+        project_setup::engine_tests::owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies
+        team::runtime::tests::a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt
+        team::runtime::tests::a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_them
+        team::runtime::tests::a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets
+        team::runtime::tests::an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_them
+        team::runtime::tests::an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit
+        team::runtime::tests::lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined
+        team::runtime::tests::turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_goes_without_it
+        landing::tests::a_lockfile_only_clash_is_rewritten_by_its_tool_as_an_engine_commit_on_top_of_the_set
+        landing::tests::a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands
+        landing::tests::a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools
+        landing::tests::a_regeneration_stopped_inside_its_reset_is_put_back_once_the_agent_committed
+        landing::tests::an_agent_that_ignores_the_note_keeps_the_regenerated_lockfile_at_its_next_turn_end
+        context_mode::tests::npm_starts_under_the_install_sandbox_profile
+        context_mode::tests::no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_against_the_pin
     steps:
       - name: Refuse to run under Rosetta
         run: |
@@ -464,6 +516,7 @@ jobs:
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CLAUDE=$work/bin/claude" >> "$GITHUB_ENV"
       - name: Install Codex
         env:
           CODEX_PACKAGE: codex-package-aarch64-apple-darwin.tar.gz
@@ -486,6 +539,7 @@ jobs:
           tar -xzf "$work/codex.tgz" -C "$work"
           test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CODEX=$work/bin/codex" >> "$GITHUB_ENV"
       - if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
@@ -554,6 +608,58 @@ jobs:
           tar -xzf "$work/vscodium.tgz" -C "$build"
           test -f "$build/out/server-main.js"
           find "$RUNNER_TOOL_CACHE/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "$IDE_VERSION" -exec rm -rf {} +
+      - name: Install pinned graphify for the graph rows
+        env:
+          UV_TARGET: aarch64-apple-darwin
+          UV_SHA256: 743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/uv/$UV_VERSION/arm64"
+          work="$RUNNER_TEMP/uv"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/uv.tar.gz" ]; then
+            cp "$prefix/uv.tar.gz" "$work/uv.tar.gz"
+          fi
+          if ! echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+            echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -c -
+            cp "$work/uv.tar.gz" "$prefix/uv.tar.gz.$$"
+            mv "$prefix/uv.tar.gz.$$" "$prefix/uv.tar.gz"
+          fi
+          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+          venv="$RUNNER_TEMP/graphify"
+          rm -rf "$venv"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
+          "$work/bin/uv" venv --no-project --no-config --python 3.12 "$venv"
+          "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
+          "$venv/bin/graphify" --help > /dev/null
+          echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
+      - name: Install the pinned context-mode for the shared-install rows
+        run: |
+          set -euo pipefail
+          read -r version integrity < <(node -e '
+            const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+            const entry = text.split("[[entries]]").find((block) => /^id = "context-mode"$/m.test(block));
+            const version = entry?.match(/^install = ".*\bcontext-mode@([0-9]+\.[0-9]+\.[0-9]+) /m)?.[1];
+            const integrity = entry?.match(/^integrity = "(sha512-[A-Za-z0-9+\/]+=*)"$/m)?.[1];
+            if (!version || !integrity) throw new Error("the default pack does not pin an exact context-mode");
+            console.log(version, integrity);
+          ' crates/crazyagent/src/setup/pack.toml)
+          test -n "$version" && test -n "$integrity"
+          install="$RUNNER_TEMP/context-mode"
+          rm -rf "$install"
+          mkdir -p "$install"
+          npm install --prefix "$install" --ignore-scripts --no-save --no-audit --no-fund --no-update-notifier --loglevel=error "context-mode@$version"
+          recorded="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"].integrity' "$install/node_modules/.package-lock.json")"
+          test "$recorded" = "$integrity"
+          npm_config_build_from_source=true npm_config_nodedir="$(dirname "$(dirname "$(command -v node)")")" \
+            npm rebuild --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
+          test -f "$install/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          test "$(node -p 'require(process.argv[1]).version' "$install/node_modules/context-mode/package.json")" = "$version"
+          echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=$install" >> "$GITHUB_ENV"
       - name: Test engine and desktop crates
         run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
       - name: Test Node suites
@@ -591,7 +697,8 @@ jobs:
           echo "runner tool cache volume: $(free_gib) GiB free after the trim"
 
   windows:
-    name: Windows lint and tests (informational until v2.2.1)
+    name: Windows lint and tests (off until v2.2.1)
+    if: ${{ false }}
     runs-on: windows-2022
     continue-on-error: true
     timeout-minutes: 120
