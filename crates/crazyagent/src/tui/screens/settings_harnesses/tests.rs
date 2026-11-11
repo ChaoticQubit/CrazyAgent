@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::update::{CheckWhen, LastUpdate, OnlineLookup};
+use crate::harnesses::update::{CheckWhen, LastUpdate};
 use crate::harnesses::{Search, catalog};
 use crate::tui::client::OwnerEvent;
 use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
@@ -88,10 +88,10 @@ fn harness_list_frames_match_the_design() {
 
     let mut shell = Shell::with(harness_ctx(120, 36), Box::new(Harnesses::with(nine)));
     let mut expected = fixture("harnesses-120", &[]);
-    engine_table(&mut expected, 8, 37, 56, 62);
-    expected[19] = put(&expected[19], 15, &path, 103);
-    expected[20] = expected[21].clone();
-    for row in expected.iter_mut().skip(21).take(3) {
+    engine_table(&mut expected, 9, 37, 56, 62);
+    expected[20] = put(&expected[20], 15, &path, 103);
+    expected[21] = expected[22].clone();
+    for row in expected.iter_mut().skip(22).take(3) {
         *row = " ".repeat(120);
     }
     assert_eq!(render(&mut shell, 120, 36), expected);
@@ -148,6 +148,10 @@ fn check_again_asks_the_engine_and_the_reply_updates_the_counts() {
     let mut screen = Harnesses::new();
     screen.shown(&mut ctx);
     assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
+    assert!(matches!(
+        ctx.next_request(),
+        Some(Request::Settings(job)) if matches!(*job, SettingsJob::HarnessUpdateSettings)
+    ));
     assert!(screen.busy(&ctx));
     screen.key(&Key::Char('r'), &mut ctx);
     assert_eq!(ctx.queued(), 0, "one check at a time");
@@ -341,7 +345,10 @@ fn u_shows_the_exact_command_and_updates_only_after_y() {
     );
     shell.key(Key::Char('u'));
     shell.key(Key::Char('y'));
-    assert_eq!(sent(&mut shell.ctx), vec![Sent::Update("claude-code".into())]);
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Update("claude-code".into())]
+    );
 }
 
 #[test]
@@ -410,7 +417,10 @@ fn the_version_line_has_the_desktop_sentences() {
         ),
         "Version 2.1.309. Couldn't check for a newer version."
     );
-    assert_eq!(line(Some("2.1.309"), Latest::NotChecked), "Version 2.1.309.");
+    assert_eq!(
+        line(Some("2.1.309"), Latest::NotChecked),
+        "Version 2.1.309."
+    );
     assert_eq!(line(None, Latest::NotChecked), "Version unknown.");
 }
 
@@ -433,6 +443,45 @@ fn every_update_sentence_is_the_desktop_sentence_and_no_two_are_alike() {
     assert_eq!(
         update_copy("harness_update_from_a_newer_engine"),
         update_copy("harness_update_outcome_unknown")
+    );
+}
+
+#[test]
+fn every_code_the_engine_answers_has_its_own_sentence() {
+    use crate::harnesses::update as engine;
+    let codes = [
+        engine::UNKNOWN_INSTALL,
+        engine::WITH_APP,
+        engine::TOOL_MISSING,
+        engine::TOOL_UNSAFE,
+        engine::NEEDS_ADMIN,
+        engine::UNSUPPORTED_HERE,
+        engine::CHECK_UNREADABLE,
+        engine::NO_INSTALLER,
+        engine::LOOKUP_FAILED,
+        engine::TIMEOUT,
+        engine::AS_ROOT,
+        engine::START_FAILED,
+        engine::BUSY,
+        engine::CHECK_FAILED,
+        engine::CHECK_ONLY,
+        engine::INSTALL_ALREADY,
+        engine::INSTALL_FAILED,
+        engine::INSTALL_NOT_FOUND,
+        engine::INSTALL_OFF,
+        engine::NOT_INSTALLED,
+        engine::SETTINGS_UNREADABLE,
+        engine::UNKNOWN_HARNESS,
+        engine::UPDATE_FAILED,
+        engine::UPDATE_OFF,
+        "harness_update_unavailable",
+    ];
+    for code in codes {
+        assert!(COPY.iter().any(|(known, _)| *known == code), "{code}");
+    }
+    assert!(
+        UPDATE_POLLS_MAX as u64 * 5 >= engine::UPDATE_TIME.as_secs(),
+        "polling outlasts the longest update"
     );
 }
 
@@ -550,10 +599,15 @@ fn a_running_update_is_read_again_on_each_refresh_until_it_ends() {
         ..newer()
     };
     deliver(&mut shell, done);
-    assert_eq!(sent(&mut shell.ctx), vec![Sent::Other], "the catalog is read again");
-    assert!(frame(&mut shell).contains(
-        "Updated from 2.1.309 to 2.1.322. New agents use it now; no restart needed."
-    ));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Other],
+        "the catalog is read again"
+    );
+    assert!(
+        frame(&mut shell)
+            .contains("Updated from 2.1.309 to 2.1.322. New agents use it now; no restart needed.")
+    );
     shell.refresh();
     assert!(sent(&mut shell.ctx).is_empty(), "polling stopped");
 }
@@ -637,7 +691,9 @@ fn i_without_an_install_line_shows_the_guide_address_and_sends_nothing() {
     shell.key(Key::Char('i'));
     let shown = frame(&mut shell);
     assert!(shown.contains(guide), "{shown}");
-    assert!(shown.contains("CrazyAgent installs with Homebrew or npm and found no way to install this one."));
+    assert!(shown.contains(
+        "CrazyAgent installs with Homebrew or npm and found no way to install this one."
+    ));
     assert!(sent(&mut shell.ctx).is_empty());
 }
 
@@ -653,7 +709,10 @@ fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
         "aider".into(),
         Ok(()),
     )));
-    assert_eq!(sent(&mut shell.ctx), vec![Sent::Versions("aider".into(), false)]);
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("aider".into(), false)]
+    );
     deliver(
         &mut shell,
         HarnessVersions {
@@ -677,10 +736,15 @@ fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
             ..missing("aider", Some(AIDER_LINE), AIDER_GUIDE)
         },
     );
-    assert_eq!(sent(&mut shell.ctx), vec![Sent::Other], "the catalog is read again");
-    assert!(frame(&mut shell).contains(
-        "The install finished, but CrazyAgent can't find Aider. Choose Check again."
-    ));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Other],
+        "the catalog is read again"
+    );
+    assert!(
+        frame(&mut shell)
+            .contains("The install finished, but CrazyAgent can't find Aider. Choose Check again.")
+    );
     let done = HarnessVersions {
         installed: Some("0.86.2".into()),
         last: Some(LastUpdate {
@@ -714,6 +778,9 @@ fn a_refused_install_says_the_engine_reason() {
     let message = shell.ctx.message().unwrap();
     assert_eq!(
         (message.lead.as_str(), message.rest.as_str()),
-        ("Could not install Aider.", "Install from the app is off in settings.")
+        (
+            "Could not install Aider.",
+            "Install from the app is off in settings."
+        )
     );
 }

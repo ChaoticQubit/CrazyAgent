@@ -5,7 +5,7 @@ use crazyagent::harnesses::update::{HarnessVersions, UpdateSettings};
 const HARNESS_ID_BYTES_MAX: usize = 64;
 const UNKNOWN_HARNESS: &str = "harness_update_unknown_harness";
 const OUTCOME_UNKNOWN: &str = "harness_update_outcome_unknown";
-const HARNESS_CODES: [&str; 22] = [
+const HARNESS_CODES: [&str; 26] = [
     "harness_update_unknown_install",
     "harness_update_with_app",
     "harness_update_tool_missing",
@@ -23,6 +23,10 @@ const HARNESS_CODES: [&str; 22] = [
     "harness_update_check_unreadable",
     UNKNOWN_HARNESS,
     OUTCOME_UNKNOWN,
+    "harness_update_check_failed",
+    "harness_update_start_failed",
+    "harness_update_settings_unreadable",
+    "harness_update_unavailable",
     "harness_install_no_tool",
     "harness_install_off",
     "harness_install_already",
@@ -189,7 +193,14 @@ mod tests {
             assert!(harness_id(id).is_ok(), "{id}");
         }
         let long = "a".repeat(HARNESS_ID_BYTES_MAX + 1);
-        for id in ["", "../codex", "Codex", "claude code", "codex;rm", long.as_str()] {
+        for id in [
+            "",
+            "../codex",
+            "Codex",
+            "claude code",
+            "codex;rm",
+            long.as_str(),
+        ] {
             assert_eq!(harness_id(id).unwrap_err().code, UNKNOWN_HARNESS, "{id}");
         }
     }

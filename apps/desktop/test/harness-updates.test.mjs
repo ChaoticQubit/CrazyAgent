@@ -117,7 +117,7 @@ test("changing the online lookup keeps the other two settings", async () => {
 });
 
 test("every update refusal has its own plain sentence", () => {
-  const codes = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_tool_missing", "harness_update_tool_unsafe", "harness_update_needs_admin", "harness_update_as_root", "harness_update_off", "harness_update_check_only", "harness_update_busy", "harness_update_not_installed", "harness_update_timeout", "harness_update_failed", "harness_update_unsupported_here", "harness_update_lookup_failed", "harness_update_check_unreadable"];
+  const codes = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_tool_missing", "harness_update_tool_unsafe", "harness_update_needs_admin", "harness_update_as_root", "harness_update_off", "harness_update_check_only", "harness_update_busy", "harness_update_not_installed", "harness_update_timeout", "harness_update_failed", "harness_update_unsupported_here", "harness_update_lookup_failed", "harness_update_check_unreadable", "harness_update_check_failed", "harness_update_start_failed", "harness_update_settings_unreadable", "harness_update_unavailable"];
   assert.equal(new Set(codes.map(api.updateCopy)).size, codes.length);
   for (const code of codes) assert.doesNotMatch(api.updateCopy(code), /harness_|\u2014/, code);
 });

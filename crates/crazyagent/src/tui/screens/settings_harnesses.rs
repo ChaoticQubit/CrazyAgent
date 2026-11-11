@@ -28,7 +28,7 @@ const UNKNOWN_INSTALL: &str = "harness_update_unknown_install";
 const LOOKUP_FAILED: &str = "harness_update_lookup_failed";
 const OUTCOME_UNKNOWN: &str = "The update ended in a way CrazyAgent doesn't know.";
 const NOT_FOUND: &str = "harness_install_not_found";
-const COPY: [(&str, &str); 22] = [
+const COPY: [(&str, &str); 26] = [
     (
         UNKNOWN_INSTALL,
         "CrazyAgent can't tell how this was installed, so it won't update it.",
@@ -85,6 +85,22 @@ const COPY: [(&str, &str); 22] = [
         "CrazyAgent doesn't know this harness.",
     ),
     ("harness_update_outcome_unknown", OUTCOME_UNKNOWN),
+    (
+        "harness_update_check_failed",
+        "The check for a newer version didn't finish.",
+    ),
+    (
+        "harness_update_start_failed",
+        "CrazyAgent couldn't start the tool that updates or installs it.",
+    ),
+    (
+        "harness_update_settings_unreadable",
+        "CrazyAgent couldn't read the harness update settings.",
+    ),
+    (
+        "harness_update_unavailable",
+        "The engine couldn't open its update records. Try again.",
+    ),
     (
         "harness_install_no_tool",
         "CrazyAgent installs with Homebrew or npm and found no way to install this one.",
@@ -436,7 +452,11 @@ impl Harnesses {
             ctx.say(Message::error(&lead, update_copy(code)));
             return;
         }
-        if self.running.as_ref().is_some_and(|(running, _)| *running == id) {
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|(running, _)| *running == id)
+        {
             ctx.say(Message::error(&lead, update_copy("harness_update_busy")));
             return;
         }
@@ -464,14 +484,16 @@ impl Harnesses {
         };
         let (id, name) = (entry.id.clone(), entry.name.clone());
         let lead = format!("Can't install {name}.");
-        if self.running.as_ref().is_some_and(|(running, _)| *running == id) {
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|(running, _)| *running == id)
+        {
             ctx.say(Message::error(&lead, update_copy("harness_update_busy")));
             return;
         }
         match self.versions.get(&id) {
-            Some(versions) if versions.install.is_some() => {
-                self.confirm = Some((id, Job::Install))
-            }
+            Some(versions) if versions.install.is_some() => self.confirm = Some((id, Job::Install)),
             Some(versions) => {
                 let code = versions
                     .refusal
@@ -546,7 +568,10 @@ impl Harnesses {
         };
         self.versions.insert(id.to_owned(), versions.clone());
         assert!(self.versions.len() <= self.entries.len().max(1));
-        let running = self.running.as_ref().is_some_and(|(running, _)| running == id);
+        let running = self
+            .running
+            .as_ref()
+            .is_some_and(|(running, _)| running == id);
         if running && !versions.running {
             self.running = None;
             self.reload(ctx);
@@ -558,13 +583,7 @@ impl Harnesses {
         }
     }
 
-    fn arrive_started(
-        &mut self,
-        id: &str,
-        job: Job,
-        result: &Result<(), String>,
-        ctx: &mut Ctx,
-    ) {
+    fn arrive_started(&mut self, id: &str, job: Job, result: &Result<(), String>, ctx: &mut Ctx) {
         let name = self
             .entries
             .iter()
@@ -574,7 +593,11 @@ impl Harnesses {
         match result {
             Ok(()) => self.poll(ctx),
             Err(code) => {
-                if self.running.as_ref().is_some_and(|(running, _)| running == id) {
+                if self
+                    .running
+                    .as_ref()
+                    .is_some_and(|(running, _)| running == id)
+                {
                     self.running = None;
                 }
                 let verb = match job {
@@ -667,7 +690,11 @@ impl Harnesses {
                             lines.push(Line::raw(format!("{}{part}", " ".repeat(LABEL_WIDTH))));
                         }
                     }
-                    if let Some(guide) = versions.guide.as_deref().filter(|_| refusal(versions).is_some()) {
+                    if let Some(guide) = versions
+                        .guide
+                        .as_deref()
+                        .filter(|_| refusal(versions).is_some())
+                    {
                         lines.push(label("Guide", cut(&sanitize(guide), room, glyphs.ellipsis)));
                     }
                 }
@@ -681,9 +708,14 @@ impl Harnesses {
                     Some(versions) => {
                         let state = install_state(versions, &entry.name);
                         lines.extend(wrap(&state, limit.max(8)).into_iter().map(Line::raw));
-                        if let Some(guide) = versions.guide.as_deref().filter(|_| versions.install.is_none()) {
+                        if let Some(guide) = versions
+                            .guide
+                            .as_deref()
+                            .filter(|_| versions.install.is_none())
+                        {
                             let room = limit.saturating_sub(LABEL_WIDTH).max(8);
-                            lines.push(label("Guide", cut(&sanitize(guide), room, glyphs.ellipsis)));
+                            lines
+                                .push(label("Guide", cut(&sanitize(guide), room, glyphs.ellipsis)));
                         }
                     }
                 }
@@ -797,7 +829,12 @@ impl Harnesses {
         }
         if let Some(entry) = self.entries.get(selected) {
             lines.push(Line::default());
-            lines.extend(Self::detail(entry, self.versions.get(&entry.id), limit, ctx));
+            lines.extend(Self::detail(
+                entry,
+                self.versions.get(&entry.id),
+                limit,
+                ctx,
+            ));
         }
         self.selected = selected;
         self.offset = offset;
@@ -946,20 +983,21 @@ impl Screen for Harnesses {
             .iter()
             .find(|entry| entry.id == *id)
             .map_or(id.as_str(), |entry| entry.name.as_str());
-        let (line, opening, after, verb) = match job {
+        let (line, after, verb) = match job {
             Job::Update => (
                 versions.command.as_deref()?,
-                "CrazyAgent runs exactly this line:".to_owned(),
-                format!(
+                vec![format!(
                     "{} When it finishes, new agents use the new version with no restart. Agents that are running keep their version until they start again.",
                     installed_with(&versions.method)
-                ),
+                )],
                 "update",
             ),
             Job::Install => (
                 versions.install.as_deref()?,
-                "CrazyAgent runs exactly this line. It never uses sudo and never runs a script from a website.".to_owned(),
-                format!("When it finishes, new agents can use {name} with no engine restart."),
+                vec![
+                    "It never uses sudo and never runs a script from a website.".to_owned(),
+                    format!("When it finishes, new agents can use {name} with no engine restart."),
+                ],
                 "install",
             ),
         };
@@ -968,14 +1006,16 @@ impl Screen for Harnesses {
             Job::Update => format!("Update {name}?"),
             Job::Install => format!("Install {name}?"),
         };
-        let mut body: Vec<Line<'static>> = wrap(&opening, room).into_iter().map(Line::raw).collect();
+        let mut body = vec![Line::raw("CrazyAgent runs exactly this line:")];
         body.extend(
             wrap(&sanitize(line), room)
                 .into_iter()
                 .map(|part| styled(part, Role::Accent, &ctx.theme)),
         );
         body.push(Line::default());
-        body.extend(wrap(&after, room).into_iter().map(Line::raw));
+        for sentence in &after {
+            body.extend(wrap(sentence, room).into_iter().map(Line::raw));
+        }
         body.push(Line::default());
         body.extend(
             wrap(
