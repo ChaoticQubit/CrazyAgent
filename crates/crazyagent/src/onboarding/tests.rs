@@ -1152,7 +1152,9 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
 /// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the
 /// environment's Python is a link into a version link (`cpython-3.12`) that leads to the
 /// real installation (`cpython-3.12.16`), and `pyvenv.cfg` names the version link. The
-/// stand-in writes an empty graph. Takes the folder. Returns the graphify file.
+/// installation's `python3.12` leads to `/bin/bash`, since macOS 26 kills a copy of a system
+/// shell started outside the system volume. The stand-in writes an empty graph. Takes the
+/// folder. Returns the graphify file.
 #[cfg(target_os = "macos")]
 fn graphify_behind_a_version_link(root: &Path) -> std::path::PathBuf {
     let real = root.join("python/cpython-3.12.16/bin");
@@ -1160,7 +1162,8 @@ fn graphify_behind_a_version_link(root: &Path) -> std::path::PathBuf {
     for folder in [&real, &bin] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    crate::spawn_gate::guarded(|| std::fs::copy("/bin/bash", real.join("python3.12"))).unwrap();
+    symlink("/bin/bash", real.join("python3.12")).unwrap();
+    assert!(real.join("python3.12").is_file());
     symlink(
         root.join("python/cpython-3.12.16"),
         root.join("python/cpython-3.12"),
