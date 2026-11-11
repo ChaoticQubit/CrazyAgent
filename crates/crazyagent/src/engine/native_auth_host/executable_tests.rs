@@ -392,6 +392,10 @@ fn native_auth_registered_executable_accepts_claude_code_2_1_309_size() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 275_923_296);
 }
 
+/// Sixteen catalog-sized rounds of checks on a harness of Claude Code's size take under a
+/// second once the harness is settled. macOS never hashes again after capture; elsewhere the
+/// row first waits [`super::SETTLE_AFTER`] and lets one check settle the harness, since every
+/// check before that hashes the whole file by design.
 #[test]
 fn native_auth_registered_executable_checks_at_harness_size_fit_the_owner_deadline() {
     let root = tempfile::tempdir().unwrap();
@@ -402,6 +406,17 @@ fn native_auth_registered_executable_checks_at_harness_size_fit_the_owner_deadli
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     let registered = RegisteredNativeAuthHost::capture(&path).unwrap();
     let digest = registered.verified_sha256().unwrap();
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::thread::sleep(super::SETTLE_AFTER);
+        assert_eq!(registered.verified_path().unwrap(), path);
+        assert!(
+            registered
+                .settled
+                .load(std::sync::atomic::Ordering::Acquire),
+            "a harness seen and unchanged for the settle time settles at its next check"
+        );
+    }
     let started = std::time::Instant::now();
     for _ in 0..16 {
         assert_eq!(registered.verified_path().unwrap(), path);
