@@ -1,4 +1,5 @@
 use super::*;
+use crate::harnesses::update::{CheckWhen, LastUpdate, OnlineLookup};
 use crate::harnesses::{Search, catalog};
 use crate::tui::client::OwnerEvent;
 use crate::tui::screens::settings_accounts::tests::{dataset, fixture, list_ctx, render};
@@ -205,4 +206,361 @@ fn words_follow_the_engine_catalog() {
     assert_eq!(control_word(opencode), "Unknown");
     assert_eq!(works_with(&[]), "Not known yet");
     assert_eq!(works_with(&[AccountKind::Local]), "Local model");
+}
+
+const BREW_LINE: &str = "/opt/homebrew/bin/brew upgrade --cask claude-code@latest";
+
+#[derive(Debug, PartialEq)]
+enum Sent {
+    Versions(String, bool),
+    Update(String),
+    Settings,
+    Other,
+}
+
+fn sent(ctx: &mut Ctx) -> Vec<Sent> {
+    let mut all = Vec::new();
+    while let Some(request) = ctx.next_request() {
+        if let Request::Settings(job) = request {
+            all.push(match *job {
+                SettingsJob::HarnessVersions { id, look } => Sent::Versions(id, look),
+                SettingsJob::HarnessUpdate { id } => Sent::Update(id),
+                SettingsJob::HarnessUpdateSettings => Sent::Settings,
+                _ => Sent::Other,
+            });
+        }
+    }
+    all
+}
+
+fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
+    HarnessVersions {
+        id: "claude-code".into(),
+        method: Method::Homebrew {
+            cask: "claude-code@latest".into(),
+        },
+        installed: Some(installed.into()),
+        latest,
+        command: Some(BREW_LINE.into()),
+        install: None,
+        refusal: None,
+        guide: None,
+        running: false,
+        last: None,
+    }
+}
+
+fn newer() -> HarnessVersions {
+    versions_of(
+        "2.1.309",
+        Latest::Newer {
+            version: "2.1.322".into(),
+        },
+    )
+}
+
+fn settings_with(mode: UpdateMode, when: CheckWhen) -> UpdateSettings {
+    UpdateSettings {
+        mode,
+        when,
+        ..UpdateSettings::default()
+    }
+}
+
+fn arrival(event: SettingsEvent) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(event))))
+}
+
+fn deliver(shell: &mut Shell, versions: HarnessVersions) {
+    let id = versions.id.clone();
+    shell.arrive(arrival(SettingsEvent::HarnessVersions(id, Ok(versions))));
+}
+
+fn on_claude(found: &Found) -> Shell {
+    let mut shell = Shell::with(
+        harness_ctx(120, 36),
+        Box::new(Harnesses::with(found.entries.clone())),
+    );
+    let at = found
+        .entries
+        .iter()
+        .position(|entry| entry.id == "claude-code")
+        .unwrap();
+    for _ in 0..at {
+        shell.key(Key::Down);
+    }
+    sent(&mut shell.ctx);
+    shell
+}
+
+fn frame(shell: &mut Shell) -> String {
+    render(shell, 120, 36).join("\n")
+}
+
+fn footer(shell: &mut Shell) -> String {
+    render(shell, 120, 36).pop().unwrap()
+}
+
+#[test]
+fn c_checks_the_selected_harness_and_the_row_shows_its_version_line() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    shell.key(Key::Char('c'));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), true)]
+    );
+    assert!(shell.busy(), "a check in flight shows a spinner");
+    deliver(&mut shell, newer());
+    assert!(!shell.busy());
+    assert!(frame(&mut shell).contains("Version 2.1.309. Version 2.1.322 is available."));
+}
+
+#[test]
+fn u_shows_the_exact_command_and_updates_only_after_y() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(&mut shell, newer());
+    shell.key(Key::Char('u'));
+    let shown = frame(&mut shell);
+    assert!(shown.contains(BREW_LINE), "{shown}");
+    assert!(shown.contains("Installed with Homebrew (claude-code@latest)."));
+    assert!(shown.contains("Update Claude Code? y to update, any other key to cancel."));
+    shell.key(Key::Char('n'));
+    assert!(!frame(&mut shell).contains(BREW_LINE));
+    assert!(
+        sent(&mut shell.ctx)
+            .iter()
+            .all(|call| !matches!(call, Sent::Update(_)))
+    );
+    shell.key(Key::Char('u'));
+    shell.key(Key::Char('y'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Update("claude-code".into())]);
+}
+
+#[test]
+fn u_on_an_install_the_app_cannot_update_says_why_and_sends_nothing() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    let refused = HarnessVersions {
+        method: Method::Unknown,
+        command: None,
+        refusal: Some("harness_update_unknown_install".into()),
+        guide: Some("https://code.claude.com/docs/en/setup".into()),
+        ..newer()
+    };
+    deliver(&mut shell, refused);
+    shell.key(Key::Char('u'));
+    let shown = frame(&mut shell);
+    assert!(
+        shown.contains("CrazyAgent can't tell how this was installed, so it won't update it."),
+        "{shown}"
+    );
+    assert!(shown.contains("https://code.claude.com/docs/en/setup"));
+    assert!(sent(&mut shell.ctx).is_empty());
+}
+
+#[test]
+fn a_failed_check_says_could_not_check_and_keeps_u() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(
+        &mut shell,
+        versions_of(
+            "2.1.309",
+            Latest::Failed {
+                code: "harness_update_lookup_failed".into(),
+            },
+        ),
+    );
+    assert!(frame(&mut shell).contains("Version 2.1.309. Couldn't check for a newer version."));
+    assert!(footer(&mut shell).contains("u Update"));
+    shell.key(Key::Char('u'));
+    assert!(frame(&mut shell).contains(BREW_LINE));
+}
+
+#[test]
+fn the_version_line_has_the_desktop_sentences() {
+    let line = |installed: Option<&str>, latest: Latest| {
+        version_line(&HarnessVersions {
+            installed: installed.map(str::to_owned),
+            ..versions_of("x", latest)
+        })
+    };
+    assert_eq!(
+        line(Some("2.1.309"), Latest::UpToDate),
+        "Version 2.1.309. Up to date."
+    );
+    assert_eq!(
+        line(Some("2.1.309"), Latest::NoCheck),
+        "Version 2.1.309. This install updates itself. Update asks it to look now."
+    );
+    assert_eq!(
+        line(
+            Some("2.1.309"),
+            Latest::Failed {
+                code: "harness_update_check_unreadable".into()
+            }
+        ),
+        "Version 2.1.309. Couldn't check for a newer version."
+    );
+    assert_eq!(line(Some("2.1.309"), Latest::NotChecked), "Version 2.1.309.");
+    assert_eq!(line(None, Latest::NotChecked), "Version unknown.");
+}
+
+#[test]
+fn every_update_sentence_is_the_desktop_sentence_and_no_two_are_alike() {
+    let desktop = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/api-harness-updates.ts"
+    ))
+    .unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for (code, sentence) in COPY {
+        assert!(
+            desktop.contains(&format!("{code}: \"{sentence}\",")),
+            "{code}"
+        );
+        assert!(seen.insert(sentence), "{code}");
+        assert_eq!(update_copy(code), sentence);
+    }
+    assert_eq!(
+        update_copy("harness_update_from_a_newer_engine"),
+        update_copy("harness_update_outcome_unknown")
+    );
+}
+
+#[test]
+fn the_settings_decide_the_keys_and_whether_opening_the_page_checks() {
+    let found = found();
+    let installed = found
+        .entries
+        .iter()
+        .filter(|entry| entry.executable.is_some())
+        .count();
+    let mut shell = Shell::with(
+        harness_ctx(120, 36),
+        Box::new(Harnesses::with(found.entries.clone())),
+    );
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Settings]);
+    shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
+        settings_with(UpdateMode::CheckAndUpdate, CheckWhen::OnOpen),
+    ))));
+    let looks = sent(&mut shell.ctx);
+    assert_eq!(looks.len(), installed);
+    assert!(
+        looks
+            .iter()
+            .all(|call| matches!(call, Sent::Versions(_, true)))
+    );
+    shell.refresh();
+    assert!(sent(&mut shell.ctx).is_empty(), "one read per page opening");
+
+    let mut shell = Shell::with(
+        harness_ctx(120, 36),
+        Box::new(Harnesses::with(found.entries.clone())),
+    );
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
+        settings_with(UpdateMode::CheckOnly, CheckWhen::OnButton),
+    ))));
+    assert!(
+        sent(&mut shell.ctx)
+            .iter()
+            .all(|call| matches!(call, Sent::Versions(_, false)))
+    );
+    let hints = footer(&mut shell);
+    assert!(hints.contains("c Check for updates"), "{hints}");
+    assert!(!hints.contains("u Update"), "{hints}");
+    shell.key(Key::Char('u'));
+    assert!(frame(&mut shell).contains("Harness updates are set to Check only."));
+    assert!(sent(&mut shell.ctx).is_empty());
+
+    let mut shell = Shell::with(
+        harness_ctx(120, 36),
+        Box::new(Harnesses::with(found.entries.clone())),
+    );
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
+        settings_with(UpdateMode::Off, CheckWhen::OnOpen),
+    ))));
+    assert!(sent(&mut shell.ctx).is_empty(), "Off reads nothing");
+    let hints = footer(&mut shell);
+    assert!(!hints.contains("Check for updates"), "{hints}");
+    shell.key(Key::Char('c'));
+    assert!(frame(&mut shell).contains("Harness updates are off in settings."));
+    assert!(sent(&mut shell.ctx).is_empty());
+}
+
+#[test]
+fn a_running_update_is_read_again_on_each_refresh_until_it_ends() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(&mut shell, newer());
+    shell.key(Key::Char('u'));
+    shell.key(Key::Char('y'));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessUpdated(
+        "claude-code".into(),
+        Ok(()),
+    )));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), false)]
+    );
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            ..newer()
+        },
+    );
+    assert!(frame(&mut shell).contains("Updating..."));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), false)]
+    );
+    shell.refresh();
+    assert!(sent(&mut shell.ctx).is_empty(), "one read in flight");
+    let done = HarnessVersions {
+        installed: Some("2.1.322".into()),
+        latest: Latest::UpToDate,
+        last: Some(LastUpdate {
+            ok: true,
+            code: None,
+            output: String::new(),
+            from: Some("2.1.309".into()),
+            to: Some("2.1.322".into()),
+            ended_ms: 1,
+        }),
+        ..newer()
+    };
+    deliver(&mut shell, done);
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Other], "the catalog is read again");
+    assert!(frame(&mut shell).contains(
+        "Updated from 2.1.309 to 2.1.322. New agents use it now; no restart needed."
+    ));
+    shell.refresh();
+    assert!(sent(&mut shell.ctx).is_empty(), "polling stopped");
+}
+
+#[test]
+fn a_refused_update_says_the_engine_reason() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(&mut shell, newer());
+    shell.key(Key::Char('u'));
+    shell.key(Key::Char('y'));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessUpdated(
+        "claude-code".into(),
+        Err("harness_update_busy".into()),
+    )));
+    assert_eq!(
+        shell.ctx.message().unwrap().rest,
+        "An update for this harness is already running."
+    );
+    shell.refresh();
+    assert!(sent(&mut shell.ctx).is_empty());
 }
