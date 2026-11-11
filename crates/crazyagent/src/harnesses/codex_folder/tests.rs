@@ -45,6 +45,7 @@ fn the_walk_stops_at_the_first_git_whether_file_or_folder() {
     assert_eq!(project_folders(&linked), [linked.as_path()]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_broken_git_link_does_not_stop_the_walk() {
     let (_root, base) = scratch();
@@ -107,6 +108,7 @@ fn no_codex_folder_leaves_the_launch_folder_trusted_alone() {
     assert_eq!(terminal_entry(&sub).unwrap(), line(&[&sub], "trusted"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_codex_link_to_a_folder_counts_and_a_plain_file_does_not() {
     let (_root, base) = scratch();

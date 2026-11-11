@@ -3,9 +3,11 @@ use super::*;
 use crate::protocol::ProjectId;
 #[cfg(unix)]
 use crate::sandbox::ide_shell;
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
+use crate::sandbox::policy::AgentAccess;
 #[cfg(target_os = "macos")]
 use crate::sandbox::policy::{AgentFilesRule, IdeAgentFiles};
+#[cfg(unix)]
+use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
 use serde_json::json;
 #[cfg(unix)]
 use std::ffi::OsString;

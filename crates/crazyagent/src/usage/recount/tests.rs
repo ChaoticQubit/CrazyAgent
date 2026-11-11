@@ -995,6 +995,7 @@ fn history_fills_tool_hours_for_a_team_agent_and_only_before_the_start() {
     assert_eq!(rows, vec![(ms("2026-11-09T02:00:00.000Z"), 7, 1)]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_team_call_written_before_the_start_and_first_read_live_is_charted_once() {
     let (root, db) = store();

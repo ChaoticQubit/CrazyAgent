@@ -1307,6 +1307,7 @@ fn an_account_with_no_reading_says_so_under_the_strategies_that_need_one() {
 /// A store with the real sign-in tables, where a native account is not signed in until a
 /// row records it, running under the engine run these rows prove sign-ins in. Output: the
 /// store's folder and connection.
+#[cfg(unix)]
 fn signed_out_database() -> (tempfile::TempDir, Connection) {
     let (directory, connection) = database();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
@@ -1334,6 +1335,7 @@ fn signed_out_database() -> (tempfile::TempDir, Connection) {
 }
 
 /// The engine run these rows read under. Output: its host stamp.
+#[cfg(unix)]
 fn this_run() -> crate::engine::owner::HostStamp {
     crate::engine::owner::HostStamp {
         db_instance: "a".repeat(64),
@@ -1343,6 +1345,7 @@ fn this_run() -> crate::engine::owner::HostStamp {
 
 /// Records one account's latest sign-in as the native sign-in flow stores it, under this run.
 /// Inputs: the store, the account, its action and the phase it ended in. Output: none.
+#[cfg(unix)]
 fn sign_in_ended(
     connection: &Connection,
     id: &str,
@@ -1355,6 +1358,7 @@ fn sign_in_ended(
 /// Records one account's latest sign-in as the native sign-in flow stores it. Inputs: the
 /// store, the account, its action, the phase it ended in and the engine run it ended under.
 /// Output: none.
+#[cfg(unix)]
 fn sign_in_under(
     connection: &Connection,
     id: &str,
@@ -1425,6 +1429,7 @@ fn sign_in_under(
 
 /// Records a finished sign-in that ended authenticated. Inputs: the store and the account.
 /// Output: none.
+#[cfg(unix)]
 fn signed_in(connection: &Connection, id: &str) {
     sign_in_ended(
         connection,
@@ -1438,6 +1443,7 @@ fn signed_in(connection: &Connection, id: &str) {
 
 /// Records a provider's rejection of an account's sign-in as the model gateway stores it.
 /// Inputs: the store and the account. Output: none.
+#[cfg(unix)]
 fn provider_rejected(connection: &Connection, id: &str) {
     let model = managed(id);
     let at_ms = u64::try_from(NOW_MS).unwrap();
@@ -1464,6 +1470,7 @@ fn provider_rejected(connection: &Connection, id: &str) {
 
 /// Every account's standing in the only pool's ranking, in ranking order. Inputs: the store
 /// and the access. Output: the standings.
+#[cfg(unix)]
 fn held_as(connection: &Connection, access: &ModelAccess) -> Vec<Standing> {
     ranked(connection, access)[0]
         .accounts
@@ -1472,6 +1479,7 @@ fn held_as(connection: &Connection, access: &ModelAccess) -> Vec<Standing> {
         .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn an_account_with_no_sign_in_is_held_as_not_signed_in_and_a_signed_in_one_is_next() {
     let (_directory, connection) = signed_out_database();
@@ -1486,6 +1494,7 @@ fn an_account_with_no_sign_in_is_held_as_not_signed_in_and_a_signed_in_one_is_ne
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn never_use_is_what_a_never_used_account_reads_even_when_it_is_not_signed_in() {
     let (_directory, mut connection) = signed_out_database();
@@ -1502,6 +1511,7 @@ fn never_use_is_what_a_never_used_account_reads_even_when_it_is_not_signed_in() 
     assert_eq!(held_as(&connection, &access), [Standing::NeverUse]);
 }
 
+#[cfg(unix)]
 #[test]
 fn not_signed_in_is_what_a_paused_account_reads_when_it_has_no_sign_in() {
     let (_directory, connection) = signed_out_database();
@@ -1515,6 +1525,7 @@ fn not_signed_in_is_what_a_paused_account_reads_when_it_has_no_sign_in() {
     assert_eq!(held_as(&connection, &access), [Standing::NotSignedIn]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_sign_in_a_provider_rejected_reads_not_signed_in() {
     let (_directory, connection) = signed_out_database();
@@ -1524,6 +1535,7 @@ fn a_sign_in_a_provider_rejected_reads_not_signed_in() {
     assert_eq!(held_as(&connection, &access), [Standing::NotSignedIn]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_latest_sign_in_that_did_not_end_authenticated_reads_not_signed_in() {
     use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
@@ -1552,6 +1564,7 @@ fn a_latest_sign_in_that_did_not_end_authenticated_reads_not_signed_in() {
 /// Holds an account's sign-in for an account check as the engine does when it could not use
 /// the credential locally. Inputs: the store and the account. Output: none; it panics unless
 /// the sign-in passed the pick's check and is now held.
+#[cfg(unix)]
 fn doubted(connection: &Connection, id: &str) {
     signed_in(connection, id);
     let tx = connection.unchecked_transaction().unwrap();
@@ -1570,6 +1583,7 @@ fn doubted(connection: &Connection, id: &str) {
 
 /// Records a sign-in whose profile a check still holds. Inputs: the store and the account.
 /// Output: none.
+#[cfg(unix)]
 fn fenced(connection: &Connection, id: &str) {
     signed_in(connection, id);
     let ModelAuthentication::NativeManaged { profile_ref } = &managed(id).auth else {
@@ -1589,6 +1603,7 @@ fn fenced(connection: &Connection, id: &str) {
 
 /// Records a sign-in proved under an earlier engine run. Inputs: the store and the account.
 /// Output: none.
+#[cfg(unix)]
 fn from_an_earlier_run(connection: &Connection, id: &str) {
     use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
     sign_in_under(
@@ -1602,6 +1617,7 @@ fn from_an_earlier_run(connection: &Connection, id: &str) {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_doubted_sign_in_does_not_read_next() {
     let (_directory, connection) = signed_out_database();
@@ -1610,6 +1626,7 @@ fn a_doubted_sign_in_does_not_read_next() {
     assert_eq!(held_as(&connection, &access), [Standing::SignInUnconfirmed]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_profile_a_check_still_holds_does_not_read_next() {
     let (_directory, connection) = signed_out_database();
@@ -1618,6 +1635,7 @@ fn a_profile_a_check_still_holds_does_not_read_next() {
     assert_eq!(held_as(&connection, &access), [Standing::SignInUnconfirmed]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_sign_in_proved_under_an_earlier_engine_run_does_not_read_next() {
     let (_directory, connection) = signed_out_database();
@@ -1626,6 +1644,7 @@ fn a_sign_in_proved_under_an_earlier_engine_run_does_not_read_next() {
     assert_eq!(held_as(&connection, &access), [Standing::SignInUnconfirmed]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_sign_in_that_needs_a_check_reads_so_over_a_pause_and_never_use_over_it() {
     let (_directory, mut connection) = signed_out_database();
@@ -1653,6 +1672,7 @@ fn a_sign_in_that_needs_a_check_reads_so_over_a_pause_and_never_use_over_it() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_ranking_reads_next_exactly_when_the_real_pick_would_take_the_account() {
     use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
@@ -1697,6 +1717,7 @@ fn the_ranking_reads_next_exactly_when_the_real_pick_would_take_the_account() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_account_with_no_native_sign_in_is_never_held_for_one() {
     let (_directory, connection) = signed_out_database();
