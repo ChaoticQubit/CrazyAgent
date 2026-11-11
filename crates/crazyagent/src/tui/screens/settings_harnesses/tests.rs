@@ -282,6 +282,58 @@ fn deliver(shell: &mut Shell, versions: HarnessVersions) {
     shell.arrive(arrival(SettingsEvent::HarnessVersions(id, Ok(versions))));
 }
 
+fn press(shell: &mut Shell, key: char, versions: HarnessVersions) {
+    shell.key(Key::Char(key));
+    deliver(shell, versions);
+}
+
+fn select(shell: &mut Shell, found: &Found, id: &str) {
+    let at = found
+        .entries
+        .iter()
+        .position(|entry| entry.id == id)
+        .unwrap();
+    shell.key(Key::Home);
+    for _ in 0..at {
+        shell.key(Key::Down);
+    }
+}
+
+fn ended(from: Option<&str>, to: Option<&str>) -> HarnessVersions {
+    HarnessVersions {
+        installed: to.map(str::to_owned),
+        latest: Latest::UpToDate,
+        last: Some(LastUpdate {
+            ok: true,
+            code: None,
+            output: String::new(),
+            from: from.map(str::to_owned),
+            to: to.map(str::to_owned),
+            ended_ms: 1,
+        }),
+        ..newer()
+    }
+}
+
+fn jobs(calls: &[Sent]) -> usize {
+    calls
+        .iter()
+        .filter(|call| matches!(call, Sent::Update(_) | Sent::Install(_)))
+        .count()
+}
+
+const NPM_LINE: &str = "/opt/homebrew/bin/npm install -g @anthropic-ai/claude-code";
+
+fn with_npm() -> HarnessVersions {
+    HarnessVersions {
+        method: Method::Npm {
+            package: "@anthropic-ai/claude-code".into(),
+        },
+        command: Some(NPM_LINE.into()),
+        ..newer()
+    }
+}
+
 fn on_claude(found: &Found) -> Shell {
     on(found, "claude-code")
 }
@@ -332,23 +384,246 @@ fn u_shows_the_exact_command_and_updates_only_after_y() {
     let mut shell = on_claude(&found);
     deliver(&mut shell, newer());
     shell.key(Key::Char('u'));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), false)],
+        "the line is read again before it is shown"
+    );
+    assert!(!frame(&mut shell).contains(BREW_LINE));
+    deliver(&mut shell, newer());
     let shown = frame(&mut shell);
     assert!(shown.contains(BREW_LINE), "{shown}");
     assert!(shown.contains("Installed with Homebrew (claude-code@latest)."));
     assert!(shown.contains("Update Claude Code? y to update, any other key to cancel."));
     shell.key(Key::Char('n'));
     assert!(!frame(&mut shell).contains(BREW_LINE));
-    assert!(
-        sent(&mut shell.ctx)
-            .iter()
-            .all(|call| !matches!(call, Sent::Update(_)))
-    );
-    shell.key(Key::Char('u'));
+    assert_eq!(jobs(&sent(&mut shell.ctx)), 0);
+    press(&mut shell, 'u', newer());
     shell.key(Key::Char('y'));
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Update("claude-code".into())]
+        vec![
+            Sent::Versions("claude-code".into(), false),
+            Sent::Update("claude-code".into())
+        ]
     );
+}
+
+#[test]
+fn u_shows_the_line_the_engine_has_now_not_the_one_read_when_the_page_opened() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(&mut shell, newer());
+    press(&mut shell, 'u', with_npm());
+    let shown = frame(&mut shell);
+    assert!(shown.contains(NPM_LINE), "{shown}");
+    assert!(shown.contains("Installed with npm (@anthropic-ai/claude-code)."));
+    assert!(!shown.contains(BREW_LINE), "{shown}");
+}
+
+#[test]
+fn a_confirm_closes_when_its_line_is_gone_or_changed_and_y_then_starts_nothing() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    press(&mut shell, 'u', newer());
+    assert!(frame(&mut shell).contains(BREW_LINE));
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            command: None,
+            refusal: Some("harness_update_tool_unsafe".into()),
+            ..newer()
+        },
+    );
+    assert!(!frame(&mut shell).contains(BREW_LINE));
+    assert_eq!(
+        shell.ctx.message().unwrap().lead,
+        "Claude Code changed while you were asked."
+    );
+    sent(&mut shell.ctx);
+    shell.key(Key::Char('y'));
+    assert_eq!(
+        jobs(&sent(&mut shell.ctx)),
+        0,
+        "no dialog, so y starts nothing"
+    );
+    shell.key(Key::Char('c'));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), true)],
+        "keys reach the page again"
+    );
+    deliver(&mut shell, newer());
+
+    press(&mut shell, 'u', newer());
+    assert!(frame(&mut shell).contains(BREW_LINE));
+    deliver(&mut shell, with_npm());
+    let shown = frame(&mut shell);
+    assert!(!shown.contains(BREW_LINE), "{shown}");
+    assert!(!shown.contains(NPM_LINE), "{shown}");
+    sent(&mut shell.ctx);
+    shell.key(Key::Char('y'));
+    assert_eq!(jobs(&sent(&mut shell.ctx)), 0);
+    press(&mut shell, 'u', with_npm());
+    assert!(frame(&mut shell).contains(NPM_LINE));
+    shell.key(Key::Char('y'));
+    assert_eq!(jobs(&sent(&mut shell.ctx)), 1);
+}
+
+#[test]
+fn a_confirm_asked_on_one_row_stays_that_rows_when_the_selection_moves() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    shell.key(Key::Char('u'));
+    select(&mut shell, &found, "aider");
+    deliver(&mut shell, newer());
+    let shown = frame(&mut shell);
+    assert!(
+        shown.contains("Update Claude Code? y to update, any other key to cancel."),
+        "{shown}"
+    );
+    assert!(shown.contains(BREW_LINE), "{shown}");
+    shell.key(Key::Char('y'));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![
+            Sent::Versions("claude-code".into(), false),
+            Sent::Update("claude-code".into())
+        ]
+    );
+}
+
+#[test]
+fn version_replies_for_a_page_with_no_catalog_yet_are_dropped() {
+    let found = found();
+    let mut shell = Shell::with(harness_ctx(120, 36), Box::new(Harnesses::new()));
+    sent(&mut shell.ctx);
+    deliver(&mut shell, newer());
+    deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
+    assert!(shell.ctx.message().is_none());
+    assert!(!frame(&mut shell).contains("Version 2.1.309"));
+    shell.arrive(arrival(SettingsEvent::Harnesses(Ok(found.entries.clone()))));
+    shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
+        settings_with(UpdateMode::CheckAndUpdate, CheckWhen::OnButton),
+    ))));
+    assert_eq!(
+        sent(&mut shell.ctx).len(),
+        found.entries.len(),
+        "every row is read once the catalog is here"
+    );
+    select(&mut shell, &found, "claude-code");
+    assert!(
+        !frame(&mut shell).contains("Version 2.1.309"),
+        "a dropped reply left nothing behind"
+    );
+    deliver(&mut shell, newer());
+    assert!(frame(&mut shell).contains("Version 2.1.309. Version 2.1.322 is available."));
+}
+
+#[test]
+fn a_second_job_waits_for_the_one_that_runs_and_the_first_row_still_ends() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    press(&mut shell, 'u', newer());
+    shell.key(Key::Char('y'));
+    shell.arrive(arrival(SettingsEvent::HarnessUpdated(
+        "claude-code".into(),
+        Ok(()),
+    )));
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            ..newer()
+        },
+    );
+    sent(&mut shell.ctx);
+
+    select(&mut shell, &found, "aider");
+    shell.key(Key::Char('i'));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(
+        (message.lead.as_str(), message.rest.as_str()),
+        (
+            "Can't install Aider.",
+            "Claude Code is being updated or installed. Wait until that ends."
+        )
+    );
+    shell.key(Key::Char('y'));
+    select(&mut shell, &found, "codex");
+    shell.key(Key::Char('u'));
+    shell.key(Key::Char('y'));
+    assert!(
+        sent(&mut shell.ctx).is_empty(),
+        "no read and no second job while one runs"
+    );
+
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), false)],
+        "the running update is still read"
+    );
+    deliver(&mut shell, ended(Some("2.1.309"), Some("2.1.322")));
+    select(&mut shell, &found, "claude-code");
+    let shown = frame(&mut shell);
+    assert!(!shown.contains("Updating..."), "{shown}");
+    assert!(
+        shown.contains("Updated from 2.1.309 to 2.1.322."),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_job_started_somewhere_else_is_read_until_it_ends_and_holds_a_second_one() {
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            ..newer()
+        },
+    );
+    assert!(frame(&mut shell).contains("Updating..."));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), false)]
+    );
+    shell.key(Key::Char('u'));
+    assert_eq!(
+        shell.ctx.message().unwrap().rest,
+        "Claude Code is being updated or installed. Wait until that ends."
+    );
+    assert!(sent(&mut shell.ctx).is_empty());
+    deliver(&mut shell, ended(Some("2.1.309"), Some("2.1.322")));
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Other],
+        "the catalog is read again"
+    );
+    assert!(!frame(&mut shell).contains("Updating..."));
+    shell.refresh();
+    assert!(sent(&mut shell.ctx).is_empty(), "polling stopped");
+}
+
+#[test]
+fn a_finished_job_with_no_old_version_is_not_called_an_install() {
+    assert_eq!(
+        last_line(&ended(None, Some("1.2.3")), "Claude Code").as_deref(),
+        Some("Version 1.2.3 is installed now. New agents use it; no restart needed.")
+    );
+    assert_eq!(
+        last_line(&ended(None, None), "Claude Code").as_deref(),
+        Some("It is installed now. New agents use it; no restart needed.")
+    );
+    let found = found();
+    let mut shell = on_claude(&found);
+    deliver(&mut shell, ended(None, Some("1.2.3")));
+    let shown = frame(&mut shell);
+    assert!(shown.contains("Version 1.2.3 is installed now."), "{shown}");
+    assert!(!shown.contains("Installed version"), "{shown}");
 }
 
 #[test]
@@ -362,33 +637,35 @@ fn u_on_an_install_the_app_cannot_update_says_why_and_sends_nothing() {
         guide: Some("https://code.claude.com/docs/en/setup".into()),
         ..newer()
     };
-    deliver(&mut shell, refused);
-    shell.key(Key::Char('u'));
+    deliver(&mut shell, refused.clone());
+    press(&mut shell, 'u', refused);
     let shown = frame(&mut shell);
     assert!(
         shown.contains("CrazyAgent can't tell how this was installed, so it won't update it."),
         "{shown}"
     );
     assert!(shown.contains("https://code.claude.com/docs/en/setup"));
-    assert!(sent(&mut shell.ctx).is_empty());
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("claude-code".into(), false)],
+        "the read, and no update"
+    );
 }
 
 #[test]
 fn a_failed_check_says_could_not_check_and_keeps_u() {
     let found = found();
     let mut shell = on_claude(&found);
-    deliver(
-        &mut shell,
-        versions_of(
-            "2.1.309",
-            Latest::Failed {
-                code: "harness_update_lookup_failed".into(),
-            },
-        ),
+    let failed = versions_of(
+        "2.1.309",
+        Latest::Failed {
+            code: "harness_update_lookup_failed".into(),
+        },
     );
+    deliver(&mut shell, failed.clone());
     assert!(frame(&mut shell).contains("Version 2.1.309. Couldn't check for a newer version."));
     assert!(footer(&mut shell).contains("u Update"));
-    shell.key(Key::Char('u'));
+    press(&mut shell, 'u', failed);
     assert!(frame(&mut shell).contains(BREW_LINE));
 }
 
@@ -559,7 +836,7 @@ fn a_running_update_is_read_again_on_each_refresh_until_it_ends() {
     let found = found();
     let mut shell = on_claude(&found);
     deliver(&mut shell, newer());
-    shell.key(Key::Char('u'));
+    press(&mut shell, 'u', newer());
     shell.key(Key::Char('y'));
     sent(&mut shell.ctx);
     shell.arrive(arrival(SettingsEvent::HarnessUpdated(
@@ -617,7 +894,7 @@ fn a_refused_update_says_the_engine_reason() {
     let found = found();
     let mut shell = on_claude(&found);
     deliver(&mut shell, newer());
-    shell.key(Key::Char('u'));
+    press(&mut shell, 'u', newer());
     shell.key(Key::Char('y'));
     sent(&mut shell.ctx);
     shell.arrive(arrival(SettingsEvent::HarnessUpdated(
@@ -626,7 +903,7 @@ fn a_refused_update_says_the_engine_reason() {
     )));
     assert_eq!(
         shell.ctx.message().unwrap().rest,
-        "An update for this harness is already running."
+        "Another harness update or install is running."
     );
     shell.refresh();
     assert!(sent(&mut shell.ctx).is_empty());
@@ -663,7 +940,11 @@ fn i_on_a_missing_harness_shows_the_exact_install_line_and_installs_only_after_y
     let mut shell = on(&found, "aider");
     deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
     assert!(footer(&mut shell).contains("i Install"));
-    shell.key(Key::Char('i'));
+    press(
+        &mut shell,
+        'i',
+        missing("aider", Some(AIDER_LINE), AIDER_GUIDE),
+    );
     let shown = frame(&mut shell);
     assert!(shown.contains(AIDER_LINE), "{shown}");
     assert!(shown.contains("It never uses sudo and never runs a script from a website."));
@@ -671,14 +952,20 @@ fn i_on_a_missing_harness_shows_the_exact_install_line_and_installs_only_after_y
     assert!(shown.contains("Install Aider? y to install, any other key to cancel."));
     shell.key(Key::Esc);
     assert!(!frame(&mut shell).contains(AIDER_LINE));
-    assert!(
-        sent(&mut shell.ctx)
-            .iter()
-            .all(|call| !matches!(call, Sent::Install(_)))
+    assert_eq!(jobs(&sent(&mut shell.ctx)), 0);
+    press(
+        &mut shell,
+        'i',
+        missing("aider", Some(AIDER_LINE), AIDER_GUIDE),
     );
-    shell.key(Key::Char('i'));
     shell.key(Key::Char('y'));
-    assert_eq!(sent(&mut shell.ctx), vec![Sent::Install("aider".into())]);
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![
+            Sent::Versions("aider".into(), false),
+            Sent::Install("aider".into())
+        ]
+    );
 }
 
 #[test]
@@ -688,13 +975,17 @@ fn i_without_an_install_line_shows_the_guide_address_and_sends_nothing() {
     let mut shell = on(&found, "openhands");
     deliver(&mut shell, missing("openhands", None, guide));
     assert!(!footer(&mut shell).contains("i Install"));
-    shell.key(Key::Char('i'));
+    press(&mut shell, 'i', missing("openhands", None, guide));
     let shown = frame(&mut shell);
     assert!(shown.contains(guide), "{shown}");
     assert!(shown.contains(
         "CrazyAgent installs with Homebrew or npm and found no way to install this one."
     ));
-    assert!(sent(&mut shell.ctx).is_empty());
+    assert_eq!(
+        sent(&mut shell.ctx),
+        vec![Sent::Versions("openhands".into(), false)],
+        "the read, and no install"
+    );
 }
 
 #[test]
@@ -702,7 +993,11 @@ fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
     let found = found();
     let mut shell = on(&found, "aider");
     deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
-    shell.key(Key::Char('i'));
+    press(
+        &mut shell,
+        'i',
+        missing("aider", Some(AIDER_LINE), AIDER_GUIDE),
+    );
     shell.key(Key::Char('y'));
     sent(&mut shell.ctx);
     shell.arrive(arrival(SettingsEvent::HarnessInstalled(
@@ -759,7 +1054,7 @@ fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
     };
     assert_eq!(
         last_line(&done, "Aider").as_deref(),
-        Some("Installed version 0.86.2. No restart needed.")
+        Some("Version 0.86.2 is installed now. New agents use it; no restart needed.")
     );
 }
 
@@ -768,7 +1063,11 @@ fn a_refused_install_says_the_engine_reason() {
     let found = found();
     let mut shell = on(&found, "aider");
     deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
-    shell.key(Key::Char('i'));
+    press(
+        &mut shell,
+        'i',
+        missing("aider", Some(AIDER_LINE), AIDER_GUIDE),
+    );
     shell.key(Key::Char('y'));
     sent(&mut shell.ctx);
     shell.arrive(arrival(SettingsEvent::HarnessInstalled(

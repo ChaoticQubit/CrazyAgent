@@ -60,7 +60,7 @@ const COPY: [(&str, &str); 26] = [
     ),
     (
         "harness_update_busy",
-        "An update for this harness is already running.",
+        "Another harness update or install is running.",
     ),
     (
         "harness_update_not_installed",
@@ -128,6 +128,33 @@ enum Job {
     Install,
 }
 
+/// An open confirm: the harness, the job and the exact line the dialog shows, taken from the
+/// versions the engine answered right before the dialog opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Confirm {
+    id: String,
+    job: Job,
+    line: String,
+}
+
+/// The line a job would run for a harness. Inputs: the versions and the job. Output: the
+/// line, or None when the engine offers none.
+fn job_line(versions: &HarnessVersions, job: Job) -> Option<&str> {
+    match job {
+        Job::Update => versions.command.as_deref(),
+        Job::Install => versions.install.as_deref(),
+    }
+}
+
+/// The lead of the message that says a job was not started. Inputs: the job and the harness
+/// name. Output: the sentence.
+fn cant(job: Job, name: &str) -> String {
+    match job {
+        Job::Update => format!("Can't update {name}."),
+        Job::Install => format!("Can't install {name}."),
+    }
+}
+
 /// The plain sentence for an update or check code, in the same words as the desktop's
 /// `updateCopy`. Input: the code. Output: one sentence, the same for no two known codes;
 /// a code this build does not know reads as an outcome CrazyAgent doesn't know.
@@ -178,8 +205,10 @@ fn last_line(versions: &HarnessVersions, name: &str) -> Option<String> {
     let unknown = "an unknown version";
     Some(match (last.ok, &last.from, last.code.as_deref()) {
         (true, None, _) => match &last.to {
-            Some(to) => format!("Installed version {to}. No restart needed."),
-            None => "Installed. No restart needed.".to_owned(),
+            Some(to) => {
+                format!("Version {to} is installed now. New agents use it; no restart needed.")
+            }
+            None => "It is installed now. New agents use it; no restart needed.".to_owned(),
         },
         (true, Some(from), _) => format!(
             "Updated from {from} to {}. New agents use it now; no restart needed.",
@@ -324,7 +353,7 @@ pub struct Harnesses {
     opened: bool,
     versions: BTreeMap<String, HarnessVersions>,
     asking: BTreeSet<String>,
-    confirm: Option<(String, Job)>,
+    confirm: Option<Confirm>,
     wants: Option<(String, Job)>,
     running: Option<(String, usize)>,
 }
@@ -437,12 +466,67 @@ impl Harnesses {
         self.ask_versions(&id, true, ctx);
     }
 
+    fn name_of(&self, id: &str) -> String {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map_or(id, |entry| entry.name.as_str())
+            .to_owned()
+    }
+
+    /// Says why no job can start while one runs, naming the harness that is busy: the engine
+    /// runs one update or install at a time. Inputs: the lead sentence and the context.
+    /// Output: whether a job runs, in which case the owner was told.
+    fn job_runs(&self, lead: &str, ctx: &mut Ctx) -> bool {
+        let Some((running, _)) = &self.running else {
+            return false;
+        };
+        let name = self.name_of(running);
+        ctx.say(Message::error(
+            lead,
+            &format!("{name} is being updated or installed. Wait until that ends."),
+        ));
+        true
+    }
+
+    /// Reads a harness again before its confirm opens, so the dialog shows the line the
+    /// engine has now and not the one read when the page opened. Inputs: the harness id, the
+    /// job and the context. Output: none; the reply opens the confirm.
+    fn ask_for(&mut self, id: String, job: Job, ctx: &mut Ctx) {
+        self.ask_versions(&id, false, ctx);
+        self.wants = Some((id, job));
+    }
+
+    /// Opens the confirm for the job the owner asked for on a harness, from the versions
+    /// just read, or says why the job is not offered. Inputs: the harness id, the job, its
+    /// versions and the context. Output: none.
+    fn offer(&mut self, id: &str, job: Job, versions: &HarnessVersions, ctx: &mut Ctx) {
+        let lead = cant(job, &self.name_of(id));
+        if self.job_runs(&lead, ctx) {
+            return;
+        }
+        if let Some(line) = job_line(versions, job) {
+            self.confirm = Some(Confirm {
+                id: id.to_owned(),
+                job,
+                line: line.to_owned(),
+            });
+            return;
+        }
+        let unknown = "harness_update_outcome_unknown";
+        let why = match job {
+            Job::Update => refusal(versions).unwrap_or_else(|| update_copy(unknown).to_owned()),
+            Job::Install => update_copy(versions.refusal.as_deref().unwrap_or(unknown)).to_owned(),
+        };
+        ctx.say(Message::error(&lead, &why));
+    }
+
     fn update(&mut self, ctx: &mut Ctx) {
         let Some(entry) = self.chosen() else {
             return;
         };
         let (id, name) = (entry.id.clone(), entry.name.clone());
-        let lead = format!("Can't update {name}.");
+        let lead = cant(Job::Update, &name);
         let blocked = match self.mode() {
             UpdateMode::Off => Some("harness_update_off"),
             UpdateMode::CheckOnly => Some("harness_update_check_only"),
@@ -452,26 +536,10 @@ impl Harnesses {
             ctx.say(Message::error(&lead, update_copy(code)));
             return;
         }
-        if self
-            .running
-            .as_ref()
-            .is_some_and(|(running, _)| *running == id)
-        {
-            ctx.say(Message::error(&lead, update_copy("harness_update_busy")));
+        if self.job_runs(&lead, ctx) {
             return;
         }
-        match self.versions.get(&id) {
-            Some(versions) if versions.command.is_some() => self.confirm = Some((id, Job::Update)),
-            Some(versions) => {
-                let why = refusal(versions)
-                    .unwrap_or_else(|| update_copy("harness_update_outcome_unknown").to_owned());
-                ctx.say(Message::error(&lead, &why));
-            }
-            None => {
-                self.wants = Some((id.clone(), Job::Update));
-                self.ask_versions(&id, false, ctx);
-            }
-        }
+        self.ask_for(id, Job::Update, ctx);
     }
 
     fn install(&mut self, ctx: &mut Ctx) {
@@ -483,36 +551,20 @@ impl Harnesses {
             return;
         };
         let (id, name) = (entry.id.clone(), entry.name.clone());
-        let lead = format!("Can't install {name}.");
-        if self
-            .running
-            .as_ref()
-            .is_some_and(|(running, _)| *running == id)
-        {
-            ctx.say(Message::error(&lead, update_copy("harness_update_busy")));
+        if self.job_runs(&cant(Job::Install, &name), ctx) {
             return;
         }
-        match self.versions.get(&id) {
-            Some(versions) if versions.install.is_some() => self.confirm = Some((id, Job::Install)),
-            Some(versions) => {
-                let code = versions
-                    .refusal
-                    .as_deref()
-                    .unwrap_or("harness_update_outcome_unknown");
-                ctx.say(Message::error(&lead, update_copy(code)));
-            }
-            None => {
-                self.wants = Some((id.clone(), Job::Install));
-                self.ask_versions(&id, false, ctx);
-            }
-        }
+        self.ask_for(id, Job::Install, ctx);
     }
 
     fn confirmed(&mut self, key: &Key, ctx: &mut Ctx) {
-        let Some((id, job)) = self.confirm.take() else {
+        let Some(Confirm { id, job, .. }) = self.confirm.take() else {
             return;
         };
         if *key != Key::Char('y') {
+            return;
+        }
+        if self.job_runs(&cant(job, &self.name_of(&id)), ctx) {
             return;
         }
         let request = match job {
@@ -549,6 +601,9 @@ impl Harnesses {
             .wants
             .take_if(|(wanted, _)| wanted == id)
             .map(|(_, job)| job);
+        if !self.entries.iter().any(|entry| entry.id == id) {
+            return;
+        }
         let versions = match result {
             Ok(versions) if versions.id == id => versions,
             Ok(_) => {
@@ -567,7 +622,21 @@ impl Harnesses {
             }
         };
         self.versions.insert(id.to_owned(), versions.clone());
-        assert!(self.versions.len() <= self.entries.len().max(1));
+        assert!(self.versions.len() <= self.entries.len());
+        let stale = self.confirm.take_if(|open| {
+            open.id == id
+                && (versions.running || job_line(versions, open.job) != Some(open.line.as_str()))
+        });
+        if stale.is_some() {
+            let name = self.name_of(id);
+            ctx.say(Message::error(
+                &format!("{name} changed while you were asked."),
+                "Press the key again to see what CrazyAgent would run now.",
+            ));
+        }
+        if versions.running && self.running.is_none() {
+            self.running = Some((id.to_owned(), 0));
+        }
         let running = self
             .running
             .as_ref()
@@ -576,20 +645,13 @@ impl Harnesses {
             self.running = None;
             self.reload(ctx);
         }
-        match wanted {
-            Some(Job::Update) => self.update(ctx),
-            Some(Job::Install) => self.install(ctx),
-            None => {}
+        if let Some(job) = wanted {
+            self.offer(id, job, versions, ctx);
         }
     }
 
     fn arrive_started(&mut self, id: &str, job: Job, result: &Result<(), String>, ctx: &mut Ctx) {
-        let name = self
-            .entries
-            .iter()
-            .find(|entry| entry.id == id)
-            .map_or(id, |entry| entry.name.as_str())
-            .to_owned();
+        let name = self.name_of(id);
         match result {
             Ok(()) => self.poll(ctx),
             Err(code) => {
@@ -939,6 +1001,8 @@ impl Screen for Harnesses {
         match result {
             Ok(entries) => {
                 self.entries = entries.clone();
+                self.versions
+                    .retain(|id, _| entries.iter().any(|entry| entry.id == *id));
                 self.load = Load::Ready(());
                 self.selected = self.selected.min(self.entries.len().saturating_sub(1));
                 let ready = self
@@ -976,24 +1040,19 @@ impl Screen for Harnesses {
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
-        let (id, job) = self.confirm.as_ref()?;
-        let versions = self.versions.get(id)?;
-        let name = self
-            .entries
-            .iter()
-            .find(|entry| entry.id == *id)
-            .map_or(id.as_str(), |entry| entry.name.as_str());
-        let (line, after, verb) = match job {
+        let Confirm { id, job, line } = self.confirm.as_ref()?;
+        let name = self.name_of(id);
+        let how = self.versions.get(id).map_or_else(String::new, |versions| {
+            format!("{} ", installed_with(&versions.method))
+        });
+        let (after, verb) = match job {
             Job::Update => (
-                versions.command.as_deref()?,
                 vec![format!(
-                    "{} When it finishes, new agents use the new version with no restart. Agents that are running keep their version until they start again.",
-                    installed_with(&versions.method)
+                    "{how}When it finishes, new agents use the new version with no restart. Agents that are running keep their version until they start again."
                 )],
                 "update",
             ),
             Job::Install => (
-                versions.install.as_deref()?,
                 vec![
                     "It never uses sudo and never runs a script from a website.".to_owned(),
                     format!("When it finishes, new agents can use {name} with no engine restart."),

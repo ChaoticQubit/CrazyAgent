@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
 import { openLink } from "../../api-projects";
 import {
-  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
-  UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
+  harnessVersions, installedWith, installHarness, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
+  UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessJob, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
 } from "../../api-harness-updates";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
@@ -77,7 +77,7 @@ function statusWord(entry: HarnessEntry): string {
 function lastLine(versions: HarnessVersions, name: string): string | null {
   const last = versions.last;
   if (last === null) return null;
-  if (last.ok && last.from === null) return last.to === null ? "Installed. No restart needed." : `Installed version ${last.to}. No restart needed.`;
+  if (last.ok && last.from === null) return last.to === null ? "It is installed now. New agents use it; no restart needed." : `Version ${last.to} is installed now. New agents use it; no restart needed.`;
   if (last.ok) return `Updated from ${last.from} to ${last.to ?? "an unknown version"}. New agents use it now; no restart needed.`;
   if (last.code === "harness_install_not_found") return `The install finished, but CrazyAgent can't find ${name}. Choose Check again.`;
   return updateCopy(last.code ?? "harness_update_failed");
@@ -110,7 +110,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
   const refusal = shown !== null ? refusalLine(shown) : absent !== null && absent.install === null && absent.refusal !== null ? updateCopy(absent.refusal) : null;
   const last = read === null || running ? null : lastLine(read, entry.name);
   const guide = shown?.guide ?? (absent !== null && absent.install === null ? absent.guide : null);
-  const said = read?.last?.code?.startsWith("harness_install_") ? "What the installer said" : "What the updater said";
+  const said = missing || read?.last?.code?.startsWith("harness_install_") ? "What the installer said" : "What the updater said";
   return <>
     <SettingRow label={entry.name}>
       <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>
@@ -127,7 +127,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
       <div className="set-ctl set-line-ctl">
         {checkable && <Button aria-label={`Check ${entry.name} for updates`} disabled={running || checking} onClick={onCheck}>Check for updates</Button>}
         {updatable && <Button aria-label={`Update ${entry.name}`} disabled={running || checking} onClick={onUpdate}>Update</Button>}
-        {installable && <Button aria-label={`Install ${entry.name}`} disabled={running} onClick={onInstall}>Install</Button>}
+        {installable && <Button aria-label={`Install ${entry.name}`} disabled={running || checking} onClick={onInstall}>Install</Button>}
         <StatusBadge word={statusWord(entry)} />
       </div>
     </SettingRow>
@@ -208,50 +208,66 @@ function HarnessRow({ entry, settings, onCatalog }: { entry: HarnessEntry; setti
   const [asking, setAsking] = useState(false);
   const [pending, setPending] = useState(false);
   const [adding, setAdding] = useState(false);
+  const alive = useRef(true);
+  const following = useRef(false);
   const mode = settings?.mode ?? "off";
   const look = settings?.when === "on_open";
   const known = settings !== null;
   const installed = entry.status.kind !== "not_installed";
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
   const show = (read: Result<HarnessVersions>) => {
+    if (!alive.current) return read;
     if (read.kind === "ok") { setVersions(read.value); setProblem(undefined); } else setProblem(failureCopy(read));
     return read;
+  };
+  const follow = async () => {
+    if (following.current) return;
+    following.current = true;
+    await pollWhileRunning(entry.id, (id, again) => harnessVersions(id, again).then(show), wait, () => alive.current);
+    following.current = false;
+    if (alive.current) onCatalog();
+  };
+  const take = (read: Result<HarnessVersions>) => {
+    show(read);
+    if (alive.current && read.kind === "ok" && read.value.running) void follow();
   };
   useEffect(() => {
     if (!known || (installed && mode === "off")) return;
     let live = true;
-    void harnessVersions(entry.id, installed && look).then((read) => { if (live) show(read); });
+    void harnessVersions(entry.id, installed && look).then((read) => { if (live) take(read); });
     return () => { live = false; };
   }, [entry.id, known, installed, mode, look]);
   const check = async () => {
     setChecking(true);
-    show(await harnessVersions(entry.id, true));
+    take(await harnessVersions(entry.id, true));
     setChecking(false);
   };
-  const update = async () => {
-    setPending(true);
-    const started = await updateHarness(entry.id);
-    setPending(false);
-    setAsking(false);
-    if (started.kind !== "ok") { setProblem(failureCopy(started)); return; }
-    show(await pollWhileRunning(entry.id, (id, again) => harnessVersions(id, again).then(show), wait));
-    onCatalog();
+  const ask = async (job: HarnessJob) => {
+    setChecking(true);
+    const fresh = await readForConfirm(entry.id, job, harnessVersions);
+    setChecking(false);
+    take(fresh.read);
+    if (!alive.current || !fresh.open) return;
+    if (job === "update") setAsking(true); else setAdding(true);
   };
-  const install = async () => {
+  const start = async (job: HarnessJob) => {
     setPending(true);
-    const started = await installHarness(entry.id);
+    const started = await (job === "update" ? updateHarness(entry.id) : installHarness(entry.id));
     setPending(false);
-    setAdding(false);
+    if (job === "update") setAsking(false); else setAdding(false);
     if (started.kind !== "ok") { setProblem(failureCopy(started)); return; }
-    show(await pollWhileRunning(entry.id, (id, again) => harnessVersions(id, again).then(show), wait));
-    onCatalog();
+    await follow();
   };
   return <>
     <HarnessRowView entry={entry} versions={versions} mode={mode} problem={problem} checking={checking}
-      onCheck={() => void check()} onUpdate={() => setAsking(true)} onInstall={() => setAdding(true)} onGuide={(url) => void openLink(url)} />
+      onCheck={() => void check()} onUpdate={() => void ask("update")} onInstall={() => void ask("install")} onGuide={(url) => void openLink(url)} />
     {versions?.command && <UpdateConfirm versions={versions} name={entry.name} open={asking} pending={pending}
-      onConfirm={() => void update()} onCancel={() => setAsking(false)} />}
+      onConfirm={() => void start("update")} onCancel={() => setAsking(false)} />}
     {versions?.install && <InstallConfirm versions={versions} name={entry.name} open={adding} pending={pending}
-      onConfirm={() => void install()} onCancel={() => setAdding(false)} />}
+      onConfirm={() => void start("install")} onCancel={() => setAdding(false)} />}
   </>;
 }
 
@@ -267,9 +283,11 @@ function UpdateSettingsRows({ settings, onSaved }: { settings: UpdateSettings; o
 
 /** The harness list as a pure view of the catalog read, with a Check again action, and the update
  * settings when the engine has them. Inputs: the catalog read, when it was checked, the recheck
- * action, the update settings (null when this engine has none) and what to do once one is saved. */
-export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings }: {
+ * action, the update settings (null when this engine has none), what to do once one is saved, and
+ * a failed settings read to say with its retry. Output: the page. */
+export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings, settingsError }: {
   catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void; settings?: UpdateSettings | null; onSettings?: (settings: UpdateSettings) => void;
+  settingsError?: { message: string; onRetry: () => void };
 }) {
   return <div className="stack">
     <div className="settings-top">
@@ -277,6 +295,7 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
       <span className="row">{checkedAt && <span className="muted small">Checked {checkedAt}</span>}
         <Button icon="refresh-cw" onClick={onCheck} disabled={catalog.kind === "loading"}>Check again</Button></span>
     </div>
+    {settingsError && <LoadError message={settingsError.message} onRetry={settingsError.onRetry} />}
     {settings !== null && onSettings && <UpdateSettingsRows settings={settings} onSaved={onSettings} />}
     {catalog.kind === "loading" ? <Skeleton shape="row" count={8} />
       : catalog.kind === "not_ready" ? <NotReady what="The harness list" />
@@ -291,10 +310,11 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
  * again, so a harness installed a moment ago shows at once, and reads the update settings. */
 export function Harnesses() {
   const [catalog, reload] = useLoad(() => harnessCatalog(true), [], "harness-check");
-  const [loaded] = useLoad(loadHarnessUpdateSettings, []);
+  const [loaded, reloadSettings] = useLoad(loadHarnessUpdateSettings, []);
   const [settings, setSettings] = useState<UpdateSettings | null>(null);
   const [checkedAt, setCheckedAt] = useState<string>();
   useEffect(() => { if (loaded.kind === "ok") setSettings(loaded.value); }, [loaded]);
-  return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings}
+  const settingsError = loaded.kind === "error" ? { message: failureCopy(loaded) ?? updateCopy("harness_update_settings_unreadable"), onRetry: reloadSettings } : undefined;
+  return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings} settingsError={settingsError}
     onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
 }

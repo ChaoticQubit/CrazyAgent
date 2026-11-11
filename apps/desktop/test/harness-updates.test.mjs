@@ -179,7 +179,7 @@ test("a running install disables the button and says Installing", () => {
 
 test("a finished install says the version and that no restart is needed, and a failed one shows its last lines", () => {
   const done = row({ entry: ready("aider", "Aider"), versions: { ...aider, installed: "0.86.2", install: null, refusal: null, method: { kind: "homebrew_formula", formula: "aider" }, command: "/opt/homebrew/bin/brew upgrade --formula aider", last: { ok: true, code: null, output: "", from: null, to: "0.86.2", ended_ms: 1 } }, mode: "check_and_update" });
-  assert.match(done, /Installed version 0\.86\.2\. No restart needed\./);
+  assert.match(done, /Version 0\.86\.2 is installed now\. New agents use it; no restart needed\./);
   const failed = row({ entry: missing("aider", "Aider"), versions: { ...aider, last: { ok: false, code: "harness_install_failed", output: "Error: No available formula", from: null, to: null, ended_ms: 1 } }, mode: "check_and_update" });
   assert.match(failed, /The install didn't finish\./);
   assert.match(failed, /Error: No available formula/);
@@ -218,4 +218,77 @@ test("every install refusal has its own plain sentence, none shared with an upda
   const update = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_not_installed", "harness_update_failed", "harness_update_outcome_unknown"];
   assert.equal(new Set([...codes, ...update].map(api.updateCopy)).size, codes.length + update.length);
   for (const code of codes) assert.doesNotMatch(api.updateCopy(code), /harness_|\u2014/, code);
+});
+
+test("an update whose old version could not be read is not called an install", () => {
+  const html = row({ entry: ready("claude-code", "Claude Code"), versions: { ...claude, installed: "1.2.3", latest: { kind: "up_to_date" }, last: { ok: true, code: null, output: "", from: null, to: "1.2.3", ended_ms: 1 } }, mode: "check_and_update" });
+  assert.match(html, /Version 1\.2\.3 is installed now\. New agents use it; no restart needed\./);
+  assert.doesNotMatch(html, /Installed version/);
+  const stopped = row({ entry: missing("aider", "Aider"), versions: { ...aider, last: { ok: false, code: "harness_update_timeout", output: "still downloading", from: null, to: null, ended_ms: 1 } }, mode: "check_and_update" });
+  assert.match(stopped, /<summary[^>]*>What the installer said<\/summary>/);
+});
+
+test("a second job says another update or install is running, not this harness", () => {
+  assert.equal(api.updateCopy("harness_update_busy"), "Another harness update or install is running.");
+});
+
+test("the confirm opens on a fresh read, so it shows the line the engine has now", async () => {
+  const npm = { ...claude, method: { kind: "npm", package: "@anthropic-ai/claude-code" }, command: "/opt/homebrew/bin/npm install -g @anthropic-ai/claude-code" };
+  const reads = [];
+  const fresh = await api.readForConfirm("claude-code", "update", (id, look) => { reads.push([id, look]); return Promise.resolve({ kind: "ok", value: npm }); });
+  assert.deepEqual(reads, [["claude-code", false]]);
+  assert.equal(fresh.open, true);
+  const html = confirm({ versions: fresh.read.value, name: "Claude Code" });
+  assert.match(html, /<pre[^>]*>\/opt\/homebrew\/bin\/npm install -g @anthropic-ai\/claude-code<\/pre>/);
+  assert.doesNotMatch(html, /brew upgrade/);
+  assert.match(html, /Installed with npm \(@anthropic-ai\/claude-code\)\./);
+});
+
+test("no confirm opens when the fresh read has no line, says a job runs, or fails", async () => {
+  const answer = (value) => () => Promise.resolve(value);
+  const gone = await api.readForConfirm("claude-code", "update", answer({ kind: "ok", value: { ...claude, command: null, refusal: "harness_update_tool_missing" } }));
+  assert.equal(gone.open, false);
+  assert.equal(gone.read.value.refusal, "harness_update_tool_missing");
+  assert.equal((await api.readForConfirm("claude-code", "update", answer({ kind: "ok", value: { ...claude, running: true } }))).open, false);
+  assert.equal((await api.readForConfirm("aider", "install", answer({ kind: "error", code: "harness_update_unavailable", message: "x" }))).open, false);
+  assert.equal((await api.readForConfirm("aider", "install", answer({ kind: "ok", value: aider }))).open, true);
+  assert.equal((await api.readForConfirm("aider", "update", answer({ kind: "ok", value: aider }))).open, false);
+  assert.equal(api.jobLine(aider, "install"), aider.install);
+  assert.equal(api.jobLine(claude, "update"), claude.command);
+});
+
+test("a row that opens while a job runs is read until the job ends, then says how it ended with its buttons on", async () => {
+  const ended = { ...claude, installed: "2.1.322", latest: { kind: "up_to_date" }, last: { ok: true, code: null, output: "", from: "2.1.309", to: "2.1.322", ended_ms: 1 } };
+  let reads = 0;
+  const last = await api.pollWhileRunning("claude-code", (id) => {
+    reads += 1;
+    return Promise.resolve({ kind: "ok", value: reads < 3 ? { ...claude, id, running: true } : ended });
+  }, () => Promise.resolve(), () => true);
+  assert.equal(reads, 3);
+  const html = row({ entry: ready("claude-code", "Claude Code"), versions: last.value, mode: "check_and_update" });
+  assert.match(html, /Updated from 2\.1\.309 to 2\.1\.322\./);
+  assert.doesNotMatch(html, /Updating/);
+  assert.doesNotMatch(html, /disabled=""/);
+});
+
+test("a row that is gone stops reading", async () => {
+  let reads = 0;
+  let waits = 0;
+  const last = await api.pollWhileRunning("claude-code", (id) => {
+    reads += 1;
+    return Promise.resolve({ kind: "ok", value: { ...claude, id, running: true } });
+  }, () => { waits += 1; return Promise.resolve(); }, () => waits < 2);
+  assert.equal(reads, 2);
+  assert.equal(last.value.running, true);
+});
+
+test("a failed settings read says why above the list and offers to try again, with no update or install controls", () => {
+  const catalog = { kind: "ok", value: [ready("claude-code", "Claude Code"), missing("aider", "Aider")] };
+  const html = markup(createElement(view.HarnessesView, { catalog, onCheck: quiet, settings: null, settingsError: { message: api.updateCopy("harness_update_settings_unreadable"), onRetry: quiet } }));
+  assert.match(html, /CrazyAgent couldn't read the harness update settings\./);
+  assert.match(html, /<button[^>]*>.*?Try again<\/button>/);
+  assert.doesNotMatch(html, />Check for updates</);
+  assert.doesNotMatch(html, />Update</);
+  assert.doesNotMatch(html, />Install</);
+  assert.doesNotMatch(markup(createElement(view.HarnessesView, { catalog, onCheck: quiet, settings: null })), /Try again/);
 });

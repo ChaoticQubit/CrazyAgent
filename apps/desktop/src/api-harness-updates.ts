@@ -9,6 +9,8 @@ export type CheckWhen = "on_button" | "on_open";
 export type OnlineLookup = "on" | "off";
 export type InstallFromApp = "on" | "off";
 export interface UpdateSettings { mode: UpdateMode; when: CheckWhen; online: OnlineLookup; install: InstallFromApp }
+export type HarnessJob = "update" | "install";
+export type ReadVersions = (id: string, look: boolean) => Promise<Result<HarnessVersions>>;
 
 export const UPDATE_POLL_MS = 2_000;
 export const UPDATE_POLLS_MAX = 600;
@@ -23,7 +25,7 @@ const COPY: Record<string, string> = {
   harness_update_as_root: "CrazyAgent is running as the root user, so it won't run an update.",
   harness_update_off: "Harness updates are off in settings.",
   harness_update_check_only: "Harness updates are set to Check only.",
-  harness_update_busy: "An update for this harness is already running.",
+  harness_update_busy: "Another harness update or install is running.",
   harness_update_not_installed: "It isn't installed on this Mac.",
   harness_update_timeout: "The update took too long and was stopped.",
   harness_update_failed: "The update didn't finish.",
@@ -110,12 +112,30 @@ export function versionLine(versions: HarnessVersions): string {
   return installed;
 }
 
-/** Re-reads a harness while its update runs, every `UPDATE_POLL_MS`, at most `UPDATE_POLLS_MAX`
- * reads. Inputs: the id, the reader and the wait. Output: the last read, or its failure. */
-export async function pollWhileRunning(id: string, read: (id: string, look: boolean) => Promise<Result<HarnessVersions>>, wait: (ms: number) => Promise<void>): Promise<Result<HarnessVersions>> {
+/** The line a job would run for a harness. Inputs: the versions and the job. Output: the line,
+ * or null when the engine offers none. */
+export function jobLine(versions: HarnessVersions, job: HarnessJob): string | null {
+  return job === "update" ? versions.command : versions.install;
+}
+
+/** Reads a harness again right before its confirm opens, so the dialog shows the line the engine
+ * has now and not the one read when the page opened. Inputs: the id, the job and the reader.
+ * Output: the read, and whether the confirm may open: the read is good, no job runs and the
+ * engine still offers a line for the job. */
+export async function readForConfirm(id: string, job: HarnessJob, read: ReadVersions): Promise<{ read: Result<HarnessVersions>; open: boolean }> {
+  assert(id.length > 0, "harness id");
+  const fresh = await read(id, false);
+  return { read: fresh, open: fresh.kind === "ok" && !fresh.value.running && jobLine(fresh.value, job) !== null };
+}
+
+/** Re-reads a harness while its update or install runs, every `UPDATE_POLL_MS`, at most
+ * `UPDATE_POLLS_MAX` reads, and stops once `live` says the row is gone. Inputs: the id, the
+ * reader, the wait and whether the row still shows. Output: the last read, or its failure. */
+export async function pollWhileRunning(id: string, read: ReadVersions, wait: (ms: number) => Promise<void>, live: () => boolean = () => true): Promise<Result<HarnessVersions>> {
   let last = await read(id, false);
-  for (let polls = 1; polls < UPDATE_POLLS_MAX && last.kind === "ok" && last.value.running; polls += 1) {
+  for (let polls = 1; polls < UPDATE_POLLS_MAX && live() && last.kind === "ok" && last.value.running; polls += 1) {
     await wait(UPDATE_POLL_MS);
+    if (!live()) break;
     last = await read(id, false);
   }
   assert(last.kind !== "ok" || last.value.id === id, "versions for another harness");
