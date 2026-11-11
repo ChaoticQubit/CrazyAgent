@@ -1,7 +1,8 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
 use crate::projects_home::{
-    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, ProjectMove, folder_size,
+    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, Placed, ProjectMove,
+    folder_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,7 +49,11 @@ impl Work {
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::MoveProject(plan) => {
                 let source = plan.source().to_path_buf();
-                Step::Record(plan.run().map(|()| Some(source)).map_err(|e| e.0))
+                let moved = plan.run().and_then(|placed| match placed {
+                    Placed::Whole => Ok(()),
+                    Placed::Copied(old) => old.clear(),
+                });
+                Step::Record(moved.map(|()| Some(source)).map_err(|e| e.0))
             }
             Self::New(plan) => Step::Staged(plan.run()),
             Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {

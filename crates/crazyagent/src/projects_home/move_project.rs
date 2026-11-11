@@ -1,6 +1,6 @@
 use super::{
-    AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Registered, git_link, in_use,
-    linked_worktree_paths, linked_worktrees, plan_add, refused,
+    AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Placed, Registered, git_link,
+    in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -121,17 +121,34 @@ impl ProjectMove {
         self.add.destination()
     }
 
-    /// Waits for the project's agents to stop, then moves or copies the folder as an add
-    /// does. Output: Ok once the folder is complete in the home, or the refusal code.
-    pub fn run(self) -> Result<(), EngineError> {
+    /// Waits for the project's agents to stop, then puts the folder in the home as an add
+    /// does, deleting nothing. Output: what is left to clear once the move is recorded (the
+    /// whole old folder of a move that went by copy), or the refusal code.
+    pub fn run(self) -> Result<Placed, EngineError> {
         self.run_with(MOVE_STOP_WAIT)
     }
 
     /// Runs the plan with a bounded wait: nothing moves while an agent of the project
-    /// runs (`move_project_busy` past the wait), then the folder is moved or copied by
-    /// [`AddPlan::run`], which leaves the source as it was on any failure. Input: the
-    /// wait. Output: the outcome.
-    pub(crate) fn run_with(self, wait: Duration) -> Result<(), EngineError> {
+    /// runs (`move_project_busy` past the wait), then the folder is placed by
+    /// [`AddPlan::place`], which leaves the source whole. Input: the wait. Output: the
+    /// outcome.
+    pub(crate) fn run_with(self, wait: Duration) -> Result<Placed, EngineError> {
+        self.ready(wait)?;
+        self.add.place()
+    }
+
+    /// Runs the plan as a move across disks or out of iCloud Drive does, by a checked
+    /// copy, on any disk. Input: the wait. Output: the old folder to clear, or the
+    /// refusal code.
+    #[cfg(test)]
+    pub(crate) fn run_by_copy(self, wait: Duration) -> Result<Placed, EngineError> {
+        self.ready(wait)?;
+        self.add.place_by_copy()
+    }
+
+    /// Waits until no agent of the project runs. Input: the wait. Output: Ok when the
+    /// folder may move now, `move_project_busy` past the wait.
+    fn ready(&self, wait: Duration) -> Result<(), EngineError> {
         let unavailable = |_| refused("move_project_unavailable");
         let db =
             Connection::open_with_flags(&self.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -145,7 +162,7 @@ impl ProjectMove {
             }
             std::thread::sleep(MOVE_POLL);
         }
-        self.add.run()
+        Ok(())
     }
 }
 

@@ -14951,3 +14951,35 @@ fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
     }
     assert_eq!(overrides.len(), 3 * 8);
 }
+
+/// While a project move is pending for the folder a change set's repository is in, an owner
+/// action on the change set is refused and writes nothing; it goes through once the move is
+/// finished or forgotten.
+#[test]
+fn a_pending_project_move_refuses_an_owner_action_on_a_change_set_in_its_folder() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let before = case.tip();
+    let origin = case.repo.canonicalize().unwrap();
+    crate::projects_home::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO projects_home_project_move VALUES (1,'request-1',1,'project-one',?1,?2,'move')",
+            rusqlite::params![
+                origin.to_str().unwrap(),
+                origin.with_file_name("moved").to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "move_project_in_progress");
+    assert_eq!(case.tip(), before);
+    case.db
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_ne!(case.tip(), before);
+}
