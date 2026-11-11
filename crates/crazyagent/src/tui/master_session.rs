@@ -3273,7 +3273,10 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::ApprovalRequired => "Needs your approval",
         MasterReason::RuntimeUnavailable => "Model runtime unavailable",
         MasterReason::CaptureIncomplete => "Reply was incomplete",
-        MasterReason::OutputLimit => "Reply was too long",
+        MasterReason::NoReply => "Ended without a reply",
+        MasterReason::StepLimit => "Stopped at its step limit; reply with 'continue' to go on",
+        MasterReason::TimeLimit => "Stopped at its time limit; reply with 'continue' to go on",
+        MasterReason::OutputLimit => "This turn's output was too large to keep",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
         MasterReason::RepositoryMissing => "This project has no repository yet",
         MasterReason::RepositoryConfigRefused => {

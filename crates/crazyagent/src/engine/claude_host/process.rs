@@ -71,7 +71,7 @@ struct Process {
     events: usize,
     completed_turns: usize,
     frame: Vec<u8>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     record: StreamDiagnostic,
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
@@ -189,7 +189,7 @@ pub(super) fn run(
         events: 0,
         completed_turns: 0,
         frame: Vec::new(),
-        deadline: Instant::now() + limits.run_time,
+        deadline: limits.run_time.map(|time| Instant::now() + time),
         record: StreamDiagnostic::default(),
         kept: diagnostic,
     };
@@ -237,7 +237,7 @@ impl Process {
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
-            if Instant::now() >= self.deadline {
+            if self.late() {
                 self.fail(Fault::Host("claude_host_deadline"));
                 return;
             }
@@ -373,7 +373,7 @@ impl Process {
                     if decode && self.fault.is_none() {
                         self.decode(&buffer[..count]);
                     }
-                    assert!(self.events <= self.limits.events);
+                    assert!(self.events <= self.stdout_bytes);
                     assert!(count <= buffer.len());
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
@@ -416,18 +416,13 @@ impl Process {
             };
             self.frame.clear();
             for event in events {
-                if self.events == self.limits.events {
-                    self.fail(Fault::Host("claude_host_event_limit"));
-                    return;
-                }
                 self.events += 1;
                 if matches!(&event.kind, EventKind::TurnFinished { .. }) {
                     self.completed_turns += 1;
                     self.stdin = None;
                 }
                 let refused_tool = !self.tools && matches!(&event.kind, EventKind::ToolUse { .. });
-                if self.output.try_send(event.into()).is_err() {
-                    self.fail(Fault::Host("claude_host_event_delivery_failed"));
+                if !self.deliver(event.into()) {
                     return;
                 }
                 if refused_tool {
@@ -438,6 +433,42 @@ impl Process {
         }
         assert!(self.frame.len() <= FRAME_LINE_MAX);
         assert!(self.completed_turns <= self.events);
+    }
+
+    /// Whether the host's wall clock ran out; never with no clock, the owner's choice of no
+    /// master time limit (OB-5c). Input: the process. Output: the answer.
+    fn late(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Hands one event to the turn's reader, waiting while the reader's queue is full, so a
+    /// burst of frames is never a failed turn (OB-5b); the harness waits on its pipe
+    /// meanwhile. The wait ends at the host's stop, at its deadline, which is recorded as the
+    /// fault, or with `claude_host_event_delivery_failed` when the reader is gone.
+    /// Input: the event. Output: whether the reader has it.
+    fn deliver(&mut self, event: ObservedEvent) -> bool {
+        assert!(self.events >= 1);
+        assert!(self.completed_turns <= self.events);
+        let mut waiting = event;
+        loop {
+            match self.output.try_send(waiting) {
+                Ok(()) => return true,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.fail(Fault::Host("claude_host_event_delivery_failed"));
+                    return false;
+                }
+                Err(mpsc::error::TrySendError::Full(event)) => waiting = event,
+            }
+            if self.stop.load(Ordering::Acquire) {
+                return false;
+            }
+            if self.late() {
+                self.fail(Fault::Host("claude_host_deadline"));
+                return false;
+            }
+            std::thread::sleep(POLL_TIME);
+        }
     }
 
     fn read_stderr(&mut self) {

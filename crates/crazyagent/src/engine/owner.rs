@@ -266,6 +266,12 @@ pub enum OwnerMutation {
     SetQuitSettings {
         settings: crate::quit_settings::QuitSettings,
     },
+    SetMasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    SetMasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -574,6 +580,12 @@ impl OwnerMutation {
             Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
                 settings: *settings,
             },
+            Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
+                settings: *settings,
+            },
+            Self::SetMasterTimeSettings { settings } => Command::OwnerMasterTime {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -772,6 +784,8 @@ pub enum OwnerRead {
     SandboxSettings,
     CleanupSettings,
     QuitSettings,
+    MasterStepSettings,
+    MasterTimeSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -872,6 +886,8 @@ impl OwnerRead {
             | Self::SandboxSettings
             | Self::CleanupSettings
             | Self::QuitSettings
+            | Self::MasterStepSettings
+            | Self::MasterTimeSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1316,6 +1332,12 @@ pub enum OwnerData {
     },
     QuitSettings {
         settings: crate::quit_settings::QuitSettings,
+    },
+    MasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    MasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

@@ -356,7 +356,30 @@ test("a stopped or failed master turn offers its own message to send again", () 
   const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
   assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
   assert.equal(research.turnLine(crashed), "The master stopped: its reply was cut off. (capture_incomplete)", "the line names what happened");
-  assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
+  const silent = { ...turn(1, "failed"), reason: "no_reply", cause: "master_empty_reply" };
+  assert.equal(research.turnLine(silent), "The master stopped: it ended its turn without writing a reply. (master_empty_reply)", "a turn that ended with no reply text is not called cut off (OB-5)");
+  for (const steps of [50, 100, 200]) {
+    const limited = { ...turn(1, "failed"), reason: "step_limit", cause: `master_step_limit_${steps}` };
+    assert.equal(research.turnLine(limited), `Stopped after ${steps} steps; reply with 'continue' to go on. (master_step_limit_${steps})`, "a turn stopped at its step limit names the steps and how to go on (OB-5b)");
+    assert.equal(research.stepsOfCause(limited.cause), steps);
+  }
+  for (const cause of ["master_step_limit_24", "master_step_limit_", "master_step_limit_500", "master_capture_incomplete", null, undefined]) {
+    assert.equal(research.stepsOfCause(cause), null, `${cause} names no step limit`);
+  }
+  const unnamed = { ...turn(1, "failed"), reason: "step_limit", cause: null };
+  assert.equal(research.turnLine(unnamed), "The master stopped: it used every step its limit allows. (step_limit)", "a step limit stop with no cause still reads plainly");
+  for (const minutes of [10, 30, 60]) {
+    const timed = { ...turn(1, "failed"), reason: "time_limit", cause: `master_time_limit_${minutes}` };
+    assert.equal(research.turnLine(timed), `Stopped after ${minutes} minutes; reply with 'continue' to go on. (master_time_limit_${minutes})`, "a turn stopped at its time limit names the minutes and how to go on (OB-5c)");
+    assert.equal(research.minutesOfCause(timed.cause), minutes);
+  }
+  for (const cause of ["master_time_limit_5", "master_time_limit_", "master_time_limit_600", "master_step_limit_50", "claude_host_deadline", null, undefined]) {
+    assert.equal(research.minutesOfCause(cause), null, `${cause} names no time limit`);
+  }
+  const late = { ...turn(1, "failed"), reason: "time_limit", cause: "codex_host_deadline" };
+  assert.equal(research.turnLine(late), "The master stopped: it reached its time limit. (codex_host_deadline)", "a clock that ended a turn with no minutes named claims no 10 minutes (OB-5c)");
+  const large = { ...turn(1, "failed"), reason: "output_limit", cause: "claude_host_stdout_limit" };
+  assert.equal(research.turnLine(large), "The master stopped: this turn's output was too large to keep. (claude_host_stdout_limit)", "a turn with more output than the app keeps says so plainly (OB-5c)");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
 
