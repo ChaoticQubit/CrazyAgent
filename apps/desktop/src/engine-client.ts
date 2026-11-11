@@ -2328,7 +2328,7 @@ export type MasterMode = "one_turn" | "live";
  * another master took the conversation over, whose `text` is the whole divider line.
  * `harness` is a live master's catalog id or alias, or a one-turn master's backend (`rcli`,
  * `codex`, `claude`). `text` is null for a terminal turn whose typed words were not read.
- * `source` tells where the row comes from (see `MessageSource`). */
+ * `source` tells where the row comes from (see `SessionMessageSource`). */
 export interface SessionMessage {
   seq: number;
   speaker: "owner" | "engine" | "master" | "switch";
@@ -2336,7 +2336,7 @@ export interface SessionMessage {
   harness: string | null;
   text: string | null;
   at_ms: number;
-  source: MessageSource;
+  source: SessionMessageSource;
 }
 
 /** Where a stored message comes from: a turn the engine ran ("turn"), a turn in the live
@@ -2344,7 +2344,7 @@ export interface SessionMessage {
  * ("backfill"). "record" is text read from the harness's own record and "counter" a row that
  * stands for a terminal turn an older engine only counted: the engine did not see those
  * words typed, so a view marks them. */
-export type MessageSource = "turn" | "terminal" | "record" | "counter" | "switch" | "backfill";
+export type SessionMessageSource = "turn" | "terminal" | "record" | "counter" | "switch" | "backfill";
 
 /** One page of a session's stored messages, oldest first. `next` is the `before` of the page
  * of older messages, null once the page holds the session's first message; `count` is every
