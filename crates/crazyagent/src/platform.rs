@@ -74,7 +74,8 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 pub(crate) const BENEATH_FOLDER_LINKED: &str = "beneath_folder_linked";
 
 /// What [`open_plain_beneath`] answers on Windows when a part below the folder is a
-/// junction, a link or a mount point, or is no longer directly inside the part before it.
+/// junction, a link or a mount point, is no longer directly inside the part before it, or
+/// was opened under another name than the one asked for.
 #[cfg(windows)]
 pub(crate) const BENEATH_PATH_LINKED: &str = "beneath_path_linked";
 
@@ -364,13 +365,16 @@ pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<s
 
 /// The Windows way of [`open_plain_beneath`]: opens the folder and then each name below it
 /// as itself, never as a link's target, and goes on only while the opened thing is no
-/// reparse point and its real place, read from its handle, is directly inside the real
-/// place of the one before ([`name_child`]). A part swapped between two opens so gives
-/// nothing. Inputs: the folder and at least one plain name below it. Output: the open file,
-/// `BENEATH_FOLDER_LINKED` when the folder itself is a reparse point, `BENEATH_PATH_LINKED`
-/// for a part below it, or the I/O error.
+/// reparse point, its real place, read from its handle, is directly inside the real place
+/// of the one before ([`name_child`]) and that place ends in the asked name
+/// ([`name_ends_in`]). A part swapped between two opens so gives nothing, and neither does
+/// a name Windows matches another way: an 8.3 short name, or a spelling with an ending dot
+/// or space. Inputs: the folder and at least one plain name below it. Output: the open
+/// file, `BENEATH_FOLDER_LINKED` when the folder itself is a reparse point,
+/// `BENEATH_PATH_LINKED` for a part below it, or the I/O error.
 #[cfg(windows)]
 fn open_real_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
     let refused =
         |code: &'static str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, code);
@@ -397,7 +401,9 @@ fn open_real_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File
             open_plain(&path)?
         };
         let found = crazyagent_win_sandbox::final_name(&opened)?;
-        if reparse_point(&opened)? || !name_child(&place, &found) {
+        let asked: Vec<u16> = part.as_os_str().encode_wide().collect();
+        let own = name_child(&place, &found) && name_ends_in(&found, &asked);
+        if reparse_point(&opened)? || !own {
             return Err(refused(BENEATH_PATH_LINKED));
         }
         (held, place) = (opened, found);
@@ -424,6 +430,31 @@ fn name_child(folder: &[u16], found: &[u16]) -> bool {
     let child = name_under(folder, found) && !found[start..].contains(&SEPARATOR);
     assert!(!child || found.len() > start);
     child
+}
+
+/// Tells whether a real place ends in the asked name: its last name, the units after its
+/// last `\`, is the asked name unit for unit, with ASCII letters taken in any case. A name
+/// Windows matched another way, an 8.3 short name or a spelling whose ending dot or space
+/// it drops, is never the asked name; a name that differs only in the case of a letter
+/// outside ASCII is refused too. Inputs: the found name, as the device name Windows gives
+/// for an open handle, and the asked name, both in UTF-16 units. Output: the answer.
+#[cfg(any(windows, test))]
+fn name_ends_in(found: &[u16], asked: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let last = found
+        .rsplit(|unit| *unit == SEPARATOR)
+        .next()
+        .unwrap_or(found);
+    let fold =
+        |unit: &u16| u8::try_from(*unit).map_or(*unit, |byte| u16::from(byte.to_ascii_lowercase()));
+    let same = !asked.is_empty()
+        && last.len() == asked.len()
+        && last
+            .iter()
+            .zip(asked)
+            .all(|(have, want)| fold(have) == fold(want));
+    assert!(!same || !asked.contains(&SEPARATOR));
+    same
 }
 
 /// Tells whether a real place lies below a folder's real place, both as the device names

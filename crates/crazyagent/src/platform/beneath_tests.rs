@@ -233,3 +233,105 @@ fn a_path_below_a_folder_takes_plain_names_only() {
         std::io::ErrorKind::NotFound
     );
 }
+
+#[test]
+fn a_name_ends_in_the_asked_name_only_in_that_spelling() {
+    let found = units(r"\Device\HarddiskVolume3\work\.crazyagent");
+    for asked in [".crazyagent", ".CrazyAgent", ".CRAZYAGENT"] {
+        assert!(name_ends_in(&found, &units(asked)), "{asked}");
+    }
+    for asked in [
+        "CRAZYA~1",
+        ".crazyagent.",
+        ".crazyagent ",
+        ".crazyagen",
+        "crazyagent",
+        "work",
+        r"work\.crazyagent",
+        "",
+    ] {
+        assert!(!name_ends_in(&found, &units(asked)), "{asked:?}");
+    }
+    assert!(name_ends_in(&units("plan.md"), &units("PLAN.md")));
+    assert!(!name_ends_in(
+        &units(r"\Device\HarddiskVolume3\work\"),
+        &units("work")
+    ));
+    let umlaut = units("\\v\\\u{e4}rger");
+    assert!(
+        !name_ends_in(&umlaut, &units("\u{c4}rger")),
+        "a letter outside ASCII is compared as it is"
+    );
+    assert!(name_ends_in(&umlaut, &units("\u{e4}RGER")));
+}
+
+#[cfg(windows)]
+fn short_name(folder: &Path) -> String {
+    let told = Command::new("cmd")
+        .args(["/C", "for %I in (.) do @echo %~sI"])
+        .current_dir(folder)
+        .output()
+        .unwrap();
+    assert!(told.status.success());
+    let text = String::from_utf8_lossy(&told.stdout);
+    let name = text.trim().rsplit('\\').next().unwrap().to_owned();
+    assert!(!name.is_empty(), "{text:?}");
+    name
+}
+
+#[cfg(windows)]
+#[test]
+fn a_part_windows_opens_under_another_name_is_refused() {
+    let refused = |base: &Path, below: &Path| {
+        let error = read(base, below).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.to_string()),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                BENEATH_PATH_LINKED.to_owned()
+            ),
+            "{below:?}"
+        );
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().join("base");
+    let hidden = base.join(".crazyagent");
+    std::fs::create_dir_all(&hidden).unwrap();
+    std::fs::write(hidden.join("state.md"), "engine").unwrap();
+    let plain: PathBuf = [".crazyagent", "state.md"].iter().collect();
+    assert_eq!(
+        read(&base, &plain).unwrap(),
+        "engine",
+        "the plain name opens"
+    );
+    let shouted: PathBuf = [".CRAZYAGENT", "STATE.md"].iter().collect();
+    assert_eq!(
+        read(&base, &shouted).unwrap(),
+        "engine",
+        "letter case is not another name"
+    );
+
+    for spelled in [".crazyagent.", ".crazyagent "] {
+        assert!(
+            std::fs::metadata(base.join(spelled)).unwrap().is_dir(),
+            "Windows itself opens the folder for {spelled:?}"
+        );
+        let below: PathBuf = [spelled, "state.md"].iter().collect();
+        refused(&base, &below);
+    }
+    let dotted: PathBuf = [".crazyagent", "state.md."].iter().collect();
+    refused(&base, &dotted);
+
+    let short = short_name(&hidden);
+    assert!(
+        !short.eq_ignore_ascii_case(".crazyagent"),
+        "this volume makes no 8.3 short names, so the short name part of this row proves nothing: {short}"
+    );
+    let below: PathBuf = [short.as_str(), "state.md"].iter().collect();
+    assert_eq!(
+        std::fs::read_to_string(base.join(&below)).unwrap(),
+        "engine",
+        "Windows itself opens the folder by its short name {short}"
+    );
+    refused(&base, &below);
+}
