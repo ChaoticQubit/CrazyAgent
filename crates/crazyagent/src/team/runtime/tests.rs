@@ -12821,18 +12821,17 @@ struct LevelRun {
     codes: BTreeMap<String, i32>,
 }
 
-/// The exit code the agent's `cargo build` must end with on this machine: 0 where the
-/// owner account's home holds a Rust toolchain for the engine to hand to agents, else 127,
-/// the shell's code for a command it cannot find, as on a CI runner whose account has no
-/// rustup. Takes nothing. Returns the code.
+/// The exit code the agent's `cargo build` must end with: 0, as on the owner's Mac, where
+/// the engine hands the account's Rust to agents. A runner whose account has no Rust says so
+/// with `CRAZYAGENT_TEST_OWNER_RUST=absent`, and the build must then end with 127, the
+/// shell's code for a command it cannot find. No product code decides the value. Takes
+/// nothing. Returns the code; panics on any other value of the variable.
 #[cfg(target_os = "macos")]
 fn built() -> i32 {
-    use crate::sandbox::toolchains::{ToolHomes, Toolchain};
-    let homes = ToolHomes::owner().expect("the owner account has a home");
-    if Toolchain::Rust.installed(&homes) {
-        0
-    } else {
-        127
+    match std::env::var("CRAZYAGENT_TEST_OWNER_RUST") {
+        Err(std::env::VarError::NotPresent) => 0,
+        Ok(stated) if stated == "absent" => 127,
+        other => panic!("CRAZYAGENT_TEST_OWNER_RUST is unset or \"absent\", got {other:?}"),
     }
 }
 

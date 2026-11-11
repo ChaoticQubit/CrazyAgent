@@ -703,8 +703,11 @@ fn the_bounds_still_count_owner_files_taken_in_from_main() {
 
 /// Writes the repository's commit-graph with generation numbers version 1 for every commit
 /// `head` and the branches reach, then rewrites it so `child` names `parent` as its only
-/// parent, as a process able to write that file forges ancestry (land-19 r1 M1). Inputs:
-/// the case, the commit the graph must reach, the child and the claimed parent.
+/// parent, as a process able to write that file forges ancestry (land-19 r1 M1). The child
+/// is a commit below the one an ancestry question names: git 2.50 reads the parents of a
+/// commit named on its command line from the commit itself, and takes the graph's word only
+/// for the commits it walks to. Inputs: the case, the commit the graph must reach, the child
+/// and the claimed parent.
 fn forge_commit_graph(case: &Case, head: &str, child: &str, parent: &str) {
     case.owner(&["update-ref", "refs/heads/forged", head]);
     case.owner(&[
@@ -802,18 +805,34 @@ fn owner_commits_gitlink(case: &Case, commit: &str) -> String {
     case.tip()
 }
 
+/// Shows a forged commit-graph is in place and changes an ancestry answer (MT2-L1): the
+/// owner's git reads the forged parent of `below`; asked as a git that trusts the graph, its
+/// merge-base of the gitlink commit and the tip is the gitlink commit itself, the answer
+/// that would hide the gitlink; with the commit-graph off, as the engine's git runs, it is
+/// the real fork point. Inputs: the case, the forged commit, the tip above it, the gitlink
+/// commit and the real fork point.
+fn forged_graph_fools_a_trusting_git(case: &Case, below: &str, tip: &str, link: &str, real: &str) {
+    let parent = case.owner(&["log", "-1", "--format=%P", below]);
+    assert_eq!(parent.trim(), link);
+    let trusting = ["-c", "core.commitGraph=true", "merge-base", link, tip];
+    assert_eq!(case.owner(&trusting).trim(), link);
+    let engine_like = ["-c", "core.commitGraph=false", "merge-base", link, tip];
+    assert_eq!(case.owner(&engine_like).trim(), real);
+}
+
 /// land-19 r1 M1 (a): a commit-graph claiming the agent's gitlink commit is on the landing
 /// tip changes nothing for the engine, whose git reads no commit-graph, so the gitlink is
-/// still the agent's own and refused at its turn end. The owner's own git reads the forged
-/// parent, which shows the graph was in place; whether its merge-base also takes the forged
-/// answer depends on the git version.
+/// still the agent's own and refused at its turn end. The forged commit is the tip's
+/// parent, so the owner's own git, trusting the graph, answers that the gitlink commit is
+/// on the tip, which the row asserts before the engine's refusal.
 #[test]
 fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_the_turn_end() {
     let case = Case::new();
     case.start();
     let agent = numbered_agent(&case, 3);
     record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
-    let gitlinked = commit_own_gitlink(&case, &agent.worktree, &case.tip());
+    let start = case.tip();
+    let gitlinked = commit_own_gitlink(&case, &agent.worktree, &start);
     write(&agent.worktree.join("own.txt"), "own\n");
     git_in(&case.home, &agent.worktree, &["add", "own.txt"]);
     git_in(
@@ -824,12 +843,10 @@ fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_the_turn_end() {
     let head = git_in(&case.home, &agent.worktree, &["rev-parse", "HEAD"])
         .trim()
         .to_owned();
-    let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
-    forge_commit_graph(&case, &head, &tip, &gitlinked);
-    assert_eq!(
-        case.owner(&["log", "-1", "--format=%P", &tip]).trim(),
-        gitlinked
-    );
+    let below = case.owner_commit("LATER", "later\n", "Owner adds a file");
+    let tip = case.owner_commit("LATEST", "latest\n", "Owner adds another file");
+    forge_commit_graph(&case, &head, &below, &gitlinked);
+    forged_graph_fools_a_trusting_git(&case, &below, &tip, &gitlinked, &start);
     assert_eq!(
         refused(record_turn_end(&case.db, &agent, &merge_turn())),
         "changes_embedded_repository"
@@ -856,12 +873,10 @@ fn a_forged_commit_graph_does_not_hide_an_agent_gitlink_at_accept() {
             [head.as_str(), id.as_str()],
         )
         .unwrap();
-    let tip = case.owner_commit("LATER", "later\n", "Owner adds a file");
-    forge_commit_graph(&case, &head, &tip, &gitlinked);
-    assert_eq!(
-        case.owner(&["log", "-1", "--format=%P", &tip]).trim(),
-        gitlinked
-    );
+    let below = case.owner_commit("LATER", "later\n", "Owner adds a file");
+    let tip = case.owner_commit("LATEST", "latest\n", "Owner adds another file");
+    forge_commit_graph(&case, &head, &below, &gitlinked);
+    forged_graph_fools_a_trusting_git(&case, &below, &tip, &gitlinked, &start);
     assert_eq!(refused(case.accept(&id)), "changes_embedded_repository");
     assert_eq!(case.tip(), tip);
 }
