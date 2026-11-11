@@ -2281,6 +2281,9 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::HarnessCatalog if harness_catalog::slow(body) => {
+                return Ok(Some(Deferred::HarnessUpdates(a)));
+            }
             Protocol::HarnessCatalog => {
                 return harness_catalog::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2486,6 +2489,10 @@ async fn serve_admitted(
             let served = usage::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
         }
+        Deferred::HarnessUpdates(a) => {
+            let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2553,6 +2560,7 @@ enum Deferred {
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
+    HarnessUpdates(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
