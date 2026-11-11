@@ -5,6 +5,7 @@ import { POLL_MS } from "./e2e-harness.mjs";
 import { USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
+const RELOAD_MS = 10_000;
 const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Share of tokens"];
 
 /** Reads what a Metrics page shows: the range line, each tile's lines, the project filter's
@@ -47,15 +48,20 @@ function oneProject(runs) {
   };
 }
 
-/** Waits until a reading of the page passes the check, reloading between reads since usage
- * rows land on the engine's own schedule. Inputs: the page, the check, what it waits for and
- * whether to reload. Output: the last reading. */
+/** Waits until a reading of the page passes the check, reloading at most every 10 s between
+ * reads since usage rows land on the engine's own schedule and each load asks the engine for
+ * every read the page shows. Inputs: the page, the check, what it waits for and whether to
+ * reload. Output: the last reading. */
 async function tilesShow(page, ready, what, reload) {
+  let reloaded = Date.now();
   for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
     const shown = await metricsShown(page).catch(() => null);
     if (ready(shown)) return shown;
     assert.ok(Date.now() < deadline, `the Metrics page never showed ${what}: ${JSON.stringify(shown)}`);
-    if (reload) await page.send("Page.reload", { ignoreCache: true });
+    if (reload && Date.now() - reloaded >= RELOAD_MS) {
+      await page.send("Page.reload", { ignoreCache: true });
+      reloaded = Date.now();
+    }
   }
 }
 
