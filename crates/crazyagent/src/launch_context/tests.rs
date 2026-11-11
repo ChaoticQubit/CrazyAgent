@@ -2339,8 +2339,8 @@ fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
 
 /// PA-7: a Codex lead in the Native mode gets Codex 0.164's multi-agent v2 on in its
 /// `config.toml`, its sub-agents capped at Max teammates, started with the lead's own
-/// instructions plus the sub-agent section and on the lead's model and effort (r1, no model
-/// on spawn, no default to reset the effort); tools off, App-spawned or Claude Code get none.
+/// instructions plus the sub-agent section, offered no model or effort on spawn and given no
+/// default that would reset the effort (r1); tools off, App-spawned or Claude Code get none.
 #[test]
 fn a_native_codex_lead_turns_codex_sub_agents_on_with_their_own_instructions_and_cap() {
     let directory = tempfile::tempdir().unwrap();

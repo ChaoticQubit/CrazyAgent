@@ -7418,7 +7418,7 @@ impl TeamRuntime {
         }
         if self.native_threads_lead(agent) {
             return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They cannot call the team tools: wait for each one, close it, then commit and report done yourself."
+                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
             );
         }
         format!(

@@ -1726,9 +1726,9 @@ fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -
     denied
 }
 
-/// Writes a Codex agent's `config.toml`: instructions, no project docs, MCP servers less the
-/// tools switched off, and for a native lead (PA-7) multi-agent v2 on with `max_threads`,
-/// the sub-agents' instructions and no model or effort on spawn, so each runs the lead's.
+/// Writes a Codex agent's `config.toml`: instructions, no project docs, MCP servers less
+/// switched-off tools; a native lead (PA-7) gets multi-agent v2 with `max_threads`, its
+/// sub-agents' instructions and no model or effort offered on spawn, though a sent one runs.
 /// Inputs: the instructions, servers, switched-off tools and the native lead's cap and
 /// sub-agent instructions. Output: the text, or `launch_context_server_name_taken`.
 fn codex_config(

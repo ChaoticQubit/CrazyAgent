@@ -46,7 +46,7 @@ test("Native is listed for every harness kind and chosen only where it has nativ
     assert.equal(options[1].disabledReason, undefined, `${harness}: CrazyAgent workers are always open`);
     assert.ok(coord.modeHelper(harness, native).endsWith("."), harness);
   }
-  assert.match(coord.modeHelper("codex", true), /Codex sub-agents run inside the lead's own session and worktree, on its model\./);
+  assert.match(coord.modeHelper("codex", true), /Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself\./);
   assert.ok(coord.modeHelper("codex", true).includes(coord.CODEX_NATIVE_SCOPE), "the Codex helper says what the app cannot show");
   assert.ok(!coord.modeHelper("claude-code", true).includes(coord.CODEX_NATIVE_SCOPE));
   assert.equal(coord.modeHelper("rcli", false), coord.NATIVE_UNAVAILABLE.rcli);

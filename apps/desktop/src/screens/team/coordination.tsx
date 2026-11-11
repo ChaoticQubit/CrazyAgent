@@ -103,7 +103,7 @@ const NATIVE_LABELS: Record<CoordHarness, string> = { "claude-code": "Native age
 
 const NATIVE_HELPERS: Record<CoordHarness, string> = {
   "claude-code": "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
-  codex: `Native Codex sub-agents run inside the lead's own session and worktree, on its model. ${CODEX_NATIVE_SCOPE} CrazyAgent workers get their own terminal, worktree and branch.`,
+  codex: `Native Codex sub-agents run inside the lead's own session and worktree. Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself. ${CODEX_NATIVE_SCOPE} CrazyAgent workers get their own terminal, worktree and branch.`,
   rcli: "Native sub-agents run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
 };
 
