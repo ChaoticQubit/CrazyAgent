@@ -1577,24 +1577,13 @@ fn the_master_fixes_a_lead_s_mode_at_spawn_and_a_lead_cannot_pick_one() {
         agents: 2,
         tools: true,
     });
-    assert_eq!(
-        as_master(
-            &mut fixture,
-            tool::SPAWN_TOOL,
-            json!({"task": "Lead the docs", "harness": "codex", "mode": "native"}),
-        ),
-        (
-            "Not handed off: a codex lead has no native teammates; leave mode out or use app_spawned (native_mode_unsupported).".to_owned(),
-            true
-        )
-    );
-    assert!(task_modes(&fixture).is_empty());
-    for (task, mode) in [
-        ("Lead A", Some("native")),
-        ("Lead B", Some("app_spawned")),
-        ("Lead C", None),
+    for (task, harness, mode) in [
+        ("Lead A", "claude-code", Some("native")),
+        ("Lead B", "claude-code", Some("app_spawned")),
+        ("Lead C", "claude-code", None),
+        ("Lead D", "codex", Some("native")),
     ] {
-        let mut arguments = json!({"task": task, "harness": "claude-code"});
+        let mut arguments = json!({"task": task, "harness": harness});
         if let Some(mode) = mode {
             arguments["mode"] = json!(mode);
         }
@@ -1607,6 +1596,7 @@ fn the_master_fixes_a_lead_s_mode_at_spawn_and_a_lead_cannot_pick_one() {
             ("Lead A".to_owned(), Some("native".to_owned())),
             ("Lead B".to_owned(), Some("app_spawned".to_owned())),
             ("Lead C".to_owned(), None),
+            ("Lead D".to_owned(), Some("native".to_owned())),
         ]
     );
     fixture
@@ -1638,7 +1628,7 @@ fn the_master_fixes_a_lead_s_mode_at_spawn_and_a_lead_cannot_pick_one() {
         answer_sub(&mut fixture.connection, &answering, lead, call).unwrap(),
         Some(("Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).".to_owned(), true))
     );
-    assert_eq!(task_modes(&fixture).len(), 3);
+    assert_eq!(task_modes(&fixture).len(), 4);
 }
 
 #[test]

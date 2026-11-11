@@ -1240,6 +1240,7 @@ mod live {
             continues: plan.continues,
             native: plan.native,
             tmux: plan.tmux.clone(),
+            native_threads: plan.native_threads,
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
             proxy: plan.proxy.clone(),

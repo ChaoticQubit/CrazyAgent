@@ -87,11 +87,39 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 /** Each coordination harness id with the name the app shows for it. */
 export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
-/** The Sub-agent mode choices in the mockup's words; Native agent teams first, and only for a
- * harness kind that has them. Input: whether it has them. Output: the options. */
-export function modeOptions(native: boolean): SelectOption[] {
-  const spawned = { value: "app_spawned", label: "CrazyAgent workers" };
-  return native ? [{ value: "native", label: "Native agent teams" }, spawned] : [spawned];
+/** Why a harness kind has no native sub-agents, in the engine's words (PA-7), or null for a kind
+ * that runs them: Claude Code as agent teams, Codex as sub-agents of the lead's own session. */
+export const NATIVE_UNAVAILABLE: Record<CoordHarness, string | null> = {
+  "claude-code": null,
+  codex: null,
+  rcli: "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.",
+};
+
+/** What the app cannot show of Codex's own sub-agents, in the engine's words (PA-7 r1): they show
+ * only in the lead's terminal, the graph, counts and Stop act on the lead, and No limit is 15. */
+export const CODEX_NATIVE_SCOPE = "Codex sub-agents show only in the lead's terminal, where Codex lists each one: the app's graph, counts and Stop act on the lead, their team tool calls count as the lead's, and Codex holds them to Max teammates at once, 15 under No limit because Codex needs a number.";
+
+const NATIVE_LABELS: Record<CoordHarness, string> = { "claude-code": "Native agent teams", codex: "Native Codex sub-agents", rcli: "Native sub-agents" };
+
+const NATIVE_HELPERS: Record<CoordHarness, string> = {
+  "claude-code": "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
+  codex: `Native Codex sub-agents run inside the lead's own session and worktree. Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself. ${CODEX_NATIVE_SCOPE} CrazyAgent workers get their own terminal, worktree and branch.`,
+  rcli: "Native sub-agents run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
+};
+
+/** The Sub-agent mode choices in the mockup's words, native first for every harness kind; a kind
+ * without native sub-agents lists it unavailable with its reason, so nothing is hidden per harness.
+ * Inputs: the harness kind and whether it has them. Output: the options. */
+export function modeOptions(harness: CoordHarness, native: boolean): SelectOption[] {
+  const reason = native ? undefined : NATIVE_UNAVAILABLE[harness] ?? `${HARNESS_NAMES[harness]} has no native sub-agents, so its sub-agents are CrazyAgent workers.`;
+  return [{ value: "native", label: NATIVE_LABELS[harness], ...(reason ? { disabledReason: reason } : {}) }, { value: "app_spawned", label: "CrazyAgent workers" }];
+}
+
+/** The helper line under a harness kind's Sub-agent mode: what native sub-agents are on it, or why
+ * it has none. Inputs: the harness kind and whether it has them. Output: the line. */
+export function modeHelper(harness: CoordHarness, native: boolean): string {
+  const reason = modeOptions(harness, native)[0].disabledReason;
+  return reason ?? NATIVE_HELPERS[harness];
 }
 
 /** The Claude Code terminal display choices, Classic first as the default. */
@@ -126,7 +154,7 @@ export const DELIVERY_HELPER: Record<CoordHarness, string> = {
 export function coordination(status: Pick<TeamStatus, "coordination">): CoordinationView {
   const view = status.coordination;
   const harnesses = COORD_HARNESSES.map((harness) => view?.harnesses.find((row) => row.harness === harness)
-    ?? { harness, mode: "app_spawned" as const, delivery: "auto" as const, native: harness === "claude-code" });
+    ?? { harness, mode: "app_spawned" as const, delivery: "auto" as const, native: NATIVE_UNAVAILABLE[harness] === null });
   return { settings: view?.settings ?? COORD_DEFAULTS, harnesses };
 }
 
@@ -262,17 +290,16 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   </>;
 }
 
-/** One harness kind's sub-agent mode as a row: Native agent teams only where that kind has them.
+/** One harness kind's sub-agent mode as a row: native sub-agents listed for every kind, chosen only where it has them.
  * Inputs: the project id, the harness kind's row, the team status it came from and a reload.
  * Output: the row. */
 function SubAgentModeSetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
   const { note, change } = useChange(reload);
   const [mode, hold] = useHeld<SubagentMode>(row.mode, Object.is, status);
   return <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
-    <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.native)}
+    <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.harness, row.native)}
       onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}
-      helper={row.native ? "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch."
-        : `${HARNESS_NAMES[row.harness]} has no native agent teams, so its sub-agents are CrazyAgent workers.`} />
+      helper={modeHelper(row.harness, row.native)} />
     <ChangeNote note={note} />
   </SettingRow>;
 }

@@ -3,7 +3,7 @@ use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
     AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CLAUDE_TOOLS_OFF,
     CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
-    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure,
+    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_launch_settings, failure,
     harness_id, key_file_text, validate,
 };
 use crate::coord::settings::ClaudeDisplay;
@@ -317,7 +317,7 @@ pub fn command(
             } else {
                 None
             };
-            let settings = codex(request, installed.is_some(), &cwd, key_file.as_deref())?;
+            let settings = codex(request, installed, &cwd, key_file.as_deref())?;
             if request.tools {
                 argv.extend([
                     "/bin/sh".to_owned(),
@@ -460,17 +460,17 @@ fn text(path: &Path) -> Result<String, LaunchError> {
 /// The settings a Codex terminal launch runs under. A repository that brings a `.codex`
 /// folder runs untrusted so Codex loads nothing from it, any other stays trusted so it
 /// never meets Codex's folder access screen; approval and sandbox come from these settings
-/// either way. Inputs: the request, whether context is on, the working folder and the key
-/// file. Output: the arguments.
+/// either way. Inputs: the request, the installed context, if any, the working folder and
+/// the key file. Output: the arguments.
 fn codex(
     request: &LaunchRequest,
-    context: bool,
+    installed: Option<&Installed>,
     cwd: &Path,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let trust = super::codex_folder::terminal_entry(cwd)?;
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file)
+    for setting in codex_launch_settings(request, installed, key_file)
         .into_iter()
         .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain(["check_for_update_on_startup=false".to_owned(), trust])

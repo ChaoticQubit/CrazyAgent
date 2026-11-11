@@ -970,6 +970,72 @@ fn codex_rollout_of_this_working_folder_is_found_and_read() {
     );
 }
 
+/// PA-7: a native Codex lead's sub-agents write rollouts of their own in its home, in its
+/// folder and newer than its own; a reader, even one that adopts a running pane, takes
+/// only the lead's, never one whose `session_meta` names a sub-agent source.
+#[test]
+fn a_codex_sub_agent_rollout_is_never_taken_as_its_lead_s_record() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let since = SystemTime::now();
+    let lead = rollout(
+        &sessions,
+        "2026/11/11",
+        "rollout-lead.jsonl",
+        &case.work(),
+        &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+    );
+    let child = sessions.join("2026/11/11").join("rollout-child.jsonl");
+    let meta = serde_json::json!({
+        "timestamp": "2026-11-11T13:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "child", "cwd": case.work().to_string_lossy(),
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "s", "depth": 1}}}
+        }
+    });
+    std::fs::write(
+        &child,
+        format!(
+            "{meta}\n{}\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child"}]}}"#
+        ),
+    )
+    .unwrap();
+    let older = SystemTime::now() - Duration::from_secs(1);
+    std::fs::File::options()
+        .write(true)
+        .open(&lead)
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+    for mut reader in [
+        TranscriptReader::adopted(
+            Transcript::CodexRollouts {
+                sessions: sessions.clone(),
+            },
+            &case.work(),
+            since - Duration::from_secs(5),
+        ),
+        TranscriptReader::new(
+            Transcript::CodexRollouts {
+                sessions: sessions.clone(),
+            },
+            &case.work(),
+            since - Duration::from_secs(5),
+        ),
+    ] {
+        let events = reader.read().unwrap();
+        assert!(!events.contains(&text("child\n")), "{events:?}");
+    }
+    let mut adopted = TranscriptReader::adopted(
+        Transcript::CodexRollouts { sessions },
+        &case.work(),
+        since - Duration::from_secs(5),
+    );
+    assert_eq!(adopted.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+}
+
 #[test]
 fn codex_rollout_older_than_the_session_is_ignored() {
     let case = Case::new();

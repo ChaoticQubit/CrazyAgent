@@ -436,10 +436,49 @@ pub fn set_delivery(
     Ok(())
 }
 
-/// Says whether a harness kind has native teammates the engine can use: Claude Code
-/// agent teams only (Q10). Takes the kind.
+/// How a harness kind runs the Native sub-agent mode, the lead's own harness running its
+/// sub-agents (Q10, DEC-141 PA-7): Claude Code as an agent team in tmux panes, Codex as
+/// multi-agent threads of the lead's own process, or not at all, with the reason the
+/// setting shows beside the choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSubAgents {
+    Teams,
+    Threads,
+    Unavailable(&'static str),
+}
+
+/// Why an RCLI lead has no native sub-agents: RCLI runs without tools (PA-3, V3).
+pub const RCLI_NATIVE_UNAVAILABLE: &str = "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.";
+
+/// What the app cannot show of Codex's own sub-agents (PA-7 r1): Codex 0.164 runs them as
+/// threads of the lead's process with no pane, takes their team calls through the lead's
+/// MCP servers, and needs a thread count even under No limit.
+pub const CODEX_NATIVE_SCOPE: &str = "Codex sub-agents show only in the lead's terminal, where Codex lists each one: the app's graph, counts and Stop act on the lead, their team tool calls count as the lead's, and Codex holds them to Max teammates at once, 15 under No limit because Codex needs a number.";
+
+/// What a harness kind's native sub-agents leave out of the app, for the setting to say
+/// beside the choice (DEC-141): Codex threads' limits, nothing for an agent team, whose
+/// teammates the app shows, counts and stops. Takes the kind. Returns the text, if any.
+pub fn native_scope(harness: HarnessKind) -> Option<&'static str> {
+    match native_sub_agents(harness) {
+        NativeSubAgents::Threads => Some(CODEX_NATIVE_SCOPE),
+        NativeSubAgents::Teams | NativeSubAgents::Unavailable(_) => None,
+    }
+}
+
+/// Names how a harness kind runs native sub-agents, every kind answered (DEC-141). Takes
+/// the kind. Returns the answer.
+pub fn native_sub_agents(harness: HarnessKind) -> NativeSubAgents {
+    match harness {
+        HarnessKind::ClaudeCode => NativeSubAgents::Teams,
+        HarnessKind::Codex => NativeSubAgents::Threads,
+        HarnessKind::Rcli => NativeSubAgents::Unavailable(RCLI_NATIVE_UNAVAILABLE),
+    }
+}
+
+/// Says whether a harness kind has native sub-agents the engine can use: Claude Code agent
+/// teams and Codex threads (Q10, PA-7). Takes the kind.
 pub fn native_supported(harness: HarnessKind) -> bool {
-    harness == HarnessKind::ClaudeCode
+    !matches!(native_sub_agents(harness), NativeSubAgents::Unavailable(_))
 }
 
 fn column(

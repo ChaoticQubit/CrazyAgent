@@ -13577,6 +13577,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         resume: None,
         continues: true,
         native: false,
+        native_threads: None,
         tmux: None,
         hookless: false,
         scratch_pin: None,
@@ -15285,6 +15286,41 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
 /// and that pin is kept on its row, so it holds after the database is opened again as on an
 /// engine restart, when no caller socket pin is left: another process under the same pane
 /// id is no one, for `who` and for a team call alike (PLC (b)).
+/// PA-7: a native Codex lead runs no agent team, so every call in its mailbox, with or without
+/// a named pane, is its own (its Codex sub-agents' calls included), while a native Claude Code
+/// lead's call with no pane is still nobody's.
+#[test]
+fn a_native_codex_lead_s_mailbox_calls_are_its_own_without_a_pane() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = |harness: &str| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,mode)
+                 VALUES (?1,'sub',?2,1,?3,'working',1,1,'native')",
+                params![PROJECT, harness, ENDPOINT],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let codex = lead("codex");
+    let claude = lead("claude-code");
+    for pane in [None, Some(("%7", std::process::id()))] {
+        assert_eq!(
+            team_caller(&connection, None, &project, (codex, "Lead"), pane),
+            Some((codex, "Lead".to_owned())),
+            "{pane:?}"
+        );
+    }
+    assert_eq!(
+        team_caller(&connection, None, &project, (claude, "Lead"), None),
+        None
+    );
+}
+
 #[test]
 fn a_native_teammate_is_named_only_under_the_pane_process_it_was_first_named_by() {
     let directory = tempfile::tempdir().unwrap();
@@ -17692,13 +17728,19 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
         fixture.connection.last_insert_rowid()
     };
     let worker = planted("claude-code", Some(native));
-    let codex = planted("codex", None);
-    for (agent, launch) in [(worker, "claude-code"), (codex, "codex")] {
+    let rcli = planted("rcli", None);
+    for (agent, launch) in [(worker, "claude-code"), (rcli, "rcli")] {
         let refused = team
             .native_lead(&project, agent, AgentRole::Sub, launch)
             .unwrap_err();
         assert!(refused.contains("(native_mode_unsupported)"), "{refused}");
     }
+    let codex = planted("codex", None);
+    assert_eq!(
+        team.native_lead(&project, codex, AgentRole::Sub, "codex"),
+        Ok(false),
+        "a native Codex lead runs threads, not an agent team"
+    );
 }
 
 /// Starts a Claude Code lead the master started while the project's Claude Code sub-agent
@@ -17710,12 +17752,35 @@ fn lead_in_its_own_clone(
     fixture: &Fixture,
     mode: crate::coord::settings::SubagentMode,
 ) -> (i64, String) {
-    use crate::coord::settings::{HarnessKind, set_mode};
+    harness_lead_in_its_own_clone(
+        fixture,
+        crate::coord::settings::HarnessKind::ClaudeCode,
+        "claude-code",
+        mode,
+    )
+}
+
+/// Starts a lead on `harness`, of kind `kind`, the master started while the project's mode
+/// for that kind is `mode`, in its own clone of the committed project on the task branch the
+/// engine claimed for it. Takes the fixture, the kind, the harness and the mode. Returns the
+/// lead and its task branch.
+#[cfg(target_os = "macos")]
+fn harness_lead_in_its_own_clone(
+    fixture: &Fixture,
+    kind: crate::coord::settings::HarnessKind,
+    harness: &str,
+    mode: crate::coord::settings::SubagentMode,
+) -> (i64, String) {
+    use crate::coord::settings::set_mode;
+    assert_eq!(
+        crate::coord::settings::HarnessKind::from_harness(harness),
+        Some(kind)
+    );
     let project = ProjectId::new(PROJECT).unwrap();
-    set_mode(&fixture.connection, &project, HarnessKind::ClaudeCode, mode).unwrap();
+    set_mode(&fixture.connection, &project, kind, mode).unwrap();
     committed_project(fixture);
     let repository = fixture.base.join("project");
-    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let lead = fixture.agent(AgentRole::Sub, harness, AgentStatus::Starting);
     assert_eq!(
         super::super::lead_mode(&fixture.connection, &project, lead).unwrap(),
         mode
@@ -17781,6 +17846,43 @@ fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
         format!(
             "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
             folder = crate::agent_git::TEAMMATES_FOLDER
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// PA-7: a native Codex lead with tools is told its Codex sub-agents share its worktree and
+/// task branch, so it gives each its own files and reports for them; it names no teammates
+/// folder or teammate branch, which only an agent team has. Tools off runs none (r1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_codex_lead_s_task_prompt_says_its_sub_agents_share_its_worktree() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) = harness_lead_in_its_own_clone(
+        &fixture,
+        crate::coord::settings::HarnessKind::Codex,
+        "codex",
+        crate::coord::settings::SubagentMode::Native,
+    );
+    let mut team = fixture.runtime();
+    assert_eq!(
+        team.branch_line(&fixture.setup.project_id, lead),
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        ),
+        "a Codex lead with tools off runs no sub-agents"
+    );
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET tools=1 WHERE id=?1", [lead])
+        .unwrap();
+    let line = team.branch_line(&fixture.setup.project_id, lead);
+    assert!(!line.contains(crate::agent_git::TEAMMATES_FOLDER), "{line}");
+    assert!(!line.contains(&format!("{branch}--")), "{line}");
+    assert_eq!(
+        line,
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
         )
     );
     team.shutdown().unwrap();
@@ -20877,6 +20979,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         resume: None,
         continues: true,
         native: false,
+        native_threads: None,
         tmux: None,
         hookless,
         scratch_pin: None,
@@ -21030,6 +21133,112 @@ fn a_native_plan_without_its_tmux_is_a_caller_bug() {
         ..hooks_plan("claude-code", false)
     };
     let _ = plan.team_context(context);
+}
+
+/// PA-7: a Codex lead the master starts in the Native mode runs Codex's own sub-agents,
+/// capped at Max teammates (the largest choice under No limit), with no agent team and only
+/// with the terminal host, where they show (r1); a nested or app-spawned Codex agent and an
+/// RCLI one get none, and the plan gives its launch context the cap.
+#[test]
+fn a_native_codex_lead_runs_capped_codex_sub_agents_without_an_agent_team() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    use std::os::unix::fs::DirBuilderExt;
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let sub = |harness: &str, parent: Option<i64>| {
+        let id = fixture.agent(AgentRole::Sub, harness, AgentStatus::Starting);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?1 WHERE id=?2",
+                params![parent, id],
+            )
+            .unwrap();
+        id
+    };
+    let spawned = sub("codex", None);
+    let headless = fixture.runtime();
+    let team = fixture.runtime().with_terminal(fixture.host()).unwrap();
+    assert_eq!(
+        team.native_threads(&project, spawned, AgentRole::Sub, "codex"),
+        Ok(None)
+    );
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::Codex,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let lead = sub("codex", None);
+    let nested = sub("codex", Some(lead));
+    assert_eq!(
+        team.native_lead(&project, lead, AgentRole::Sub, "codex"),
+        Ok(false),
+        "a Codex lead runs no Claude Code agent team, terminal host or not"
+    );
+    assert_eq!(
+        headless.native_lead(&project, lead, AgentRole::Sub, "codex"),
+        Ok(false)
+    );
+    let refused = headless
+        .native_threads(&project, lead, AgentRole::Sub, "codex")
+        .unwrap_err();
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_mode_unavailable")),
+        "only the lead's terminal shows its Codex sub-agents: {refused}"
+    );
+    assert_eq!(
+        team.native_threads(&project, lead, AgentRole::Sub, "codex"),
+        Ok(Some(*crate::team::CAP_CHOICES.last().unwrap()))
+    );
+    assert_eq!(
+        team.native_threads(&project, nested, AgentRole::Sub, "codex"),
+        Ok(None)
+    );
+    assert_eq!(
+        team.native_threads(&project, spawned, AgentRole::Sub, "codex"),
+        Ok(None),
+        "a lead keeps the mode of its first start"
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_caps(project,teammates) VALUES (?1,3)",
+            [PROJECT],
+        )
+        .unwrap();
+    assert_eq!(
+        team.native_threads(&project, lead, AgentRole::Sub, "codex"),
+        Ok(Some(3))
+    );
+    let rcli = sub("rcli", None);
+    assert_eq!(
+        team.native_threads(&project, rcli, AgentRole::Sub, "rcli"),
+        Ok(None)
+    );
+
+    let context =
+        crate::launch_context::for_project(&fixture.connection, &project, Layout::Linked).unwrap();
+    let plan = Plan {
+        native_threads: Some(3),
+        ..hooks_plan("codex", false)
+    };
+    let home = fixture.base.join("codex-native-home");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let installed = plan
+        .team_context(context)
+        .install("codex", &home, true)
+        .unwrap();
+    assert!(installed.native_threads());
+    drop(installed);
+    let mut team = team;
+    team.shutdown().unwrap();
+    let mut headless = headless;
+    headless.shutdown().unwrap();
 }
 
 #[test]
@@ -22485,6 +22694,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         continues: false,
         native: true,
         tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
+        native_threads: None,
         hookless: false,
         scratch_pin: None,
         toolchains: Vec::new(),
