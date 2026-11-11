@@ -976,19 +976,14 @@ pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
 /// folder and whether to clear those flags.
 #[cfg(unix)]
 fn writable(folder: &Path, pinned: bool) {
-    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+    use rustix::fs::{Dir, FileType, Mode, OFlags};
     use std::ffi::CString;
     use std::rc::Rc;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
     if pinned {
         unpin(rustix::fs::CWD, folder);
-        let _ = rustix::fs::chmodat(
-            rustix::fs::CWD,
-            folder,
-            Mode::RWXU,
-            AtFlags::SYMLINK_NOFOLLOW,
-        );
+        let _ = open_up(rustix::fs::CWD, folder);
     }
     let Ok(top) = rustix::fs::open(folder, flags, Mode::empty()) else {
         return;
@@ -1007,12 +1002,7 @@ fn writable(folder: &Path, pinned: bool) {
                     if pinned {
                         unpin(&*parent, name.as_c_str());
                     }
-                    rustix::fs::chmodat(
-                        &*parent,
-                        name.as_c_str(),
-                        Mode::RWXU,
-                        AtFlags::SYMLINK_NOFOLLOW,
-                    )?;
+                    open_up(&*parent, name.as_c_str())?;
                     rustix::fs::openat(&*parent, name.as_c_str(), flags, Mode::empty())
                 })
                 .map(Rc::new),
@@ -1048,6 +1038,46 @@ fn writable(folder: &Path, pinned: bool) {
 
 #[cfg(not(unix))]
 fn writable(_: &Path, _: bool) {}
+
+/// Gives this user rwx on the folder `name` under `parent` without following a link. Linux
+/// `fchmodat` cannot refuse a link, so there the folder is pinned by an `O_PATH` handle that
+/// refuses a link and changed through `/proc/self/fd/<n>` of that handle; elsewhere
+/// `chmodat` refuses the link itself. Inputs: the parent handle and the name. Output: Ok,
+/// or the error that left the folder as it was.
+#[cfg(target_os = "linux")]
+fn open_up<P: rustix::path::Arg>(
+    parent: impl std::os::fd::AsFd,
+    name: P,
+) -> rustix::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::fd::AsRawFd;
+    let pinned = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    rustix::fs::chmod(
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()).as_str(),
+        Mode::RWXU,
+    )
+}
+
+/// Gives this user rwx on the folder `name` under `parent` without following a link, through
+/// `chmodat` with `AT_SYMLINK_NOFOLLOW`. Inputs: the parent handle and the name. Output: Ok,
+/// or the error that left the folder as it was.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_up<P: rustix::path::Arg>(
+    parent: impl std::os::fd::AsFd,
+    name: P,
+) -> rustix::io::Result<()> {
+    rustix::fs::chmodat(
+        parent,
+        name,
+        rustix::fs::Mode::RWXU,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+}
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {

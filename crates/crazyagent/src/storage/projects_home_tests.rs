@@ -166,7 +166,9 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
 /// agent wait before any folder moves: a folder another project uses (`delete_shared_folder`,
 /// naming that project), research of the project that is queued, running or waiting for a
 /// pool (`delete_research_running`), and a projects home move still pending
-/// (`home_move_in_progress`). Finished research holds nothing back.
+/// (`home_move_in_progress`). Finished research holds nothing back. Runs on macOS only, the
+/// one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[test]
 fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_before_any_move() {
     let root = tempfile::tempdir().unwrap();

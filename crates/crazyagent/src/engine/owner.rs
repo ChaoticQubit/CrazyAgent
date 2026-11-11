@@ -1153,6 +1153,12 @@ pub enum OwnerSummary {
     },
 }
 
+/// True for a folder with no iCloud placeholders, whose `FolderSize` reply leaves the count
+/// out, so a client from before the count still reads it.
+fn no_placeholders(count: &u64) -> bool {
+    *count == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
@@ -1282,6 +1288,8 @@ pub enum OwnerData {
     },
     FolderSize {
         bytes: u64,
+        #[serde(default, skip_serializing_if = "no_placeholders")]
+        placeholders: u64,
     },
     Onboarding {
         onboarding: Box<crate::onboarding::OnboardingView>,

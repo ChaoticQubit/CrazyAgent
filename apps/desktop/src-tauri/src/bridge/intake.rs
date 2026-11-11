@@ -5,6 +5,7 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
+use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::setup::SetupStatus;
@@ -19,7 +20,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 62] = [
+pub const INTAKE_CODES: [&str; 71] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -60,6 +61,15 @@ pub const INTAKE_CODES: [&str; 62] = [
     "home_add_unverified",
     "home_add_interrupted",
     "home_record_invalid",
+    "home_icloud_not_downloaded",
+    "home_permission_denied",
+    "icloud_download_busy",
+    "icloud_folder_missing",
+    "icloud_folder_unsafe",
+    "icloud_folder_unreadable",
+    "icloud_path_invalid",
+    "icloud_outcome_unknown",
+    "icloud_owner_unavailable",
     "folder_size_path_invalid",
     "folder_size_unsafe",
     "folder_size_unreadable",
@@ -160,7 +170,8 @@ const SETUP_CODES: [&str; 34] = [
 ];
 
 /// What the window asks about before a Move or Copy: the folder's size, or None with the
-/// soft size code (timeout, too large, unreadable) when it could not be measured, the
+/// soft size code (timeout, too large, unreadable) when it could not be measured, how many
+/// of its files are only in iCloud (0 when unmeasured), the
 /// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
 /// folders, whether a Move keeps its git links and which link it breaks, whether a Copy keeps
 /// its own git data, whether it has git at all, and whether it is on the projects folder's
@@ -170,6 +181,7 @@ pub struct FolderSize {
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_problem: Option<&'static str>,
+    pub placeholders: u64,
     pub github: Option<String>,
     pub worktrees: usize,
     pub worktree_paths: Vec<String>,
@@ -410,22 +422,28 @@ impl NativeBridge {
                 .and_then(|root| crazyagent::projects_home::same_volume(folder, Path::new(root))),
             _ => return Err(failure("owner_read_failed")),
         };
-        let (bytes, size_problem) = match self.owner_read(OwnerRead::FolderSize { path }).await {
-            Ok(OwnerData::FolderSize { bytes }) => (Some(bytes), None),
+        let read = self.owner_read(OwnerRead::FolderSize { path }).await;
+        let (bytes, placeholders, size_problem) = match read {
+            Ok(OwnerData::FolderSize {
+                bytes,
+                placeholders,
+            }) => (Some(bytes), placeholders, None),
             Ok(_) => return Err(failure("owner_read_failed")),
             Err(error) => match SIZE_PROBLEMS
                 .iter()
                 .copied()
                 .find(|code| *code == error.code)
             {
-                Some(code) => (None, Some(code)),
+                Some(code) => (None, 0, Some(code)),
                 None => return Err(error),
             },
         };
         assert!(bytes.is_some() != size_problem.is_some());
+        assert!(bytes.is_some() || placeholders == 0);
         bounded(FolderSize {
             bytes,
             size_problem,
+            placeholders,
             github,
             worktrees,
             worktree_paths,
@@ -488,6 +506,43 @@ impl NativeBridge {
             OwnerData::Onboarding { onboarding } => bounded(*onboarding),
             _ => Err(failure("owner_read_failed")),
         }
+    }
+
+    fn icloud_client(&mut self) -> Result<Arc<OwnerClient>, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?.shared_client().map_err(intake_failure)
+    }
+
+    /// Downloads every file of a folder that is only in iCloud and waits until all are on
+    /// this Mac; the folder itself is not moved or changed. Runs without the bridge lock, so
+    /// progress and cancel answer while it waits. Input: the absolute folder. Output: how many
+    /// files it downloaded, or `home_icloud_not_downloaded` after a cancel, stall or time limit.
+    pub fn icloud_download(&mut self, path: String) -> Result<Unlocked<u64>, BridgeError> {
+        crazyagent::projects_home::path_text(&path, "icloud_path_invalid")
+            .map_err(intake_failure)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.icloud_download(path).await.map_err(intake_failure)?)
+        }))
+    }
+
+    /// Reads how far the running iCloud download has come. Output: the counts, or None when
+    /// no download runs.
+    pub fn icloud_progress(&mut self) -> Result<Unlocked<Option<Progress>>, BridgeError> {
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.icloud_progress().await.map_err(intake_failure)?)
+        }))
+    }
+
+    /// Stops the running iCloud download at its next check. Output: whether one was running.
+    pub fn icloud_cancel(&mut self) -> Result<Unlocked<bool>, BridgeError> {
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.icloud_cancel().await.map_err(intake_failure)?)
+        }))
     }
 
     fn github_client(&mut self) -> Result<Arc<OwnerClient>, BridgeError> {
@@ -870,6 +925,7 @@ mod tests {
             include_str!("../../../../../crates/crazyagent/src/projects_home.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/icloud.rs"),
         ];
         let mut refusals: Vec<&str> = engine
             .iter()
@@ -887,6 +943,13 @@ mod tests {
             "home_move_research_running",
             "home_move_delete_in_progress",
             "home_new_project_failed",
+            "home_icloud_not_downloaded",
+            "home_permission_denied",
+            "icloud_folder_missing",
+            "icloud_folder_unreadable",
+            "icloud_path_invalid",
+            "icloud_outcome_unknown",
+            "icloud_owner_unavailable",
         ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");
         }

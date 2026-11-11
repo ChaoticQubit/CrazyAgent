@@ -902,6 +902,9 @@ fn an_empty_plan_hands_work_to_any_runnable_harness_with_an_account() {
     );
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_empty_plan_runs_more_than_one_sub_agent_at_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -1888,6 +1891,9 @@ fn the_runtime_parks_work_without_a_pool_and_never_starts_an_uninstalled_harness
 /// The owner moved the project folder away before the master started. The agent and the
 /// owner's note name the plain code of the failed file step, never the system's error text
 /// or a path.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_master_whose_project_folder_is_gone_names_the_plain_file_code() {
     let directory = tempfile::tempdir().unwrap();
@@ -2083,6 +2089,9 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
     team.shutdown().unwrap();
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
     warm_agents_ended(b"#!/bin/sh\nexit 1\n", false);
@@ -2092,6 +2101,9 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
 /// warm off, as the team status shows before the test lets the second go on; it then dies,
 /// still ends Failed, and nothing starts again in its place. A file the test removes holds
 /// that order, not a sleep a loaded machine could outlast (rv-code WAD-L1).
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_warm_agent_that_dies_after_keeping_warm_went_off_still_ends_failed() {
     warm_agents_ended(
@@ -2100,6 +2112,9 @@ fn a_warm_agent_that_dies_after_keeping_warm_went_off_still_ends_failed() {
     );
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
     let cold = warm_agents_ended(
@@ -2127,6 +2142,7 @@ fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
 /// exists; the test checks the first has ended and turned keeping warm off while the second
 /// is alive, then removes the file. Input: the stand-in harness script and whether it holds.
 /// Output: the team status once both agents ended.
+#[cfg(target_os = "macos")]
 fn warm_agents_ended(script: &[u8], held: bool) -> TeamStatus {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
@@ -2283,6 +2299,9 @@ fn warm_agents_ended(script: &[u8], held: bool) -> TeamStatus {
     cold
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
@@ -2655,6 +2674,9 @@ fn concurrent_agent_setups_create_one_project_repository() {
     assert_eq!(exclude.matches("/worktrees/").count(), 1, "{exclude}");
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() {
     use crate::agents::AgentState;
@@ -3258,6 +3280,9 @@ fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one
     );
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_live_and_stopped() {
     use crate::agents::tests::{alive, until};

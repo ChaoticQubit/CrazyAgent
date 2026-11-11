@@ -2,12 +2,13 @@ use super::intake::{AddWarning, COPY_WARN_BYTES, ask, copy, event};
 use super::new_project::{complete, expand, size_label};
 use super::{Flow, Place, Screen, open};
 use crate::engine::owner::OwnerResult;
-use crate::projects_home::{AddMode, AddOverride, GitLink, PATH_BYTES_MAX};
-use crate::tui::client::intake::{IntakeQuery, IntakeView};
+use crate::projects_home::icloud::Progress;
+use crate::projects_home::{AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX};
+use crate::tui::client::intake::{IntakeJob, IntakeQuery, IntakeView};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::Arrival;
+use crate::tui::seam::{Arrival, Request};
 use crate::tui::text::{join, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, radio};
@@ -15,6 +16,8 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const FIELD_WIDTH: usize = 72;
 const WORKTREE_PATHS_MAX: usize = 16;
@@ -23,6 +26,8 @@ const SOFT_SIZE_CODES: [&str; 3] = [
     "folder_size_too_large",
     "folder_size_unreadable",
 ];
+const ICLOUD_CHOICES: [&str; 3] = ["Download and move", "Download and copy", "Cancel"];
+const ICLOUD_STOPPED: &str = "The download stopped. Nothing was moved or copied.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -95,22 +100,47 @@ struct Question {
     choice: usize,
 }
 
+/// The open iCloud question for a folder whose files are not all on this Mac: the folder, how
+/// many of its files the read found only in iCloud (none when only the engine's refusal said
+/// so), the selected answer (Download and move, Download and copy, Cancel) and, once the owner
+/// chose, the running download.
+#[derive(Clone, Debug)]
+struct Icloud {
+    source: String,
+    placeholders: Option<u64>,
+    choice: usize,
+    download: Option<Downloading>,
+}
+
+/// One running iCloud download: the way the folder is added after it, the flag Esc sets to
+/// stop it and the last progress the engine reported.
+#[derive(Clone, Debug)]
+struct Downloading {
+    mode: AddMode,
+    cancel: Arc<AtomicBool>,
+    progress: Option<Progress>,
+}
+
 /// The Existing folder page: sets up a folder on this computer where it is
 /// by default, or moves or copies it into the projects folder with the target
 /// shown first, a Move confirmed with a second Enter, and a Copy with its size
 /// shown first, a warning above 1 GB and the linked git worktrees it leaves with
 /// the original. A Move or Copy with issues asks "Move anyway?" first, data loss
 /// first: yes sends an override for exactly those issues, Use where it is sets the
-/// folder up in place. The folder then opens its setup.
+/// folder up in place. A folder with files only in iCloud asks first whether to download
+/// them and then move or copy, shows the download's progress, stops it on Esc, and goes on
+/// with the chosen way once every file is on this Mac. The folder then opens its setup.
 pub struct AddFolder {
     field: TextField,
     way: Way,
     confirming: bool,
     focus: Focus,
     home: Option<String>,
-    size: Option<(String, Load<u64>)>,
+    size: Option<(String, Load<Measured>)>,
     worktrees: usize,
     question: Option<Question>,
+    icloud: Option<Icloud>,
+    downloaded: Option<String>,
     sent: Option<String>,
     problem: Option<String>,
 }
@@ -129,6 +159,8 @@ impl AddFolder {
             size: None,
             worktrees: 0,
             question: None,
+            icloud: None,
+            downloaded: None,
             sent: None,
             problem: None,
         }
@@ -174,7 +206,7 @@ impl AddFolder {
     fn facts(&self, source: &str) -> Facts {
         let folder = Path::new(source);
         let (bytes, size_problem) = match self.sized(source) {
-            Some(Load::Ready(bytes)) => (Some(*bytes), None),
+            Some(Load::Ready(measured)) => (Some(measured.bytes), None),
             Some(Load::Failed(code)) if SOFT_SIZE_CODES.contains(&code.as_str()) => {
                 (None, Some(code.clone()))
             }
@@ -260,7 +292,7 @@ impl AddFolder {
         ))
     }
 
-    fn sized(&self, source: &str) -> Option<&Load<u64>> {
+    fn sized(&self, source: &str) -> Option<&Load<Measured>> {
         self.size
             .as_ref()
             .filter(|(path, _)| path == source)
@@ -291,6 +323,22 @@ impl AddFolder {
                 return Flow::Handled;
             }
         }
+        self.proceed(source, mode, ctx)
+    }
+
+    /// Goes on with a measured folder: the iCloud question while some of its files are only
+    /// in iCloud, then the question for its issues, then the Move confirmation, then the add.
+    /// Takes the folder, the way and the context. Returns the flow.
+    fn proceed(&mut self, source: String, mode: AddMode, ctx: &mut Ctx) -> Flow {
+        let placeholders = match self.sized(&source) {
+            Some(Load::Ready(measured)) if measured.placeholders > 0 => Some(measured.placeholders),
+            _ => None,
+        };
+        let fetched = self.downloaded.as_deref() == Some(source.as_str());
+        if !self.confirming && placeholders.is_some() && !fetched {
+            self.ask_icloud(&source, mode, placeholders);
+            return Flow::Handled;
+        }
         if !self.confirming && self.ask_anyway(&source, mode, None) {
             return Flow::Handled;
         }
@@ -299,6 +347,119 @@ impl AddFolder {
             return Flow::Handled;
         }
         self.send(source, mode, Vec::new(), ctx)
+    }
+
+    /// Opens the iCloud question for `source` with the owner's way selected. Takes the folder,
+    /// the way and how many files the read found only in iCloud, if it counted them.
+    fn ask_icloud(&mut self, source: &str, mode: AddMode, placeholders: Option<u64>) {
+        assert!(placeholders != Some(0));
+        assert!(self.downloaded.as_deref() != Some(source));
+        self.icloud = Some(Icloud {
+            source: source.to_owned(),
+            placeholders,
+            choice: match mode {
+                AddMode::Move => 0,
+                AddMode::Copy => 1,
+            },
+            download: None,
+        });
+        self.question = None;
+        self.confirming = false;
+    }
+
+    /// Starts the download the owner chose; the folder is moved or copied only after it.
+    /// Takes the way and the context. Returns Handled; progress and the end arrive later.
+    fn download(&mut self, mode: AddMode, ctx: &mut Ctx) -> Flow {
+        let Some(icloud) = &mut self.icloud else {
+            return Flow::Ignored;
+        };
+        assert!(icloud.download.is_none());
+        let cancel = Arc::new(AtomicBool::new(false));
+        icloud.download = Some(Downloading {
+            mode,
+            cancel: Arc::clone(&cancel),
+            progress: None,
+        });
+        let path = icloud.source.clone();
+        self.way = Way::Into(mode);
+        self.problem = None;
+        ctx.request(Request::Intake(Box::new(IntakeJob::IcloudDownload {
+            path,
+            cancel,
+        })));
+        Flow::Handled
+    }
+
+    /// Takes one key while the iCloud question is open: arrows and Tab pick the answer,
+    /// Enter gives it and Esc closes it. While the download runs, Esc stops it and every
+    /// other key waits. Takes the key and the context. Returns the flow.
+    fn answer_icloud(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(icloud) = &mut self.icloud else {
+            return Flow::Ignored;
+        };
+        let count = ICLOUD_CHOICES.len();
+        assert!(icloud.choice < count);
+        if let Some(download) = &icloud.download {
+            if *key == Key::Esc {
+                download.cancel.store(true, Ordering::Relaxed);
+            }
+            return Flow::Handled;
+        }
+        match key {
+            Key::Right | Key::Tab => icloud.choice = (icloud.choice + 1) % count,
+            Key::Left | Key::BackTab => icloud.choice = (icloud.choice + count - 1) % count,
+            Key::Esc => self.icloud = None,
+            Key::Enter => {
+                return match icloud.choice {
+                    0 => self.download(AddMode::Move, ctx),
+                    1 => self.download(AddMode::Copy, ctx),
+                    _ => {
+                        self.icloud = None;
+                        Flow::Handled
+                    }
+                };
+            }
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    /// Applies one download reply: progress updates the line, the end goes on with the chosen
+    /// way, and a failure or the owner's stop closes the question with its sentence. Takes the
+    /// folder the reply is for, the result and the context. Returns the flow.
+    fn download_reply(
+        &mut self,
+        path: &str,
+        result: &Result<IntakeView, String>,
+        ctx: &mut Ctx,
+    ) -> Flow {
+        let Some(icloud) = self.icloud.as_mut().filter(|icloud| icloud.source == path) else {
+            return Flow::Handled;
+        };
+        let Some(download) = &mut icloud.download else {
+            return Flow::Handled;
+        };
+        let (mode, stopped) = (download.mode, download.cancel.load(Ordering::Relaxed));
+        match result {
+            Ok(IntakeView::IcloudProgress(progress)) => {
+                assert!(progress.done <= progress.total);
+                download.progress = Some(*progress);
+                return Flow::Handled;
+            }
+            Ok(IntakeView::IcloudDownloaded(_)) if !stopped => {
+                self.icloud = None;
+                self.downloaded = Some(path.to_owned());
+                return self.proceed(path.to_owned(), mode, ctx);
+            }
+            Ok(IntakeView::IcloudDownloaded(_)) => self.problem = Some(ICLOUD_STOPPED.into()),
+            Err(code) if stopped && code == "home_icloud_not_downloaded" => {
+                self.problem = Some(ICLOUD_STOPPED.into());
+            }
+            Err(code) => self.problem = Some(copy(code)),
+            Ok(_) => self.problem = Some(copy("icloud_outcome_unknown")),
+        }
+        self.icloud = None;
+        Flow::Handled
     }
 
     /// Sends the add with the overrides the owner agreed to. Takes the folder, the way, the
@@ -385,6 +546,12 @@ impl AddFolder {
     }
 
     fn button(&self, ctx: &Ctx) -> &'static str {
+        if let Some(icloud) = &self.icloud {
+            return match icloud.download {
+                Some(_) => "Wait",
+                None => ICLOUD_CHOICES[icloud.choice],
+            };
+        }
         if let Some(question) = &self.question {
             return match (question.choice, question.mode) {
                 (0, _) => "Use where it is",
@@ -408,7 +575,7 @@ impl AddFolder {
             _ if !measured => "Check size",
             AddMode::Move if self.confirming => "Move it now",
             AddMode::Move => "Move into projects folder",
-            AddMode::Copy if matches!(size, Some(Load::Ready(bytes)) if bytes > COPY_WARN_BYTES) => {
+            AddMode::Copy if matches!(size, Some(Load::Ready(measured)) if measured.bytes > COPY_WARN_BYTES) => {
                 "Copy anyway"
             }
             AddMode::Copy => "Copy into projects folder",
@@ -423,6 +590,17 @@ impl Screen for AddFolder {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
+        match self.icloud.as_ref().map(|icloud| icloud.download.is_some()) {
+            Some(true) => return vec![hint("Esc", "Stop the download")],
+            Some(false) => {
+                return vec![
+                    hint(&arrows, "Choose"),
+                    hint("Enter", self.button(ctx)),
+                    hint("Esc", "Close the question"),
+                ];
+            }
+            None => {}
+        }
         if self.question.is_some() {
             return vec![
                 hint(&arrows, "Choose"),
@@ -456,6 +634,9 @@ impl Screen for AddFolder {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if self.sent.is_some() {
             return Flow::Handled;
+        }
+        if self.icloud.is_some() {
+            return self.answer_icloud(key, ctx);
         }
         if self.question.is_some() {
             return self.answer(key, ctx);
@@ -518,7 +699,7 @@ impl Screen for AddFolder {
                 {
                     self.worktrees = crate::projects_home::linked_worktrees(Path::new(path));
                     *size = match result {
-                        Ok(IntakeView::FolderSize(bytes)) => Load::Ready(*bytes),
+                        Ok(IntakeView::FolderSize(measured)) => Load::Ready(*measured),
                         Ok(_) => Load::Failed("intake_change_outcome_unknown".into()),
                         Err(code) => Load::Failed(code.clone()),
                     };
@@ -545,11 +726,21 @@ impl Screen for AddFolder {
                         self.ask_anyway(source, *mode, Some(code));
                         Flow::Handled
                     }
+                    Err(code)
+                        if code == "home_icloud_not_downloaded"
+                            && self.downloaded.as_ref() != Some(source) =>
+                    {
+                        self.ask_icloud(source, *mode, None);
+                        Flow::Handled
+                    }
                     Err(code) => {
                         self.problem = Some(copy(code));
                         Flow::Handled
                     }
                 }
+            }
+            (IntakeQuery::IcloudDownload { path }, result) => {
+                self.download_reply(path, result, ctx)
             }
             _ => Flow::Handled,
         }
@@ -650,7 +841,7 @@ impl Screen for AddFolder {
                 .ok()
                 .and_then(|source| self.sized(&source).cloned());
             match size {
-                Some(Load::Ready(bytes)) => {
+                Some(Load::Ready(Measured { bytes, .. })) => {
                     lines.push(Line::raw(format!("Size: {}", size_label(bytes))));
                     if copying && self.worktrees > 0 {
                         lines.extend(
@@ -692,7 +883,9 @@ impl Screen for AddFolder {
             );
             lines.push(Line::default());
         }
-        if let Some(question) = &self.question {
+        if let Some(icloud) = &self.icloud {
+            icloud_lines(icloud, limit, ctx, &mut lines);
+        } else if let Some(question) = &self.question {
             question_lines(question, limit, theme, &mut lines);
         } else if self.sent.is_some() {
             lines.push(ctx.loading(match self.way {
@@ -717,7 +910,12 @@ impl Screen for AddFolder {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.sent.is_some() || matches!(&self.size, Some((_, Load::Loading)))
+        self.sent.is_some()
+            || matches!(&self.size, Some((_, Load::Loading)))
+            || self
+                .icloud
+                .as_ref()
+                .is_some_and(|icloud| icloud.download.is_some())
     }
 
     fn draft(&self) -> bool {
@@ -959,6 +1157,72 @@ fn question_lines(
         Some(question.choice),
         theme,
     ));
+}
+
+/// Draws the iCloud question: how many files are only in iCloud, that a move takes the folder
+/// out of iCloud on the owner's other Macs, and the three answers; while the download runs,
+/// its progress instead of the answers. Takes the question, the width, the context and the
+/// lines to add to.
+fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'static>>) {
+    let theme = &ctx.theme;
+    let name = AddFolder::name(&icloud.source);
+    lines.push(styled(
+        format!("Download {name} from iCloud first?"),
+        Role::Heading,
+        theme,
+    ));
+    let place = icloud_place(&icloud.source, ctx.home.as_deref());
+    for text in [
+        icloud_count(icloud.placeholders),
+        format!("Moving takes the folder out of {place} on your other Macs too."),
+    ] {
+        lines.extend(wrap(&text, limit).into_iter().map(Line::raw));
+    }
+    lines.push(Line::default());
+    let Some(download) = &icloud.download else {
+        lines.push(buttons(&ICLOUD_CHOICES, Some(icloud.choice), theme));
+        return;
+    };
+    if download.cancel.load(Ordering::Relaxed) {
+        lines.push(ctx.loading("Stopping the download"));
+        return;
+    }
+    lines.push(ctx.loading(&match download.progress {
+        Some(Progress { total, done }) if total > 0 => {
+            format!("Downloading from iCloud: {done} of {total} files")
+        }
+        _ => "Downloading from iCloud".to_owned(),
+    }));
+}
+
+/// Says how many of a folder's files are only in iCloud and that CrazyAgent downloads them
+/// first. Takes the count, none when only the engine's refusal said some are. Returns the
+/// sentence.
+fn icloud_count(placeholders: Option<u64>) -> String {
+    let files = match placeholders {
+        Some(1) => "1 file is".to_owned(),
+        Some(count) => format!("{count} files are"),
+        None => "Some files are".to_owned(),
+    };
+    format!(
+        "{files} only in iCloud; CrazyAgent downloads them first (needs internet, can take a while)."
+    )
+}
+
+/// Names the iCloud place a folder is in, for the move line: iCloud Desktop for a folder in
+/// ~/Desktop, iCloud Documents for one in ~/Documents and iCloud Drive otherwise. Takes the
+/// folder and the user's home folder. Returns the name.
+fn icloud_place(source: &str, home: Option<&str>) -> &'static str {
+    let inside = |folder: &str| {
+        home.is_some_and(|home| Path::new(source).starts_with(Path::new(home).join(folder)))
+    };
+    if inside("Desktop") {
+        "iCloud Desktop"
+    } else if inside("Documents") {
+        "iCloud Documents"
+    } else {
+        "iCloud Drive"
+    }
 }
 
 /// Says that a Copy leaves the folder's linked git worktrees with the original.

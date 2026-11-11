@@ -1,11 +1,12 @@
+pub mod icloud;
 mod intake;
 mod layout;
 mod platform;
 mod watch;
 
 pub use intake::{
-    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, MovePlan, copy_tree, folder_size,
-    move_by_copy, verify_tree,
+    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, copy_tree,
+    folder_size, move_by_copy, verify_tree,
 };
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
@@ -1202,6 +1203,20 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_copy_unverified" => "The copy did not match the original, so the original was kept.",
         "home_move_source_left" => {
             "The folder was added, but some of the original could not be removed."
+        }
+        "home_icloud_not_downloaded" => {
+            "Some files are still only in iCloud, so the folder was not added. Nothing was removed. Download them and try again."
+        }
+        "home_permission_denied" => {
+            "macOS did not let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed."
+        }
+        "icloud_download_busy" => "Another iCloud download is running. Wait for it to finish.",
+        "icloud_folder_missing" => "That folder isn't there anymore.",
+        "icloud_folder_unsafe" => "That folder can't be downloaded.",
+        "icloud_folder_unreadable" => "Some files in this folder can't be read.",
+        "icloud_path_invalid" => "Pick a folder from the file browser.",
+        "icloud_outcome_unknown" | "icloud_owner_unavailable" => {
+            "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again."
         }
         "home_add_unverified" => "The folder did not arrive in your projects folder.",
         "home_move_same" => "That is already your projects folder.",

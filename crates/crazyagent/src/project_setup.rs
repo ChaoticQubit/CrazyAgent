@@ -1,6 +1,7 @@
 use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::sandbox::policy::LevelView;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -504,6 +505,8 @@ pub struct ProjectCatalog {
     pub default_team: TeamPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_team_status: Option<String>,
+    #[serde(default)]
+    pub agent_access: Vec<LevelView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1022,6 +1025,7 @@ pub fn catalog(
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
         default_team: default_team(config, pool, research, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
+        agent_access: LevelView::all(),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)

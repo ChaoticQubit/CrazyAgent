@@ -77,7 +77,12 @@ const POLL: Duration = Duration::from_millis(20);
 /// take the connections every other IDE call needs.
 pub(super) const GIT_CALLS_MAX: usize = 3;
 pub(super) const PROJECT_GIT_CALLS_MAX: usize = 2;
-const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folders"];
+/// The system temp folders anyone can write, by their real paths, on macOS.
+#[cfg(target_os = "macos")]
+const TEMP_FOLDERS: &[&str] = &["/private/tmp", "/private/var/folders"];
+/// The system temp folders anyone can write, by their real paths, outside macOS.
+#[cfg(not(target_os = "macos"))]
+const TEMP_FOLDERS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 
 const _: () = assert!(PROJECT_GIT_CALLS_MAX <= GIT_CALLS_MAX);
 const _: () = assert!(
@@ -408,9 +413,9 @@ pub(super) fn owner_env(
 
 /// The folders of a PATH git may run `ssh`, a credential helper or `gpg` from outside the
 /// IDE sandbox: absolute and existing, given by their real path so no link can be swapped
-/// later, and outside every denied folder and the system temp folders, where the IDE or an
-/// agent could plant a program. Inputs: the PATH value and the denied folders. Output: the
-/// kept folders joined as a PATH.
+/// later, outside every denied folder and the system temp folders, where the IDE or an
+/// agent could plant a program, and each real path once. Inputs: the PATH value and the
+/// denied folders. Output: the kept folders joined as a PATH.
 pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
     let denied: Vec<PathBuf> = denied
         .iter()
@@ -418,7 +423,8 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
         .chain(TEMP_FOLDERS.iter().map(Path::new))
         .map(|folder| crate::sandbox::canonical(folder).unwrap_or_else(|_| folder.to_path_buf()))
         .collect();
-    let kept: Vec<PathBuf> = std::env::split_paths(value)
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for real in std::env::split_paths(value)
         .filter(|entry| entry.is_absolute())
         .filter_map(|entry| crate::sandbox::canonical(&entry).ok())
         .filter(|real| {
@@ -426,7 +432,11 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
                 && real.to_str().is_some_and(|text| !text.contains(':'))
                 && !denied.iter().any(|folder| real.starts_with(folder))
         })
-        .collect();
+    {
+        if !kept.contains(&real) {
+            kept.push(real);
+        }
+    }
     let joined = std::env::join_paths(&kept).unwrap_or_default();
     assert!(kept.is_empty() || !joined.is_empty());
     joined

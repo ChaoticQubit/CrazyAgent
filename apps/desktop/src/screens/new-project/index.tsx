@@ -16,7 +16,7 @@ import { PoolPicker } from "./pool-picker";
 import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
 import { TeamEditor } from "./team-editor";
 import {
-  NEW_PROJECT_ACCESS, STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, emptyDraft, poolName, preselectPool,
+  STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
   stepComplete, summary, teamValid,
 } from "./wizard";
 import type { ProjectDraft, StepId } from "./wizard";
@@ -164,7 +164,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         message = `${name} created. Couldn't assign ${chosenPool ? poolName(chosenPool.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
       }
     }
-    const access = draft.access ?? NEW_PROJECT_ACCESS;
+    const access = draftAccess(draft, catalogValue?.agent_access);
     if (access !== "sandboxed") {
       const read = await loadAgentPolicy(id);
       const saved = read.kind === "ok" ? await saveAgentPolicy(id, { access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }, read.value.version, nextGeneration()) : read;
@@ -280,7 +280,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
           {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
-          <AccessLevels name="np-access" value={draft.access ?? NEW_PROJECT_ACCESS} unavailable={() => null} onChange={(access) => setDraft({ ...draft, access })} />
+          <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} onChange={(access) => setDraft({ ...draft, access })} />
           <p className="pj-help">You can change agent access later in the project's Settings, Agent access.</p>
           <p className="pj-summary">{summary(draft, chosenPool ? poolName(chosenPool.pool) : null)}</p>
         </div>}
