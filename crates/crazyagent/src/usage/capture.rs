@@ -17,6 +17,7 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const WEEK_MINUTES: u64 = 7 * 24 * 60;
 const NAME_BYTES_MAX: usize = 128;
+const HEAD_BYTES_MAX: u64 = 4096;
 const AGENT_BYTES_MAX: usize = NAME_BYTES_MAX + 64;
 const WALK_DEPTH_MAX: usize = 3;
 const ENTRIES_PER_SCAN_MAX: usize = FILES_PER_SCAN_MAX * 64;
@@ -243,6 +244,12 @@ struct Progress {
     filed_to: u64,
     #[serde(default)]
     turn: super::activity::OpenTurn,
+    /// How many of the record's first bytes `head_hash` covers; none in older progress.
+    #[serde(default)]
+    head_bytes: u64,
+    /// The hash of those bytes, the second witness that the progress belongs to this file.
+    #[serde(default)]
+    head_hash: u64,
 }
 
 /// The records of one read, one entry per message. Inputs arrive line by line.
@@ -851,11 +858,63 @@ fn read_opened(
     (usages, limits)
 }
 
+/// Hashes the first `bytes` bytes of an open record. Inputs: the record and the count, at
+/// most `HEAD_BYTES_MAX`. Output: the first eight bytes of their SHA-256 as a number, or
+/// none when the record is shorter or cannot be read.
+fn head_hash(file: &mut File, bytes: u64) -> Option<u64> {
+    use sha2::{Digest, Sha256};
+    assert!(bytes <= HEAD_BYTES_MAX);
+    let mut head = Vec::new();
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.by_ref().take(bytes).read_to_end(&mut head).ok()?;
+    if head.len() as u64 != bytes {
+        return None;
+    }
+    let digest = Sha256::digest(head.as_slice());
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    Some(u64::from_be_bytes(first))
+}
+
+/// Whether an open record still starts with the bytes its progress hashed: the second
+/// witness beside the inode, which Linux file systems hand to the next file made after a
+/// removal. Progress that hashed nothing holds, and stored progress whose hash covers more
+/// than it read does not. Inputs: the record and its progress. Output: the answer, or none
+/// when the start cannot be read now.
+fn head_holds(file: &mut File, progress: &Progress) -> Option<bool> {
+    if progress.head_bytes == 0 {
+        return Some(true);
+    }
+    if progress.head_bytes > progress.offset.min(HEAD_BYTES_MAX) {
+        return Some(false);
+    }
+    let held = head_hash(file, progress.head_bytes)? == progress.head_hash;
+    assert!(progress.head_bytes <= HEAD_BYTES_MAX);
+    Some(held)
+}
+
+/// Hashes the start of a record up to where its progress has read, at most
+/// `HEAD_BYTES_MAX`, once the progress moved past what the stored hash covers. A start
+/// that cannot be read keeps the stored hash. Inputs: the record and its progress.
+fn witness_head(file: &mut File, progress: &mut Progress) {
+    let bytes = progress.offset.min(HEAD_BYTES_MAX);
+    assert!(progress.head_bytes <= bytes);
+    if bytes == progress.head_bytes {
+        return;
+    }
+    if let Some(hash) = head_hash(file, bytes) {
+        progress.head_bytes = bytes;
+        progress.head_hash = hash;
+    }
+    assert!(progress.head_bytes <= progress.offset);
+}
+
 /// Reads what an open record gained since its stored progress, up to the length it had
 /// when it was opened and at most `READ_BYTES_MAX`, so lines a harness appends meanwhile
 /// wait for the next scan. The record is the one the progress pinned while its inode is
-/// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
-/// device, so a reboot never counts a whole record again. Inputs: the open record with its
+/// the same, under the crate-wide volume renumber rule, and its first bytes still hash to
+/// what the progress holds; the pin then moves to the live device, so a reboot never counts
+/// a whole record again. Inputs: the open record with its
 /// identity and length, its progress, the time and where to collect the tool calls read,
 /// at most `TOOLS_PER_READ_MAX`, if anywhere, the thread to use when no line named one and
 /// what the scan saw. Output: the records, the finished turns and the last limits.
@@ -872,9 +931,17 @@ fn read_opened_with(
     Vec<super::activity::Closed>,
     Option<Observation>,
 ) {
-    if crate::file_identity::same_files(&[progress.identity], &[identity])
-        && length >= progress.offset
-    {
+    let pinned = crate::file_identity::same_files(&[progress.identity], &[identity])
+        && length >= progress.offset;
+    let held = if pinned && length > progress.offset {
+        let Some(held) = head_holds(&mut file, progress) else {
+            return (Vec::new(), Vec::new(), None);
+        };
+        held
+    } else {
+        pinned
+    };
+    if held {
         progress.identity = identity;
     } else {
         *progress = Progress {
@@ -887,6 +954,7 @@ fn read_opened_with(
     }
     let mut bytes = Vec::new();
     if file
+        .by_ref()
         .take((length - progress.offset).min(READ_BYTES_MAX as u64))
         .read_to_end(&mut bytes)
         .is_err()
@@ -897,6 +965,7 @@ fn read_opened_with(
         if bytes.len() == READ_BYTES_MAX {
             progress.offset += bytes.len() as u64;
             progress.skipping = true;
+            witness_head(&mut file, progress);
         }
         return (Vec::new(), Vec::new(), None);
     };
@@ -959,6 +1028,7 @@ fn read_opened_with(
     }
     progress.offset += consumed;
     assert!(progress.offset <= length);
+    witness_head(&mut file, progress);
     assert!(tools.is_none_or(|tools| tools.len() <= TOOLS_PER_READ_MAX));
     assert!(reading.turns.len() <= TURNS_PER_READ_MAX);
     let (usages, turns) = reading.finished();
@@ -1155,8 +1225,8 @@ pub(super) struct RecountRead {
 }
 
 /// Reads one more chunk of a record for the recount, through the live scan's open and parser.
-/// A record that cannot be opened, is no longer the file that was listed or has shrunk is
-/// finished and not complete. A turn is a copy when the recount already counted its first
+/// A record that cannot be opened, is no longer the file that was listed, has shrunk or no
+/// longer starts with the bytes the last chunk hashed is finished and not complete. A turn is a copy when the recount already counted its first
 /// message. Inputs: the store, the record, its format, the stored progress (empty at the
 /// start), the identity it was listed with and the time. Output: the read.
 pub(super) fn recount_read(
@@ -1178,11 +1248,14 @@ pub(super) fn recount_read(
         done: true,
         complete: false,
     };
-    let Some(opened) = open_record(path) else {
+    let Some(mut opened) = open_record(path) else {
         return stopped;
     };
     let (identity, length) = (opened.1, opened.2);
-    if !crate::file_identity::same_files(&[listed], &[identity]) || length < before {
+    if !crate::file_identity::same_files(&[listed], &[identity])
+        || length < before
+        || head_holds(&mut opened.0, &progress) != Some(true)
+    {
         return stopped;
     }
     let mut tools = Vec::new();
