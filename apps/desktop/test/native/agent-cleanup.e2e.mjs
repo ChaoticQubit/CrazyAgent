@@ -307,7 +307,9 @@ test("Finished agents: at a real engine start each option removes only the workt
   const waiting = agent("waiting-work", now - 2 * DAY_MS);
   await land(waiting);
   await restart();
-  await open(`#/projects/${encodeURIComponent(project)}/agents`, "the Clean up row", (text) => text.includes("Remove worktrees of 1 finished agent"));
+  await open(`#/projects/${encodeURIComponent(project)}/agents`, "the Finished fold-out", (text) => text.includes("Stopped and failed agents."));
+  await me.unfold("Finished agents");
+  await me.waitFor("the Clean up row", (text) => text.includes("Remove worktrees of 1 finished agent"));
   assert.deepEqual(there(waiting, unlanded), [true, true], "nothing went at the engine start before the click");
   await me.capture("finished-agents-before-the-click");
   const row = await buttonStarting(page, "Remove worktrees of 1 finished agent");

@@ -27,10 +27,10 @@ for (const option of OPTIONS) {
       const before = await value(bridge, "desktop_project_agent_policy", { id: project });
       assert.equal(before.tool_cache, "shared", "a project starts Shared");
       assert.deepEqual(before.tool_caches.map((row) => [row.scope, row.label]), OPTIONS.map((row) => [row.scope, row.label]), "the engine lists every choice");
-      await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=access` });
+      await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/settings?section=access` });
       await me.waitFor("the tool cache choice in Agent access", (text) => text.includes("Tool cache for uv and pnpm") && text.includes(option.label));
       if (option.scope !== before.tool_cache) {
-        await me.click(option.label, "label");
+        await me.click(option.label, "label.pj-radio-card strong");
         await me.click("Save agent access", "button");
       }
       for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
@@ -41,6 +41,7 @@ for (const option of OPTIONS) {
       await me.capture(`tool-cache-${option.scope}`);
       const earlier = caches(runtime);
       await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
+      await me.unfold("Agents and tasks");
       await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
       await handOff(me, page, project, runtime);
       const made = caches(runtime).filter((name) => !earlier.includes(name));

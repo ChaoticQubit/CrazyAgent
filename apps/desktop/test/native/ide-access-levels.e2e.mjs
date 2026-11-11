@@ -36,11 +36,12 @@ const MENU_ROWS = `(() => {
 })()`;
 const TRUST = `(() => ({
   asked: [...document.querySelectorAll(".monaco-dialog-box")].some((box) => (box.textContent ?? "").includes("Do you trust the authors of the files in this")),
-  restricted: [...document.querySelectorAll(".part.banner")].some((banner) => (banner.textContent ?? "").includes("Restricted Mode is intended for safe code browsing.")),
+  restricted: (document.getElementById("status.workspaceTrust")?.textContent ?? "").includes("Restricted Mode"),
 }))()`;
-const DISTRUST = `(() => {
+const TRUST_TERMINAL = `(() => {
   ${CENTRE}
-  const button = [...document.querySelectorAll(".monaco-dialog-box .monaco-button")].find((item) => (item.textContent ?? "").includes("No, I don't trust the authors"));
+  const box = [...document.querySelectorAll(".monaco-dialog-box")].find((item) => (item.textContent ?? "").includes("Creating a terminal process requires executing code"));
+  const button = box && [...box.querySelectorAll(".monaco-button")].find((item) => (item.textContent ?? "").includes("Trust Workspace & Continue"));
   return button ? centre(button) : null;
 })()`;
 const CRAZYAGENT_VIEWS = ["Memories", "Agents", "Change sets", "Brief and documents"];
@@ -180,11 +181,10 @@ async function atLevel(t, level, shared) {
     }
 
     if (level.access === "full") {
-      await t.test("Full access: workspace trust asks first and the extension's views load in Restricted Mode", async () => {
-        await ide.until("the workspace trust question", `${TRUST}.asked`);
-        await me.capture("level-full-trust-asked");
-        await keys.click(await ide.until("the answer that keeps the folder untrusted", DISTRUST));
-        await ide.until("the Restricted Mode banner", `${TRUST}.restricted`);
+      await t.test("Full access: workspace trust is on, the IDE opens in Restricted Mode and the extension's views load there", async () => {
+        await ide.until("the Restricted Mode status entry", `${TRUST}.restricted`);
+        assert.deepEqual(await page.evaluate(TRUST), { asked: false, restricted: true }, "the pinned build asks nothing at start");
+        await me.capture("level-full-restricted-at-start");
         await ide.run("View: Show CrazyAgent");
         assert.deepEqual(await ide.until("the CrazyAgent views in Restricted Mode", CRAZYAGENT_PANES), CRAZYAGENT_VIEWS);
         await me.capture("level-full-restricted");
@@ -193,6 +193,11 @@ async function atLevel(t, level, shared) {
 
     await t.test(`${level.label}: the first terminal shows its panel`, async () => {
       await ide.run("Terminal: Create New Terminal");
+      if (level.access === "full") {
+        await keys.click(await ide.until("the trust question the first terminal asks", TRUST_TERMINAL));
+        await me.capture("level-full-terminal-trust");
+        await ide.until("the workspace trusted", `!${TRUST}.asked && !${TRUST}.restricted`);
+      }
       await pause(SETTLE_MS);
       if ((await page.evaluate(ide.rows))?.length) await ide.pick(FOLDER);
       await ide.until(`the first ${level.label} terminal in the panel`, PANEL_TERMINAL);
@@ -274,7 +279,7 @@ async function atLevel(t, level, shared) {
 
     if (level.access === "full") {
       await t.test("Full access: a process its terminal left running is named when the IDE opens again", async () => {
-        const said = await ran("level-left.txt", `nohup node -e "setInterval(() => {}, 1000)" > /dev/null 2>&1 & echo $!`);
+        const said = await ran("level-left.txt", `/usr/bin/python3 -c "import os,time; r,w=os.pipe(); p=os.fork(); (os.close(w), print(os.read(r,32).decode(), flush=True), os._exit(0)) if p else (os.close(r), os.setsid(), os.write(w, str(os.getpid()).encode()), os.close(w), os.close(1), os.close(2), time.sleep(600))"`);
         const pid = said.split("\n")[0];
         assert.match(pid, /^\d+$/, said);
         try {
@@ -282,6 +287,7 @@ async function atLevel(t, level, shared) {
           for (const deadline = Date.now() + STEP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
             assert.ok(Date.now() < deadline, "the Full access server kept running after its level was lowered");
           }
+          assert.doesNotThrow(() => process.kill(Number(pid), 0), `${pid} ended with the server, so nothing was left running`);
           await setLevel(bridge, project, "full", next);
           const reopened = await value(bridge, "e2e_ide_open", { projectId: project });
           writeFileSync(join(evidence, "level-full-left.txt"), `${reopened.left ?? "none"}\n`);
