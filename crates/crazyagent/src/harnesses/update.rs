@@ -1,7 +1,15 @@
+mod run;
 #[cfg(all(test, unix))]
 mod tests;
 
+pub use run::{
+    AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
+    UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
+};
+
 use crate::harnesses;
+#[cfg(all(test, unix))]
+use run::read_pointer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;

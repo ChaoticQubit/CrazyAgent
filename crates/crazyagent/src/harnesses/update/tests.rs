@@ -1,6 +1,7 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 struct Machine {
     root: tempfile::TempDir,
@@ -788,4 +789,285 @@ fn no_install_command_ever_names_a_look_alike_package_a_script_or_sudo() {
         }
     }
     assert_eq!(built, 20 + 15);
+}
+
+fn executable(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::spawn_gate::guarded(|| std::fs::write(path, text)).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn script(machine: &Machine, relative: &str, body: &str, args: &[&'static str]) -> Fixed {
+    let path = machine.root.path().join(relative);
+    executable(&path, &format!("#!/bin/sh\n{body}"));
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    Fixed {
+        program: path.clone(),
+        args: args.to_vec(),
+        search: vec![path.parent().unwrap().to_path_buf()],
+    }
+}
+
+#[test]
+fn a_run_passes_exactly_the_fixed_arguments_and_a_cleared_environment() {
+    let machine = Machine::new();
+    let out = machine.root.path().join("seen");
+    let fixed = script(
+        &machine,
+        "bin/tool",
+        &format!(
+            "printf '%s\\n' \"$@\" > {0}.args\nenv > {0}.env\n",
+            out.display()
+        ),
+        &["upgrade", "--cask", "codex"],
+    );
+    let ran = run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
+    assert!(ran.success);
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.args", out.display())).unwrap(),
+        "upgrade\n--cask\ncodex\n"
+    );
+    let names: Vec<String> = std::fs::read_to_string(format!("{}.env", out.display()))
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split('=').next().map(str::to_owned))
+        .collect();
+    for name in &names {
+        assert!(
+            [
+                "HOME", "PATH", "USER", "LOGNAME", "LANG", "TMPDIR", "PWD", "SHLVL", "_", "OLDPWD"
+            ]
+            .contains(&name.as_str()),
+            "{name}"
+        );
+    }
+    assert!(names.iter().any(|name| name == "PATH"));
+}
+
+#[test]
+fn the_search_path_is_the_tools_folder_then_the_system_folders_and_nothing_else() {
+    let machine = Machine::new();
+    let out = machine.root.path().join("path");
+    let fixed = script(
+        &machine,
+        "bin/tool",
+        &format!("printf '%s' \"$PATH\" > {}\n", out.display()),
+        &[],
+    );
+    run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
+    let path = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        path,
+        format!(
+            "{}:/usr/bin:/bin:/usr/sbin:/sbin",
+            machine.root.path().join("bin").display()
+        )
+    );
+}
+
+#[test]
+fn output_past_the_bound_is_dropped_and_the_tool_still_ends() {
+    let machine = Machine::new();
+    let fixed = script(
+        &machine,
+        "bin/tool",
+        "i=0\nwhile [ $i -lt 40000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done\n",
+        &[],
+    );
+    let ran = run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
+    assert!(ran.success);
+    assert!(ran.output.len() <= SHOWN_BYTES_MAX);
+}
+
+#[test]
+fn a_tool_past_its_time_is_ended_with_every_child_it_started() {
+    let machine = Machine::new();
+    let pid_file = machine.root.path().join("child.pid");
+    let fixed = script(
+        &machine,
+        "bin/tool",
+        &format!(
+            "[ \"$1\" = warm ] && exit 0\nsleep 600 &\necho $! > {}\nsleep 600\n",
+            pid_file.display()
+        ),
+        &[],
+    );
+    let warm = Fixed {
+        args: vec!["warm"],
+        ..fixed.clone()
+    };
+    assert!(
+        run(&warm, &machine.roots().home, CHECK_TIME)
+            .unwrap()
+            .success
+    );
+    assert_eq!(
+        run(&fixed, &machine.roots().home, Duration::from_secs(2)).unwrap_err(),
+        "harness_update_timeout"
+    );
+    let child: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let gone = (0..40).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        rustix::process::test_kill_process(rustix::process::Pid::from_raw(child).unwrap()).is_err()
+    });
+    assert!(gone);
+}
+
+#[test]
+fn a_failing_tool_reports_failure_with_its_last_lines() {
+    let machine = Machine::new();
+    let fixed = script(
+        &machine,
+        "bin/tool",
+        "echo Error: cask is pinned >&2\nexit 3\n",
+        &[],
+    );
+    let ran = run(&fixed, &machine.roots().home, CHECK_TIME).unwrap();
+    assert!(!ran.success);
+    assert!(ran.output.contains("Error: cask is pinned"));
+}
+
+#[test]
+fn a_tool_that_reads_input_gets_none() {
+    let machine = Machine::new();
+    let fixed = script(&machine, "bin/tool", "read answer || echo no-input\n", &[]);
+    assert!(
+        run(&fixed, &machine.roots().home, CHECK_TIME)
+            .unwrap()
+            .output
+            .contains("no-input")
+    );
+}
+
+#[test]
+fn shown_output_hides_credential_shapes_and_the_home_folder() {
+    let home = Path::new("/Users/owner");
+    let text = masked(b"Authorization: Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345\ninstalled to /Users/owner/.local/bin/claude\n", home);
+    assert!(!text.contains("sk-ant-api03"));
+    assert!(!text.contains("/Users/owner"));
+    assert!(text.contains("~/.local/bin/claude"));
+}
+
+#[test]
+fn shown_output_drops_terminal_control_sequences() {
+    let text = masked(b"\x1b[32mUpdated\x1b[0m\r\n", Path::new("/Users/owner"));
+    assert_eq!(text.trim(), "Updated");
+}
+
+#[test]
+fn the_root_user_is_refused() {
+    assert_eq!(refused_user(0), Some("harness_update_as_root"));
+    assert_eq!(refused_user(501), None);
+}
+
+fn serve_once(reply: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/pointer",
+        listener.local_addr().unwrap().port()
+    );
+    let served = std::thread::spawn(move || {
+        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n")
+            && head.len() < 8192
+            && stream.read(&mut byte).unwrap_or(0) == 1
+        {
+            head.push(byte[0]);
+        }
+        let _ = stream.write_all(&reply);
+        String::from_utf8_lossy(&head).to_ascii_lowercase()
+    });
+    (url, served)
+}
+
+fn answer(status: &str, body: &[u8]) -> Vec<u8> {
+    let mut reply = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    reply.extend_from_slice(body);
+    reply
+}
+
+#[test]
+fn a_pointer_read_returns_the_body_within_its_bound() {
+    let (url, served) = serve_once(answer("200 OK", b"2.1.322\n"));
+    assert_eq!(read_pointer(&url, 64, POINTER_TIME).unwrap(), b"2.1.322\n");
+    served.join().unwrap();
+}
+
+#[test]
+fn a_pointer_request_carries_no_cookie_no_credentials_and_a_plain_user_agent() {
+    let (url, served) = serve_once(answer("200 OK", b"2.1.322\n"));
+    read_pointer(&url, 64, POINTER_TIME).unwrap();
+    let head = served.join().unwrap();
+    assert!(head.starts_with("get /pointer http/1.1\r\n"));
+    assert!(head.contains("\r\nuser-agent: crazyagent/"));
+    for header in [
+        "\r\ncookie:",
+        "\r\nauthorization:",
+        "\r\nreferer:",
+        "\r\nx-",
+    ] {
+        assert!(!head.contains(header), "{header}");
+    }
+}
+
+#[test]
+fn a_pointer_reply_over_its_bound_is_a_failed_lookup_and_none_of_it_is_returned() {
+    let (url, _served) = serve_once(answer("200 OK", &[b'9'; 100]));
+    assert_eq!(
+        read_pointer(&url, 64, POINTER_TIME).unwrap_err(),
+        LOOKUP_FAILED
+    );
+}
+
+#[test]
+fn a_pointer_server_that_answers_an_error_is_a_failed_lookup() {
+    let (url, _served) = serve_once(answer("404 Not Found", b"<html>missing</html>"));
+    assert_eq!(
+        read_pointer(&url, 64, POINTER_TIME).unwrap_err(),
+        LOOKUP_FAILED
+    );
+}
+
+#[test]
+fn a_pointer_server_that_never_answers_is_a_failed_lookup_within_the_time_limit() {
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/pointer",
+        listener.local_addr().unwrap().port()
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        read_pointer(&url, 64, Duration::from_secs(1)).unwrap_err(),
+        LOOKUP_FAILED
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(listener);
+}
+
+#[test]
+fn a_pointer_url_that_is_not_https_or_loopback_is_refused_before_any_request() {
+    assert_eq!(
+        read_pointer(
+            "http://downloads.claude.ai/claude-code-releases/latest",
+            64,
+            POINTER_TIME
+        )
+        .unwrap_err(),
+        LOOKUP_FAILED
+    );
+    assert_eq!(
+        read_pointer("file:///etc/hosts", 64, POINTER_TIME).unwrap_err(),
+        LOOKUP_FAILED
+    );
 }
