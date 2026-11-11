@@ -574,7 +574,7 @@ impl OwnerRuntimeHandle {
                 .map(std::path::Path::to_path_buf)
         });
         let lease = prepared.lease.clone();
-        let settings = self.ide_servers().settings_files();
+        let settings = self.engine.settings_files();
         let landed = tokio::task::spawn_blocking(move || {
             let root = root.ok_or_else(|| failure("changes_unavailable"))?;
             let db = crate::landing::open(&root)?;
