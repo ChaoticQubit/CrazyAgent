@@ -120,11 +120,12 @@ const LANDLOCK_DEVICES: &[&str] = &[
 
 /// The rules the Landlock helper applies to itself before it starts the harness: read and
 /// execute beneath `read`, full access beneath `write`, and, when `limit_network` is set,
-/// outbound TCP only to the `connect` ports, no TCP listener and no socket but TCP, unless
-/// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). Both
-/// networks name `keep_free`: the helper starts no agent while Linux could hand one of them
-/// out by itself, and an open-network agent binds any TCP port but those. The engine
-/// renders it as helper arguments and the helper parses it back.
+/// outbound TCP only to the `connect` ports, no TCP bind and no socket but TCP, unless
+/// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). A listen
+/// with no bind still takes a port Linux picks, on either network, so both name
+/// `keep_free`: the helper starts no agent while Linux could hand one of them out by
+/// itself, and an open-network agent binds any TCP port but those. The engine renders it
+/// as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
@@ -285,12 +286,13 @@ fn read_picked_ports() -> Option<RangeInclusive<u16>> {
     picked_ports(&text)
 }
 
-/// Refuses kept ports Linux could hand to the agent by itself. Landlock checks only the
-/// port a bind names: a bind to port 0 on an open network, or a listen on a socket that was
-/// never bound on any network, gets a port Linux picks from its range with no check, and no
-/// rule can refuse a listen. So every kept port must lie outside that range, or no agent
-/// starts. Inputs: the kept ports and the range, none when it cannot be read. Output: Ok,
-/// or the plain reason naming the first kept port inside the range.
+/// Refuses kept ports Linux could hand to a Landlock agent by itself. Landlock leaves the
+/// agent in the host's network and checks only the port a bind names: a bind to port 0 on
+/// an open network, or a listen on a socket that was never bound on any network, gets a
+/// port Linux picks from its range with no check, and no rule can refuse a listen. So every
+/// kept port must lie outside that range, or no Landlock agent starts. Inputs: the kept
+/// ports and the range, none when it cannot be read. Output: Ok, or the plain reason
+/// naming the first kept port inside the range.
 fn kept_outside_picked(kept: &[u16], picked: Option<&RangeInclusive<u16>>) -> Result<(), String> {
     let Some(picked) = picked else {
         return Err(PICKED_PORTS_UNREADABLE.into());
@@ -609,8 +611,10 @@ impl LinuxSandbox {
     /// executable as an absolute file. Output: the sandbox, `Invalid` for a bad executable,
     /// or `Unavailable` for a network limit or an open network on bubblewrap, which keeps no
     /// port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
-    /// worktree, whose git denies neither backend can hold, or for a limited network the
-    /// sockets setting starts no agent on.
+    /// worktree, whose git denies neither backend can hold, for a limited network the
+    /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
+    /// out by itself ([`kept_outside_picked`]). Bubblewrap starts only a closed agent, in a
+    /// network of its own, where no port it takes is a host port.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
         let executable = match &backend {
@@ -636,6 +640,9 @@ impl LinuxSandbox {
                 }
                 SandboxNetwork::Only(_) => {}
             }
+        } else {
+            kept_outside_picked(&kept_free(&sandbox), read_picked_ports().as_ref())
+                .map_err(SandboxError::Unavailable)?;
         }
         Ok(Self { sandbox, backend })
     }
@@ -719,10 +726,9 @@ impl LinuxSandbox {
     }
 }
 
-/// Refuses a policy neither Linux backend starts: one confined to its own worktree, a
-/// limited network under [`LinuxSockets::Refuse`], or any network with a kept port that
-/// Linux could hand to the agent by itself ([`kept_outside_picked`]). Input: the policy.
-/// Output: Ok, or the plain `Unavailable` reason.
+/// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
+/// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
+/// plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.checkout.is_some() || sandbox.clone.is_some() {
         return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
@@ -732,8 +738,7 @@ fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     {
         return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
     }
-    kept_outside_picked(&kept_free(sandbox), read_picked_ports().as_ref())
-        .map_err(SandboxError::Unavailable)
+    Ok(())
 }
 
 impl Sandbox for LinuxSandbox {
