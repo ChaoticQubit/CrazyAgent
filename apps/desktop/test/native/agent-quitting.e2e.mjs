@@ -23,6 +23,8 @@ const SHOWN = `(() => {
   return [quit?.value ?? null, left?.value ?? null, hours?.value ?? null, hours?.disabled ?? null];
 })()`;
 const SAVE = 'form[aria-label="Quitting"] button[type=submit]';
+const KEEP_CARD = "Keep team agents running They go on with their work, and CrazyAgent takes them over when it opens again.";
+const STOP_CARD = "Stop team agents Each agent stops as Stop would, and its task goes back to the queue.";
 const HOUR_S = 60 * 60;
 const TEN_YEARS_S = 10 * 365 * 24 * HOUR_S;
 const SLACK_S = 5;
@@ -214,10 +216,10 @@ test("Quitting: Keep team agents running is the default, and picking it again af
   await until("the default in the engine", ["keep_running", "after_hours", 24], () => stored(bridge));
   await until("the default on the page", ["keep_running", "after_hours", "24", false], () => page.evaluate(SHOWN));
   assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(SAVE)})?.disabled ?? null`), true, "Save waits for a change");
-  await me.click("Stop team agents", "label.radio-card");
+  await me.click(STOP_CARD, "label.radio-card");
   await me.click("Save changes", SAVE);
   await until("Stop team agents in the engine", ["stop", "after_hours", 24], () => stored(bridge));
-  await me.click("Keep team agents running", "label.radio-card");
+  await me.click(KEEP_CARD, "label.radio-card");
   await me.click("Save changes", SAVE);
   await until("Keep team agents running in the engine", ["keep_running", "after_hours", 24], () => stored(bridge));
   await reload("What happens to team agents when CrazyAgent quits.");
@@ -229,7 +231,7 @@ test("Quitting: Keep team agents running is the default, and picking it again af
 
 test("Quitting: Stop team agents is saved and stays after a reload and an engine restart", { timeout: 600000 }, (t) => onEngine(t, "ca-quit-stop-", async ({ bridge, me, page, open, reload, restart }) => {
   await quitting(me, open);
-  await me.click("Stop team agents", "label.radio-card");
+  await me.click(STOP_CARD, "label.radio-card");
   await me.click("Save changes", SAVE);
   await until("Stop team agents in the engine", ["stop", "after_hours", 24], () => stored(bridge));
   await reload("What happens to team agents when CrazyAgent quits.");
