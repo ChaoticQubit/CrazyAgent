@@ -8,7 +8,6 @@ pub const DAYS_MIN: u16 = 1;
 pub const DAYS_MAX: u16 = 365;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS agent_cleanup_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     mode TEXT NOT NULL CHECK(mode IN ('after_days', 'once_landed', 'manual')),
@@ -70,7 +69,6 @@ fn invalid() -> EngineError {
 
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
