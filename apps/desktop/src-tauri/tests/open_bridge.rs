@@ -152,3 +152,39 @@ fn every_listed_context_file_opens_from_the_folder_the_engine_listed_it_in() {
         );
     }
 }
+
+/// Open in default app on a file linked from the repository: the engine lists it as
+/// `repo/<path>` and it opens below the project folder itself, not below `.crazyagent`. A
+/// link is not followed, and a path that leaves the folder, is missing, is empty or is no
+/// document type is refused.
+#[test]
+fn a_linked_repo_file_opens_from_the_project_folder_and_nothing_else_does() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let project = home.join("notes-cli");
+    std::fs::create_dir_all(project.join(".crazyagent/context")).unwrap();
+    std::fs::create_dir_all(project.join("docs")).unwrap();
+    std::fs::write(project.join("docs/plan.md"), "# Plan").unwrap();
+    std::fs::write(project.join("docs/plan"), "# Plan").unwrap();
+    std::fs::write(home.join("outside.md"), "outside").unwrap();
+    symlink(home.join("outside.md"), project.join("docs/link.md")).unwrap();
+    let setup = setup_at(&project);
+    assert_eq!(setup.state_folder(), project.join(".crazyagent"));
+    assert_eq!(
+        context_item(&setup, "repo/docs/plan.md").unwrap(),
+        project.join("docs/plan.md")
+    );
+    for refused in [
+        "repo/docs/link.md",
+        "repo/../outside.md",
+        "repo/docs/missing.md",
+        "repo/docs/plan",
+        "repo/",
+    ] {
+        assert_eq!(
+            context_item(&setup, refused).unwrap_err().code,
+            "context_item_not_openable",
+            "{refused}"
+        );
+    }
+}

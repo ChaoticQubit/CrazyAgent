@@ -783,10 +783,11 @@ export function memoryGroups(items: MemoryItem[]): { suggested: MemoryItem[]; sa
   };
 }
 
-/** Tells whether the owner may delete a context file; the brief always stays.
- * Input: the context item. Output: true for documents and research reports. */
+/** Tells whether the owner may delete a context file; the brief always stays, and so does a
+ * file linked from the repository, which is the owner's own file.
+ * Input: the context item. Output: true for documents and research reports kept in the context. */
 export function deletable(item: ContextItem): boolean {
-  return item.kind === "document" || item.kind === "research";
+  return item.linked !== true && (item.kind === "document" || item.kind === "research");
 }
 
 /** The delete confirmation title for a context file.

@@ -3086,6 +3086,7 @@ fn console_screen() -> ProjectScreen {
             path: "docs/brief.md".into(),
             kind: ContextKind::Document,
             bytes: 10,
+            linked: false,
         }],
     });
     screen.open(Tab::Conversation);
@@ -3470,11 +3471,13 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
                 path: "context/brief.md".into(),
                 kind: ContextKind::Brief,
                 bytes: 10,
+                linked: false,
             },
             ContextItem {
                 path: "context/documents/spec.md".into(),
                 kind: ContextKind::Document,
                 bytes: 20,
+                linked: false,
             },
         ],
     });
@@ -3533,6 +3536,7 @@ fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_canno
             path: "context/documents/spec.md".into(),
             kind: ContextKind::Document,
             bytes: 20,
+            linked: false,
         }],
     };
     screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
@@ -4175,4 +4179,53 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     screen.apply(&query, Ok(SetupView::Changed(OwnerResult::Applied)));
     assert_eq!(screen.problem, None);
     assert!(screen.setup_due);
+}
+
+#[test]
+fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_deleted() {
+    use super::project::OpenRequest;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![ContextItem {
+            path: "repo/docs/plan-2026.md".into(),
+            kind: ContextKind::Plan,
+            bytes: 15,
+            linked: true,
+        }],
+    });
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(shown.contains("plan-2026.md"), "{shown}");
+    assert!(shown.contains("Linked from your repo"), "{shown}");
+    assert!(!shown.contains("Planned after research"), "{shown}");
+
+    let plan = OpenRequest::Context {
+        folder: "/private/tmp/ca-notes-cli".into(),
+        path: "docs/plan-2026.md".into(),
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Char('o'))),
+        ProjectReply::Open(plan.clone()),
+        "a linked file opens from the project folder, not the state folder"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(plan)
+    );
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert!(screen.reading, "the linked file opens in the reader");
+    screen.key(key(KeyCode::Esc));
+    assert!(!screen.reading);
+    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert!(screen.confirm_delete.is_none(), "no delete is asked for");
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This file is linked from your repo. It can't be deleted here.")
+    );
 }

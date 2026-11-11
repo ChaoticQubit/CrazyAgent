@@ -44,9 +44,18 @@ pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, BridgeErro
 
 /// Resolves one context file the engine listed for a project, from the folder it lists the
 /// context in (`.crazyagent/` for projects in the projects home, else the project folder),
-/// with the [`context_file`] checks. Inputs: the project's stored setup and the listed path.
-/// Output: the file's canonical path, `project_folder_missing` or `context_item_not_openable`.
+/// with the [`context_file`] checks; a linked repository file, listed as `repo/<path>`, is
+/// resolved below the project folder itself. Inputs: the project's stored setup and the
+/// listed path. Output: the file's canonical path, `project_folder_missing` or
+/// `context_item_not_openable`.
 pub fn context_item(setup: &StoredSetup, relative: &str) -> Result<PathBuf, BridgeError> {
+    if let Some(linked) = relative.strip_prefix(crazyagent::project_setup::LINKED_PREFIX) {
+        let folder = setup.project_folder();
+        let folder = folder
+            .to_str()
+            .ok_or_else(|| failure("project_folder_missing"))?;
+        return context_file(&project_folder(folder)?, linked);
+    }
     let state = setup.state_folder();
     let state = state
         .to_str()
