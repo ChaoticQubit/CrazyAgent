@@ -63,7 +63,9 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
     let (_, access) = native.attach().await;
     assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
 
-    let event = native.intake(IntakeJob::Query(IntakeQuery::Home)).await;
+    let event = native
+        .intake(IntakeJob::Query(IntakeQuery::Home), |_| {})
+        .await;
     assert_eq!(event.query, IntakeQuery::Home);
     let Ok(IntakeView::Home(first)) = event.result else {
         panic!("projects home read required: {:?}", event.result);
@@ -72,23 +74,30 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
 
     let path = home.to_str().unwrap().to_owned();
     let event = native
-        .intake(IntakeJob::Query(IntakeQuery::SetHome {
-            path: path.clone(),
-            generation: 1,
-        }))
+        .intake(
+            IntakeJob::Query(IntakeQuery::SetHome {
+                path: path.clone(),
+                generation: 1,
+            }),
+            |_| {},
+        )
         .await;
     assert!(
         matches!(event.result, Ok(IntakeView::Changed(OwnerResult::Applied))),
         "{:?}",
         event.result
     );
-    let event = native.intake(IntakeJob::Query(IntakeQuery::Home)).await;
+    let event = native
+        .intake(IntakeJob::Query(IntakeQuery::Home), |_| {})
+        .await;
     let Ok(IntakeView::Home(set)) = event.result else {
         panic!("projects home read required: {:?}", event.result);
     };
     assert_eq!(set.path.as_deref(), Some(path.as_str()));
 
-    let event = native.intake(IntakeJob::Query(IntakeQuery::Found)).await;
+    let event = native
+        .intake(IntakeJob::Query(IntakeQuery::Found), |_| {})
+        .await;
     let Ok(IntakeView::Found(found)) = event.result else {
         panic!("found folders required: {:?}", event.result);
     };
@@ -101,19 +110,60 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
 
     let source = outside.to_str().unwrap().to_owned();
     let event = native
-        .intake(IntakeJob::Query(IntakeQuery::FolderSize {
-            path: source.clone(),
-        }))
+        .intake(
+            IntakeJob::Query(IntakeQuery::FolderSize {
+                path: source.clone(),
+            }),
+            |_| {},
+        )
         .await;
-    assert_eq!(event.result, Ok(IntakeView::FolderSize(5)));
+    assert_eq!(
+        event.result,
+        Ok(IntakeView::FolderSize(crate::projects_home::Measured {
+            bytes: 5,
+            placeholders: 0
+        }))
+    );
+
+    let mut reports = 0;
+    let event = native
+        .intake(
+            IntakeJob::IcloudDownload {
+                path: source.clone(),
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+            |_| reports += 1,
+        )
+        .await;
+    assert_eq!(
+        event.query,
+        IntakeQuery::IcloudDownload {
+            path: source.clone()
+        }
+    );
+    assert_eq!(event.result, Ok(IntakeView::IcloudDownloaded(0)));
+    assert!(reports <= 1, "{reports} progress reports");
+    let event = native
+        .intake(
+            IntakeJob::IcloudDownload {
+                path: "relative".into(),
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+            |_| {},
+        )
+        .await;
+    assert_eq!(event.result, Err("icloud_path_invalid".into()));
 
     let event = native
-        .intake(IntakeJob::Query(IntakeQuery::AddExisting {
-            source,
-            mode: AddMode::Copy,
-            overrides: Vec::new(),
-            generation: 2,
-        }))
+        .intake(
+            IntakeJob::Query(IntakeQuery::AddExisting {
+                source,
+                mode: AddMode::Copy,
+                overrides: Vec::new(),
+                generation: 2,
+            }),
+            |_| {},
+        )
         .await;
     assert!(
         matches!(event.result, Ok(IntakeView::Changed(OwnerResult::Applied))),
@@ -124,7 +174,9 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
         outside.join("plan.txt").exists(),
         "a copy leaves the source"
     );
-    let event = native.intake(IntakeJob::Query(IntakeQuery::Found)).await;
+    let event = native
+        .intake(IntakeJob::Query(IntakeQuery::Found), |_| {})
+        .await;
     let Ok(IntakeView::Found(found)) = event.result else {
         panic!("found folders required: {:?}", event.result);
     };

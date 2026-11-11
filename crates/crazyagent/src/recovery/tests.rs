@@ -17,13 +17,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
+#[cfg(target_os = "macos")]
+use std::time::{Instant, UNIX_EPOCH};
 
 const PROJECT: &str = "recovery-runs";
 const ENDPOINT: &str = "local-a";
 const HEARTBEAT: i64 = 1_800_000_000_000;
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Plan the page"}}"#;
 const TURN_DONE: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}"#;
+#[cfg(target_os = "macos")]
 const WAIT: Duration = Duration::from_secs(30);
 
 fn reference(value: &str) -> CredentialRef {
@@ -40,6 +43,7 @@ fn waiting(found: &[Interrupted]) -> Listed {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn now() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -250,6 +254,7 @@ impl Fixture {
             .unwrap()
     }
 
+    #[cfg(target_os = "macos")]
     fn until(&self, team: &mut TeamRuntime, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + WAIT;
         while !done(self) {
@@ -447,6 +452,9 @@ fn scan_twice_records_once() {
     again.shutdown().unwrap();
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_clean_stop_mid_turn_records_the_run_when_its_pane_is_gone_at_the_next_start() {
     let fixture = Fixture::new();

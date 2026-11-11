@@ -347,6 +347,9 @@ fn the_access_box_says_beside_the_level_that_saving_restarts_the_projects_ide() 
 }
 
 /// The Full access confirm box says what Full access means for the IDE, in the desktop's words.
+/// macOS only: Linux runs agents Sandboxed alone in this version, so Own branch and Full
+/// access are refused there (`LINUX_UNAVAILABLE`, asserted in `sandbox::policy::tests`).
+#[cfg(target_os = "macos")]
 #[test]
 fn the_full_access_box_says_what_full_access_means_for_the_ide() {
     use super::project_access::FULL_ACCESS_IDE;

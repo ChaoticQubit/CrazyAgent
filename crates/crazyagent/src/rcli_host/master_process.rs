@@ -341,6 +341,9 @@ mod tests {
         assert_eq!(survivors(processes, Duration::from_secs(1)), []);
     }
 
+    /// macOS only: it waits for the EPERM that macOS alone answers for a group whose members
+    /// all exited and are not reaped. Linux answers Ok until the reap; its twin row covers that.
+    #[cfg(target_os = "macos")]
     #[test]
     fn exited_unreaped_host_group_is_not_cleanup_uncertainty() {
         let mut command = Command::new("/bin/sh");
@@ -369,6 +372,48 @@ mod tests {
         assert!(process.group_absent);
     }
 
+    /// The Linux twin of `exited_unreaped_host_group_is_not_cleanup_uncertainty`. A group
+    /// whose only member exited and is not reaped still takes signal 0 and TERM there, so
+    /// the cleanup reaps the host first and ends clean once the group answers ESRCH.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_unreaped_host_group_answers_until_the_reap_and_is_then_absent() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        let stat = format!("/proc/{}/stat", process.child.id());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&stat).is_ok_and(|stat| {
+            stat.rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.starts_with(" Z"))
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "host did not become an exited unreaped group"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let group = process.group();
+        assert_eq!(rustix::process::test_kill_process_group(group), Ok(()));
+        assert!(process.status.is_none());
+        process.observe_group().unwrap();
+        process.signal(Signal::TERM).unwrap();
+        assert!(!process.group_absent);
+        process.cleanup().unwrap();
+        assert!(process.status.is_some());
+        assert!(process.group_absent);
+        assert_eq!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        );
+    }
+
     #[test]
     fn a_refused_group_signal_before_the_leader_can_be_reaped_leaves_the_deadline_to_decide() {
         let mut command = Command::new("/bin/sleep");
@@ -387,6 +432,9 @@ mod tests {
         assert!(process.group_absent);
     }
 
+    /// macOS only: it waits for the EPERM that macOS alone answers for a group whose members
+    /// all exited and are not reaped. Linux answers Ok until the reap; its twin row covers that.
+    #[cfg(target_os = "macos")]
     #[test]
     fn exited_group_member_reaped_by_its_own_parent_is_not_cleanup_uncertainty() {
         let mut command = Command::new("/bin/sleep");

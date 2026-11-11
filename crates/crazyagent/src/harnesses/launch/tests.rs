@@ -174,14 +174,14 @@ fn claude_assistant_errors_other_than_rate_limits_are_not_rate_limited() {
     assert_eq!(turn_errors(&events), [false]);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct TeamLaunch {
     _directory: tempfile::TempDir,
     request: LaunchRequest,
     work: PathBuf,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn team_launch(harness: &str) -> TeamLaunch {
     use std::os::unix::fs::PermissionsExt;
     let entry = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
@@ -220,7 +220,9 @@ fn team_launch(harness: &str) -> TeamLaunch {
     }
 }
 
-#[cfg(unix)]
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub_agent() {
     use std::io::{BufRead, BufReader, Write};
@@ -281,7 +283,9 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
     }
 }
 
-#[cfg(unix)]
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_claude_team_agent_waits_long_enough_for_its_mcp_servers_to_connect() {
     let connect_limit = |command: &std::process::Command| {
@@ -301,7 +305,9 @@ fn a_tools_on_claude_team_agent_waits_long_enough_for_its_mcp_servers_to_connect
     );
 }
 
-#[cfg(unix)]
+/// macOS only: no agent launches elsewhere (`launch_sandbox_unavailable`), so a Linux build
+/// host installs no Codex whose reading of a team agent's configuration could be checked.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
     let launch = team_launch("codex");
@@ -341,7 +347,7 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
     assert_eq!(state("shell_tool"), Some("true"), "{text}");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 const LATE_RESULT_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
@@ -356,7 +362,7 @@ printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-3","session_i
 /bin/cat > /dev/null
 "#;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn turn(session: &mut super::Session, prompt: &str) -> Vec<LaunchEvent> {
     session.send(prompt).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -376,7 +382,9 @@ fn turn(session: &mut super::Session, prompt: &str) -> Vec<LaunchEvent> {
     events
 }
 
-#[cfg(unix)]
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_next_turn() {
     use std::os::unix::fs::PermissionsExt;
@@ -424,7 +432,7 @@ fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_nex
     session.stop().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 const USAGE_RESULT_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
@@ -436,7 +444,9 @@ printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-2","session_i
 /bin/cat > /dev/null
 "#;
 
-#[cfg(unix)]
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_piped_claude_turn_reports_the_usage_its_result_carries_before_it_finishes() {
     use std::os::unix::fs::PermissionsExt;
@@ -561,7 +571,9 @@ fn a_team_codex_agent_interrupts_a_codex_native_sub_agent_and_finishes_its_turn(
     );
 }
 
-#[cfg(unix)]
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_off() {
     use std::os::unix::fs::PermissionsExt;
@@ -651,6 +663,51 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         git(&["log", "-1", "--format=%an|%ae|%cn|%ce"]),
         "Repo Owner|owner@example.invalid|Repo Owner|owner@example.invalid\n"
     );
+}
+
+/// Off macOS no agent launch is built, since agents run under Seatbelt alone in this
+/// version: a request that is valid in every other way, its sandbox profile named, is
+/// refused with `launch_sandbox_unavailable` and nothing is written into the agent's home.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-refused-launch-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    for (harness, tools) in [
+        ("claude-code", true),
+        ("claude-code", false),
+        ("codex", true),
+    ] {
+        let request = LaunchRequest {
+            harness: harness.into(),
+            executable: PathBuf::from("/usr/bin/true"),
+            working_dir: work.clone(),
+            account: AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools,
+            sandbox_profile: Some(profile.clone()),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        };
+        assert_eq!(
+            super::command(&request).unwrap_err(),
+            super::LaunchError("launch_sandbox_unavailable".into(), None),
+            "{harness} with tools {tools}"
+        );
+    }
+    assert!(std::fs::read_dir(&home).unwrap().next().is_none());
 }
 
 #[cfg(target_os = "macos")]

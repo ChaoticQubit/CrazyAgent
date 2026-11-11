@@ -57,6 +57,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
+  agent_access?: AccessLevel[];
 }
 
 export interface StoredSetup {
@@ -156,6 +157,14 @@ export interface ContextChunk {
 /** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
+/** One access level as the engine names it, with the reason it can't run agents on this
+ * computer, null when it runs. */
+export interface AccessLevel {
+  access: AgentAccess;
+  label: string;
+  unavailable: string | null;
+}
+
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
  * the whole network, https is port 443 only, none is the model alone: a hosted model's own
  * hosts through the engine's model proxy, or only a local model's port on loopback. It does
@@ -191,7 +200,7 @@ export interface AgentPolicy {
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
-  levels: { access: AgentAccess; label: string; unavailable: string | null }[];
+  levels: AccessLevel[];
   networks: { network: AgentNetwork; label: string }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;

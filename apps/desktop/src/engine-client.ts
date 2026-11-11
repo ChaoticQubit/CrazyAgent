@@ -494,6 +494,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
+  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null }[];
 }
 
 export interface StoredSetup {
@@ -1285,13 +1286,14 @@ export interface FoundProject {
 }
 
 /** What the native bridge read about a picked folder: its bytes, or null with the size code when
- * it could not be measured, its GitHub repository, its linked worktrees and their folders, whether
+ * it could not be measured, how many of its files are only in iCloud, its GitHub repository, its linked worktrees and their folders, whether
  * the engine lets it move and be copied without an override and which git link a Move breaks,
  * whether it has git, and whether it shares a disk with the projects folder (null when that is
  * unknown). */
 export interface FolderSize {
   bytes: number | null;
   size_problem?: string | null;
+  placeholders?: number;
   github?: string | null;
   worktrees?: number;
   worktree_paths?: string[];
@@ -1508,6 +1510,29 @@ export function moveProjectsHome(path: string, generation: number): Promise<Inte
 /** Lists the folders in the projects home with their state. Output: the found projects. */
 export function foundProjects(): Promise<FoundProject[]> {
   return invoke<FoundProject[]>("desktop_found_projects");
+}
+
+/** How far the running iCloud download has come: the files only in iCloud it found so far and how
+ * many of them are on this Mac now. */
+export interface IcloudProgress {
+  total: number;
+  done: number;
+}
+
+/** Downloads every file of a folder that is only in iCloud and waits until all are on this Mac;
+ * the folder itself is not moved. Input: an absolute folder path. Output: how many it downloaded. */
+export function icloudDownload(path: string): Promise<number> {
+  return invoke<number>("desktop_icloud_download", { path });
+}
+
+/** Reads the running iCloud download's progress. Output: the counts, or null when none runs. */
+export function icloudProgress(): Promise<IcloudProgress | null> {
+  return invoke<IcloudProgress | null>("desktop_icloud_progress");
+}
+
+/** Stops the running iCloud download. Output: whether one was running. */
+export function icloudCancel(): Promise<boolean> {
+  return invoke<boolean>("desktop_icloud_cancel");
 }
 
 /** Measures a folder before Copy and names its GitHub repository, if any.

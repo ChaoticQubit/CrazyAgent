@@ -1,6 +1,6 @@
 use super::renewal::{Keeper, since_epoch};
 use super::{NativeProfileUse, failure};
-use crate::engine::EngineError;
+use crate::engine::{EngineError, off_worker};
 use base64::Engine;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde_json::{Map, Value, json};
@@ -258,19 +258,6 @@ impl NativeProfileUse {
     pub(crate) fn claude_expiry(&self) -> Result<Duration, EngineError> {
         account_record(Harness::Claude, &self.home.file, &self.profile_path()?)
             .map(|record| record.expires)
-    }
-}
-
-/// Runs blocking account work, such as a renewal of up to two minutes, so it never stalls
-/// the async runtime: on a multi-thread tokio runtime the worker first hands its other
-/// tasks to another thread; anywhere else the work runs in place.
-/// Input: the work. Output: its result.
-pub(super) fn off_worker<R>(work: impl FnOnce() -> R) -> R {
-    match tokio::runtime::Handle::try_current() {
-        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
     }
 }
 
