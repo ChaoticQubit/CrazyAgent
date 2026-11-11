@@ -1,6 +1,7 @@
 import { call } from "./api";
 import type { Failure, Result } from "./api";
 import { failureCopy } from "./api-projects";
+import type { RunMode } from "./screens/project/run-command";
 import { isMac } from "./ui/keys";
 
 /** How often a project page with its IDE loaded tells the engine the owner still uses it, in
@@ -81,6 +82,18 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_token_unreadable: "The IDE's sign-in file couldn't be read. Try again.",
   ide_project_folder_invalid: "The IDE can't open this project's folder: it's missing or unreadable, or its path holds a colon (:), which the IDE's git can't use. Check the folder is still there; for a colon, add the project again from a folder whose path has none.",
   git_exclude_invalid: "The IDE didn't start: it couldn't add the agents folder to the project's .git/info/exclude, which keeps agent files out of your commits. Make .git/info a plain folder and .git/info/exclude a plain file under 1 MiB, not links, then open the IDE again.",
+};
+
+const RUN_FAILURES: Record<string, string> = {
+  ide_run_off: "Run in project terminal is off for this project. Copy the command, or turn it on in the project's settings.",
+  ide_run_chained: "This line chains commands, so it wasn't run. Copy it and run it yourself.",
+  ide_run_not_one_line: "This is more than one line, so it wasn't run. Copy it and run it yourself.",
+  ide_run_control_character: "This line holds a hidden character, so it wasn't run. Copy it and run it yourself.",
+  ide_run_too_long: "This line is too long to run from here. Copy it and run it yourself.",
+  ide_run_empty: "There is no command to run.",
+  ide_run_unanswered: "The IDE didn't answer in time, so the command may not have been typed. Check the IDE tab before you run it again.",
+  ide_not_running: "This project's IDE isn't open. Open the IDE tab, then choose Run again.",
+  ide_reveal_busy: "The IDE is busy. Try again in a moment.",
 };
 
 /** Says what the IDE tab shows for the engine's IDE state. Input: the state. Output: the
@@ -231,6 +244,26 @@ export function closeIde(projectId: string): Promise<Result<null>> {
  * whether its server still runs. */
 export function touchIde(projectId: string): Promise<Result<boolean>> {
   return call<boolean>("desktop_ide_touch", { projectId });
+}
+
+/** Says why a command wasn't typed into the project terminal; every run refusal has its own
+ * sentence. Input: the refusal code, or the failure with the engine cause behind it.
+ * Output: the plain sentence. */
+export function runCopy(failure: string | { code: string; cause?: string }): string {
+  const code = typeof failure === "string" ? failure : failure.code;
+  return Object.hasOwn(RUN_FAILURES, code) ? RUN_FAILURES[code] : failureCopy(failure);
+}
+
+/** Reads a project's "Run in project terminal" setting. Input: the project. Output: the
+ * mode, Type and run when the owner saved none. */
+export function loadRunMode(projectId: string): Promise<Result<RunMode>> {
+  return call<RunMode>("desktop_ide_run_mode", { projectId });
+}
+
+/** Saves a project's "Run in project terminal" setting. Inputs: the project and the mode.
+ * Output: the mode as saved. */
+export function setRunMode(projectId: string, mode: RunMode): Promise<Result<RunMode>> {
+  return call<RunMode>("desktop_ide_set_run_mode", { projectId, mode });
 }
 
 /** Types one confirmed command into a new terminal of the project's open IDE; the engine

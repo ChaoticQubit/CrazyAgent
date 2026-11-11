@@ -32,6 +32,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
+use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
 use crazyagent::memory::ReviewDecision;
@@ -3230,6 +3231,41 @@ async fn desktop_ide_focus(
 }
 
 #[tauri::command]
+async fn desktop_ide_run(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    command: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.ide_run(project_id, command)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_run_mode(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<RunMode, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.ide_run_mode(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_set_run_mode(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    mode: RunMode,
+) -> Result<RunMode, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.ide_set_run_mode(project_id, mode)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_set_reset(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4397,6 +4433,9 @@ native_commands! {
     desktop_engine_versions,
     desktop_restart_engine,
     desktop_ide_focus,
+    desktop_ide_run,
+    desktop_ide_run_mode,
+    desktop_ide_set_run_mode,
     desktop_update_settings,
     desktop_set_update_channel,
     desktop_check_update,

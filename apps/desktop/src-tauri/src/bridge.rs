@@ -28,6 +28,7 @@ mod harnesses;
 pub mod ide;
 mod ide_extensions;
 mod ide_reveal;
+mod ide_run;
 pub mod intake;
 pub mod master;
 pub mod memory;

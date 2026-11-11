@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -86,4 +87,55 @@ test("a refused line keeps Copy, has no Run button and says why once", () => {
   assert.match(row("echo \u{202e}dlrow", "type_only"), /This line holds a hidden character\. Copy it and run it yourself\./);
   assert.match(row("x".repeat(513), "type_only"), /This line is too long to run from here\. Copy it and run it yourself\./);
   assert.doesNotMatch(row("   ", "type_and_run"), /run it yourself/);
+});
+
+const api = await import("../src/api-ide.ts");
+const failed = (code) => () => Promise.resolve({ kind: "error", code, message: code });
+
+test("a run with no IDE open offers to open the IDE tab and keeps the command", async () => {
+  const outcome = await run.runOutcome("alpha", "cargo build", failed("ide_not_running"));
+  assert.match(outcome.note, /Open the IDE tab, then choose Run again\./);
+  assert.equal(outcome.openIde, true);
+});
+
+test("a finished run says where the command went", async () => {
+  const sent = [];
+  const outcome = await run.runOutcome("alpha", "cargo build", (projectId, command) => { sent.push([projectId, command]); return Promise.resolve({ kind: "ok", value: undefined }); });
+  assert.match(outcome.note, /Typed into a new terminal in the IDE tab\./);
+  assert.equal(outcome.openIde, false);
+  assert.deepEqual(sent, [["alpha", "cargo build"]], "the command is sent once, as confirmed");
+});
+
+test("every run refusal has its own plain sentence", () => {
+  const codes = ["ide_run_off", "ide_run_chained", "ide_run_not_one_line", "ide_run_control_character", "ide_run_too_long", "ide_run_empty", "ide_run_unanswered", "ide_not_running", "ide_reveal_busy"];
+  for (const code of codes) {
+    assert.notEqual(api.runCopy(code), api.runCopy("something_else"), code);
+    assert.doesNotMatch(api.runCopy(code), /ide_|\u{2014}/u, code);
+  }
+  assert.equal(new Set(codes.map((code) => api.runCopy(code))).size, codes.length, "no two refusals share a sentence");
+});
+
+test("a refusal, an engine that isn't ready and a call that throws each leave a sentence and no IDE offer", async () => {
+  for (const code of ["ide_run_off", "ide_run_unanswered", "ide_reveal_busy", "ide_outcome_unknown"]) {
+    const outcome = await run.runOutcome("alpha", "cargo build", failed(code));
+    assert.equal(outcome.note, api.runCopy(code), code);
+    assert.equal(outcome.openIde, false, code);
+  }
+  const waiting = await run.runOutcome("alpha", "cargo build", () => Promise.resolve({ kind: "not_ready" }));
+  const thrown = await run.runOutcome("alpha", "cargo build", () => Promise.reject(new Error("bridge gone")));
+  assert.equal(waiting.note, "CrazyAgent's engine isn't ready yet. Try again in a moment.");
+  assert.deepEqual(thrown, waiting);
+  await assert.rejects(run.runOutcome("alpha", "a; b", failed("ide_run_chained")), /refused command/);
+});
+
+test("the run calls name their bridge commands and the mode travels as the engine names it", () => {
+  const source = readFileSync(new URL("../src/api-ide.ts", import.meta.url), "utf8");
+  assert.match(source, /call<null>\("desktop_ide_run", \{ projectId, command \}\)/);
+  assert.match(source, /call<RunMode>\("desktop_ide_run_mode", \{ projectId \}\)/);
+  assert.match(source, /call<RunMode>\("desktop_ide_set_run_mode", \{ projectId, mode \}\)/);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  for (const command of ["desktop_ide_run", "desktop_ide_run_mode", "desktop_ide_set_run_mode"]) {
+    assert.match(lib, new RegExp(`async fn ${command}\\(`), command);
+    assert.match(lib, new RegExp(`\\n    ${command},\\n`), `${command} is in the handler list`);
+  }
 });
