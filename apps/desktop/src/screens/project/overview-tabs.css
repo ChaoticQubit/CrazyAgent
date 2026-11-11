@@ -1,0 +1,3 @@
+.ov-strip { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.ov-strip > .ov-tablist { border-bottom: 0; margin-bottom: 0; flex: 1 1 auto; }
+.ov-strip > .ov-meta { flex: 0 0 auto; min-height: 36px; }
