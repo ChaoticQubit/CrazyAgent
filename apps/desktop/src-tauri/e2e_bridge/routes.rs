@@ -2780,7 +2780,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option, text)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option.into_iter().collect(), text)?; call.await }.await;
             routed(result)
         }
         "desktop_dismiss_question" => {

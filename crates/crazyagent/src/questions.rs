@@ -43,10 +43,22 @@ pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 pub const COUNTED_PROJECTS_MAX: i64 = 256;
 /// The most notes a conversation master is given before one turn.
 pub const NOTES_MAX: usize = 16;
+/// The label every client shows as the last choice of a single or multi question; picking
+/// it opens a free-text box whose words go with the picks or stand alone.
+pub const COMMENT_LABEL: &str = "Add a comment";
+/// The most bytes of a comment given with picks, so picks and comment fit one answer.
+pub const COMMENT_BYTES_MAX: usize = 2048;
+/// The fewest options a single or multi question offers.
+pub const OPTIONS_MIN: usize = 2;
+/// The most questions one producer reply raises, the per-asker pending cap.
+pub const ASKS_FROM_ONE_REPLY_MAX: usize = 8;
 
 const QUOTED_BYTES_MAX: usize = 200;
 const BUSY_WAIT: Duration = Duration::from_secs(5);
-const COLUMNS: &str = "id,project,asker,question,options_json,recommended,context,status,answer,answered_by,created_ms,settled_ms";
+const PICKS_SEPARATOR: &str = "; ";
+const COMMENT_PREFIX: &str = "\nComment: ";
+const KIND_COLUMN: &str = "ALTER TABLE questions_log ADD COLUMN kind TEXT NOT NULL DEFAULT ''";
+const COLUMNS: &str = "id,project,asker,question,options_json,recommended,context,status,answer,answered_by,created_ms,settled_ms,kind";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS questions_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
@@ -63,7 +75,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS questions_log (
     turn_floor INTEGER NOT NULL,
     noted_ms INTEGER,
     created_ms INTEGER NOT NULL,
-    settled_ms INTEGER
+    settled_ms INTEGER,
+    kind TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS questions_log_status ON questions_log(project, status, id);
 CREATE INDEX IF NOT EXISTS questions_log_asker ON questions_log(project, asker, status);";
@@ -81,6 +94,14 @@ const _: () = assert!(LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MA
 const _: () = assert!(OPTIONS_MAX <= u8::MAX as usize);
 const _: () = assert!(PENDING_PER_ASKER_MAX < PENDING_PER_PROJECT_MAX);
 const _: () = assert!(PENDING_PER_PROJECT_MAX < KEPT_PER_PROJECT_MAX);
+const _: () = assert!(
+    OPTIONS_MAX * (OPTION_BYTES_MAX + PICKS_SEPARATOR.len())
+        + COMMENT_PREFIX.len()
+        + COMMENT_BYTES_MAX
+        <= ANSWER_BYTES_MAX
+);
+const _: () = assert!(OPTIONS_MIN <= OPTIONS_MAX);
+const _: () = assert!(ASKS_FROM_ONE_REPLY_MAX as i64 <= PENDING_PER_ASKER_MAX);
 
 /// Who asked the owner, apart from the engine's own steps: a team master (live or run
 /// through drop files) by its team agent id, a conversation master by its session, a team
@@ -125,11 +146,23 @@ pub enum AnsweredBy {
     Chat,
 }
 
-/// The owner's answer: one of the question's options by position, or typed text.
+/// How the owner answers a question: pick one option, pick any options, or write free
+/// text. Single and multi questions also take a comment ([`COMMENT_LABEL`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionKind {
+    Single,
+    Multi,
+    Text,
+}
+
+/// The owner's answer: picked options by position and an optional comment. A text question
+/// takes the comment only; a single question at most one pick; a multi question any
+/// distinct picks. A pick, a comment or both must be given.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Option(u8),
-    Text(String),
+pub struct Answer {
+    pub picks: Vec<u8>,
+    pub comment: Option<String>,
 }
 
 /// How a settling write ended: recorded, or refused because the question was settled or
@@ -141,12 +174,14 @@ pub enum Settlement {
     Stale,
 }
 
-/// One question as an asker gives it: the question, up to `OPTIONS_MAX` single-line options,
-/// the recommended answer (one of the options, or short text when there are none) and the
+/// One question as an asker gives it: the question, how it is answered, `OPTIONS_MIN` to
+/// `OPTIONS_MAX` single-line options with one of them recommended for a single or multi
+/// question (none for a text question, whose recommended answer is short text) and the
 /// context the owner needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     pub question: String,
+    pub kind: QuestionKind,
     pub options: Vec<String>,
     pub recommended: Option<String>,
     pub context: Option<String>,
@@ -160,6 +195,7 @@ pub struct Question {
     pub project: ProjectId,
     pub asker: String,
     pub question: String,
+    pub kind: QuestionKind,
     pub options: Vec<String>,
     pub recommended: Option<String>,
     pub context: Option<String>,
@@ -272,12 +308,37 @@ impl AnsweredBy {
     }
 }
 
+impl QuestionKind {
+    /// Returns the stored and wire name of this kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Multi => "multi",
+            Self::Text => "text",
+        }
+    }
+
+    /// Reads a stored kind back. An empty name is a row from before kinds: text without
+    /// options, single with them. Inputs: the name and the option count. Output: the kind,
+    /// or none for a name this module never writes.
+    pub fn stored(name: &str, options: usize) -> Option<Self> {
+        match name {
+            "" if options == 0 => Some(Self::Text),
+            "" | "single" => Some(Self::Single),
+            "multi" => Some(Self::Multi),
+            "text" => Some(Self::Text),
+            _ => None,
+        }
+    }
+}
+
 impl Ask {
     /// Checks every bound of a question, never truncating: no hidden characters, plain
     /// text, distinct single-line options, and a recommendation that is one of the options
-    /// or short text when there are none. Input: the ask. Output: the ask with each text
-    /// trimmed, or `questions_text_invalid` for hidden characters and `questions_ask_invalid`
-    /// for anything else out of bounds.
+    /// or short text when there are none. A single or multi question needs `OPTIONS_MIN`
+    /// options and its recommended one; a text question takes no options. Input: the ask.
+    /// Output: the ask with each text trimmed, or `questions_text_invalid` for hidden
+    /// characters and `questions_ask_invalid` for anything else out of bounds.
     pub fn checked(&self) -> Result<Ask, EngineError> {
         let invalid = || failure("questions_ask_invalid");
         let given = [
@@ -318,12 +379,22 @@ impl Ask {
                 Some(text)
             }
         };
+        let fits = match self.kind {
+            QuestionKind::Text => options.is_empty(),
+            QuestionKind::Single | QuestionKind::Multi => {
+                options.len() >= OPTIONS_MIN && recommended.is_some()
+            }
+        };
+        if !fits {
+            return Err(invalid());
+        }
         let context = match &self.context {
             None => None,
             Some(text) => Some(plain(text, CONTEXT_BYTES_MAX, true).ok_or_else(invalid)?),
         };
         Ok(Ask {
             question: plain(&self.question, QUESTION_BYTES_MAX, true).ok_or_else(invalid)?,
+            kind: self.kind,
             options,
             recommended,
             context,
@@ -442,14 +513,7 @@ pub fn answer(
     if is_terminal(&question.asker) {
         return Err(failure("questions_in_terminal"));
     }
-    let text = match answer {
-        Answer::Option(index) => question
-            .options
-            .get(usize::from(*index))
-            .cloned()
-            .ok_or_else(|| failure("questions_option_invalid"))?,
-        Answer::Text(text) => answer_text(text)?,
-    };
+    let text = answer_words(&question, answer)?;
     let project = question.project.clone();
     let how = How::Answer(&text, AnsweredBy::Owner);
     let settled = settle(&tx, question, how, &owner(), version)?;
@@ -855,9 +919,13 @@ fn insert(
         )
         .map_err(unavailable)?;
     let now = now_ms();
+    assert!(
+        ask.kind != QuestionKind::Text || ask.options.is_empty(),
+        "a text question never has options"
+    );
     tx.execute(
-        "INSERT INTO questions_log(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9)",
+        "INSERT INTO questions_log(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms,kind)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9,?10)",
         params![
             project.as_str(),
             asker,
@@ -867,7 +935,8 @@ fn insert(
             ask.recommended,
             ask.context,
             floor,
-            now
+            now,
+            ask.kind.as_str()
         ],
     )
     .map_err(unavailable)?;
@@ -1119,6 +1188,7 @@ fn select(
         Option<String>,
         i64,
         Option<i64>,
+        String,
     );
     let rows: Vec<Row> = {
         let mut statement = tx.prepare(query).map_err(unavailable)?;
@@ -1137,6 +1207,7 @@ fn select(
                     row.get(9)?,
                     row.get(10)?,
                     row.get(11)?,
+                    row.get(12)?,
                 ))
             })
             .map_err(unavailable)?
@@ -1157,6 +1228,7 @@ fn select(
         by,
         created,
         settled,
+        kind,
     ) in rows
     {
         let id = u64::try_from(id).map_err(unavailable)?;
@@ -1175,12 +1247,19 @@ fn select(
             None => None,
             Some(ms) => Some(u64::try_from(ms).map_err(unavailable)?),
         };
+        let options: Vec<String> = serde_json::from_str(&options).map_err(unavailable)?;
+        let kind = QuestionKind::stored(&kind, options.len()).ok_or_else(|| unavailable(()))?;
+        assert!(
+            kind != QuestionKind::Text || options.is_empty(),
+            "a text question never has options"
+        );
         questions.push(Question {
             id,
             project,
             asker,
             question,
-            options: serde_json::from_str(&options).map_err(unavailable)?,
+            kind,
+            options,
             recommended,
             context,
             status,
@@ -1200,14 +1279,70 @@ fn item(project: &ProjectId, id: u64) -> Result<Item, EngineError> {
     Item::new(&format!("question:{}:{id}", project.as_str()))
 }
 
+/// Renders the owner's answer as the asker reads it: picked options in the question's order
+/// joined by "; ", then "Comment: " and the comment, or the comment alone. Inputs: the
+/// question and the answer. Output: at most `ANSWER_BYTES_MAX` bytes, or
+/// `questions_option_invalid`, `questions_answer_invalid` or `questions_text_invalid`.
+fn answer_words(question: &Question, answer: &Answer) -> Result<String, EngineError> {
+    if answer.picks.len() > OPTIONS_MAX {
+        return Err(failure("questions_option_invalid"));
+    }
+    let mut picks = answer.picks.clone();
+    picks.sort_unstable();
+    picks.dedup();
+    let allowed = match question.kind {
+        QuestionKind::Text => 0,
+        QuestionKind::Single => 1,
+        QuestionKind::Multi => question.options.len(),
+    };
+    if picks.len() != answer.picks.len() || picks.len() > allowed {
+        return Err(failure("questions_option_invalid"));
+    }
+    let chosen = picks
+        .iter()
+        .map(|at| question.options.get(usize::from(*at)).cloned())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| failure("questions_option_invalid"))?;
+    let limit = if chosen.is_empty() {
+        ANSWER_BYTES_MAX
+    } else {
+        COMMENT_BYTES_MAX
+    };
+    let comment = answer
+        .comment
+        .as_deref()
+        .map(|text| bounded_answer(text, limit))
+        .transpose()?;
+    let words = match (chosen.is_empty(), comment) {
+        (true, None) => return Err(failure("questions_answer_invalid")),
+        (true, Some(comment)) => comment,
+        (false, None) => chosen.join(PICKS_SEPARATOR),
+        (false, Some(comment)) => {
+            format!("{}{COMMENT_PREFIX}{comment}", chosen.join(PICKS_SEPARATOR))
+        }
+    };
+    assert!(!words.trim().is_empty());
+    assert!(words.len() <= ANSWER_BYTES_MAX);
+    Ok(words)
+}
+
 /// Checks an answer the owner gave, never truncating it. Input: the text. Output: the
 /// trimmed answer, or `questions_text_invalid` for hidden characters and
 /// `questions_answer_invalid` when it is blank or longer than `ANSWER_BYTES_MAX`.
 fn answer_text(text: &str) -> Result<String, EngineError> {
+    bounded_answer(text, ANSWER_BYTES_MAX)
+}
+
+/// Checks an owner text against a bound, never truncating. Inputs: the text and the bound.
+/// Output: the trimmed text, or `questions_text_invalid` for hidden characters and
+/// `questions_answer_invalid` when blank or too long.
+fn bounded_answer(text: &str, max: usize) -> Result<String, EngineError> {
+    assert!(max > 0);
+    assert!(max <= ANSWER_BYTES_MAX);
     if hidden_text(text) {
         return Err(failure("questions_text_invalid"));
     }
-    plain(text, ANSWER_BYTES_MAX, true).ok_or_else(|| failure("questions_answer_invalid"))
+    plain(text, max, true).ok_or_else(|| failure("questions_answer_invalid"))
 }
 
 fn owner() -> Writer {
@@ -1220,8 +1355,75 @@ fn is_terminal(asker: &str) -> bool {
     asker.starts_with("terminal:")
 }
 
+/// Makes the questions log when it is missing and adds the kind column to a log made
+/// before kinds. Input: the transaction. Output: nothing, or `questions_unavailable`.
 fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    tx.execute_batch(SCHEMA).map_err(unavailable)
+    tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    let has_kind: bool = tx
+        .query_row(
+            "SELECT COUNT(*)>0 FROM pragma_table_info('questions_log') WHERE name='kind'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !has_kind {
+        tx.execute_batch(KIND_COLUMN).map_err(unavailable)?;
+    }
+    Ok(())
+}
+
+/// Reads the questions a producer agent returned in its `{"questions": [...]}` block: each
+/// item checked as an ask and dropped when invalid, at most `ASKS_FROM_ONE_REPLY_MAX`, every
+/// one given `context`. Inputs: the parsed block and the context line. Output: the asks.
+pub fn asks_from_json(value: &serde_json::Value, context: &str) -> Vec<Ask> {
+    let items = value
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut asks = Vec::new();
+    for item in items.iter().take(ASKS_FROM_ONE_REPLY_MAX * 2) {
+        if asks.len() == ASKS_FROM_ONE_REPLY_MAX {
+            break;
+        }
+        if let Some(ask) = ask_from_item(item, context) {
+            asks.push(ask);
+        }
+    }
+    assert!(asks.len() <= ASKS_FROM_ONE_REPLY_MAX);
+    assert!(asks.len() <= items.len());
+    asks
+}
+
+/// Reads one question item as an ask, or none when a field is missing, of the wrong type
+/// or out of bounds. Inputs: the item and the context line. Output: the checked ask.
+fn ask_from_item(item: &serde_json::Value, context: &str) -> Option<Ask> {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let options: Vec<String> = match item.get("options") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(values)) if values.len() <= OPTIONS_MAX => values
+            .iter()
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect::<Option<_>>()?,
+        Some(_) => return None,
+    };
+    let kind = QuestionKind::stored(&text("kind")?, options.len())?;
+    let ask = Ask {
+        question: text("question")?,
+        kind,
+        options,
+        recommended: text("recommended"),
+        context: Some(context.to_owned()),
+    }
+    .checked()
+    .ok()?;
+    assert!(ask.options.len() <= OPTIONS_MAX);
+    assert!(ask.kind == kind);
+    Some(ask)
 }
 
 fn immediate(db: &Connection) -> Result<Transaction<'_>, EngineError> {

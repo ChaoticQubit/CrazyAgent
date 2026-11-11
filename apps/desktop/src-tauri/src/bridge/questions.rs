@@ -81,17 +81,24 @@ pub fn questions_error(error: EngineError) -> BridgeError {
     )
 }
 
-/// The owner's answer as the window sends it: exactly one of an option position below
-/// `OPTIONS_MAX` or typed text that is not blank and at most `ANSWER_BYTES_MAX` bytes.
-/// Inputs: the option and the text. Output: the answer, or `questions_answer_invalid`.
-pub fn choice(option: Option<u8>, text: Option<String>) -> Result<Answer, BridgeError> {
-    match (option, text) {
-        (Some(index), None) if usize::from(index) < OPTIONS_MAX => Ok(Answer::Option(index)),
-        (None, Some(text)) if !text.trim().is_empty() && text.len() <= ANSWER_BYTES_MAX => {
-            Ok(Answer::Text(text))
-        }
-        _ => Err(failure("questions_answer_invalid")),
+/// The owner's answer as the window sends it: distinct option positions below
+/// `OPTIONS_MAX` and an optional comment within `ANSWER_BYTES_MAX`, at least one of them.
+/// Inputs: the picks and the comment. Output: the answer, or `questions_answer_invalid`.
+pub fn choice(picks: Vec<u8>, comment: Option<String>) -> Result<Answer, BridgeError> {
+    let in_range =
+        picks.len() <= OPTIONS_MAX && picks.iter().all(|at| usize::from(*at) < OPTIONS_MAX);
+    let distinct = picks
+        .iter()
+        .enumerate()
+        .all(|(index, at)| !picks[..index].contains(at));
+    let comment = comment.filter(|text| !text.trim().is_empty());
+    let sized = comment
+        .as_ref()
+        .is_none_or(|text| text.len() <= ANSWER_BYTES_MAX);
+    if !in_range || !distinct || !sized || (picks.is_empty() && comment.is_none()) {
+        return Err(failure("questions_answer_invalid"));
     }
+    Ok(Answer { picks, comment })
 }
 
 /// Reads an engine settlement: Ok once recorded, `questions_stale` when the question
@@ -141,17 +148,17 @@ impl NativeBridge {
         }))
     }
 
-    /// Answers a pending question with one option or typed text, run without the bridge
-    /// lock. Inputs: the question id, the version the owner read, and the option or text.
-    /// Output: Ok once recorded; `questions_stale` when it changed since.
+    /// Answers a pending question with picked options, a comment or both, run without the
+    /// bridge lock. Inputs: the question id, the version the owner read, the picks and the
+    /// comment. Output: Ok once recorded; `questions_stale` when it changed since.
     pub fn answer_question(
         &self,
         id: u64,
         version: u64,
-        option: Option<u8>,
-        text: Option<String>,
+        picks: Vec<u8>,
+        comment: Option<String>,
     ) -> Result<Unlocked<()>, BridgeError> {
-        let answer = choice(option, text)?;
+        let answer = choice(picks, comment)?;
         let client = self.questions_client()?;
         Ok(Box::pin(async move {
             settled(
@@ -200,37 +207,53 @@ impl NativeBridge {
 mod tests {
     use super::*;
 
-    /// The window sends exactly one of an option or typed text, within the engine's bounds;
+    /// The window sends distinct picks, a comment or both, within the engine's bounds;
     /// anything else is refused before the engine is asked.
     #[test]
-    fn an_answer_is_one_option_or_bounded_text() {
+    fn an_answer_is_distinct_picks_a_bounded_comment_or_both() {
         let last = u8::try_from(OPTIONS_MAX - 1).unwrap();
         let past = u8::try_from(OPTIONS_MAX).unwrap();
-        assert!(matches!(choice(Some(0), None), Ok(Answer::Option(0))));
-        assert!(matches!(
-            choice(Some(last), None),
-            Ok(Answer::Option(index)) if index == last
-        ));
-        assert!(matches!(
-            choice(None, Some("Use Postgres".into())),
-            Ok(Answer::Text(text)) if text == "Use Postgres"
-        ));
-        let longest = "a".repeat(ANSWER_BYTES_MAX);
-        assert!(
-            matches!(choice(None, Some(longest.clone())), Ok(Answer::Text(text)) if text == longest)
+        let answer = |picks: &[u8], comment: Option<&str>| Answer {
+            picks: picks.to_vec(),
+            comment: comment.map(str::to_owned),
+        };
+        assert_eq!(choice(vec![0], None).unwrap(), answer(&[0], None));
+        assert_eq!(
+            choice(vec![last, 0], None).unwrap(),
+            answer(&[last, 0], None)
         );
-        for (option, text) in [
-            (None, None),
-            (Some(past), None),
-            (Some(0), Some("both".into())),
-            (None, Some(" \n\t".into())),
-            (None, Some("a".repeat(ANSWER_BYTES_MAX + 1))),
-            (None, Some("\u{e9}".repeat(ANSWER_BYTES_MAX / 2 + 1))),
+        assert_eq!(
+            choice(Vec::new(), Some("Use Postgres".into())).unwrap(),
+            answer(&[], Some("Use Postgres"))
+        );
+        assert_eq!(
+            choice(vec![0], Some("both".into())).unwrap(),
+            answer(&[0], Some("both"))
+        );
+        assert_eq!(
+            choice(vec![1], Some(" \n\t".into())).unwrap(),
+            answer(&[1], None)
+        );
+        let longest = "a".repeat(ANSWER_BYTES_MAX);
+        assert_eq!(
+            choice(Vec::new(), Some(longest.clone())).unwrap(),
+            answer(&[], Some(&longest))
+        );
+        let every: Vec<u8> = (0..=last).collect();
+        assert_eq!(choice(every.clone(), None).unwrap(), answer(&every, None));
+        for (picks, comment) in [
+            (Vec::new(), None),
+            (vec![past], None),
+            (vec![0, 0], None),
+            ([every.as_slice(), &[0]].concat(), None),
+            (Vec::new(), Some(" \n\t".into())),
+            (Vec::new(), Some("a".repeat(ANSWER_BYTES_MAX + 1))),
+            (vec![0], Some("\u{e9}".repeat(ANSWER_BYTES_MAX / 2 + 1))),
         ] {
             assert_eq!(
-                choice(option, text.clone()).unwrap_err().code,
+                choice(picks.clone(), comment.clone()).unwrap_err().code,
                 "questions_answer_invalid",
-                "{option:?} {text:?}"
+                "{picks:?} {comment:?}"
             );
         }
     }

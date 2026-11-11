@@ -1,6 +1,7 @@
 use super::{
-    AnsweredBy, COLUMNS, PENDING_PER_PROJECT_MAX, Question, QuestionStatus, STORED_BYTES_MAX,
-    asker_label, ensure, immediate, is_terminal, item, select, unavailable,
+    AnsweredBy, COLUMNS, COMMENT_LABEL, PENDING_PER_PROJECT_MAX, Question, QuestionKind,
+    QuestionStatus, STORED_BYTES_MAX, asker_label, ensure, immediate, is_terminal, item, select,
+    unavailable,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
@@ -161,7 +162,8 @@ fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
     ));
     fenced(page, &question.question);
     if !question.options.is_empty() {
-        let options = question
+        assert!(question.kind != QuestionKind::Text);
+        let mut options = question
             .options
             .iter()
             .enumerate()
@@ -170,10 +172,13 @@ fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
                 let mark = if recommended { " (recommended)" } else { "" };
                 format!("{}. {option}{mark}", n + 1)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        page.push_str("\nOptions:\n\n");
-        fenced(page, &options);
+            .collect::<Vec<_>>();
+        options.push(format!("- {COMMENT_LABEL}"));
+        page.push_str(match question.kind {
+            QuestionKind::Multi => "\nPick any:\n\n",
+            QuestionKind::Single | QuestionKind::Text => "\nPick one:\n\n",
+        });
+        fenced(page, &options.join("\n"));
     }
     if let Some(recommended) = &question.recommended
         && !question.options.contains(recommended)

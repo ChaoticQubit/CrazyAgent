@@ -129,6 +129,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         &EngineSource::Mapping,
         &Ask {
             question: "Which database should the app use?\nIt stores recipes.".into(),
+            kind: crazyagent::questions::QuestionKind::Single,
             options: vec!["Postgres".into(), "SQLite".into()],
             recommended: Some("SQLite".into()),
             context: Some("It runs on one laptop.".into()),

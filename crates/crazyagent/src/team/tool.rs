@@ -242,6 +242,7 @@ pub enum Call {
     },
     Ask {
         question: String,
+        kind: crate::questions::QuestionKind,
         options: Vec<String>,
         recommended: Option<String>,
         context: Option<String>,
@@ -1013,6 +1014,7 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     };
     let ask = crate::questions::Ask {
         question: text("question")??,
+        kind: crate::questions::QuestionKind::stored("", options.len())?,
         options,
         recommended: text("recommended")?,
         context: text("context")?,
@@ -1021,6 +1023,7 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
     .ok()?;
     Some(Call::Ask {
         question: ask.question,
+        kind: ask.kind,
         options: ask.options,
         recommended: ask.recommended,
         context: ask.context,
@@ -1098,6 +1101,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         }
         Call::Ask {
             question,
+            kind: _,
             options,
             recommended,
             context,

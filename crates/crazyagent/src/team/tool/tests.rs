@@ -768,6 +768,7 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
     let record = |arguments: Value| live_call(RECORD_TOOL, Some(&arguments)).unwrap();
     let asked = Call::Ask {
         question: "Ship V2 on Friday?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Yes".into(), "No, wait a week".into()],
         recommended: Some("Yes".into()),
         context: Some("One flaky test left.".into()),
@@ -783,10 +784,12 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
     );
     assert_eq!(checked(asked.clone()), Ok(asked));
     let six: Vec<String> = (1..=6).map(|n| format!("option {n}")).collect();
-    let widest = ask(json!({"question": "Pick one?", "options": six.clone()}));
+    let widest =
+        ask(json!({"question": "Pick one?", "options": six.clone(), "recommended": "option 1"}));
     assert!(matches!(widest, Ok(Call::Ask { ref options, .. }) if options == &six));
     let bare = Call::Ask {
         question: "Which name?".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: vec![],
         recommended: Some("CrazyAgent, it is known.".into()),
         context: None,
@@ -847,6 +850,7 @@ fn ask_takes_a_bounded_question_and_record_answer_only_numbers_and_the_engine_ch
     }
     let planted = Call::Ask {
         question: " untrimmed ".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: vec![],
         recommended: None,
         context: None,
