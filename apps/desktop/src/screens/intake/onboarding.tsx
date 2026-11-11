@@ -151,9 +151,9 @@ export function OnboardingReview({ id }: { id: string }) {
     setDraft(next);
   };
   const takeProposed = () => {
-    if (value === null || saved === null) return;
+    if (value === null || draft === null) return;
     setTouched(true);
-    setDraft(onboardingDraft(withProposed(value), saved));
+    setDraft(withProposed(draft, value));
   };
 
   const name = draft?.name.trim() || value?.name?.trim() || saved?.name || "this project";

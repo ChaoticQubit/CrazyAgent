@@ -1223,6 +1223,7 @@ mod live {
         Plan {
             harness: plan.harness.clone(),
             executable: plan.executable.clone(),
+            entry: plan.entry.clone(),
             working_dir: plan.working_dir.clone(),
             model: plan.model.clone(),
             tools: plan.tools,

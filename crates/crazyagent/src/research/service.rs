@@ -188,14 +188,16 @@ where
 /// terminal host every agent in its own pane, and with the engine's agent
 /// register each running job named as a holder of the account it signs in with.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
     project: &Path,
-    codex: &Path,
+    codex: Option<&Path>,
     claude: Option<&Path>,
     terminal: Option<Arc<dyn crate::terminal::Host>>,
     agents: Option<Arc<crate::agents::Agents>>,
+    lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
@@ -222,9 +224,15 @@ pub fn start_for_engine(
     if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err("engine database must be a private file".into());
     }
-    let mut runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
-        .map_err(|error| error.to_string())?
-        .with_settings(global, project);
+    let mut runner = match codex {
+        Some(codex) => ResearchRunner::new(&database, &state, codex, ResearchLimits::default()),
+        None => ResearchRunner::without_codex(&database, &state, ResearchLimits::default()),
+    }
+    .map_err(|error| error.to_string())?
+    .with_settings(global, project);
+    if let Some(lookup) = lookup {
+        runner = runner.with_harness_lookup(lookup);
+    }
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)
@@ -250,14 +258,16 @@ pub fn start_for_engine(
 /// made or checked. Takes the runtime, settings files, harness paths, terminal host and
 /// agent register, all unused. Returns `research_runtime_unavailable`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
     _runtime: &Path,
     _global: &Path,
     _project: &Path,
-    _codex: &Path,
+    _codex: Option<&Path>,
     _claude: Option<&Path>,
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
     _agents: Option<Arc<crate::agents::Agents>>,
+    _lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
 }

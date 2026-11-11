@@ -1066,7 +1066,7 @@ impl ManagedAgent {
             live: false,
             managed: Some(Managed {
                 home: self.home.clone(),
-                executable: self.plan.executable.clone(),
+                executable: self.plan.entry.clone(),
             }),
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),

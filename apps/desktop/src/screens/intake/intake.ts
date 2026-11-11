@@ -534,13 +534,13 @@ export function offerProposed(view: OnboardingView): boolean {
   return view.finished && proposed !== null && (proposed.about.trim() !== "" || proposed.tech_stack.length > 0);
 }
 
-/** The view with the mapping's About, tech stack and platforms in its draft when the review
- * offers them, so the form fills from them; any other view as it is.
- * Input: the onboarding view. Output: the view the form fills from. */
-export function withProposed(view: OnboardingView): OnboardingView {
-  if (!offerProposed(view) || !view.proposed) return view;
+/** The form's draft with the mapping's About, tech stack and platforms when the review offers
+ * them, every other answer the owner gave, saved or not, kept; any other draft as it is.
+ * Input: the draft on screen and the onboarding view. Output: the draft the form shows. */
+export function withProposed(draft: ProjectDraft, view: OnboardingView): ProjectDraft {
+  if (!offerProposed(view) || !view.proposed) return draft;
   const { about, tech_stack, platforms } = view.proposed;
-  return { ...view, draft: { ...view.draft, about, tech_stack: [...tech_stack], platforms: [...platforms] } };
+  return { ...draft, about, stack: [...tech_stack], platforms: [...platforms] };
 }
 
 /** Reads a Start setup receipt. Input: the receipt. Output: started with the project id, rejected
