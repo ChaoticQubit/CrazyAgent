@@ -182,9 +182,25 @@ fn identity(_path: &Path, _directory: bool) -> Result<Identity, EngineError> {
     Err(error("worktree_filesystem_unavailable"))
 }
 
+/// Refuses the identity of an entry already read where the Unix owner, mode, device and
+/// inode do not exist. Takes the entry and kind, both unused. Returns
+/// `worktree_filesystem_unavailable`.
+#[cfg(not(unix))]
+fn identified(_entry: &std::fs::Metadata, _directory: bool) -> Result<Identity, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
 #[cfg(unix)]
 fn identity(path: &Path, directory: bool) -> Result<Identity, EngineError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(error)?;
+    identified(&std::fs::symlink_metadata(path).map_err(error)?, directory)
+}
+
+/// Checks the identity of an entry already read without following a link, with the rules
+/// of [`identity`], so its check and its kind come from one read. Inputs: the entry's
+/// metadata and whether it must be a folder. Output: its device and inode, or
+/// `untrusted_filesystem_identity`.
+#[cfg(unix)]
+fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity, EngineError> {
     if metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o022 != 0
         || (directory && !metadata.is_dir())
@@ -410,10 +426,23 @@ fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
         if visited > METADATA_ENTRIES_MAX {
             return Err(error("git_metadata_capacity"));
         }
-        if !trusted(metadata, &path)?.is_dir() {
+        let root = path == start;
+        let found = if root {
+            Some(trusted(metadata, &path)?)
+        } else {
+            listed(metadata, &path)?
+        };
+        if !found.is_some_and(|entry| entry.is_dir()) {
             continue;
         }
-        for entry in std::fs::read_dir(&path).map_err(error)? {
+        let entries = if root {
+            std::fs::read_dir(&path).map_err(error)?
+        } else if let Some(entries) = listing(&path)? {
+            entries
+        } else {
+            continue;
+        };
+        for entry in entries {
             let child = entry.map_err(error)?.path();
             let name = child.file_name().unwrap_or_default();
             if path == worktrees {
@@ -446,35 +475,99 @@ fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Reads one .git entry without following a link and requires [`identity`] of it. Inputs:
-/// the .git folder and the entry. Output: its metadata, or `untrusted_git_entry:` with
-/// the entry's path inside .git.
+/// Reads the entry a walk starts from without following a link and requires [`identity`]
+/// of it from that one read. Inputs: the .git folder and the entry. Output: its metadata,
+/// the read failure when it is missing, or `untrusted_git_entry:` with the entry's path
+/// inside .git.
 fn trusted(metadata: &Path, path: &Path) -> Result<std::fs::Metadata, EngineError> {
     let entry = std::fs::symlink_metadata(path).map_err(error)?;
-    identity(path, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+    identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
     Ok(entry)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does to a listed .git entry just before the walk reads it, given the
+    /// entry and whether the read lists it as a folder. None leaves every entry alone.
+    static BEFORE_READ: std::cell::RefCell<Option<Box<dyn Fn(&Path, bool)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the step a test set in `BEFORE_READ` on this thread. Inputs: the listed entry and
+/// whether the coming read lists it as a folder. Output: none.
+#[cfg(test)]
+fn before_read(path: &Path, listing: bool) {
+    BEFORE_READ.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step(path, listing);
+        }
+    });
+}
+
+/// Does nothing outside tests, where no step stands between a listing and a read. Inputs:
+/// the listed entry and the kind of read, both unused. Output: none.
+#[cfg(not(test))]
+fn before_read(_path: &Path, _listing: bool) {}
+
+/// Reads one entry a .git folder listed, without following a link, and requires
+/// [`identity`] of it from that one read. Git removes its lock files, temporary packs and
+/// pruned objects at any moment, so an entry gone since its listing is as if never listed;
+/// every other read failure and every refusal stays. Inputs: the .git folder and the
+/// entry. Output: its metadata, None when it is gone, or `untrusted_git_entry:` with the
+/// entry's path inside .git.
+fn listed(metadata: &Path, path: &Path) -> Result<Option<std::fs::Metadata>, EngineError> {
+    before_read(path, false);
+    match std::fs::symlink_metadata(path) {
+        Ok(entry) => {
+            identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+            Ok(Some(entry))
+        }
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(failed) => Err(error(failed)),
+    }
+}
+
+/// Lists one folder that [`listed`] found inside .git. Git removes emptied folders at any
+/// moment, so a folder gone since that read is as if never listed; every other failure
+/// stays. Input: the folder. Output: its entries, None when it is gone, or the failure.
+fn listing(folder: &Path) -> Result<Option<std::fs::ReadDir>, EngineError> {
+    before_read(folder, true);
+    match std::fs::read_dir(folder) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(failed) => Err(error(failed)),
+    }
 }
 
 /// Checks one fan-out folder of the object store and every object file in it, since Git
 /// reads an object through any link put in its place. Names that are not hex digits, such
 /// as a temporary object left by a killed Git, are never read as objects and are left
-/// alone. Inputs: the .git folder, the fan-out folder and how many entries may still be
+/// alone, and a folder or an object Git pruned since its listing counts as read and is no
+/// finding. Inputs: the .git folder, the fan-out folder and how many entries may still be
 /// read. Output: the entries read, or the refusal or `git_object_store_capacity` code.
 fn fan_out(metadata: &Path, folder: &Path, room: usize) -> Result<usize, EngineError> {
     if room == 0 {
         return Err(error("git_object_store_capacity"));
     }
-    if !trusted(metadata, folder)?.is_dir() {
+    let Some(found) = listed(metadata, folder)? else {
+        return Ok(1);
+    };
+    if !found.is_dir() {
         return Err(untrusted(metadata, folder));
     }
+    let Some(entries) = listing(folder)? else {
+        return Ok(1);
+    };
     let mut read = 1;
-    for entry in std::fs::read_dir(folder).map_err(error)? {
+    for entry in entries {
         let path = entry.map_err(error)?.path();
         read += 1;
         if read > room {
             return Err(error("git_object_store_capacity"));
         }
-        if path.file_name().is_some_and(hex) && !trusted(metadata, &path)?.is_file() {
+        if path.file_name().is_some_and(hex)
+            && listed(metadata, &path)?.is_some_and(|object| !object.is_file())
+        {
             return Err(untrusted(metadata, &path));
         }
     }
@@ -485,10 +578,16 @@ fn fan_out(metadata: &Path, folder: &Path, room: usize) -> Result<usize, EngineE
 /// Checks the files of another worktree's admin folder that Git reads for every worktree,
 /// as `git worktree add` does: each must be a plain file when present, so no read follows
 /// a link or waits on a pipe, and HEAD must pass [`plain_head`], so Git resolves no ref of
-/// that folder. The rest of that folder is checked with its own lease.
+/// that folder. The rest of that folder is checked with its own lease. An admin folder Git
+/// removed since its listing is no finding.
 /// Inputs: the .git folder and the admin folder. Output: nothing, or the refusal code.
 fn shared_worktree_files(metadata: &Path, admin: &Path) -> Result<(), EngineError> {
-    let folder = std::fs::symlink_metadata(admin).map_err(error)?;
+    before_read(admin, false);
+    let folder = match std::fs::symlink_metadata(admin) {
+        Ok(folder) => folder,
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(failed) => return Err(error(failed)),
+    };
     if folder.file_type().is_symlink() {
         return Err(untrusted(metadata, admin));
     }
@@ -2787,6 +2886,171 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    /// The step a walk on this thread runs before each read of a listed .git entry, set for
+    /// one test and cleared when dropped.
+    struct Step;
+
+    impl Step {
+        /// Sets the step. Input: what to do with the entry and whether the coming read
+        /// lists it as a folder. Output: the guard that clears it.
+        fn set(step: impl Fn(&Path, bool) + 'static) -> Self {
+            BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(step)));
+            Self
+        }
+    }
+
+    impl Drop for Step {
+        fn drop(&mut self) {
+            BEFORE_READ.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    /// A repository whose .git holds what Git makes and removes while it works: lock files,
+    /// a temporary pack, loose objects in fan-out folders, another worktree's admin folder
+    /// and a folder of a running rebase. Input: the folder to make it in. Output: the
+    /// repository.
+    fn metadata_folder(root: &Path) -> PathBuf {
+        let repository = root.join("repository");
+        let git = repository.join(".git");
+        for folder in [
+            "refs/heads",
+            "objects/ab",
+            "objects/cd",
+            "objects/ef",
+            "objects/pack",
+            "worktrees/other",
+            "rebase-merge",
+        ] {
+            std::fs::create_dir_all(git.join(folder)).unwrap();
+        }
+        for file in [
+            "HEAD",
+            "index.lock",
+            "refs/heads/main.lock",
+            "objects/ab/0123",
+            "objects/ab/4567",
+            "objects/pack/tmp_pack_1",
+        ] {
+            std::fs::write(git.join(file), b"kept\n").unwrap();
+        }
+        repository
+    }
+
+    /// Removes one entry as Git does when it is done with it. Input: the file or folder.
+    fn unlink(path: &Path) {
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_git_entry_removed_between_its_listing_and_its_read_is_no_finding() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = metadata_folder(root.path());
+        let git = repository.join(".git");
+        let gone = [
+            "index.lock",
+            "refs/heads/main.lock",
+            "objects/pack/tmp_pack_1",
+            "objects/ab/0123",
+            "objects/cd",
+            "worktrees/other",
+        ]
+        .map(|name| git.join(name));
+        let emptied = ["rebase-merge", "objects/ef"].map(|name| git.join(name));
+        let step = {
+            let (gone, emptied) = (gone.clone(), emptied.clone());
+            Step::set(move |path, listing| {
+                let named = if listing { &emptied[..] } else { &gone[..] };
+                if named.iter().any(|entry| entry == path) {
+                    unlink(path);
+                }
+            })
+        };
+        validate_metadata(&repository).unwrap();
+        drop(step);
+        for entry in gone.iter().chain(&emptied) {
+            assert!(
+                std::fs::symlink_metadata(entry).is_err(),
+                "the walk never read {}",
+                entry.display()
+            );
+        }
+        assert!(git.join("objects/ab/4567").is_file());
+        validate_metadata(&repository).unwrap();
+    }
+
+    #[test]
+    fn a_link_or_a_pipe_put_in_a_listed_entry_s_place_is_still_refused() {
+        for (name, pipe) in [
+            ("index.lock", false),
+            ("index.lock", true),
+            ("objects/ab/0123", false),
+            ("objects/ab/0123", true),
+            ("refs/heads", false),
+            ("refs/heads", true),
+            ("objects/cd", false),
+            ("worktrees/other", false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let repository = metadata_folder(root.path());
+            let outside = root.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let swapped = repository.join(".git").join(name);
+            let step = {
+                let swapped = swapped.clone();
+                Step::set(move |path, listing| {
+                    let kept = std::fs::symlink_metadata(path)
+                        .is_ok_and(|entry| entry.is_file() || entry.is_dir());
+                    if path != swapped || listing || !kept {
+                        return;
+                    }
+                    unlink(path);
+                    if pipe {
+                        let made = crate::spawn_gate::status(
+                            std::process::Command::new("/usr/bin/mkfifo").arg(path),
+                        )
+                        .unwrap();
+                        assert!(made.success());
+                    } else {
+                        std::os::unix::fs::symlink(&outside, path).unwrap();
+                    }
+                })
+            };
+            let refused = validate_metadata(&repository).unwrap_err();
+            drop(step);
+            assert_eq!(
+                refused.0,
+                format!("{UNTRUSTED_GIT_ENTRY}{name}"),
+                "pipe {pipe}"
+            );
+            let left = std::fs::symlink_metadata(&swapped).unwrap();
+            assert!(
+                !left.is_file() && !left.is_dir(),
+                "{name} was never swapped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_start_or_an_unreadable_folder_is_a_failure_not_an_entry_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = metadata_folder(root.path());
+        let git = repository.join(".git");
+        validate_admin(&repository, &git.join("worktrees/other")).unwrap();
+        assert!(validate_admin(&repository, &git.join("worktrees/absent")).is_err());
+        let closed = git.join("refs/heads");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = validate_metadata(&repository);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.is_err(), "an unreadable folder was skipped as gone");
+        validate_metadata(&repository).unwrap();
+        std::fs::remove_dir_all(&git).unwrap();
+        assert!(validate_metadata(&repository).is_err());
     }
 
     #[test]
