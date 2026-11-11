@@ -164,15 +164,17 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
         .transpose()
 }
 
-/// Says whether an agent's app waits in its pane, by the rule the engine types into it: it
-/// drew nothing for `APP_QUIET` and no question or permission prompt is on its screen. A
-/// host that cannot tell and a failed look say no. Takes the host and the pane name.
-/// Returns the answer.
+/// Says whether an agent's app waits for a message in its pane: it drew nothing for
+/// `APP_QUIET`, no question or permission prompt is on its screen, and the screen shows the
+/// app's own input prompt (see `idle_prompt`), so a still dialog the question rule does not
+/// know never counts as waiting. A host that cannot tell and a failed look say no. Takes
+/// the host and the pane name. Returns the answer.
 fn waits(host: &dyn Host, agent: &AgentId) -> bool {
+    use crate::team::events::{idle_prompt, question};
     matches!(host.quiet(agent), Ok(Some(quiet)) if quiet >= APP_QUIET)
         && host
             .screen(agent)
-            .is_ok_and(|screen| crate::team::events::question(&screen).is_none())
+            .is_ok_and(|screen| question(&screen).is_none() && idle_prompt(&screen))
 }
 
 fn host_failure(error: HostError) -> LaunchError {

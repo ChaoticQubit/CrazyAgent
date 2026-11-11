@@ -176,6 +176,8 @@ fn a_turn_still_running_is_stopped_before_the_pane_is_adopted() {
 #[cfg(target_os = "macos")]
 const DRAWING_HARNESS: &str = "while :; do printf 'working\\n'; sleep 0.2; done";
 #[cfg(target_os = "macos")]
+const IDLE_PROMPT: &str = "printf '\u{203a} Ask the agent to do anything\\n'; ";
+#[cfg(target_os = "macos")]
 const LOCAL_OUTPUT: &str =
     r#"{"type":"user","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}"#;
 
@@ -234,6 +236,30 @@ fn a_turn_that_does_not_stop_on_a_pane_that_still_draws_leaves_no_pane_behind() 
     assert!(host.alive().unwrap().is_empty());
 }
 
+/// OB-1 r1 (OB1-F1): a turn that does not stop on a still pane that shows no idle prompt
+/// ends the pane as before: what the screen shows cannot be told from a dialog, so the
+/// pane is not taken over idle, where engine input could be typed into it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_turn_that_does_not_stop_on_a_still_pane_with_no_idle_prompt_leaves_no_pane_behind() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(14).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+
+    let refused = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .err()
+    .map(|problem| problem.0);
+    assert_eq!(refused.as_deref(), Some("launch_adopt_unsettled"));
+    assert!(host.alive().unwrap().is_empty());
+}
+
 /// OB-1: a turn that does not stop on a pane whose app waits does not end the pane. The
 /// pane is taken over idle and keeps running.
 #[cfg(target_os = "macos")]
@@ -243,7 +269,7 @@ fn a_turn_that_does_not_stop_on_a_waiting_pane_is_adopted_idle() {
     let host = fixture.host();
     let agent = AgentId::team(11).unwrap();
     let file = fixture.transcript(&[TURN_OPEN]);
-    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let record = fixture.spawn(&host, &agent, &format!("{IDLE_PROMPT}exec cat"), &file);
 
     let mut session = TerminalSession::adopt(
         host.clone(),
@@ -273,7 +299,8 @@ fn a_stale_open_turn_on_a_waiting_pane_is_adopted_idle_with_nothing_typed() {
     let host = fixture.host();
     let agent = AgentId::team(12).unwrap();
     let file = fixture.transcript(&[TURN_OPEN, TURN_DONE, TURN_OPEN]);
-    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    let harness = format!("{IDLE_PROMPT}{ESCAPE_HARNESS}");
+    let record = fixture.spawn(&host, &agent, &harness, &file);
     std::thread::sleep(Duration::from_secs(5));
 
     let began = Instant::now();

@@ -15588,16 +15588,24 @@ fn a_live_master_turn_reported_as_none_closes_without_counting() {
 const LIVE_CODEX_STARTED: &str = r#"  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
 "#;
 
-/// A live Codex stand-in whose turn on a line with "never ends" opens and writes no end,
-/// and whose line with "late end" writes a reply and an end with no start before them.
-/// Takes nothing. Returns the script.
+#[cfg(target_os = "macos")]
+const LIVE_CODEX_READY: &str = r"Codex stand-in ready\n'";
+#[cfg(target_os = "macos")]
+const LIVE_CODEX_COMPOSER: &str = "Codex stand-in ready\\n\u{203a} Ask Codex to do anything\\n'";
+
+/// A live Codex stand-in that shows a composer row as its idle prompt, whose turn on a line
+/// with "never ends" opens and writes no end, and whose line with "late end" writes a reply
+/// and an end with no start before them. Takes nothing. Returns the script.
 #[cfg(target_os = "macos")]
 fn unclosed_codex() -> String {
     let started = format!(
         "  case \"$line\" in *\"late end\"*) ;; *)\n{LIVE_CODEX_STARTED}  ;; esac\n  case \"$line\" in *\"never ends\"*) continue ;; esac\n"
     );
     assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_STARTED).count(), 1);
-    LIVE_CODEX.replace(LIVE_CODEX_STARTED, &started)
+    assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_READY).count(), 1);
+    LIVE_CODEX
+        .replace(LIVE_CODEX_STARTED, &started)
+        .replace(LIVE_CODEX_READY, LIVE_CODEX_COMPOSER)
 }
 
 /// OB-1 in a real pane: a live master's turn that opens and that nothing closes, on an app

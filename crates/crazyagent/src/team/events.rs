@@ -62,6 +62,12 @@ const NOTIFICATION_HISTORY: &str = "1=1";
 const COLD_PAUSE: i64 = -1;
 const MARKERS: [char; 5] = ['❯', '›', '>', '▶', '→'];
 const BORDERS: [char; 4] = ['│', '|', '┃', '║'];
+const PROMPT_MARKS: [char; 3] = ['❯', '›', '>'];
+const COMPOSER_MARK: char = '›';
+const RULES: [char; 6] = ['─', '━', '╭', '╮', '╰', '╯'];
+const RULE_CHARS_MIN: usize = 3;
+const PROMPT_ROWS_BELOW_MAX: usize = 6;
+const COMPOSER_ROWS_BELOW_MAX: usize = 2;
 
 const _: () = assert!(EVENTS_QUEUED_MAX < EVENTS_PER_PROJECT_MAX);
 const _: () = assert!(EVENTS_QUEUED_PER_AGENT_MAX < EVENTS_QUEUED_MAX);
@@ -2042,14 +2048,7 @@ impl Choice {
 /// Finds the choice an agent's app waits on in its screen, as `question` describes. Takes
 /// the screen bytes. Returns the question line and at least two options, or none.
 pub fn choice(screen: &[u8]) -> Option<Choice> {
-    let rows: Vec<String> = screen_rows(screen)
-        .into_iter()
-        .map(|row| {
-            row.trim_matches(|c: char| BORDERS.contains(&c) || c.is_whitespace())
-                .to_owned()
-        })
-        .filter(|row| !row.is_empty())
-        .collect();
+    let rows = shown_rows(screen);
     let rows = &rows[rows.len().saturating_sub(SCREEN_ROWS_SCANNED)..];
     let first = rows
         .iter()
@@ -2086,6 +2085,51 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
         marker,
         below: rows[last + 1..].to_vec(),
     })
+}
+
+/// Reads a screen's rows that show something, each without its box borders and the spaces
+/// around it. Takes the screen bytes. Returns the rows in order.
+fn shown_rows(screen: &[u8]) -> Vec<String> {
+    screen_rows(screen)
+        .into_iter()
+        .map(|row| {
+            row.trim_matches(|c: char| BORDERS.contains(&c) || c.is_whitespace())
+                .to_owned()
+        })
+        .filter(|row| !row.is_empty())
+        .collect()
+}
+
+/// Says whether an agent's app shows its own input prompt at the bottom of its screen,
+/// empty or with a draft, so it waits for a message and for nothing else: Claude Code's
+/// prompt row between two rules with at most `PROMPT_ROWS_BELOW_MAX` rows below it, or
+/// Codex's composer row with at most `COMPOSER_ROWS_BELOW_MAX`. A dialog, a notice or a
+/// list drawn in its place is not one. Takes the screen bytes. Returns the answer.
+pub fn idle_prompt(screen: &[u8]) -> bool {
+    let rows = shown_rows(screen);
+    let Some(at) = rows.iter().rposition(|row| prompt_row(row)) else {
+        return false;
+    };
+    let below = &rows[at + 1..];
+    let boxed = at > 0 && ruled_row(&rows[at - 1]) && below.iter().any(|row| ruled_row(row));
+    let composer = rows[at].starts_with(COMPOSER_MARK);
+    (boxed && below.len() <= PROMPT_ROWS_BELOW_MAX)
+        || (composer && below.len() <= COMPOSER_ROWS_BELOW_MAX)
+}
+
+/// Says whether a shown row is an input prompt's first row: a prompt mark, then nothing or
+/// a space and a draft, and no numbered option. Takes the row. Returns the answer.
+fn prompt_row(row: &str) -> bool {
+    let mut rest = row.chars();
+    rest.next().is_some_and(|mark| PROMPT_MARKS.contains(&mark))
+        && matches!(rest.next(), None | Some(' '))
+        && option(row).is_none()
+}
+
+/// Says whether a shown row is a horizontal rule or a box's top or bottom edge. Takes the
+/// row. Returns the answer.
+fn ruled_row(row: &str) -> bool {
+    row.chars().count() >= RULE_CHARS_MIN && row.chars().all(|c| RULES.contains(&c))
 }
 
 /// Reads the wake rule in force for a project's agent: the agent's own, else the project's,
