@@ -32,7 +32,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
-use crazyagent::harnesses::update::{HarnessVersions, UpdateSettings};
+use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
 use crazyagent::memory::ReviewDecision;
@@ -347,7 +347,7 @@ async fn desktop_harness_install(
 async fn desktop_harness_update_settings(
     webview: Webview,
     state: State<'_, NativeState>,
-) -> Result<UpdateSettings, BridgeError> {
+) -> Result<crazyagent::harnesses::update::UpdateSettings, BridgeError> {
     main_window(&webview)?;
     read(&state).await?.harness_update_settings().await
 }
@@ -356,7 +356,7 @@ async fn desktop_harness_update_settings(
 async fn desktop_harness_set_update_settings(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: UpdateSettings,
+    settings: crazyagent::harnesses::update::UpdateSettings,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     read(&state)

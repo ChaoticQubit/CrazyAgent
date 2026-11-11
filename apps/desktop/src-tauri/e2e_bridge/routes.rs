@@ -12,7 +12,6 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
     use crazyagent::engine::owner::NativeAuthMethod;
-    use crazyagent::harnesses::update::UpdateSettings;
     use crazyagent::memory::ReviewDecision;
     use crazyagent::owner_profile::OwnerProfile;
     use crazyagent::plugins::Scope;
@@ -97,7 +96,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
-                settings: UpdateSettings,
+                settings: crazyagent::harnesses::update::UpdateSettings,
             }
             let Args { settings } = match parse(args) {
                 Ok(args) => args,
