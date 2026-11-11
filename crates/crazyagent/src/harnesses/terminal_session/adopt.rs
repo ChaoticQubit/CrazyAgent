@@ -235,8 +235,11 @@ fn replay(
 impl TerminalSession {
     /// Takes over an agent pane a previous engine left running, without starting the harness
     /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work; a turn that does not end ends the pane, with
-    /// `launch_adopt_unsettled` once its processes are confirmed gone and
+    /// longer be matched to the engine's work. An open turn whose record the harness last
+    /// wrote the launch's `stale_turn` ago, on a pane whose app waits (see `waits`), is no
+    /// turn: nothing is typed and the pane is taken over idle. A turn that does not end on
+    /// a pane whose app waits is taken over idle as well; on any other pane it ends the
+    /// pane, with `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
     /// budget go on counting from its start. A Codex pane still on its folder access screen
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
@@ -264,7 +267,13 @@ impl TerminalSession {
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
         let mut events = 0;
-        if replay(&mut reader, &limits, &mut events)? == Some(true) {
+        let open = replay(&mut reader, &limits, &mut events)? == Some(true);
+        let stale = open
+            && reader
+                .silent()
+                .is_some_and(|silent| silent >= limits.stale_turn)
+            && super::waits(host.as_ref(), &agent);
+        if open && !stale {
             host.input(&agent, ESCAPE).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;
             let mut settled = false;
@@ -279,7 +288,7 @@ impl TerminalSession {
                     )
                 });
             }
-            if !settled {
+            if !settled && !super::waits(host.as_ref(), &agent) {
                 return Err(failure(
                     match super::end_left_pane(host.as_ref(), &agent, "adopt") {
                         Ok(true) => "launch_adopt_unsettled",

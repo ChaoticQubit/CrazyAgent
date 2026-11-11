@@ -193,6 +193,14 @@ impl TranscriptReader {
         self.consumed
     }
 
+    /// Says how long ago the harness last wrote its record, by the modification time of the
+    /// file this reader holds open. Output: the time since, none before the record is open,
+    /// when the time cannot be read or when it lies in the future.
+    pub fn silent(&self) -> Option<Duration> {
+        let written = self.file.as_ref()?.metadata().ok()?.modified().ok()?;
+        written.elapsed().ok()
+    }
+
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
     /// scanning on from where the last read stopped and draining the used lines once, so many
     /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
