@@ -57,6 +57,17 @@ fn host(name: &str, port: u16) -> ModelHost {
     ModelHost::new(name, port).unwrap()
 }
 
+/// A port of [`PROXY_PORTS`] that a proxy held and let go a moment ago, so a row can use it
+/// as a saved port. The next proxies of this process start looking past it. Output: the
+/// port.
+fn let_go_block_port() -> u16 {
+    let proxy = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None, &[]).unwrap();
+    let port = proxy.port();
+    drop(proxy);
+    assert!(PROXY_PORTS.contains(&port));
+    port
+}
+
 /// Connects to the proxy on 127.0.0.1 and sends `request`. Inputs: the proxy and the bytes.
 /// Output: the connection, with a read bound so a test never hangs.
 fn ask(proxy: &ModelProxy, request: &[u8]) -> TcpStream {
@@ -165,19 +176,15 @@ fn the_proxy_variables_name_the_proxy_and_exempt_no_host() {
     }
 }
 
-/// S4B-2W1: a proxy started without a saved port takes a port of the fixed block 41300 to
-/// 41427 on both loopback addresses, and a second proxy started while the first holds its
-/// port takes another port of the block.
+/// S4B-2W1: a proxy started without a saved port takes a port of the fixed block on both
+/// loopback addresses, and a second proxy started while the first holds its port takes
+/// another port of the block.
 #[test]
 fn a_proxy_takes_a_port_of_the_fixed_block_and_skips_a_taken_one() {
     let first = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None, &[]).unwrap();
     let second = ModelProxy::bind(8, vec![host("api.anthropic.com", 443)], None, &[]).unwrap();
     for proxy in [&first, &second] {
-        assert!(
-            (41_300..=41_427).contains(&proxy.port()),
-            "{}",
-            proxy.port()
-        );
+        assert!(PROXY_PORTS.contains(&proxy.port()), "{}", proxy.port());
     }
     assert_ne!(first.port(), second.port());
     for address in ["127.0.0.1", "[::1]"] {
@@ -420,13 +427,50 @@ fn a_tunnel_past_the_bound_is_refused_with_503() {
 
 #[test]
 fn a_saved_port_another_process_holds_is_refused_and_a_free_one_is_kept() {
-    let taken = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = taken.local_addr().unwrap().port();
+    let port = let_go_block_port();
+    let taken = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, port)).unwrap();
     let refused = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], Some(port), &[]);
-    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        refused.as_ref().err().map(io::Error::kind),
+        Some(io::ErrorKind::AddrInUse),
+        "{refused:?}"
+    );
     drop(taken);
     let kept = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], Some(port), &[]).unwrap();
     assert_eq!(kept.port(), port);
+}
+
+#[test]
+fn a_saved_port_outside_the_proxy_ports_is_refused_and_never_bound() {
+    let free = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let picked = free.local_addr().unwrap().port();
+    drop(free);
+    assert!(!PROXY_PORTS.contains(&picked), "{picked}");
+    for port in [picked, PROXY_PORTS.start() - 1, PROXY_PORTS.end() + 1] {
+        let refused = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], Some(port), &[]);
+        assert_eq!(
+            refused.as_ref().err().map(io::Error::kind),
+            Some(io::ErrorKind::InvalidInput),
+            "a saved port {port} outside the proxy ports: {refused:?}"
+        );
+    }
+    assert!(
+        spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, picked)).is_err(),
+        "a proxy listens on {picked}"
+    );
+    let first = *PROXY_PORTS.start();
+    let other_block = if first == 41_300 { 29_300 } else { 41_300 };
+    let refused = ModelProxy::bind(
+        7,
+        vec![host("api.anthropic.com", 443)],
+        Some(other_block),
+        &[],
+    );
+    assert_eq!(
+        refused.as_ref().err().map(io::Error::kind),
+        Some(io::ErrorKind::InvalidInput),
+        "a port of the other platform's proxy ports: {refused:?}"
+    );
 }
 
 #[test]
@@ -519,13 +563,15 @@ fn the_proxy_holds_its_port_on_both_loopback_addresses_so_no_other_listener_stan
         &connect("example.com:443"),
     ));
     assert!(said.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{said}");
-    let holder = spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, 0)).unwrap();
-    let held = holder.local_addr().unwrap().port();
+    let held = let_go_block_port();
+    let holder = spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, held)).unwrap();
     let refused = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], Some(held), &[]);
-    assert!(
-        refused.is_err(),
+    assert_eq!(
+        refused.as_ref().err().map(io::Error::kind),
+        Some(io::ErrorKind::AddrInUse),
         "a saved port whose ::1 side another listener holds was taken: {refused:?}"
     );
+    drop(holder);
 }
 
 #[test]

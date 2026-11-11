@@ -503,6 +503,12 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
                 result: Err(busy()),
             }))
         }
+        Request::Roadmap(query) => {
+            OwnerEvent::Roadmap(Box::new(super::client::roadmap::RoadmapEvent {
+                query: *query,
+                result: Err(busy()),
+            }))
+        }
         Request::Questions(query) => {
             OwnerEvent::Questions(Box::new(super::client::questions::QuestionsEvent {
                 query: *query,
@@ -562,6 +568,7 @@ fn send(
         Request::Changes(query) => connection.changes(*query),
         Request::Process(query) => connection.process(*query),
         Request::Recovery(query) => connection.recovery(*query),
+        Request::Roadmap(query) => connection.roadmap(*query),
         Request::Questions(query) => connection.questions(*query),
         Request::Cleanup(query) => connection.cleanup(*query),
         Request::Reveal(query) => connection.reveal(*query),

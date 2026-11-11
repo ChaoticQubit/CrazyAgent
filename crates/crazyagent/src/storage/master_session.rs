@@ -1099,6 +1099,7 @@ fn delete_session(
         "DELETE FROM master_turns WHERE session=?1",
         "DELETE FROM team_master_conversations WHERE session=?1",
         "DELETE FROM session_owner_turns WHERE session=?1",
+        "DELETE FROM session_messages WHERE session=?1",
         "DELETE FROM session_marks WHERE session=?1",
     ] {
         tx.execute(statement, [id.as_str()]).map_err(error)?;
@@ -1341,6 +1342,10 @@ fn now_ms() -> Result<u64, EngineError> {
 }
 
 fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineError> {
+    assert!(
+        turn.activity.is_empty(),
+        "master turn activity is never stored"
+    );
     let changed = tx
         .execute(
             "UPDATE master_turns SET phase=?1,body=?2 WHERE session=?3 AND id=?4",
@@ -1353,6 +1358,14 @@ fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineEr
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
+    if let Some(reply) = &turn.reply {
+        crate::master_sessions::one_turn_reply(
+            tx,
+            &turn.session_id,
+            turn.id.as_str(),
+            &reply.text,
+        )?;
+    }
     Ok(())
 }
 
@@ -2565,10 +2578,27 @@ const HISTORY_HEADER: &str = "Conversation so far, oldest first:";
 const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
 const INPUT_GONE: &str = "(This message is no longer kept.)";
 
+/// Takes from the live terminal exchanges still to place the ones that followed one
+/// engine-run turn, or with None the ones before every such turn. Inputs: the exchanges
+/// and the turn id. Output: their entries, oldest first; the rest stay.
+fn exchanges_after(
+    live: &mut Vec<crate::master_sessions::LiveExchange>,
+    turn: Option<&str>,
+) -> Vec<String> {
+    let before = live.len();
+    let (here, rest): (Vec<_>, Vec<_>) = std::mem::take(live)
+        .into_iter()
+        .partition(|exchange| exchange.after_turn.as_deref() == turn);
+    *live = rest;
+    assert_eq!(here.len() + live.len(), before);
+    here.into_iter().map(|exchange| exchange.entry).collect()
+}
+
 /// Reads the earlier turns of this conversation that reached a model, oldest first, as
 /// the entries the next prompt carries. Inputs: the transaction, session and current
 /// turn. Output: one "Owner:" entry per turn with its reply or a no-reply line, then one
-/// "Engine:" line per task that turn handed to the team.
+/// "Engine:" line per task that turn handed to the team; and, in its place among them,
+/// one entry per exchange of the session's live terminal, whatever harness ran there.
 fn prior_turns(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -2585,7 +2615,9 @@ fn prior_turns(
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let mut entries = Vec::new();
+    let mut live = crate::master_sessions::live_exchanges(tx, &session.session_id)?;
+    let mut entries = exchanges_after(&mut live, None);
+    let mut turns = 0usize;
     for body in bodies {
         let body = body.ok_or_else(|| error("master_turn_bounds"))?;
         let earlier: MasterTurnView = serde_json::from_str(&body).map_err(error)?;
@@ -2596,6 +2628,7 @@ fn prior_turns(
             earlier.phase,
             MasterTurnPhase::Succeeded | MasterTurnPhase::Failed | MasterTurnPhase::Uncertain
         ) {
+            entries.extend(exchanges_after(&mut live, Some(earlier.id.as_str())));
             continue;
         }
         let asked = match &earlier.engine_request {
@@ -2616,8 +2649,12 @@ fn prior_turns(
             entry.push_str(&task.line());
         }
         entries.push(entry);
+        turns += 1;
+        entries.extend(exchanges_after(&mut live, Some(earlier.id.as_str())));
     }
-    assert!(entries.len() < usize::try_from(turn.ordinal).map_err(error)?);
+    entries.extend(live.into_iter().map(|exchange| exchange.entry));
+    assert!(turns < usize::try_from(turn.ordinal).map_err(error)?);
+    assert!(turns <= entries.len());
     Ok(entries)
 }
 
@@ -4376,13 +4413,42 @@ fn queue_turn(
         tasks: Vec::new(),
         changes: None,
         engine_request,
+        activity: Vec::new(),
         detail: None,
         cause: None,
     };
     let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![session.session_id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(turn.input_cursor.value())?, encode(&turn)?]).map_err(error)?;
     assert_eq!(changed, 1);
+    note_asked(tx, session, &turn)?;
     session.current_turn = Some(turn.id);
     Ok(())
+}
+
+/// Stores what a newly queued turn asked in the session's one conversation store: the
+/// owner's message, or the line of the engine's own request. Inputs: the transaction,
+/// session and turn. Output: Ok once stored.
+fn note_asked(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<(), EngineError> {
+    use crate::master_sessions::Asked;
+    let message = match &turn.engine_request {
+        Some(_) => None,
+        None => turn_input(tx, session, turn)?,
+    };
+    let asked = match &turn.engine_request {
+        Some(request) => Asked::Engine(&request.line),
+        None => Asked::Owner(message.as_deref()),
+    };
+    crate::master_sessions::one_turn_asked(
+        tx,
+        &session.project_id,
+        &session.session_id,
+        session.selection.backend,
+        turn.id.as_str(),
+        &asked,
+    )
 }
 
 /// Keeps a Resolve the owner asked for while the master's turn was outstanding, so the
@@ -6799,6 +6865,41 @@ mod sign_in_gap_tests {
             );
         }
         assert_eq!(sign_in_gap(NativeAuthPhase::AuthenticatedObserved), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod activity_store_tests {
+    use super::*;
+    use crate::master_session::MasterActivityLine;
+
+    #[test]
+    #[should_panic(expected = "master turn activity is never stored")]
+    fn a_turn_read_with_its_live_activity_is_never_saved_back() {
+        let db = Connection::open_in_memory().unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        let turn = MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Running,
+            reason: None,
+            attempt: None,
+            runtime: None,
+            reply: None,
+            accounts: Vec::new(),
+            tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
+            activity: vec![MasterActivityLine {
+                at_ms: 1,
+                text: "Reading src/app.ts".into(),
+            }],
+            detail: None,
+            cause: None,
+        };
+        let _ = save_turn(&tx, &turn);
     }
 }
 

@@ -36,6 +36,7 @@ pub use transport::recovery::{
     BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
     RecoveryBanner, RunShown,
 };
+pub use transport::roadmap::ROADMAP_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
@@ -187,7 +188,7 @@ pub enum OwnerMutation {
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        kept: Option<Vec<String>>,
+        kept: Option<Vec<crate::project_setup::KeptFile>>,
     },
     RemoveProject {
         project_id: ProjectId,

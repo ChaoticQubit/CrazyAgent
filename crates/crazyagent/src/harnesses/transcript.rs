@@ -19,6 +19,23 @@ const EXCERPT_MESSAGES_MAX: usize = 256;
 const CLAUDE_NOTIFICATION: &str = "<task-notification>";
 const CLAUDE_NOTIFICATION_MODE: &str = "task-notification";
 const NOTIFIED_TASKS_MAX: usize = 16;
+const CLAUDE_ASIDES: [&str; 10] = [
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<local-command-caveat>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<system-reminder>",
+    "<user-prompt-submit-hook>",
+];
+const CLAUDE_NOT_PROMPTS: [&str; 3] = [
+    "isCompactSummary",
+    "isVisibleInTranscriptOnly",
+    "isSidechain",
+];
 
 /// One fact read from a harness's own session record, whatever the harness.
 /// `Waiting` means the harness waits for the owner, such as an approval or a question.
@@ -27,6 +44,8 @@ const NOTIFIED_TASKS_MAX: usize = 16;
 /// ends with its task notification, or with the agent's own stop of it, which brings none.
 /// Claude Code records a notification that comes while the agent is idle as a user message
 /// that starts a turn, and one that comes during a turn as a queued command attachment.
+/// Any other Claude Code user line starts a turn only when it is a prompt the model answers
+/// (see `claude_prompt`); the model's first line after one that is not starts it instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
     TurnStarted,
@@ -54,6 +73,8 @@ pub struct TranscriptReader {
     pending: Vec<u8>,
     scanned: usize,
     in_turn: bool,
+    aside: bool,
+    dropped: bool,
     consumed: u64,
 }
 
@@ -102,6 +123,8 @@ impl TranscriptReader {
             pending: Vec::new(),
             scanned: 0,
             in_turn: false,
+            aside: false,
+            dropped: false,
             consumed: 0,
         }
     }
@@ -172,6 +195,23 @@ impl TranscriptReader {
         self.consumed
     }
 
+    /// Says how long ago the harness last wrote its record, by the modification time of the
+    /// file this reader holds open. Output: the time since, none before the record is open,
+    /// when the time cannot be read or when it lies in the future.
+    pub fn silent(&self) -> Option<Duration> {
+        let written = self.file.as_ref()?.metadata().ok()?.modified().ok()?;
+        written.elapsed().ok()
+    }
+
+    /// Forgets the open turn as no turn: its end, if one comes alone, is given no more. The
+    /// model at work in it later, with text or a tool, starts it again, so it is followed
+    /// and ends like any other. Takes the reader, which must be in a turn. Returns nothing.
+    pub fn drop_turn(&mut self) {
+        assert!(self.in_turn);
+        self.in_turn = false;
+        self.dropped = true;
+    }
+
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
     /// scanning on from where the last read stopped and draining the used lines once, so many
     /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
@@ -220,10 +260,17 @@ impl TranscriptReader {
             };
             let facts = match self.source {
                 Transcript::CodexRollouts { .. } => codex_facts(&value),
-                Transcript::ClaudeSession { .. } => claude_facts(&value),
+                Transcript::ClaudeSession { .. } => self.claude_line(&value),
                 Transcript::Unavailable => Vec::new(),
             };
             for fact in facts {
+                let works = matches!(
+                    fact,
+                    TranscriptEvent::Text { .. } | TranscriptEvent::ToolUse { .. }
+                );
+                if works && self.dropped && !self.in_turn {
+                    events.extend(self.track(TranscriptEvent::TurnStarted));
+                }
                 if let Some(fact) = self.track(fact) {
                     events.push(fact);
                 }
@@ -239,15 +286,36 @@ impl TranscriptReader {
         Ok(events)
     }
 
+    /// Reads one Claude Code line with what the reader knows. The model's first line after
+    /// a user line that carried text yet was no prompt, such as a typed command that runs a
+    /// prompt, starts the turn that line did not, so the turn is followed and ends like any
+    /// other; a sub-agent's line starts none. Takes the line. Returns its facts in order.
+    fn claude_line(&mut self, value: &Value) -> Vec<TranscriptEvent> {
+        let mut facts = claude_facts(value);
+        let answer =
+            value["type"] == "assistant" && value["isSidechain"] != true && !facts.is_empty();
+        if answer && self.aside && !self.in_turn {
+            facts.insert(0, TranscriptEvent::TurnStarted);
+        }
+        self.aside |= claude_aside(value);
+        facts
+    }
+
     fn track(&mut self, fact: TranscriptEvent) -> Option<TranscriptEvent> {
         match fact {
             TranscriptEvent::TurnStarted => {
                 self.in_turn = true;
+                self.aside = false;
+                self.dropped = false;
                 Some(fact)
             }
-            TranscriptEvent::TurnFinished { .. } if !self.in_turn => None,
+            TranscriptEvent::TurnFinished { .. } if !self.in_turn => {
+                self.aside = false;
+                None
+            }
             TranscriptEvent::TurnFinished { .. } => {
                 self.in_turn = false;
+                self.aside = false;
                 Some(fact)
             }
             other => Some(other),
@@ -527,6 +595,37 @@ fn content_texts(content: &Value) -> Vec<&str> {
     }
 }
 
+/// Says whether a Claude Code user line is a prompt the model answers, the only user line
+/// that starts a turn. A compact summary, a transcript-only line, a sub-agent's line and a
+/// line that carries a tool result are none; neither is text that starts with one of
+/// `CLAUDE_ASIDES`, which Claude Code writes for a local command, bash mode, a reminder or
+/// a hook without calling the model. Takes the line and its texts. Returns the answer.
+fn claude_prompt(value: &Value, texts: &[&str]) -> bool {
+    let marked = CLAUDE_NOT_PROMPTS.iter().any(|key| value[*key] == true);
+    let result = value["message"]["content"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["type"] == "tool_result"));
+    let typed = |text: &&str| {
+        let text = text.trim_start();
+        !text.is_empty() && !CLAUDE_ASIDES.iter().any(|tag| text.starts_with(tag))
+    };
+    !marked && !result && texts.iter().any(typed)
+}
+
+/// Says whether a Claude Code line is a user line that carries text yet starts no turn: not
+/// a meta line, not an interrupt and no prompt. The model may still answer one, as it does a
+/// typed command that runs a prompt. Takes the line. Returns the answer.
+fn claude_aside(value: &Value) -> bool {
+    if value["type"] != "user" || value["isMeta"] == true {
+        return false;
+    }
+    let texts = content_texts(&value["message"]["content"]);
+    let interrupt = texts
+        .iter()
+        .any(|text| text.starts_with(CLAUDE_INTERRUPTED));
+    !texts.is_empty() && !interrupt && !claude_prompt(value, &texts)
+}
+
 fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
     let message = &value["message"];
     match value["type"].as_str() {
@@ -569,7 +668,7 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                     TranscriptEvent::Interrupted,
                     TranscriptEvent::TurnFinished { success: false },
                 ]);
-            } else if !texts.is_empty() {
+            } else if claude_prompt(value, &texts) {
                 facts.push(TranscriptEvent::TurnStarted);
             }
             facts
@@ -960,6 +1059,59 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
         }
     }
     Some(typed)
+}
+
+/// Reads what was typed into a harness conversation after byte `offset` of its record,
+/// with where each typed line ends, so a caller can read on from one typed message to the
+/// next. Only lines the harness finished are read, from at most `EXCERPT_TAIL_BYTES_MAX`
+/// bytes past the offset, never following a link. A Claude Code line is typed only when it
+/// is a prompt that starts a turn (`claude_prompt`), so a compact summary, a line only the
+/// transcript shows or a sub-agent's line is never read as a turn's words. Takes the
+/// harness, the record and the
+/// offset. Returns the typed texts oldest first, each with the byte offset just past its
+/// line, and the offset just past the last line read; none when the record cannot be read
+/// or is now shorter than the offset.
+pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
+    let mut file = open_plain(record)?;
+    let length = file.metadata().ok()?.len();
+    if length < offset {
+        return None;
+    }
+    let mut read = Vec::new();
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.take(EXCERPT_TAIL_BYTES_MAX)
+        .read_to_end(&mut read)
+        .ok()?;
+    let mut typed = Vec::new();
+    let mut end = offset;
+    for line in read.split_inclusive(|byte| *byte == b'\n') {
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        end += u64::try_from(line.len()).ok()?;
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let said = match harness {
+            "codex" => codex_message(&value),
+            "claude-code"
+                if claude_prompt(&value, &content_texts(&value["message"]["content"])) =>
+            {
+                claude_message(&value)
+            }
+            _ => None,
+        };
+        if let Some((Speaker::Input, text)) = said {
+            typed.push((end, text));
+        }
+    }
+    let read_bytes = u64::try_from(read.len()).ok()?;
+    if end == offset && read_bytes == EXCERPT_TAIL_BYTES_MAX {
+        end = offset + read_bytes;
+    }
+    assert!(end >= offset);
+    assert!(end - offset <= EXCERPT_TAIL_BYTES_MAX);
+    Some((typed, end))
 }
 
 #[cfg(all(test, unix))]

@@ -748,6 +748,13 @@ pub enum LinuxSockets {
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
+/// Why a sandbox with an open network does not start on a Linux that cannot keep ports
+/// free. Only Landlock network rules (Linux 6.7 or newer) keep an agent's listeners off the
+/// owner's fixed ports, the kept local model ports and the model proxy ports; without them
+/// the launch is refused instead of started unprotected (DEC-137 addendum 2).
+pub const LINUX_OPEN_NETWORK_NEEDS_LANDLOCK: &str = "keeping the owner's ports free of an \
+     open-network agent needs Landlock network rules (Linux 6.7 or newer)";
+
 /// The launch refusal when, under `TcpOnly`, a harness that looks host names up is not a
 /// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
 pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";

@@ -43,6 +43,11 @@ fn stored(
         harness: Some(harness.into()),
         text: text.map(str::to_owned),
         at_ms: 1_000,
+        source: match (speaker, mode) {
+            (MessageSpeaker::Switch, _) => crate::master_sessions::MessageSource::Switch,
+            (_, MasterMode::Live) => crate::master_sessions::MessageSource::Terminal,
+            (_, MasterMode::OneTurn) => crate::master_sessions::MessageSource::Turn,
+        },
     }
 }
 

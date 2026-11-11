@@ -716,7 +716,10 @@ impl ProjectPage {
                 text: waiting.text.clone(),
                 error: false,
             });
-            transcript.status = MasterStatus::Thinking { since_ms: None };
+            transcript.status = MasterStatus::Thinking {
+                since_ms: None,
+                activity: Vec::new(),
+            };
         }
         Some(transcript)
     }
@@ -1241,6 +1244,11 @@ impl ProjectPage {
         if let Some(query) = self.screen.recovery.next_query(now_ms()) {
             ctx.request(Request::Recovery(Box::new(query)));
         }
+        if matches!(self.screen.tab, Tab::Overview | Tab::Settings)
+            && let Some(query) = self.screen.roadmap.next_query(now_ms())
+        {
+            ctx.request(Request::Roadmap(Box::new(query)));
+        }
         if self.screen.tab == Tab::Changes
             && let Some(query) = self.screen.changes.next_query(now_ms())
         {
@@ -1733,6 +1741,9 @@ impl Screen for ProjectPage {
                 OwnerEvent::Questions(event) => self.screen.questions.apply(event),
                 OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
                     self.screen.recovery.apply(event);
+                }
+                OwnerEvent::Roadmap(event) if event.query.project() == &self.screen.project => {
+                    self.screen.roadmap.apply(event);
                 }
                 OwnerEvent::Process(event) => {
                     self.import_arrived(event, ctx);

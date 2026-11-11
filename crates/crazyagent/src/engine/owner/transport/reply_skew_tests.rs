@@ -480,6 +480,7 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
         ("process", include_str!("process.rs")),
         ("questions", include_str!("questions.rs")),
         ("recovery", include_str!("recovery.rs")),
+        ("roadmap", include_str!("roadmap.rs")),
         ("usage", include_str!("usage.rs")),
     ];
     let expected: &[(&str, &[&str])] = &[
@@ -521,6 +522,7 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
         ),
         ("questions", &["List", "Counts"]),
         ("recovery", &["List"]),
+        ("roadmap", &["ReadStatus"]),
         ("usage", &["Report", "Metrics"]),
     ];
     assert_eq!(sources.len(), expected.len());

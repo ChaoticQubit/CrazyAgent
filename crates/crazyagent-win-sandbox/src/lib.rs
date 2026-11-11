@@ -11,4 +11,4 @@ pub mod request;
 mod win;
 
 #[cfg(windows)]
-pub use win::{BoundaryError, release, run};
+pub use win::{BoundaryError, final_name, release, run};

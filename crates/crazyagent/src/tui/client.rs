@@ -34,6 +34,7 @@ pub(super) mod process;
 mod project_setup;
 pub(super) mod questions;
 pub(super) mod recovery;
+pub(super) mod roadmap;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
@@ -65,6 +66,7 @@ enum Job {
     Changes(Box<changes::ChangesQuery>),
     Process(Box<process::ProcessQuery>),
     Recovery(Box<recovery::RecoveryQuery>),
+    Roadmap(Box<roadmap::RoadmapQuery>),
     Questions(Box<questions::QuestionsQuery>),
     Cleanup(Box<cleanup::CleanupQuery>),
     Reveal(Box<ide::RevealQuery>),
@@ -190,6 +192,7 @@ pub(super) enum OwnerEvent {
     Changes(Box<changes::ChangesEvent>),
     Process(Box<process::ProcessEvent>),
     Recovery(Box<recovery::RecoveryEvent>),
+    Roadmap(Box<roadmap::RoadmapEvent>),
     Questions(Box<questions::QuestionsEvent>),
     Cleanup(Box<cleanup::CleanupEvent>),
     Reveal(Box<ide::RevealEvent>),
@@ -759,6 +762,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Recovery(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Roadmap(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.roadmap(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => roadmap::RoadmapEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Roadmap(Box::new(event)),
                                 })
                                 .is_err()
                             {

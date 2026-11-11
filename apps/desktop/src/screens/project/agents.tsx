@@ -7,7 +7,7 @@ import type { GraphNode, IntentReceipt, TeamStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { accountName, changeOutcome, finishedRows, nearBottom, pauseSummary, researchActions, researchRow, teamPanel } from "./research";
+import { changeOutcome, finishedRows, nearBottom, pauseSummary, researchActions, researchRow, teamPanel } from "./research";
 import { AgentUsageCard } from "./usage";
 import { FinishedAgentsCleanup } from "./cleanup";
 import type { ResearchRow } from "./research";
@@ -227,7 +227,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     {team.result?.kind === "ok" && team.result.value.paused && <StopAll projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
-    <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)}
+    <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)}
       {...bar} />
     <details className="pj-stack-s" aria-label="Agents and tasks">
       <summary><strong>Agents and tasks</strong> <span className="pj-small pj-muted">Stop all, Hand a task, the team's agents and tasks, wake rules and usage.</span></summary>

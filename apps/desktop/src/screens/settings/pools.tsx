@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { projectsUsing } from "../../api-projects";
-import { accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
+import { accountLabels, accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
 import { loadUsage, type AccountLimits } from "../../api-usage";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import {
@@ -205,7 +205,8 @@ function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry, 
   const rows = found?.accounts ?? [];
   const ready = rows.filter((item) => item.standing.kind === "next");
   const held = rows.filter((item) => item.standing.kind !== "next");
-  const byId = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account]) : []);
+  const labels = accountLabels(accounts.kind === "ok" ? accounts.value : []);
+  const byId = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, { ...account, name: labels.get(account.id) ?? account.name }]) : []);
   const members = new Map(pool.members.map((member) => [member.id, member]));
   const row = (item: RankedAccount, at: number | null) => <OrderRow key={item.connection} item={item} at={at} account={byId.get(item.connection)} member={members.get(item.connection)}
     schedule={schedule.kind === "ok" ? schedule.value : undefined} limits={limits} nowMs={nowMs}
@@ -291,9 +292,10 @@ function AddPanel({ pool, accounts, onAdd, onDone }: { pool: PoolSummary; accoun
   const members = pool.members.map((member) => member.id);
   const full = members.length >= POOL_MEMBER_MAX;
   const providers = [...new Map(all.map((account) => [account.provider, account.provider_name])).entries()];
+  const labels = accountLabels(all);
   const line = (account: AccountView) => <div key={account.id} className="pool-add-row">
-    <span className="pick-words"><span className="ellipsis">{account.name}</span><span className="small secondary ellipsis">{`${account.provider_name}. ${account.status_label}.`}</span></span>
-    <Button size="small" aria-label={`Add ${account.name}`} data-control={`add:${account.id}`} aria-disabled={full || undefined} onClick={() => onAdd(account)}>Add</Button>
+    <span className="pick-words"><span className="ellipsis">{labels.get(account.id) ?? account.name}</span><span className="small secondary ellipsis">{`${account.provider_name}. ${account.status_label}.`}</span></span>
+    <Button size="small" aria-label={`Add ${labels.get(account.id) ?? account.name}`} data-control={`add:${account.id}`} aria-disabled={full || undefined} onClick={() => onAdd(account)}>Add</Button>
   </div>;
   return <div className="pool-add">
     <div className="set-bar">
@@ -584,7 +586,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const prepareAll = async (pool: PoolSummary) => {
     setPreparing(pool.id);
     setRefusal(undefined);
-    const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
+    const names = accountLabels(accounts.kind === "ok" ? accounts.value : []);
     const ids = keyedMembers(pool);
     const failures = await readyEach(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })), session.noteResult);
     setPreparing(null);

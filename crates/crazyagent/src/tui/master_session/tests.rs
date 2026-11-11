@@ -46,6 +46,7 @@ fn stored_row(seq: u64, text: Option<&str>) -> SessionMessage {
         harness: Some("claude-code".into()),
         text: text.map(str::to_owned),
         at_ms: 1_000 + seq,
+        source: crate::master_sessions::MessageSource::Terminal,
     }
 }
 
