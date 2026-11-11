@@ -788,6 +788,33 @@ test("Edit with AI says what it waits for while it reads the pools and while the
   assert.match(running, /role="status"[^>]*>A model is cleaning up the saved instructions\. This can take up to 5 minutes\. Nothing changes until you accept\./);
 });
 
+test("the editor takes no edits while Edit with AI runs or shows a proposal, so a stale Accept cannot drop typed lines", () => {
+  const project = { kind: "project", id: "alpha", name: "Alpha" };
+  const steps = [{ kind: "pools" }, { kind: "choosing", pools: [{ id: "pool-a", name: "Pool A" }], picked: null }, { kind: "running" },
+    { kind: "proposed", proposal: { text: "Use TDD.\n", base_version: 1 } }];
+  const button = (markup, label) => {
+    const end = markup.indexOf(`${label}</button>`);
+    assert.ok(end >= 0, `the page has a ${label} button`);
+    return markup.slice(markup.lastIndexOf("<button", end), end);
+  };
+  for (const scope of [{ kind: "app" }, project]) {
+    const shown = scope.kind === "app" ? {} : { view: "edit", mode: "both" };
+    const open = page({ scope, ...shown });
+    assert.doesNotMatch(open, /<textarea[^>]*readonly/i, `${scope.kind}: the editor takes typing when no Edit with AI step is open`);
+    assert.doesNotMatch(open, /Edit with AI is open/);
+    for (const cleanup of steps) {
+      const locked = page({ scope, ...shown, cleanup });
+      assert.match(locked, /<textarea[^>]*readonly=""/i, `${scope.kind}, ${cleanup.kind}: the editor is read-only`);
+      assert.match(locked, /Read-only while Edit with AI is open\./, `${scope.kind}, ${cleanup.kind}: the editor says why it takes no typing`);
+      const writers = scope.kind === "app" ? ["Import from file", "Use the CrazyAgent default process"] : ["Use app default"];
+      for (const label of writers) {
+        assert.match(button(locked, label), /disabled=""/, `${scope.kind}, ${cleanup.kind}: ${label} cannot replace the editor's text`);
+        assert.doesNotMatch(button(open, label), /disabled/, `${label} works when no step is open`);
+      }
+    }
+  }
+});
+
 test("a proposal shows as a line diff with Accept and Discard, and nothing is saved by showing it", () => {
   const project = { kind: "project", id: "alpha", name: "Alpha" };
   for (const scope of [{ kind: "app" }, project]) {

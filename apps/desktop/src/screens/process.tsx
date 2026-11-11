@@ -238,6 +238,8 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   const invalid = processTextError(draft)
     ?? (scope.kind === "project" && mode === "project_only" && draft.trim() === "" ? "Under Project only an empty file leaves agents with no instructions." : undefined);
   const changed = draft !== saved.value;
+  const locked = cleanup !== null;
+  const size = `${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}${locked ? ". Read-only while Edit with AI is open." : ""}`;
   const waits = changed ? "Save or discard your edits to use Edit with AI."
     : saved.value.trim() === "" ? "Write some instructions first; Edit with AI cleans up what is saved." : "";
   const ai = editWithAi && <>
@@ -271,15 +273,15 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
         actions={<Segmented label="How the instructions show" value={editing ? "edit" : "read"} options={INSTRUCTION_VIEWS} onValue={(next) => onView?.(next)} />}>
         {editing
           ? <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
-            <TextArea id="process-project" label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
-              helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
+            <TextArea id="process-project" label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save" || locked}
+              helper={size} />
             <span className="row">
               <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
                 disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
               {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
               {mode === "project_only"
                 ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick App and project or App only under Delivery.</span>
-                : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
+                : mode !== null && <Button disabled={busy !== null || locked || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
               <span className="small muted">{note}</span>
               {ai}
             </span>
@@ -297,16 +299,16 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
     {proposal}
     <SettingSection title="Start from" about="Both open a preview first. Nothing changes until you save.">
       <SettingLine label="Your own file" help="Read a text file into the editor.">
-        <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import from file</Button>
+        <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null || locked} onClick={onImport}>Import from file</Button>
       </SettingLine>
       <SettingLine label="CrazyAgent default" help="The process CrazyAgent ships with.">
-        <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null} onClick={onDefault}>Use the CrazyAgent default process</Button>
+        <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null || locked} onClick={onDefault}>Use the CrazyAgent default process</Button>
       </SettingLine>
     </SettingSection>
     <SettingSection title={<label htmlFor="process-app">Instructions for agents</label>} changed={changed}>
       <form className="set-body" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
-        <TextArea id="process-app" label="Instructions for agents" labelOutside value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
-          helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
+        <TextArea id="process-app" label="Instructions for agents" labelOutside value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save" || locked}
+          helper={size} />
         <span className="row">
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
             disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
