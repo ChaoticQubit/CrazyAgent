@@ -1001,14 +1001,17 @@ pub(crate) fn refused_config_line(code: &str, repository: &str) -> Option<String
     ))
 }
 
+/// Checks every entry of a repository's own Git config against [`REFUSED_KEYS`]. Input: the
+/// repository. Output: nothing, or `repository_config_refused:` with the refusing rule's
+/// code. The listing is bounded by the engine Git output bound, [`OUTPUT_BYTES_MAX`], so a
+/// repository with thousands of tracked branches is read whole and a longer one fails as
+/// that command does.
 fn validate_config(repository: &Path) -> Result<(), EngineError> {
     let bytes = git(
         repository,
         &["config", "--local", "--no-includes", "--null", "--list"],
     )?;
-    if bytes.len() > 65536 {
-        return Err(error("git_config_capacity"));
-    }
+    assert!(bytes.len() <= OUTPUT_BYTES_MAX);
     for record in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let record = std::str::from_utf8(record).map_err(error)?;
         let (key, value) = record
@@ -1021,7 +1024,6 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
             return Err(error(format!("{CONFIG_REFUSED}{}", rule.code)));
         }
     }
-    assert!(bytes.len() <= 65536);
     Ok(())
 }
 
