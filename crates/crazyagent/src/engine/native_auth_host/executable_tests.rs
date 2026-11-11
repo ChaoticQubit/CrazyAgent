@@ -64,13 +64,15 @@ fn native_auth_registered_executable_verified_sha256_rejects_replacement() {
 
 /// Off macOS a request that verifies the claude and codex harnesses, the way a harness catalog
 /// or a launch does, hashes each one again only until one matching hash starts
-/// [`super::SETTLE_AFTER`] past its seen identity; after that a request hashes nothing.
+/// [`super::SETTLE_AFTER`] past its seen identity and past its change time; after that a
+/// request hashes nothing. The row waits that time for real: the change time is the file's
+/// own, which no test can move back.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn off_macos_a_request_hashes_each_harness_only_until_it_settles() {
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir().unwrap();
-    let mut harnesses = ["claude", "codex"]
+    let harnesses = ["claude", "codex"]
         .map(|name| RegisteredNativeAuthHost::capture(&executable(root.path(), name)).unwrap());
     let request = |harnesses: &[RegisteredNativeAuthHost; 2]| {
         for registered in harnesses {
@@ -100,9 +102,12 @@ fn off_macos_a_request_hashes_each_harness_only_until_it_settles() {
         .iter()
         .filter(|registered| !registered.settled.load(Ordering::Acquire))
         .count();
-    for registered in &mut harnesses {
-        registered.seen = registered.seen.checked_sub(super::SETTLE_AFTER).unwrap();
-    }
+    std::thread::sleep(super::SETTLE_AFTER);
+    assert!(
+        harnesses
+            .iter()
+            .all(|registered| registered.seen.elapsed() >= super::SETTLE_AFTER)
+    );
     let settling = request(&harnesses);
     assert_eq!(settling, fresh + unsettled);
     assert!(
