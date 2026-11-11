@@ -238,7 +238,8 @@ impl TerminalSession {
     /// longer be matched to the engine's work. An open turn whose record the harness last
     /// wrote the launch's `stale_turn` ago, on a pane whose app waits (see `waits`), is no
     /// turn: nothing is typed and the pane is taken over idle. A turn that does not end on
-    /// a pane whose app waits is taken over idle as well; on any other pane it ends the
+    /// a pane whose app waits is taken over idle as well, and either is dropped in the
+    /// record's reader (see `TranscriptReader::drop_turn`); on any other pane it ends the
     /// pane, with `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
     /// budget go on counting from its start. A Codex pane still on its folder access screen
@@ -296,7 +297,14 @@ impl TerminalSession {
                     },
                 ));
             }
-            replay(&mut reader, &limits, &mut events)?;
+            if settled {
+                replay(&mut reader, &limits, &mut events)?;
+            } else {
+                reader.drop_turn();
+            }
+        }
+        if stale {
+            reader.drop_turn();
         }
         let unkept = host.unkept(&agent);
         let unconfined = !matches!(
@@ -328,7 +336,6 @@ impl TerminalSession {
             live: false,
             own: false,
             grown: (0, Instant::now()),
-            stale_told: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
             exited: false,

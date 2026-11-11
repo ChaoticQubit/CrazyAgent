@@ -9416,8 +9416,8 @@ fn live_adopted(
 /// engine, which types no message before that, and a look that fails before the pane
 /// ends is tried again on the next pass, except Codex's folder access step running out,
 /// which ends the session. A turn left open that is none any more (see
-/// `TerminalSession::turn_stale`) is reported as `Report::NoTurn`, and opens again when the
-/// model speaks in it after all. Takes the session, the worker's channels and
+/// `TerminalSession::turn_stale`) is reported as `Report::NoTurn`, and starts again as a
+/// turn when the model works in it after all. Takes the session, the worker's channels and
 /// flags, whether a later engine may take the pane over, and the account's credential copy
 /// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
@@ -9440,7 +9440,6 @@ fn live_serve(
     let mut problem = None;
     let mut named = false;
     let mut reads_keys = false;
-    let mut dropped = false;
     while !cancel.load(Ordering::SeqCst) {
         if !reads_keys {
             match session.poll_ready() {
@@ -9469,19 +9468,12 @@ fn live_serve(
             Ok(Some(TranscriptEvent::TurnStarted)) => {
                 text.clear();
                 (limited, interrupted) = (false, false);
-                dropped = false;
                 let _ = reports.send(Report::Turn {
                     end: None,
                     text: String::new(),
                 });
             }
             Ok(Some(TranscriptEvent::Text { text: said })) => {
-                if std::mem::take(&mut dropped) {
-                    let _ = reports.send(Report::Turn {
-                        end: None,
-                        text: String::new(),
-                    });
-                }
                 if text.len() + said.len() <= LIVE_REPLY_BYTES_MAX {
                     text.push_str(&said);
                 }
@@ -9489,7 +9481,6 @@ fn live_serve(
             Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
             Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
             Ok(Some(TranscriptEvent::TurnFinished { success })) => {
-                dropped = false;
                 let end = match (limited, interrupted, success) {
                     (true, ..) => TurnEnd::RateLimited,
                     (false, true, _) => TurnEnd::Interrupted,
@@ -9519,7 +9510,6 @@ fn live_serve(
             }
         }
         if session.turn_stale() {
-            dropped = true;
             let _ = reports.send(Report::NoTurn);
         }
     }

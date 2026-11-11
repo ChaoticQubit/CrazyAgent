@@ -179,6 +179,38 @@ const DRAWING_HARNESS: &str = "while :; do printf 'working\\n'; sleep 0.2; done"
 const LOCAL_OUTPUT: &str =
     r#"{"type":"user","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}"#;
 
+#[cfg(target_os = "macos")]
+const COMMAND: &str = r#"{"type":"user","message":{"content":"<command-message>review</command-message>\n<command-name>/review</command-name>"}}"#;
+
+/// Checks that a pane taken over idle over an open turn follows a typed command the model
+/// answers as a turn, from the model's first line to its end (OB-1 r1): the dropped turn is
+/// open no more in the record's reader. Takes the session, which then follows every turn,
+/// and its record, to which the command and the answer are written.
+#[cfg(target_os = "macos")]
+fn follows_a_typed_command(session: &mut TerminalSession, file: &Path) {
+    use std::io::Write;
+    session.follow_every_turn();
+    let mut record = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    writeln!(record, "{COMMAND}\n{TURN_DONE}").unwrap();
+    let mut facts = Vec::new();
+    while let Some(fact) = session.next_fact(Duration::from_secs(5)).unwrap() {
+        facts.push(fact);
+        if facts.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(
+        facts,
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::Text {
+                text: "Done\n".to_owned()
+            },
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
 /// A turn that does not stop on a pane whose app still draws ends the pane: the app works
 /// on something the engine can no longer match to its work.
 #[cfg(target_os = "macos")]
@@ -213,7 +245,7 @@ fn a_turn_that_does_not_stop_on_a_waiting_pane_is_adopted_idle() {
     let file = fixture.transcript(&[TURN_OPEN]);
     let record = fixture.spawn(&host, &agent, "exec cat", &file);
 
-    let session = TerminalSession::adopt(
+    let mut session = TerminalSession::adopt(
         host.clone(),
         agent.clone(),
         &record,
@@ -222,6 +254,7 @@ fn a_turn_that_does_not_stop_on_a_waiting_pane_is_adopted_idle() {
     .unwrap();
     assert!(session.ready && !session.turn);
     assert_eq!(lines(&file), 1);
+    follows_a_typed_command(&mut session, &file);
     session.leave();
     assert_eq!(
         host.alive().unwrap(),
@@ -244,7 +277,7 @@ fn a_stale_open_turn_on_a_waiting_pane_is_adopted_idle_with_nothing_typed() {
     std::thread::sleep(Duration::from_secs(5));
 
     let began = Instant::now();
-    let session = TerminalSession::adopt(
+    let mut session = TerminalSession::adopt(
         host.clone(),
         agent.clone(),
         &record,
@@ -261,6 +294,7 @@ fn a_stale_open_turn_on_a_waiting_pane_is_adopted_idle_with_nothing_typed() {
     assert!(session.ready && !session.turn);
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(lines(&file), 3, "nothing was typed into the pane");
+    follows_a_typed_command(&mut session, &file);
     session.leave();
     assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
 }

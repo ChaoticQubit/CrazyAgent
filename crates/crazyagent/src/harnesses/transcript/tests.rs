@@ -339,6 +339,137 @@ fn claude_a_reply_starts_a_turn_only_after_a_line_that_was_no_prompt() {
     assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
 }
 
+/// OB-1 r1: a Claude Code turn dropped as none is open no more, so a typed command the
+/// model answers after it is a turn from the model's first line, started once; and the
+/// model at work in the dropped turn itself, with a tool or with text, starts it again.
+#[test]
+fn claude_a_dropped_turn_is_open_no_more_and_starts_again_with_the_model_s_work() {
+    let prompt = concat!(
+        r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+        "\n"
+    );
+    let reply = concat!(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewed"}],"stop_reason":"end_turn"}}"#,
+        "\n"
+    );
+    let ended = vec![
+        TranscriptEvent::TurnStarted,
+        text("Reviewed\n"),
+        TranscriptEvent::TurnFinished { success: true },
+    ];
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(&file, prompt);
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"<command-message>review</command-message>\n<command-name>/review</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Review the open change."}]}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(&file, prompt);
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}],"stop_reason":"tool_use"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::ToolUse {
+                name: "Bash".to_owned()
+            },
+        ]
+    );
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended[1..]);
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(&file, prompt);
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+    append(&file, reply);
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![text("Reviewed\n")],
+        "only a dropped turn starts again by the model's work"
+    );
+}
+
+/// OB-1 r1: a Codex turn dropped as none gives no end when its end comes alone, and the
+/// model's text in it starts it again so its end is given.
+#[test]
+fn codex_a_dropped_turn_gives_no_lone_end_and_starts_again_with_the_model_s_text() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let mut reader = TranscriptReader::new(
+        Transcript::CodexRollouts {
+            sessions: sessions.clone(),
+        },
+        &case.work(),
+        SystemTime::now(),
+    );
+    let path = rollout(
+        &sessions,
+        "2026/10/23",
+        "rollout-dropped.jsonl",
+        &case.work(),
+        &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+    );
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+    reader.drop_turn();
+    let complete = concat!(
+        r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        "\n"
+    );
+    append(&path, complete);
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(
+        &path,
+        concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#,
+            "\n",
+        ),
+    );
+    append(&path, complete);
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("Done\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// Only an open turn can be dropped: dropping with none open is a caller's mistake.
+#[test]
+#[should_panic(expected = "assertion failed: self.in_turn")]
+fn dropping_a_turn_with_none_open_panics() {
+    let case = Case::new();
+    let (_, mut reader) = case.claude();
+    reader.drop_turn();
+}
+
 #[test]
 fn claude_interrupt_and_api_errors_end_the_turn() {
     let case = Case::new();

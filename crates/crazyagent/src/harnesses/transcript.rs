@@ -74,6 +74,7 @@ pub struct TranscriptReader {
     scanned: usize,
     in_turn: bool,
     aside: bool,
+    dropped: bool,
     consumed: u64,
 }
 
@@ -123,6 +124,7 @@ impl TranscriptReader {
             scanned: 0,
             in_turn: false,
             aside: false,
+            dropped: false,
             consumed: 0,
         }
     }
@@ -201,6 +203,15 @@ impl TranscriptReader {
         written.elapsed().ok()
     }
 
+    /// Forgets the open turn as no turn: its end, if one comes alone, is given no more. The
+    /// model at work in it later, with text or a tool, starts it again, so it is followed
+    /// and ends like any other. Takes the reader, which must be in a turn. Returns nothing.
+    pub fn drop_turn(&mut self) {
+        assert!(self.in_turn);
+        self.in_turn = false;
+        self.dropped = true;
+    }
+
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
     /// scanning on from where the last read stopped and draining the used lines once, so many
     /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
@@ -253,6 +264,13 @@ impl TranscriptReader {
                 Transcript::Unavailable => Vec::new(),
             };
             for fact in facts {
+                let works = matches!(
+                    fact,
+                    TranscriptEvent::Text { .. } | TranscriptEvent::ToolUse { .. }
+                );
+                if works && self.dropped && !self.in_turn {
+                    events.extend(self.track(TranscriptEvent::TurnStarted));
+                }
                 if let Some(fact) = self.track(fact) {
                     events.push(fact);
                 }
@@ -288,6 +306,7 @@ impl TranscriptReader {
             TranscriptEvent::TurnStarted => {
                 self.in_turn = true;
                 self.aside = false;
+                self.dropped = false;
                 Some(fact)
             }
             TranscriptEvent::TurnFinished { .. } if !self.in_turn => {

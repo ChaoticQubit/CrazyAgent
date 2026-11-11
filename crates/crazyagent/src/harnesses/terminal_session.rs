@@ -65,7 +65,6 @@ pub struct TerminalSession {
     live: bool,
     own: bool,
     grown: (u64, Instant),
-    stale_told: bool,
     facts: VecDeque<TranscriptEvent>,
     background: BTreeSet<String>,
     exited: bool,
@@ -351,7 +350,6 @@ impl TerminalSession {
             live: false,
             own: false,
             grown: (0, Instant::now()),
-            stale_told: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
             exited: false,
@@ -570,18 +568,21 @@ impl TerminalSession {
 
     /// Says whether the open turn of a session that follows every turn is no turn any more:
     /// its record got no byte for the launch's `stale_turn` and its app waits in the pane
-    /// (see `waits`). A pane that does not wait restarts the wait; a yes is said once, until
-    /// the record grows again. Takes the session. Returns the answer.
+    /// (see `waits`). A pane that does not wait restarts the wait. On a yes the turn is
+    /// dropped here and in the record's reader, so the model at work in it later starts it
+    /// again as a turn. Takes the session. Returns the answer.
     pub fn turn_stale(&mut self) -> bool {
         assert!(self.live);
-        if !self.turn || self.stale_told || self.grown.1.elapsed() < self.limits.stale_turn {
+        if !self.turn || self.grown.1.elapsed() < self.limits.stale_turn {
             return false;
         }
-        self.stale_told = waits(self.host.as_ref(), &self.agent);
-        if !self.stale_told {
+        if !waits(self.host.as_ref(), &self.agent) {
             self.grown.1 = Instant::now();
+            return false;
         }
-        self.stale_told
+        self.reader.drop_turn();
+        self.turn = false;
+        true
     }
 
     /// Ends the pane and every process its harness started, then removes the key file and
@@ -748,7 +749,6 @@ impl TerminalSession {
         }
         if self.reader.bytes() != self.grown.0 {
             self.grown = (self.reader.bytes(), Instant::now());
-            self.stale_told = false;
         }
         for fact in facts {
             if self.live {

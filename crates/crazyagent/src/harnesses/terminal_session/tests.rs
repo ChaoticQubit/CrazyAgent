@@ -322,8 +322,9 @@ mod own_turns {
     }
 
     /// OB-1: in a session that follows every turn, an open turn whose record gets no byte
-    /// for the launch's `stale_turn`, on a pane whose app waits, is said stale once. A record
-    /// that grows starts the wait again, and a turn that ended is never stale.
+    /// for the launch's `stale_turn`, on a pane whose app waits, is said stale once and is
+    /// open no more. The model at work in it starts it again as a turn, which can go stale
+    /// again and ends like any other; a turn that ended is never stale.
     #[test]
     fn an_open_turn_with_a_silent_record_on_a_waiting_pane_is_said_stale_once() {
         let mut pane = start("stale-turn-1");
@@ -338,11 +339,18 @@ mod own_turns {
         assert!(!pane.session.turn_stale(), "the record just grew");
         stale(&mut pane);
         assert!(!pane.session.turn_stale(), "a stale turn is said once");
+        std::thread::sleep(Duration::from_secs(5));
+        assert_eq!(
+            pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+            None
+        );
+        assert!(!pane.session.turn_stale(), "a dropped turn is open no more");
 
         pane.write(&[TOOL]);
         assert_eq!(
-            pane.session.next_fact(Duration::from_millis(500)).unwrap(),
-            None
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted),
+            "the model at work in the dropped turn starts it again"
         );
         assert!(
             !pane.session.turn_stale(),
@@ -351,6 +359,10 @@ mod own_turns {
         stale(&mut pane);
 
         pane.write(&[&reply("done")]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted)
+        );
         assert_eq!(
             pane.session.next_fact(Duration::from_secs(5)).unwrap(),
             Some(text("done"))
