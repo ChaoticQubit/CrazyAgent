@@ -1121,12 +1121,17 @@ pub(crate) fn wheel_only(bytes: &[u8]) -> bool {
 }
 
 /// The length of the view report that bytes start with: a focus report, an X10 mouse report
-/// of three raw bytes, or an SGR mouse report of digits and `;` ending in `M` or `m`. Takes
-/// the bytes. Returns the length, none when they start with anything else.
+/// of three bytes of at least 0x20 (button, column and row, each plus 32), or an SGR mouse
+/// report of digits and `;` ending in `M` or `m`. Takes the bytes. Returns the length, none
+/// when they start with anything else.
 fn report_len(bytes: &[u8]) -> Option<usize> {
     match bytes {
         [0x1b, b'[', b'I' | b'O', ..] => Some(3),
-        [0x1b, b'[', b'M', _, _, _, ..] => Some(6),
+        [0x1b, b'[', b'M', button, column, row, ..]
+            if [button, column, row].iter().all(|byte| **byte >= 0x20) =>
+        {
+            Some(6)
+        }
         [0x1b, b'[', b'<', rest @ ..] => {
             let end = rest
                 .iter()
