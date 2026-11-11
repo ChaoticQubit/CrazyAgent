@@ -2821,6 +2821,103 @@ fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
     );
 }
 
+/// DEC-141: a row saved while the display was the Claude Code display holds it as
+/// `claude_display`. It reads as the project's terminal display, so the owner's Fullscreen is
+/// kept, the next save stores it as `terminal_display` only, a row with neither name reads as
+/// Classic, each display is stored by its own name and reads back, and a row holding both
+/// names is refused instead of one silently winning.
+#[cfg(unix)]
+#[test]
+fn a_stored_claude_display_reads_as_the_terminal_display() {
+    use settings::TerminalDisplay;
+    let connection = db();
+    let project = project();
+    settings::write(&connection, &project, &CoordSettings::default()).unwrap();
+    let stored = |json: &str| {
+        connection
+            .execute(
+                "UPDATE coord_settings SET json=?2 WHERE project=?1",
+                params![PROJECT, json],
+            )
+            .unwrap();
+        settings::read(&connection, &project)
+    };
+    let raw = || -> String {
+        connection
+            .query_row(
+                "SELECT json FROM coord_settings WHERE project=?1",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let old = |display: &str| {
+        format!(
+            r#"{{"questions_to":"lead","overlaps":"warn","nudges":"off","counted_tools":["graphify"]{display}}}"#
+        )
+    };
+    assert_eq!(
+        stored(&old("")).unwrap().terminal_display,
+        TerminalDisplay::Classic
+    );
+    for (name, display) in [
+        ("classic", TerminalDisplay::Classic),
+        ("fullscreen", TerminalDisplay::Fullscreen),
+    ] {
+        let kept = stored(&old(&format!(r#","claude_display":"{name}""#))).unwrap();
+        assert_eq!(kept.terminal_display, display, "{name}");
+        settings::write(&connection, &project, &kept).unwrap();
+        let saved = raw();
+        assert!(
+            saved.contains(&format!(r#""terminal_display":"{name}""#)),
+            "{saved}"
+        );
+        assert!(!saved.contains("claude_display"), "{saved}");
+        assert_eq!(
+            settings::read(&connection, &project)
+                .unwrap()
+                .terminal_display,
+            display,
+            "{name}"
+        );
+        let chosen = CoordSettings {
+            terminal_display: display,
+            ..CoordSettings::default()
+        };
+        settings::write(&connection, &project, &chosen).unwrap();
+        assert_eq!(settings::read(&connection, &project).unwrap(), chosen);
+    }
+    let both = old(r#","claude_display":"fullscreen","terminal_display":"classic""#);
+    assert_eq!(stored(&both).unwrap_err().0, "coord_settings_invalid");
+    let unknown = old(r#","terminal_display":"sideways""#);
+    assert_eq!(stored(&unknown).unwrap_err().0, "coord_settings_invalid");
+}
+
+/// DEC-141: the coordination view names, for every harness kind, the terminal displays its
+/// terminals can draw, so the one Terminal display setting can say which kind stays Classic.
+#[cfg(unix)]
+#[test]
+fn the_coordination_view_names_the_displays_each_harness_kind_can_draw() {
+    use settings::TerminalDisplay;
+    let connection = db();
+    let view = crate::team::coordination(&connection, &project()).unwrap();
+    let seen: Vec<(HarnessKind, Vec<TerminalDisplay>)> = view
+        .harnesses
+        .iter()
+        .map(|row| (row.harness, row.displays.clone()))
+        .collect();
+    let both = TerminalDisplay::ALL.to_vec();
+    assert_eq!(
+        seen,
+        [
+            (HarnessKind::ClaudeCode, both.clone()),
+            (HarnessKind::Codex, both),
+            (HarnessKind::Rcli, vec![TerminalDisplay::Classic]),
+        ]
+    );
+    assert_eq!(view.settings.terminal_display, TerminalDisplay::Classic);
+}
+
 /// Settings saved before the nudge options (DEC-111 R4) held `nudges` as a bool: a stored
 /// `true` reads as TenMinutes and `false` as Off, each option is stored by its own name and
 /// reads back, and a name this build does not know is refused.

@@ -5290,7 +5290,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
             worker: Some(vec!["release-notes".into()]),
             ..Default::default()
         },
-        claude_display: crate::coord::settings::ClaudeDisplay::Fullscreen,
+        terminal_display: crate::coord::settings::TerminalDisplay::Fullscreen,
         task_start: crate::coord::settings::TaskStart::Off,
     };
     for action in [

@@ -1,7 +1,7 @@
 use super::super::TurnEnd;
 use super::super::managed_agent::{AGENT, ManagedAgent, SignedIn, claude};
 use super::{TURN, processes_with};
-use crate::coord::settings::ClaudeDisplay;
+use crate::coord::settings::TerminalDisplay;
 use crate::team::AgentRole;
 use crate::terminal::tmux::{Tmux, installed};
 use crate::terminal::{AgentId, FOLDER, Host};
@@ -60,7 +60,7 @@ fn display_variables(pid: &str) -> Vec<String> {
 /// Runs one real Claude Code sub-agent turn in a pane under `display`, the way the team
 /// runtime runs a managed agent, and watches the pane while the turn runs. Input: the
 /// display. Output: the reply text, how the turn ended, its cause and what the watcher saw.
-fn watched_turn(display: ClaudeDisplay) -> (String, TurnEnd, Option<String>, Seen) {
+fn watched_turn(display: TerminalDisplay) -> (String, TurnEnd, Option<String>, Seen) {
     let root = tempfile::Builder::new()
         .prefix("ca-live-display-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -105,8 +105,8 @@ fn watched_turn(display: ClaudeDisplay) -> (String, TurnEnd, Option<String>, See
         })
     };
     let profile = signed_in.acquire(match display {
-        ClaudeDisplay::Classic => "claude-live-display-classic",
-        ClaudeDisplay::Fullscreen => "claude-live-display-fullscreen",
+        TerminalDisplay::Classic => "claude-live-display-classic",
+        TerminalDisplay::Fullscreen => "claude-live-display-fullscreen",
     });
     let (text, end, cause) = agent.run_turn(profile, ASK_SUM, TURN);
     done.store(true, Ordering::SeqCst);
@@ -125,7 +125,7 @@ fn watched_turn(display: ClaudeDisplay) -> (String, TurnEnd, Option<String>, See
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_pane_at_classic_leaves_the_wheel_and_selection_to_the_view() {
-    let (text, end, cause, seen) = watched_turn(ClaudeDisplay::Classic);
+    let (text, end, cause, seen) = watched_turn(TerminalDisplay::Classic);
     println!(
         "real claude classic display: end={end:?} cause={cause:?} reply={text:?} seen={seen:?}"
     );
@@ -144,7 +144,7 @@ fn a_real_claude_pane_at_classic_leaves_the_wheel_and_selection_to_the_view() {
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_pane_at_fullscreen_keeps_claude_code_s_own_view() {
-    let (text, end, cause, seen) = watched_turn(ClaudeDisplay::Fullscreen);
+    let (text, end, cause, seen) = watched_turn(TerminalDisplay::Fullscreen);
     println!(
         "real claude fullscreen display: end={end:?} cause={cause:?} reply={text:?} seen={seen:?}"
     );
