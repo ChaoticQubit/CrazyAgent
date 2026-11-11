@@ -8,10 +8,10 @@
 
   Which hosting region should the shop use?
   From      the master                                             Asked hh:mm
-  Options   1. Europe (recommended)
-            2. North America
+  Options   ( ) 1. Europe (recommended)
+            ( ) 2. North America
+            ( ) Add a comment
   Context   The shop keeps orders and stock.
-
 
 
 

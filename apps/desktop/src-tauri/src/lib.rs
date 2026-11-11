@@ -3473,14 +3473,13 @@ async fn desktop_answer_question(
     state: State<'_, NativeState>,
     id: u64,
     version: u64,
-    option: Option<u8>,
-    text: Option<String>,
+    picks: Vec<u8>,
+    comment: Option<String>,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call =
-        lock(&state)
-            .await?
-            .answer_question(id, version, option.into_iter().collect(), text)?;
+    let call = lock(&state)
+        .await?
+        .answer_question(id, version, picks, comment)?;
     call.await
 }
 

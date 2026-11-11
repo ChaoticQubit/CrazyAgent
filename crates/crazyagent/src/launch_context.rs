@@ -1410,7 +1410,7 @@ pub(crate) enum AskReach {
 
 /// Tells a conversation that holds the engine's `ask` tool how it asks the owner: with that
 /// tool, or also with a for me `update_work` question when it has the team tools section,
-/// one question per call, with its options and the one it recommends, never in reply text
+/// one question per call, with its kind, options and the one it recommends, never in reply text
 /// or with its harness's own question tools, and how the answer comes back. Input: how the
 /// answer reaches it and whether its for me `update_work` questions reach the owner too.
 /// Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
@@ -1442,7 +1442,8 @@ pub(crate) fn ask_rule(reach: AskReach, for_me: bool) -> String {
         )
     };
     let rule = format!(
-        "\n## Asking the owner\n\n{how} Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the one you recommend in `recommended`, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",
+        "\n## Asking the owner\n\n{how} Ask one question per call and wait for its answer before the next one. Set `kind` to `single` (the owner picks one) or `multi` (the owner picks any), with {} to {} choices in `options` and one of them in `recommended`; use `text` with no options only when no short list of answers fits. Put what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",
+        crate::questions::OPTIONS_MIN,
         crate::questions::OPTIONS_MAX
     );
     assert!(rule.len() <= ASK_RULE_BYTES_MAX);
