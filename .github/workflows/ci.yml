@@ -255,8 +255,8 @@ jobs:
           find "$state" -mindepth 1 -maxdepth 1 -name 'target*' ! -name target-line-tables -exec rm -rf {} +
           free_kib="$(df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print $4 }')"
           echo "runner tool cache volume: $(( free_kib / 1024 / 1024 )) GiB free before the build"
-          if (( free_kib < 25 * 1024 * 1024 )); then
-            echo "::error::badal has $(( free_kib / 1024 / 1024 )) GiB free on the runner tool cache volume and this job needs 25 GiB; free disk on badal, then run the job again"
+          if (( free_kib < 15 * 1024 * 1024 )); then
+            echo "::error::badal has $(( free_kib / 1024 / 1024 )) GiB free on the runner tool cache volume and this job needs 15 GiB; free disk on badal, then run the job again"
             exit 1
           fi
           rm -rf "$home"
@@ -548,8 +548,12 @@ jobs:
           set -euo pipefail
           case "$RUNNER_TOOL_CACHE" in /?*) ;; *) echo "::error::RUNNER_TOOL_CACHE is not an absolute path; nothing trimmed"; exit 1 ;; esac
           state="$RUNNER_TOOL_CACHE/crazyagent-ci"
+          target="$state/target-line-tables"
           free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
           echo "runner tool cache volume: $(free_gib) GiB free after the tests"
+          if [ -d "$target" ]; then
+            du -sk "$target" | awk '{ printf "Rust target: %.1f GiB\n", $1 / 1048576 }'
+          fi
           if [ -d "$state" ] && [ ! -L "$state" ]; then
             size_kib="$(du -sk "$state" | cut -f1)"
             if (( size_kib > 10 * 1024 * 1024 )); then

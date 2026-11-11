@@ -380,7 +380,7 @@ test("nothing macOS CI runs on the owner's runner installs globally or reads or 
   }
 });
 
-test("macOS CI on the owner's runner builds with line tables only, shows the free disk, refuses below 25 GiB free and trims only its own cache to 10 GiB at the end", async () => {
+test("macOS CI on the owner's runner builds with line tables only, shows the free disk, refuses below 15 GiB free and trims only its own cache to 10 GiB at the end", async () => {
   const ci = await workflow("ci.yml");
   const all = steps(ci, "macos");
   const home = all[1];
@@ -391,8 +391,8 @@ test("macOS CI on the owner's runner builds with line tables only, shows the fre
   assert.match(home, /\n\s+target="\$state\/target-line-tables"\n/);
   assert.match(home, /\n\s+find "\$state" -mindepth 1 -maxdepth 1 -name 'target\*' ! -name target-line-tables -exec rm -rf \{\} \+\n/, "a target built with other debug settings goes");
   assert.match(home, /\n\s+free_kib="\$\(df -Pk "\$RUNNER_TOOL_CACHE" \| awk 'NR == 2 \{ print \$4 \}'\)"\n\s+echo "[^"\n]*\$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*"\n/, "the free space shows before the build");
-  assert.match(home, /\n\s+if \(\( free_kib < 25 \* 1024 \* 1024 \)\); then\n\s+echo "::error::badal has \$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*needs 25 GiB[^"\n]*free disk on badal[^"\n]*"\n\s+exit 1\n\s+fi\n/);
-  assert(home.indexOf("free_kib < 25") < home.indexOf('>> "$GITHUB_ENV"'), "the refusal comes before the job sets anything up");
+  assert.match(home, /\n\s+if \(\( free_kib < 15 \* 1024 \* 1024 \)\); then\n\s+echo "::error::badal has \$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*needs 15 GiB[^"\n]*free disk on badal[^"\n]*"\n\s+exit 1\n\s+fi\n/);
+  assert(home.indexOf("free_kib < 15") < home.indexOf('>> "$GITHUB_ENV"'), "the refusal comes before the job sets anything up");
   const last = all.at(-1);
   const tests = all.findIndex((step) => /- name: Test Bun suites\n/.test(step));
   assert(tests > 0 && tests === all.length - 2, "the trim is the last step, right after the tests");
@@ -402,6 +402,9 @@ test("macOS CI on the owner's runner builds with line tables only, shows the fre
   assert.match(last, /\n\s+if \[ -d "\$state" \] && \[ ! -L "\$state" \]; then\n/);
   assert.equal((last.match(/df -Pk "\$RUNNER_TOOL_CACHE"/g) ?? []).length, 1, "one free-space reader");
   assert.equal((last.match(/\$\(free_gib\) GiB free/g) ?? []).length, 2, "free space after the tests and after the trim");
+  assert.match(last, /\n\s+target="\$state\/target-line-tables"\n/);
+  assert.match(last, /\n\s+if \[ -d "\$target" \]; then\n\s+du -sk "\$target" \| awk '\{ printf "Rust target: %\.1f GiB\\n", \$1 \/ 1048576 \}'\n\s+fi\n/, "the target size shows, so the floor can follow the real need");
+  assert(last.indexOf('du -sk "$target"') < last.indexOf("-exec rm -rf"), "the size is read before the trim");
   assert.equal((last.match(/\(\( size_kib > 10 \* 1024 \* 1024 \)\)/g) ?? []).length, 2, "targets first, then everything, down to 10 GiB");
   const removals = last.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
   assert.deepEqual(removals, ["find \"$state\" -mindepth 1 -maxdepth 1 -name 'target*' -exec rm -rf {} +", 'rm -rf "$state"'], "nothing outside this runner's crazyagent-ci folder");
