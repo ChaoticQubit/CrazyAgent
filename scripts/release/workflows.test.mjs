@@ -411,6 +411,30 @@ test("macOS CI on the owner's runner builds with line tables only, shows the fre
   assert.doesNotMatch(last, /\$RUNNER_TOOL_CACHE\/(?!crazyagent-ci")|\.\.\//);
 });
 
+test("Linux CI frees the hosted runner's unused toolsets first, builds with line tables only and shows the free disk and target size at the end", async () => {
+  const ci = await workflow("ci.yml");
+  const linux = block(block(ci, 0, "jobs").join("\n"), 2, "linux").join("\n");
+  const env = block(linux, 4, "env");
+  for (const name of ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"]) {
+    assert.equal(env.filter((line) => line === `      ${name}: line-tables-only`).length, 1, name);
+  }
+  assert.match(block(ci, 0, "env").join("\n"), /\n  CARGO_INCREMENTAL: "0"\n/, "no incremental state in a CI target");
+  const all = steps(ci, "linux");
+  assert.match(all[0], /^ {6}- uses: actions\/checkout@/, "checkout stays the first step");
+  const free = all[1];
+  assert.match(free, /^ {6}- name: [^\n]+\n {8}if: runner\.environment == 'github-hosted'\n/, "the second step, right after checkout, only on a GitHub-hosted runner");
+  assert.match(free, /\n\s+df -h \/\n\s+sudo rm -rf \/usr\/share\/dotnet \/usr\/local\/lib\/android \/opt\/ghc \/usr\/local\/share\/boost \/opt\/hostedtoolcache\/CodeQL\n\s+df -h \/$/,
+    "the free disk shows before and after the toolsets go");
+  const removals = free.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
+  assert.deepEqual(removals, ["sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL"], "only the five literal toolset folders");
+  const last = all.at(-1);
+  assert.match(all.at(-2), /^ {6}- name: Test engine and desktop crates\n/, "the disk report comes right after the tests");
+  assert.match(last, /^ {6}- name: [^\n]+\n {8}if: always\(\)\n/, "it runs even when a step failed");
+  assert.match(last, /\n\s+df -h \/\n/);
+  assert.match(last, /\n\s+target="\$\{CARGO_TARGET_DIR:-target\}"\n\s+if \[ -d "\$target" \]; then\n\s+du -sh "\$target"\n\s+fi\n/, "the target size shows, so the disk need is known");
+  assert.doesNotMatch(last, /\brm\b|\bsudo\b/, "the report changes nothing");
+});
+
 test("make test and test-rust-selected give every cargo test the native-auth host, desktop tests included", async () => {
   const lines = (await readFile(new URL("../../Makefile", import.meta.url), "utf8")).split("\n");
   const exported = new Set(lines.flatMap((line) => {

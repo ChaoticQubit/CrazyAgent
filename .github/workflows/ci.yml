@@ -52,10 +52,23 @@ jobs:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms windows_terminal agent_secret_walls setup team_project_root
         harness_launch launch_context project_sandbox sandbox_everywhere terminal_session
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Free disk on the GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+            echo "::error::this step removes preinstalled toolsets and runs only on a GitHub-hosted runner"
+            exit 1
+          fi
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -222,6 +235,15 @@ jobs:
             printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null
             make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
           '
+      - name: Show the free disk and the Rust target size
+        if: always()
+        run: |
+          set -euo pipefail
+          df -h /
+          target="${CARGO_TARGET_DIR:-target}"
+          if [ -d "$target" ]; then
+            du -sh "$target"
+          fi
 
   macos:
     name: macOS lint and tests
