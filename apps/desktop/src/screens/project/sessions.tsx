@@ -3,8 +3,9 @@ import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { deleteSession, failureCopy, readOwnerLines, readSessions, receiptState, resumeSession, startNewSession } from "../../api-projects";
 import type { ReceiptState } from "../../api-projects";
-import type { IntentReceipt, MasterSessionSummary, MasterTurn, TeamStatus } from "../../engine-client";
+import type { HarnessEntry, IntentReceipt, MasterSessionSummary, MasterTurn, TeamStatus } from "../../engine-client";
 import { displayText } from "../conversation";
+import { SessionMessages, ranBy } from "./session-messages";
 import { Badge } from "./shared";
 
 /** When a session started, in words. Inputs: its start time in milliseconds, absent for
@@ -24,6 +25,26 @@ export function startedLabel(ms: number | null, now: number): string {
  * Input: the session. Output: the line, or a placeholder before any message. */
 export function sessionLine(session: MasterSessionSummary): string {
   return session.last_line ?? session.first_line ?? "No messages yet";
+}
+
+/** The first owner message of a listed session, shown under its newest line when the two
+ * differ. Input: the session. Output: the line, or null when there is nothing more to show. */
+export function firstLine(session: MasterSessionSummary): string | null {
+  const { first_line: first, last_line: last } = session;
+  return first !== null && last !== null && first !== last ? `First message: ${first}` : null;
+}
+
+/** How many messages a session holds, in words. Input: the count. Output: the words. */
+export function countLabel(turns: number): string {
+  return turns === 0 ? "no messages yet" : turns === 1 ? "1 message" : `${turns} messages`;
+}
+
+/** The head of a listed session: when it started, how many messages it holds and the master
+ * that ran it last, when the engine names one. Inputs: the session, now and the harness
+ * catalog, if read. Output: one line. */
+export function sessionHead(session: MasterSessionSummary, now: number, harnesses: HarnessEntry[] | null): string {
+  const ran = session.mode ? ranBy(session.mode, session.harness ?? null, harnesses) : null;
+  return [startedLabel(session.started_ms, now), countLabel(session.turns), ...(ran === null ? [] : [ran])].join(" · ");
 }
 
 /** Names the agents a session used. Input: their names. Output: one line, or null for none. */
@@ -130,15 +151,19 @@ export function SwitchDivider({ team }: { team: Result<TeamStatus> | undefined }
 type Pending = { kind: "new" } | { kind: "resume"; session: MasterSessionSummary } | { kind: "delete"; session: MasterSessionSummary };
 
 /** The master view's session header: the live session, a visible New session button and
- * the Sessions list, where clicking a parked session resumes it and Delete removes it after
- * the owner confirms. A running reply is stopped only after the owner confirms. New session
+ * the Sessions list. The list holds the live session first and then every parked one, each
+ * with its message count, the master that ran it last, its newest and first line, and Show
+ * messages, which reads that session's stored messages; clicking a parked session resumes
+ * it and Delete removes it after the owner confirms. A running reply is stopped only after the owner confirms. New session
  * does nothing while the live session has no owner turn; only the newest list read shows,
  * and a list read that works clears the problem a refused list read showed, never the
  * problem of a switch. Inputs: the master ticket, the live session id as the view read it, a mark of the
  * master's turns as the view last read them, whose every change reads the list again so
- * its message count follows each turn, and a refresh for the view after a switch. */
-export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticket: string; liveId: string | null; mark?: string | null; onSwitched: () => Promise<void> }) {
+ * its message count follows each turn, the harness catalog, if read, for the names of the
+ * masters, and a refresh for the view after a switch. */
+export function SessionsBar({ ticket, liveId, mark = null, harnesses = null, onSwitched }: { ticket: string; liveId: string | null; mark?: string | null; harnesses?: HarnessEntry[] | null; onSwitched: () => Promise<void> }) {
   const [sessions, setSessions] = useState<MasterSessionSummary[]>([]);
+  const [opened, setOpened] = useState<string | null>(null);
   const [listed, setListed] = useState(false);
   const [shown, setShown] = useState(false);
   const [working, setWorking] = useState(false);
@@ -200,6 +225,13 @@ export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticke
   const live = liveSession(sessions);
   const unused = liveUnused(liveId, sessions, listed);
   const others = resumable(sessions);
+  const messagesOf = (session: MasterSessionSummary) => {
+    const open = opened === session.session_id;
+    return {
+      button: <button type="button" className="btn quiet small" aria-expanded={open} onClick={() => setOpened(open ? null : session.session_id)} data-testid="open-session">{open ? "Hide messages" : "Show messages"}</button>,
+      list: open ? <SessionMessages ticket={ticket} sessionId={session.session_id} mark={session.phase === "configured" ? mark : null} harnesses={harnesses} /> : null,
+    };
+  };
   return <div className="pj-sessions" data-testid="master-sessions">
     <div className="pj-row between">
       <span className="pj-small pj-muted" data-testid="master-live-session">
@@ -227,18 +259,38 @@ export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticke
     </div>}
     {(problem || readProblem) && <p className="pj-error" role="alert">{problem || readProblem}</p>}
     {shown && <ul className="pj-session-list" aria-label="Sessions">
+      {live && (() => {
+        const first = firstLine(live);
+        const messages = messagesOf(live);
+        return <li key={live.session_id} className="pj-session-item" data-testid="live-session-item">
+          <div className="pj-session-live">
+            <span className="pj-small">{displayText(`Live session · ${sessionHead(live, now, harnesses)}`)}</span>
+            <span className="pj-small">{displayText(sessionLine(live))}</span>
+            {first && <span className="pj-small pj-muted">{displayText(first)}</span>}
+          </div>
+          <span className="pj-session-actions">{messages.button}</span>
+          {messages.list}
+        </li>;
+      })()}
       {others.length === 0 && <li className="pj-small pj-muted">No other sessions yet.</li>}
       {others.map((session) => {
         const waiting = waitingBadge(session.results_waiting);
         const agents = agentsLine(session.agents);
+        const first = firstLine(session);
+        const messages = messagesOf(session);
         return <li key={session.session_id} className="pj-session-item">
           <button type="button" className="pj-session" disabled={working} onClick={() => void run({ kind: "resume", session }, false)} data-testid="resume-session">
-            <span className="pj-row between"><span className="pj-small">{startedLabel(session.started_ms, now)}</span>
+            <span className="pj-row between"><span className="pj-small">{displayText(sessionHead(session, now, harnesses))}</span>
               {waiting && <Badge word={waiting} tone="info" />}</span>
             <span className="pj-small">{displayText(sessionLine(session))}</span>
+            {first && <span className="pj-small pj-muted">{displayText(first)}</span>}
             {agents && <span className="pj-small pj-muted">{displayText(agents)}</span>}
           </button>
-          <button type="button" className="btn quiet small" disabled={working} aria-label={`Delete the session ${startedLabel(session.started_ms, now).toLowerCase()}`} onClick={() => setPending({ kind: "delete", session })} data-testid="delete-session">Delete</button>
+          <span className="pj-session-actions">
+            {messages.button}
+            <button type="button" className="btn quiet small" disabled={working} aria-label={`Delete the session ${startedLabel(session.started_ms, now).toLowerCase()}`} onClick={() => setPending({ kind: "delete", session })} data-testid="delete-session">Delete</button>
+          </span>
+          {messages.list}
         </li>;
       })}
     </ul>}

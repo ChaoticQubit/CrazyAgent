@@ -164,6 +164,7 @@
     "allow-desktop-master-sessions",
     "allow-desktop-master-session-turns",
     "allow-desktop-master-inputs",
+    "allow-desktop-master-messages",
     "allow-desktop-new-master-session",
     "allow-desktop-resume-master-session",
     "allow-desktop-delete-master-session",

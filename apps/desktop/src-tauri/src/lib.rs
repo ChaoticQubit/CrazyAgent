@@ -2396,6 +2396,22 @@ async fn desktop_master_inputs(
 }
 
 #[tauri::command]
+async fn desktop_master_messages(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    before: Option<u64>,
+    limit: u8,
+) -> Result<bridge::master::MasterMessages, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .master_messages(&ticket, &session_id, before, limit)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_session_turns(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4352,6 +4368,7 @@ native_commands! {
     desktop_master_sessions,
     desktop_master_session_turns,
     desktop_master_inputs,
+    desktop_master_messages,
     desktop_new_master_session,
     desktop_resume_master_session,
     desktop_delete_master_session,

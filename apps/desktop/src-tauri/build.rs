@@ -162,6 +162,7 @@ fn main() {
         "desktop_master_sessions",
         "desktop_master_session_turns",
         "desktop_master_inputs",
+        "desktop_master_messages",
         "desktop_new_master_session",
         "desktop_resume_master_session",
         "desktop_delete_master_session",

@@ -239,11 +239,21 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-paths li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .pj-paths .pj-mono { min-width: 0; overflow-wrap: anywhere; }
 .pj-sessions { display: grid; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
-.pj-session-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 320px; overflow-y: auto; }
+.pj-session-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: min(60vh, 560px); overflow-y: auto; }
 .pj-session { width: 100%; display: grid; gap: 2px; text-align: left; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
 .pj-session:hover:not(:disabled) { background: var(--surface-2); }
 .pj-session:disabled { cursor: default; opacity: 0.6; }
 .pj-session-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: start; }
+.pj-session-item > .pj-messages { grid-column: 1 / -1; }
+.pj-session-live { display: grid; gap: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-control); overflow-wrap: anywhere; }
+.pj-session-actions { display: grid; gap: 4px; justify-items: end; }
+.pj-messages { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; }
+.pj-message-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.pj-message { display: grid; gap: 2px; padding: 6px 10px; border-radius: var(--radius-control); background: var(--surface); overflow-wrap: anywhere; }
+.pj-message.owner { background: var(--surface-2); }
+.pj-message.switch { text-align: center; background: none; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); border-radius: 0; }
+.pj-live-conversation { display: grid; gap: 6px; padding: 0 var(--space-4); justify-items: start; }
+.pj-live-conversation > .pj-messages { width: 100%; max-height: 30vh; }
 
 .pj-master-live { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; min-width: 0; }
 .pj-master-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }

@@ -1,10 +1,10 @@
 import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterMessages, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -809,6 +809,13 @@ export function endMaster(ticket: string, session: string, generation: number): 
 /** Lists the selected project's master sessions. Input: the master ticket. Output: the list. */
 export function readSessions(ticket: string): Promise<Result<MasterSessions>> {
   return wrap(() => masterSessions(ticket));
+}
+
+/** Reads one page of a session's stored messages, whatever master ran them. Inputs: the
+ * master ticket, the session id, the sequence number to read below or null for the newest,
+ * and the page size, 1 to 64. Output: the page. */
+export function readMessages(ticket: string, session: string, before: number | null, limit: number): Promise<Result<MasterMessages>> {
+  return wrap(() => masterMessages(ticket, session, before, limit));
 }
 
 /** Reads the owner messages behind some turns of a session. Inputs: the master ticket, the
