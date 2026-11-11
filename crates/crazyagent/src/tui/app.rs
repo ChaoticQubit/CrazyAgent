@@ -876,6 +876,7 @@ impl App {
             | OwnerEvent::Changes(_)
             | OwnerEvent::Process(_)
             | OwnerEvent::Recovery(_)
+            | OwnerEvent::Roadmap(_)
             | OwnerEvent::Questions(_)
             | OwnerEvent::Cleanup(_)
             | OwnerEvent::Reveal(_)

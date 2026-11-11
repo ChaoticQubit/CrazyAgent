@@ -1,7 +1,12 @@
 use super::new_project_view::Look;
-use super::planning_line::{PLAN_NOW, Planning, planning, planning_key, planning_value};
+use super::planning_line::{
+    PLAN_NOW, Planning, STATUS_CHECKING, STATUS_OFF, StatusLine, planning, planning_key,
+    planning_value, refreshes_status, status_counts,
+};
 use crate::project_setup::{ResearchJob, ResearchKind, ResearchStatus, SetupAction};
 use crate::protocol::ProjectId;
+use crate::roadmap_status::{ItemState, ItemStatus, Refresh, RoadmapItem, RoadmapStatus};
+use crate::tui::client::roadmap::{RoadmapEvent, RoadmapQuery, RoadmapReply};
 use crossterm::event::KeyCode;
 
 fn job(id: i64, kind: ResearchKind, status: ResearchStatus, error: Option<&str>) -> ResearchJob {
@@ -88,10 +93,10 @@ fn planning_line_shows_failed_with_retry() {
             "A roadmap is already being planned for this project. Wait for it to finish."
         ))
     );
-    assert_eq!(
-        planning_key(&running, &project, KeyCode::Char('r')),
-        Some(Err("Only a failed or stopped plan can run again."))
-    );
+    assert_eq!(planning_key(&running, &project, KeyCode::Char('r')), None);
+    assert!(refreshes_status(&running, KeyCode::Char('r')));
+    assert!(!refreshes_status(&state, KeyCode::Char('r')));
+    assert!(!refreshes_status(&running, KeyCode::Char('p')));
 
     let waiting = planning(&[
         job(
@@ -236,4 +241,123 @@ fn planning_asks_before_it_can_replace_the_roadmap() {
         }),
         "Retry asks too"
     );
+}
+
+const NOW: i64 = 1_800_000_000_000;
+
+fn alpha() -> ProjectId {
+    ProjectId::new("alpha").unwrap()
+}
+
+/// A status checked a minute before `NOW` with one item per given state.
+fn checked(states: &[ItemStatus]) -> RoadmapStatus {
+    RoadmapStatus {
+        items: states
+            .iter()
+            .map(|status| ItemState {
+                item: RoadmapItem {
+                    section: "V1".into(),
+                    text: "Sign in".into(),
+                },
+                status: *status,
+                evidence: String::new(),
+            })
+            .collect(),
+        checked_ms: Some(NOW - 60_000),
+        running: false,
+        stale: false,
+        refresh: Refresh::AfterLanding,
+        source: Some("docs/plan.md".into()),
+        problem: None,
+    }
+}
+
+/// Sends the line's next request and answers it. Returns the request sent.
+fn exchange(line: &mut StatusLine, now: i64, result: Result<RoadmapReply, String>) -> RoadmapQuery {
+    let query = line.next_query(now).expect("a request is due");
+    line.apply(&RoadmapEvent {
+        query: query.clone(),
+        result,
+    });
+    query
+}
+
+fn shown(line: &StatusLine) -> String {
+    line.value(&Look::plain(), NOW).text()
+}
+
+#[test]
+fn the_status_line_shows_the_counts_when_it_was_checked_and_the_refresh_key() {
+    let mut line = StatusLine::new(alpha());
+    assert_eq!(shown(&line), "Loading...");
+    let states = [
+        ItemStatus::Tested,
+        ItemStatus::InProgress,
+        ItemStatus::Pending,
+    ];
+    let read = line.next_query(NOW).unwrap();
+    assert_eq!(read, RoadmapQuery::Read { project: alpha() });
+    assert_eq!(line.next_query(NOW), None, "one request at a time");
+    line.apply(&RoadmapEvent {
+        query: read,
+        result: Ok(RoadmapReply::Status(Box::new(checked(&states)))),
+    });
+    assert_eq!(
+        shown(&line),
+        "1 tested, 0 done, 1 in progress, 1 pending   Checked 1 min ago   r Refresh"
+    );
+    let mut never = checked(&[]);
+    never.checked_ms = None;
+    assert_eq!(status_counts(&never), "Not checked yet");
+    assert_eq!(status_counts(&checked(&[])), "No roadmap items");
+}
+
+#[test]
+fn the_status_line_is_read_again_slowly_when_idle_and_quickly_while_a_check_runs() {
+    let mut line = StatusLine::new(alpha());
+    let idle = checked(&[ItemStatus::Done]);
+    exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(idle))));
+    assert_eq!(line.next_query(NOW + 59_999), None);
+    let mut running = checked(&[ItemStatus::Done]);
+    running.running = true;
+    let reply = Ok(RoadmapReply::Status(Box::new(running)));
+    assert!(matches!(
+        exchange(&mut line, NOW + 60_000, reply),
+        RoadmapQuery::Read { .. }
+    ));
+    assert_eq!(
+        shown(&line),
+        "0 tested, 1 done, 0 in progress, 0 pending   Checking now"
+    );
+    assert_eq!(line.refresh(), Err(STATUS_CHECKING));
+    assert_eq!(line.next_query(NOW + 64_999), None);
+    assert!(line.next_query(NOW + 65_000).is_some());
+}
+
+#[test]
+fn r_asks_for_a_check_then_reads_the_status_again_and_off_refuses_it() {
+    let mut line = StatusLine::new(alpha());
+    let idle = checked(&[ItemStatus::Pending]);
+    exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(idle))));
+    assert_eq!(line.refresh(), Ok(()));
+    let asked = exchange(&mut line, NOW + 1, Ok(RoadmapReply::Done));
+    assert_eq!(asked, RoadmapQuery::Refresh { project: alpha() });
+    let mut off = checked(&[ItemStatus::Pending]);
+    off.refresh = Refresh::Off;
+    let reply = Ok(RoadmapReply::Status(Box::new(off)));
+    assert!(
+        matches!(
+            exchange(&mut line, NOW + 2, reply),
+            RoadmapQuery::Read { .. }
+        ),
+        "a Refresh that was taken reads the status again at once"
+    );
+    assert_eq!(shown(&line), "Off");
+    assert_eq!(line.refresh(), Err(STATUS_OFF));
+    assert_eq!(line.next_query(NOW + 3), None, "Off queues no check");
+
+    let mut refused = StatusLine::new(alpha());
+    assert_eq!(refused.refresh(), Ok(()));
+    exchange(&mut refused, NOW, Err("roadmap_status_off".into()));
+    assert_eq!(shown(&refused), format!("! {STATUS_OFF}"));
 }

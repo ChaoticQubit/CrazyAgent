@@ -3,7 +3,7 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
-use super::planning_line::{Planning, planning, planning_key};
+use super::planning_line::{Planning, StatusLine, planning, planning_key, refreshes_status};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
@@ -685,6 +685,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub changes: ProjectChanges,
     pub questions: ProjectQuestions,
     pub recovery: ProjectRecovery,
+    pub roadmap: StatusLine,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -713,6 +714,7 @@ impl ProjectScreen {
             changes: ProjectChanges::new(project.clone()),
             questions: ProjectQuestions::new(project.clone()),
             recovery: ProjectRecovery::new(project.clone()),
+            roadmap: StatusLine::new(project.clone()),
             sessions: Sessions::default(),
             project,
             name,
@@ -2469,6 +2471,12 @@ impl ProjectScreen {
     /// none for a key the planning line does not use.
     fn planning_reply(&mut self, key: KeyCode) -> Option<ProjectReply> {
         let state = planning(self.jobs.as_ref()?);
+        if refreshes_status(&state, key) {
+            if let Err(line) = self.roadmap.refresh() {
+                self.problem = Some(line.into());
+            }
+            return Some(ProjectReply::Handled);
+        }
         match planning_key(&state, &self.project, key)? {
             Ok(action) if self.plan_replaces(&state) => {
                 self.confirm_plan = Some(action);

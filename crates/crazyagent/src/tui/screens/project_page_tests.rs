@@ -189,6 +189,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
                 other => panic!("project pages never send {other:?}"),
             }
         }

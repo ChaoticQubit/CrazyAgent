@@ -14,10 +14,10 @@
   Access    Loading...   c Agent access
   Process   Instructions for this project's agents   i Edit
   Roadmap   Not planned   p Plan roadmap now
+  Status    Loading...
 
   Skills  0                                                                           From Settings, plus this project
     Loading...
-
 
 
 
