@@ -2371,6 +2371,12 @@ fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
         state[&key]["trusted_hash"].as_str(),
         Some(codex_hook_hash(&written).as_str())
     );
+    assert_eq!(
+        codex_pinned_keys(&codex),
+        Some(vec![key]),
+        "the engine reads back the keys it asks Codex about (PA1213R2-F2)"
+    );
+    assert_eq!(codex_pinned_keys(&root.join("no-home")), None);
     drop(installed);
 }
 

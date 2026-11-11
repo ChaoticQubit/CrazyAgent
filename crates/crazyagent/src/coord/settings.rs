@@ -112,6 +112,12 @@ pub const RCLI_NO_HOOKS: &str =
     "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
 /// Which owner hooks a Codex agent runs: those on an event Codex has (PA-12).
 pub const CODEX_HOOK_EVENTS_ONLY: &str = "Codex agents run your hooks on the events Codex has.";
+/// What a Codex agent's Messages timeline shows when its app-server lists a hook the launch
+/// pinned as not trusted (PA1213R2-F2), so Codex runs neither the edit guard nor that hook.
+pub const CODEX_HOOKS_UNTRUSTED: &str = "Codex does not trust CrazyAgent's hooks for this agent, so Block and Wait cannot hold its edits and your hooks do not run for it.";
+/// What a Codex agent's Messages timeline shows when the engine cannot ask its app-server
+/// about the pinned hooks in time: another Codex release, another system, or no answer.
+pub const CODEX_HOOKS_UNCHECKED: &str = "CrazyAgent could not confirm that Codex trusts its hooks for this agent, so Block and Wait may not hold its edits and your hooks may not run for it.";
 /// The short form of BARE_NO_HOOKS and RCLI_NO_HOOKS a terminal Hooks heading has room
 /// for: which agents run none of the owner's hooks.
 pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and rcli run none";

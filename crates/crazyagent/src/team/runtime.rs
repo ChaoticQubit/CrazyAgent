@@ -70,6 +70,9 @@ const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
+/// How long after a Codex agent starts the engine keeps asking its app-server whether it
+/// trusts the hooks the launch pinned before it says it could not confirm (PA1213R2-F2).
+const HOOK_TRUST_WAIT: Duration = Duration::from_secs(60);
 /// How often a project's running agents are checked for an owner instruction edit under
 /// the Restart and Badge choices (DEC-111 QR1).
 const INSTRUCTION_CHECK_EVERY: Duration = Duration::from_secs(2);
@@ -622,6 +625,7 @@ pub struct TeamRuntime {
     teammate_conflicts_told: BTreeMap<i64, BTreeMap<String, (String, String)>>,
     teammates_unrecorded: BTreeMap<i64, (String, String, u8)>,
     receipts_next: BTreeMap<ProjectId, Instant>,
+    hooks_checked: BTreeSet<i64>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
@@ -926,6 +930,7 @@ impl TeamRuntime {
             teammate_conflicts_told: BTreeMap::new(),
             teammates_unrecorded: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
+            hooks_checked: BTreeSet::new(),
             live_starts: BTreeMap::new(),
             unread: BTreeMap::new(),
             resuming: None,
@@ -4447,6 +4452,9 @@ impl TeamRuntime {
             let codex = kind == Some(HarnessKind::Codex);
             if receipts && codex {
                 let _ = crate::coord::relay::codex_receipts(&self.connection, id, &home, now_ms());
+                if !self.hooks_checked.contains(&id) && self.check_codex_hooks(project, id, &home) {
+                    self.hooks_checked.insert(id);
+                }
             }
             if codex {
                 let _ = crate::coord::relay::serve(
@@ -4485,6 +4493,45 @@ impl TeamRuntime {
                 now_ms(),
             );
         }
+    }
+
+    /// Asks a Codex agent's own app-server whether it trusts every hook the agent's launch
+    /// pinned, and keeps the matching lacks text in the agent's Messages timeline as the
+    /// engine's notice when it does not, or still cannot say `HOOK_TRUST_WAIT` after the agent
+    /// started (PA1213R2-F2). Takes the project, the agent and its `CODEX_HOME`. Returns
+    /// whether the check is settled; an unsettled one is asked again on a later tick.
+    fn check_codex_hooks(&self, project: &ProjectId, id: i64, home: &Path) -> bool {
+        let Some(worker) = self.workers.get(&id) else {
+            return true;
+        };
+        let pane = self.terminal.as_deref().and_then(|host| {
+            let pane = AgentId::team(id).ok()?;
+            host.pane_pid(&pane).ok().flatten()
+        });
+        let answer = match crate::launch_context::codex_pinned_keys(home) {
+            Some(keys) if keys.is_empty() => return true,
+            Some(keys) => crate::coord::delivery::codex::hooks_trusted(home, pane, &keys),
+            None => Err("codex_config_unreadable"),
+        };
+        let text = match answer {
+            Ok(true) => return true,
+            Ok(false) => crate::coord::settings::CODEX_HOOKS_UNTRUSTED,
+            Err(_) if worker.spawned.elapsed() < HOOK_TRUST_WAIT => return false,
+            Err(_) => crate::coord::settings::CODEX_HOOKS_UNCHECKED,
+        };
+        let Ok(tx) = self.connection.unchecked_transaction() else {
+            return false;
+        };
+        super::agent_messages::record(
+            &tx,
+            project,
+            id,
+            super::agent_messages::Said::Notice,
+            text,
+            now_ms(),
+        )
+        .is_ok()
+            && tx.commit().is_ok()
     }
 
     /// Types into each running sub-agent of a project how the owner settled its questions,
@@ -6444,6 +6491,7 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?
             .flatten();
+        self.hooks_checked.remove(&id);
         self.workers.insert(
             id,
             Worker {

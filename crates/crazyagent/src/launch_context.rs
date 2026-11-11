@@ -1896,6 +1896,35 @@ fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
     table
 }
 
+/// The most bytes of a Codex home's `config.toml` `codex_pinned_keys` reads.
+const CODEX_CONFIG_BYTES_MAX: u64 = 256 * 1024;
+
+/// The hook trust keys a Codex launch pinned under `[hooks.state]` in its home's
+/// `config.toml`, so the engine can ask Codex whether it trusts each one (PA1213R2-F2).
+/// Takes the agent's `CODEX_HOME`. Returns the keys, empty when the launch pinned none, or
+/// None for a config that cannot be read whole within `CODEX_CONFIG_BYTES_MAX` or parsed.
+pub fn codex_pinned_keys(home: &Path) -> Option<Vec<String>> {
+    let file = File::open(home.join("config.toml")).ok()?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(
+        &mut std::io::Read::take(file, CODEX_CONFIG_BYTES_MAX + 1),
+        &mut text,
+    )
+    .ok()?;
+    if text.len() as u64 > CODEX_CONFIG_BYTES_MAX {
+        return None;
+    }
+    let config = text.parse::<toml_edit::DocumentMut>().ok()?;
+    Some(
+        config
+            .get("hooks")
+            .and_then(|hooks| hooks.get("state"))
+            .and_then(toml_edit::Item::as_table_like)
+            .map(|state| state.iter().map(|(key, _)| key.to_owned()).collect())
+            .unwrap_or_default(),
+    )
+}
+
 /// The owner's hooks a Codex launch runs (PA-12): those on an event Codex has, each copied
 /// with its plugin folder under the launch state and run with `CLAUDE_PLUGIN_ROOT` set to
 /// that copy, as Claude Code runs them; a hook on any other event is left out, which the

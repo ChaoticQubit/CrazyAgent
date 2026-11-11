@@ -75,6 +75,48 @@ fn a_turn_id_is_kept_only_when_it_is_short_plain_text() {
     }
 }
 
+/// PA1213R2-F2: the engine counts a Codex agent's pinned hooks as trusted only when the
+/// app-server's `hooks/list` lists every pinned key as trusted; a modified, untrusted or
+/// unlisted key, or an answer of another shape, reads as not trusted.
+#[test]
+fn pinned_hooks_count_as_trusted_only_when_codex_lists_each_one_trusted() {
+    let guard = "/h/config.toml:pre_tool_use:0:0".to_owned();
+    let owner = "/h/config.toml:session_start:0:0".to_owned();
+    let listing = |guard_status: &str, owner_status: &str| {
+        serde_json::json!({"data": [
+            {"cwd": "/w", "warnings": [], "errors": [], "hooks": [
+                {"key": guard, "eventName": "preToolUse", "trustStatus": guard_status},
+                {"key": "/w/.codex/hooks.json:pre_tool_use:0:0", "trustStatus": "untrusted"},
+            ]},
+            {"cwd": "/v", "warnings": [], "errors": [], "hooks": [
+                {"key": owner, "eventName": "sessionStart", "trustStatus": owner_status},
+            ]},
+        ]})
+    };
+    let both = [guard.clone(), owner.clone()];
+    assert!(all_trusted(&listing("trusted", "trusted"), &both));
+    assert!(all_trusted(&listing("Trusted", "trusted"), &both));
+    for (guard_status, owner_status) in [
+        ("modified", "trusted"),
+        ("trusted", "untrusted"),
+        ("managed", "trusted"),
+    ] {
+        assert!(
+            !all_trusted(&listing(guard_status, owner_status), &both),
+            "{guard_status} {owner_status}"
+        );
+    }
+    let unlisted = [guard.clone(), "/h/config.toml:stop:0:0".to_owned()];
+    assert!(!all_trusted(&listing("trusted", "trusted"), &unlisted));
+    for odd in [
+        serde_json::json!({}),
+        serde_json::json!({"data": {"hooks": []}}),
+        serde_json::json!({"data": [{"hooks": [{"key": guard, "trustStatus": 1}]}]}),
+    ] {
+        assert!(!all_trusted(&odd, std::slice::from_ref(&guard)), "{odd}");
+    }
+}
+
 /// SECAUDIT codex-bridge-oversized-server-ping-panics-team-runtime: a ping larger than a
 /// control frame may be is refused as a broken bridge, with no panic in the engine.
 #[cfg(target_os = "macos")]

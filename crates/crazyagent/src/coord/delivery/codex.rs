@@ -64,6 +64,41 @@ pub fn deliver(home: &Path, text: &str, start: bool, pane: Option<u32>) -> Bridg
     }
 }
 
+/// Asks an agent's own Codex app-server whether it trusts every hook the agent's launch
+/// pinned (PA1213R2-F2), over the same checked socket, peer and release as `deliver`, so a
+/// trust key or hash that drifted from Codex's never passes unseen. Takes the agent's
+/// `CODEX_HOME`, its pane's first process and the pinned hook keys. Returns the answer, or a
+/// plain reason while the server cannot be asked.
+pub fn hooks_trusted(
+    home: &Path,
+    pane: Option<u32>,
+    keys: &[String],
+) -> Result<bool, &'static str> {
+    let socket = socket(home).ok_or("codex_bridge_unsupported")?;
+    let pane = pane.ok_or("codex_bridge_peer_unknown")?;
+    wire::hooks_trusted(&socket, pane, keys)
+}
+
+/// Tells whether a `hooks/list` answer (Codex 0.163 to 0.167.1: `data[].hooks[]` with `key`
+/// and `trustStatus`) shows each of `keys` as trusted. Takes the answer and the keys.
+/// Returns true only when every key is listed as trusted.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn all_trusted(listing: &serde_json::Value, keys: &[String]) -> bool {
+    let trusted: Vec<&str> = listing["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .filter(|hook| {
+            hook["trustStatus"]
+                .as_str()
+                .is_some_and(|status| status.eq_ignore_ascii_case("trusted"))
+        })
+        .filter_map(|hook| hook["key"].as_str())
+        .collect();
+    keys.iter().all(|key| trusted.contains(&key.as_str()))
+}
+
 /// Keeps a turn id the app-server named when it is short, plain text, so a stored id
 /// never carries more than `TURN_ID_BYTES_MAX` printable ASCII bytes. Takes the id, if
 /// any. Returns it, or none for a missing, empty, long or unprintable one.
@@ -169,6 +204,30 @@ mod wire {
         start: bool,
         pane: u32,
     ) -> Result<Option<String>, &'static str> {
+        let mut wire = session(socket, pane)?;
+        let thread = wire.thread()?;
+        for _ in 0..ATTEMPTS_MAX {
+            if let Sent::Into(turn) = wire.send_into(&thread, text, start)? {
+                return Ok(turn);
+            }
+        }
+        Err("codex_bridge_turn_moved")
+    }
+
+    pub(super) fn hooks_trusted(
+        socket: &Path,
+        pane: u32,
+        keys: &[String],
+    ) -> Result<bool, &'static str> {
+        let mut wire = session(socket, pane)?;
+        let listing = wire.call("hooks/list", json!({}))?;
+        Ok(super::all_trusted(&listing, keys))
+    }
+
+    /// Opens one initialized JSON-RPC session with an agent's app-server: the owner's private
+    /// daemon folder, the owner's own socket, a listener in the agent's pane and a release
+    /// in `VERSIONS`. Takes the socket and the pane's first process. Returns the session.
+    fn session(socket: &Path, pane: u32) -> Result<Wire, &'static str> {
         let folder = socket.parent().ok_or("codex_bridge_unsupported")?;
         private_folder(folder)?;
         let metadata = match std::fs::symlink_metadata(socket) {
@@ -192,13 +251,7 @@ mod wire {
             return Err("codex_bridge_version_unknown");
         }
         wire.notify("initialized")?;
-        let thread = wire.thread()?;
-        for _ in 0..ATTEMPTS_MAX {
-            if let Sent::Into(turn) = wire.send_into(&thread, text, start)? {
-                return Ok(turn);
-            }
-        }
-        Err("codex_bridge_turn_moved")
+        Ok(wire)
     }
 
     /// Tells whether the process listening on a bridge socket runs in the agent's pane. A
@@ -546,6 +599,14 @@ mod wire {
         _start: bool,
         _pane: u32,
     ) -> Result<Option<String>, &'static str> {
+        Err("codex_bridge_unsupported")
+    }
+
+    pub(super) fn hooks_trusted(
+        _socket: &Path,
+        _pane: u32,
+        _keys: &[String],
+    ) -> Result<bool, &'static str> {
         Err("codex_bridge_unsupported")
     }
 }
