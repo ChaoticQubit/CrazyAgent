@@ -112,6 +112,15 @@ export const DELIVERY_OPTIONS: SelectOption[] = [
   { value: "typing_only", label: "Typing only" },
 ];
 
+/** What the Delivery choices do on each harness kind, shown under its Messages to row (PA-11,
+ * DEC-141): Native only never types, and a harness without a channel while its agent works
+ * says how its messages arrive instead. The TUI says the same sentences. */
+export const DELIVERY_HELPER: Record<CoordHarness, string> = {
+  "claude-code": "Auto hands a message to a Claude Code agent through its relay and types it in if the relay has not taken it after 60 seconds. Native only uses the relay alone and never types. Typing only types every message in.",
+  codex: "Auto hands a message to a Codex agent with tools on through its app-server bridge and types it in when the bridge can't take it. Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle. Typing only types every message in.",
+  rcli: "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice.",
+};
+
 /** The coordination settings a team status holds, with the plan defaults for an engine that
  * sends none. Input: the status. Output: the settings and every harness kind's row. */
 export function coordination(status: Pick<TeamStatus, "coordination">): CoordinationView {
@@ -193,6 +202,7 @@ export function DeliverySetting({ projectId, row, status, reload }: { projectId:
   return <SettingRow label={label}>
     <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={delivery} options={DELIVERY_OPTIONS}
       onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void change(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery", () => hold(value as Delivery)); }} />
+    <span className="tg-terminal-note">{DELIVERY_HELPER[row.harness]}</span>
     <ChangeNote note={note} />
   </SettingRow>;
 }

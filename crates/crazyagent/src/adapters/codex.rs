@@ -488,6 +488,28 @@ enum LoginState {
     Completed,
 }
 
+/// The Codex 0.164 thread items that run a tool. A model round that starts one of them is a
+/// step of the master step limit (PA-9); its token count ends the round once its tools are
+/// done (core session_turn.rs, send_token_count_event after drain_in_flight).
+const STEP_TOOLS: [&str; 8] = [
+    "commandExecution",
+    "fileChange",
+    "mcpToolCall",
+    "dynamicToolCall",
+    "collabAgentToolCall",
+    "webSearch",
+    "imageView",
+    "imageGeneration",
+];
+
+/// The steps one Codex turn has taken: model rounds that started a tool, and whether the
+/// round under way has started one yet.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Steps {
+    taken: u16,
+    tools: bool,
+}
+
 /// Tracks a bounded projection of the pinned stable Codex wire protocol.
 /// Byte inputs and returned frames describe protocol facts only.
 /// This object grants no execution, authentication or recovery authority.
@@ -504,6 +526,7 @@ pub struct CodexProtocol {
     login_ids: BTreeMap<String, LoginState>,
     refused: Option<String>,
     children: Children,
+    steps: Steps,
 }
 
 impl Default for CodexProtocol {
@@ -527,10 +550,18 @@ impl CodexProtocol {
             login_ids: BTreeMap::new(),
             refused: None,
             children: Children::default(),
+            steps: Steps::default(),
         };
         protocol.assert_consistent();
         assert_eq!(protocol.phase, State::New);
         protocol
+    }
+
+    /// The steps the current turn has taken, as the master step limit counts them: model
+    /// rounds of this thread that started a tool, each counted once its token count ends
+    /// it. Input: none. Output: the count, 0 before a turn and at each new turn.
+    pub fn steps(&self) -> u16 {
+        self.steps.taken
     }
 
     pub fn state(&self) -> State {
@@ -725,6 +756,7 @@ impl CodexProtocol {
             }),
         )?;
         self.turn = None;
+        self.steps = Steps::default();
         self.phase = State::TurnStarting;
         self.assert_consistent();
         assert!(self.server_requests.is_empty());
@@ -835,6 +867,7 @@ impl CodexProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.next_id > 0);
+        assert!(self.turn.is_some() || self.steps == Steps::default());
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_turns.len() <= TURNS_MAX);
         self.seen_server_ids.check();
@@ -1231,6 +1264,7 @@ impl CodexProtocol {
             }
             let inserted = self.seen_turns.insert(turn.id.clone());
             assert!(inserted);
+            self.steps = Steps::default();
         }
         let event = if turn.status == TurnStatus::InProgress {
             self.phase = State::Active;
@@ -1382,6 +1416,7 @@ impl CodexProtocol {
         if let Some(event) = self.child_frame(&method, &params)? {
             return Ok(event);
         }
+        self.count_step(&method, &params);
         match method.as_str() {
             "account/login/completed" => self
                 .login_completed(&params)
@@ -1429,6 +1464,36 @@ impl CodexProtocol {
             }
             _ => Ok(Some(Event::UnsupportedNotification { method })),
         }
+    }
+
+    /// Counts a step of the running turn (PA-9): a tool item this thread's turn starts marks
+    /// the model round as one that used tools, and the round's token count ends it as a step.
+    /// Frames of another thread or turn count nothing. Inputs: the notification's method and
+    /// params. Output: none.
+    fn count_step(&mut self, method: &str, params: &Value) {
+        let own = self.thread_id.as_deref().is_some_and(|thread| {
+            params["threadId"] == thread
+                && self.turn.as_ref().is_some_and(|turn| {
+                    turn.status == TurnStatus::InProgress && params["turnId"] == turn.id.as_str()
+                })
+        });
+        if !own {
+            return;
+        }
+        let before = self.steps;
+        match method {
+            "item/started" => {
+                let kind = params["item"]["type"].as_str().unwrap_or_default();
+                self.steps.tools |= STEP_TOOLS.contains(&kind);
+            }
+            "thread/tokenUsage/updated" if self.steps.tools => {
+                self.steps.taken = self.steps.taken.saturating_add(1);
+                self.steps.tools = false;
+            }
+            _ => {}
+        }
+        assert!(self.steps.taken >= before.taken);
+        assert!(self.steps.taken - before.taken <= 1);
     }
 
     /// Sets apart the frames of sub-agents Codex starts on its own from this thread's turn: a

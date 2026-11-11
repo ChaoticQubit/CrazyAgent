@@ -33,7 +33,8 @@ test("Settings lists Master in the Agents group after Quitting with the four ste
   assert.match(shown, /No limit A turn runs until the master replies or its time is up\./);
   for (const steps of [50, 100, 200]) assert.ok(shown.includes(`${steps} steps A turn stops after ${steps} steps.`), `${steps} steps is listed`);
   assert.match(shown, /Stopped after N steps; reply with 'continue' to go on\./);
-  assert.match(shown, /The limit covers a Claude master with tools on; a Codex master counts no steps\./);
+  assert.match(shown, /The limit covers Claude and Codex masters with tools on\. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it\./);
+  assert.doesNotMatch(shown, /counts no steps/);
   assert.doesNotMatch(shown, /cut off/);
   assert.deepEqual(settings.STEP_LIMIT_CHOICES.map((option) => option.choice), LIMITS);
   assert.deepEqual(settings.STEP_LIMIT_DEFAULT, { limit: "no_limit" });

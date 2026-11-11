@@ -198,3 +198,15 @@ test("a coordination save keeps the value the TUI or another window set since, e
   await assert.rejects(coord.saveCoordSettings("wrong", { nudges: "off" }), /its own project's team read/);
   assert.equal(engine.sent.length, 3, "a save on another project's read sends nothing");
 });
+
+test("each Messages to row says what its choices do on that harness, Native only included (PA-11, DEC-141)", () => {
+  const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden })).replaceAll("&#x27;", "'");
+  assert.deepEqual(Object.keys(coord.DELIVERY_HELPER).sort(), [...coord.COORD_HARNESSES].sort(), "every harness has its sentence");
+  for (const harness of coord.COORD_HARNESSES) assert.ok(per.includes(coord.DELIVERY_HELPER[harness]), `${harness}: ${per}`);
+  assert.match(coord.DELIVERY_HELPER["claude-code"], /Native only uses the relay alone and never types\./);
+  assert.match(coord.DELIVERY_HELPER.codex, /Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle\./);
+  assert.match(coord.DELIVERY_HELPER.rcli, /rcli runs no team agents/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_team.rs", import.meta.url), "utf8");
+  for (const harness of coord.COORD_HARNESSES) assert.ok(tui.includes(`"${coord.DELIVERY_HELPER[harness]}"`), `the TUI says the ${harness} sentence too`);
+});

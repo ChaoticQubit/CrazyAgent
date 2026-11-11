@@ -130,6 +130,12 @@ impl CodexHostProtocol {
         self.protocol.state()
     }
 
+    /// The steps the running turn has taken, as the master step limit counts them (PA-9).
+    /// Input: none. Output: the count.
+    pub fn steps(&self) -> u16 {
+        self.protocol.steps()
+    }
+
     /// Names the frame the Codex protocol last refused, for the master's stream diagnostic.
     /// Input: none. Output: the name, or none before any refusal.
     pub fn refused(&self) -> Option<&str> {

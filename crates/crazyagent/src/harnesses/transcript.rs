@@ -185,9 +185,19 @@ impl TranscriptReader {
     }
 
     /// Says whether this record reports the commands its harness starts in the background
-    /// and their ends, as a Claude Code transcript does; a Codex rollout reports neither.
+    /// and their ends: a Claude Code transcript and a Codex 0.164 rollout both do (PA-10).
     /// Output: the answer.
     pub fn reports_background(&self) -> bool {
+        matches!(
+            self.source,
+            Transcript::ClaudeSession { .. } | Transcript::CodexRollouts { .. }
+        )
+    }
+
+    /// Says whether the harness starts a turn of its own when a background command ends, as
+    /// Claude Code does with its task notification; Codex only records the end, so a session
+    /// holding a turn for its commands ends that turn itself. Output: the answer.
+    pub fn notifies_background_end(&self) -> bool {
         matches!(self.source, Transcript::ClaudeSession { .. })
     }
 
@@ -579,8 +589,61 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
                 .unwrap_or("tool")
                 .to_owned(),
         }],
+        (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
+            output_texts(&payload["output"])
+                .into_iter()
+                .flat_map(str::lines)
+                .filter_map(|line| line.strip_prefix(CODEX_RUNNING))
+                .filter_map(codex_session_id)
+                .map(|id| TranscriptEvent::BackgroundStarted { id })
+                .collect()
+        }
+        (Some("event_msg"), Some("item_completed"))
+            if payload["item"]["type"] == "CommandExecution"
+                && payload["item"]["status"] != "in_progress" =>
+        {
+            payload["item"]["process_id"]
+                .as_str()
+                .and_then(codex_session_id)
+                .map(|id| TranscriptEvent::BackgroundEnded { id })
+                .into_iter()
+                .collect()
+        }
         _ => Vec::new(),
     }
+}
+
+/// The line Codex 0.164 ends a tool output with while the command it started still runs,
+/// followed by the session id of that command (core tools/context.rs).
+const CODEX_RUNNING: &str = "Process running with session ID ";
+
+/// The most digits a Codex session id is read with.
+const CODEX_SESSION_DIGITS_MAX: usize = 20;
+
+/// The texts of a Codex tool output in the shapes a rollout keeps it: a string, a list of
+/// content parts with text, or an object whose `content` is either. Takes the output.
+/// Returns its texts, none for any other value.
+fn output_texts(output: &Value) -> Vec<&str> {
+    match output {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+        Value::Object(_) if !output["content"].is_object() => output_texts(&output["content"]),
+        _ => Vec::new(),
+    }
+}
+
+/// A Codex background command's session id as the engine keeps it: digits only, at most
+/// `CODEX_SESSION_DIGITS_MAX`. Takes the text after the marker. Returns the id, none for
+/// any other text.
+fn codex_session_id(text: &str) -> Option<String> {
+    let id = text.trim();
+    let digits = !id.is_empty()
+        && id.len() <= CODEX_SESSION_DIGITS_MAX
+        && id.bytes().all(|byte| byte.is_ascii_digit());
+    digits.then(|| id.to_owned())
 }
 
 /// The texts of a Claude Code content value: the string itself, or each text block of an

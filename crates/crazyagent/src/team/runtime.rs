@@ -2641,7 +2641,8 @@ impl TeamRuntime {
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
         super::events::forward_to_parents(&self.connection, project, now_ms())?;
-        let asleep = self.asleep(project);
+        let mut asleep = self.asleep(project);
+        asleep.extend(self.unreached(project)?);
         let held = self.held_for_background(project);
         let reach = crate::coord::delivery::Reach {
             host: self.terminal.as_deref(),
@@ -2683,6 +2684,41 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    /// Lists a project's idle sub-agents in a kept session that the Delivery setting leaves
+    /// no channel of their own ([`crate::coord::delivery::no_channel`]): a tools-off Codex
+    /// agent under Native only has no bridge and is never typed into, so `wake_for_messages`
+    /// brings it its messages as a task of their own, as it does an asleep agent's (PA-11).
+    /// Takes the project. Returns their ids, or a database failure.
+    fn unreached(&self, project: &ProjectId) -> Result<BTreeSet<i64>, EngineError> {
+        let mut found = BTreeSet::new();
+        for (id, worker) in &self.workers {
+            let idle = &worker.project == project
+                && !worker.managed
+                && !worker.live
+                && worker.busy.is_none()
+                && !worker.stopping;
+            if idle
+                && crate::coord::delivery::no_channel(
+                    &self.connection,
+                    project,
+                    worker.role,
+                    &worker.harness,
+                    worker.tools,
+                    true,
+                )?
+                .is_some()
+            {
+                found.insert(*id);
+            }
+        }
+        assert!(
+            found
+                .iter()
+                .all(|id| self.workers[id].role == AgentRole::Sub && !self.workers[id].tools)
+        );
+        Ok(found)
     }
 
     /// Lists a project's agents whose task turn is held for the commands they started in the

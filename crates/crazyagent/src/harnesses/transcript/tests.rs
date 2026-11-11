@@ -1341,3 +1341,109 @@ fn a_deeply_nested_tool_input_is_formatted_only_up_to_its_bound() {
         "deep {deep_took:?}, flat {flat_took:?}"
     );
 }
+
+/// A Codex 0.164 command still running when exec_command yields is reported by its session
+/// id, from the "Process running with session ID N" line of its tool output (PA-10), in the
+/// text and the content-list output shapes; its end is the CommandExecution item Codex
+/// writes once the process exits. A running item, an item without an id, an id that is not
+/// a number and a poll of a command that already exited report nothing.
+#[test]
+fn codex_background_commands_are_followed_by_session_id() {
+    use serde_json::json;
+    let output = |output: serde_json::Value| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":output}});
+    let ended = |status: &str, id: serde_json::Value| {
+        json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"u",
+            "item":{"type":"CommandExecution","id":"c1","process_id":id,"command":["sleep","9"],
+                "cwd":"/w","parsed_cmd":[],"source":"agent","status":status,"exit_code":0}}})
+    };
+    let started = |id: &str| TranscriptEvent::BackgroundStarted { id: id.into() };
+    assert_eq!(
+        codex_facts(&output(json!(
+            "Chunk ID: 1\nWall time: 1.0002 seconds\nProcess running with session ID 4821\nOutput:\nserving"
+        ))),
+        vec![started("4821")]
+    );
+    assert_eq!(
+        codex_facts(&output(json!([
+            {"type":"input_text","text":"Wall time: 2.0 seconds\nProcess running with session ID 77"}
+        ]))),
+        vec![started("77")]
+    );
+    assert_eq!(
+        codex_facts(&output(
+            json!({"content":"Process running with session ID 9"})
+        )),
+        vec![started("9")]
+    );
+    for quiet in [
+        output(json!(
+            "Wall time: 1.0 seconds\nProcess exited with code 0\nOutput:\n"
+        )),
+        output(json!("Process running with session ID 48\u{7}21")),
+        output(json!("Process running with session ID abc")),
+        output(json!("echo Process running with session ID 5")),
+        ended("in_progress", json!("4821")),
+        ended("completed", serde_json::Value::Null),
+        ended("completed", json!("x1")),
+    ] {
+        assert_eq!(codex_facts(&quiet), Vec::new(), "{quiet}");
+    }
+    for status in ["completed", "failed", "declined"] {
+        assert_eq!(
+            codex_facts(&ended(status, json!("4821"))),
+            vec![TranscriptEvent::BackgroundEnded { id: "4821".into() }]
+        );
+    }
+}
+
+/// Both harnesses with tools report their background commands; only Claude Code starts a
+/// turn of its own when one ends, so a Codex session must end a held turn itself (PA-10).
+#[test]
+fn codex_and_claude_records_report_background_commands() {
+    let case = Case::new();
+    let (_, claude) = case.claude();
+    assert!(claude.reports_background());
+    assert!(claude.notifies_background_end());
+    let codex = TranscriptReader::new(
+        Transcript::CodexRollouts {
+            sessions: case.path(),
+        },
+        &case.work(),
+        SystemTime::now(),
+    );
+    assert!(codex.reports_background());
+    assert!(!codex.notifies_background_end());
+    let none = TranscriptReader::new(Transcript::Unavailable, &case.work(), SystemTime::now());
+    assert!(!none.reports_background());
+    assert!(!none.notifies_background_end());
+}
+
+/// Background commands at task end maps to every harness kind (PA-10, DEC-141): a Claude
+/// Code and a Codex record both report the commands their agent starts in the background,
+/// so Wait, a grace time and Stop act the same on both; rcli runs no team agent and has no
+/// tools, which the setting says. The match names every kind, so a new one fails to build
+/// until it has a mapping.
+#[test]
+fn every_harness_kind_maps_background_commands_at_task_end() {
+    use crate::coord::settings::HarnessKind;
+    let case = Case::new();
+    for kind in HarnessKind::ALL {
+        match kind {
+            HarnessKind::ClaudeCode => {
+                let (_, reader) = case.claude();
+                assert!(reader.reports_background());
+            }
+            HarnessKind::Codex => {
+                let reader = TranscriptReader::new(
+                    Transcript::CodexRollouts {
+                        sessions: case.path(),
+                    },
+                    &case.work(),
+                    SystemTime::now(),
+                );
+                assert!(reader.reports_background());
+            }
+            HarnessKind::Rcli => assert_eq!(crate::team::launch_harness("rcli"), None),
+        }
+    }
+}
