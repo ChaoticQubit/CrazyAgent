@@ -151,11 +151,13 @@ fn ignored_files_that_are_not_markdown_or_look_secret_stay_unread() {
 }
 
 #[test]
-fn a_roadmap_in_a_hidden_folder_is_found_but_git_internals_and_engine_worktrees_are_not() {
+fn a_roadmap_in_a_hidden_folder_is_found_but_git_internals_and_the_engine_folder_are_not() {
     let plan = "# Release plan\n\n### M0 Start\n\n### M1 Beta\n\n### M2 Launch\n";
     let repo = repo_with(&[
         (".agent/reports/plan.md", plan),
         (".crazyagent/worktrees/team-1/plan.md", plan),
+        (".crazyagent/research/agents/run-1/notes.md", plan),
+        (".crazyagent/context/plan.md", plan),
         (".git/plan.md", plan),
         (".hidden.md", plan),
     ]);
@@ -253,4 +255,76 @@ fn the_prompt_shows_the_local_scan_first_inside_each_documents_fence() {
         "{text}"
     );
     assert_eq!(text.matches("Local scan").count(), 2);
+}
+
+#[test]
+fn dependency_folders_and_python_environments_are_not_walked() {
+    let plan = "# Roadmap\n\n### M0 Start\n\n### M1 Beta\n\n### M2 Launch\n";
+    let repo = repo_with(&[
+        ("docs/roadmap.md", plan),
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (".venv/lib/python3.12/site-packages/pkg/CHANGELOG.md", plan),
+        (".tox/py312/README.md", plan),
+        (".cargo/registry/notes.md", plan),
+        ("env/pyvenv.cfg", "home = /usr/bin\n"),
+        ("env/notes/plan.md", plan),
+        ("lib/site-packages/pkg/README.md", plan),
+    ]);
+    let (documents, unread) = read(repo.path(), None, &[]).unwrap();
+    let paths: Vec<&str> = documents
+        .iter()
+        .map(|document| document.path.as_str())
+        .collect();
+    assert_eq!(paths, ["docs/roadmap.md"]);
+    assert!(unread.is_empty(), "{unread:?}");
+}
+
+#[test]
+fn a_changelogs_version_headings_are_not_milestones() {
+    let changelog = concat!(
+        "# Changelog\n\n## v3.0.0 - 2025-01-01\n\n",
+        "- Faster ([#12](https://github.com/o/r/pull/12))\n\n",
+        "## v2.1.0 - 2024-06-01\n\n## V1.0.0 - 2024-01-01\n\n",
+        "## Release 0.9.0\n\n## Release 0.8.1\n",
+    );
+    assert_eq!(heading_kind(changelog), (FoundKind::Other, 0, Vec::new()));
+    let versions = "## V1 - MVP\n\n## V2: Teams\n\n## v3. Scale\n\n## Release 4 Launch\n";
+    let (kind, score, marks) = heading_kind(versions);
+    assert_eq!(kind, FoundKind::Roadmap);
+    assert_eq!(score, 4 * 6);
+    assert_eq!(marks.len(), 4, "{marks:?}");
+}
+
+#[test]
+fn a_heading_mark_naming_a_hidden_folder_path_or_a_secret_like_file_never_reaches_the_prompt() {
+    let repo = repo_with(&[("README.md", "# App\n")]);
+    let mut evidence = Evidence {
+        documents: vec![Document {
+            path: "docs/plan.md".into(),
+            size: 1,
+            text: "# Plan\n".into(),
+            cut: false,
+            kind: FoundKind::Roadmap,
+            marks: vec![
+                "M1 Identity".into(),
+                "M3: move config/credentials.json into the vault".into(),
+                "Phase 2: publish client-x/contract.md".into(),
+                "M4 Ship docs/guide.md".into(),
+            ],
+        }],
+        ..Evidence::default()
+    };
+    screen(repo.path(), &mut evidence, &["client-x".to_owned()]);
+    assert_eq!(
+        evidence.documents[0].marks,
+        ["M1 Identity", "M4 Ship docs/guide.md"]
+    );
+    let prompt =
+        crate::onboarding::draft::prompt(&evidence, &crate::onboarding::MappingFacts::default());
+    assert!(
+        prompt.contains("Local scan: roadmap (M1 Identity; M4 Ship docs/guide.md)"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("credentials"), "{prompt}");
+    assert!(!prompt.contains("client-x"), "{prompt}");
 }

@@ -218,9 +218,9 @@ pub(crate) struct Document {
     pub marks: Vec<String>,
 }
 
-/// What the agent's answer held: its overview text, the draft fields it proposed and the
-/// questions it left for the owner. Every field is empty when the answer had no readable
-/// JSON block.
+/// What the agent's answer held: its overview text, the draft fields it proposed, the
+/// questions it left for the owner and whether it gave its roadmap files as a list, an empty
+/// list included. Every field is empty or false when the answer had no readable JSON block.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Answer {
     pub overview: String,
@@ -229,6 +229,7 @@ pub(crate) struct Answer {
     pub platforms: Vec<Platform>,
     pub facts: MappingFacts,
     pub questions: Vec<crate::questions::Ask>,
+    pub roadmap_answered: bool,
 }
 
 #[cfg(unix)]
@@ -848,6 +849,7 @@ pub(crate) fn parse_answer(text: &str) -> Answer {
             &serde_json::json!({ "questions": reply.questions }),
             SETUP_QUESTION_CONTEXT,
         ),
+        roadmap_answered: reply.roadmap.is_array(),
     }
 }
 
@@ -868,13 +870,14 @@ fn union(sources: &[&[String]], max: usize, bytes: usize) -> Vec<String> {
     merged
 }
 
-/// Fills only the gaps of `base` from the manifest facts and the agent's
-/// answer: a field the owner or an earlier onboarding already filled stays.
-/// The research and documents the answer names count only for files the prompt
-/// showed with their text; when any remain they replace the earlier map, else
-/// the earlier map stays. Takes the current draft, the answer, the found facts
-/// and stack. Returns a draft whose setup passes `ProjectSetup::validate`,
-/// research still off.
+/// Fills only the gaps of `base` from the manifest facts and the agent's answer: a field the
+/// owner or an earlier onboarding already filled stays. The research and documents the answer
+/// names count only for files the prompt showed with their text; when any remain they replace
+/// the earlier map, else the earlier map stays. The roadmap is the shown files of the answer's
+/// roadmap list, an empty list meaning none; only an answer without that list takes the first
+/// document the heading scan took for a roadmap, else keeps the earlier roadmap. Takes the
+/// current draft, the answer, the found facts and stack. Returns a draft whose setup passes
+/// `ProjectSetup::validate`, research still off.
 pub(crate) fn merge(
     base: &Drafted,
     answer: &Answer,
@@ -949,10 +952,10 @@ pub(crate) fn merge(
         .filter(|path| found.shown.contains(path))
         .cloned()
         .collect();
-    merged.facts.roadmap = match (roadmap.is_empty(), found.shown_roadmap.first()) {
-        (false, _) => roadmap,
-        (true, Some(scanned)) => vec![scanned.clone()],
-        (true, None) => base.facts.roadmap.clone(),
+    merged.facts.roadmap = match (answer.roadmap_answered, found.shown_roadmap.first()) {
+        (true, _) => roadmap,
+        (false, Some(scanned)) => vec![scanned.clone()],
+        (false, None) => base.facts.roadmap.clone(),
     };
     assert!(merged.facts.shown.is_empty());
     assert!(merged.draft.validate().is_ok());

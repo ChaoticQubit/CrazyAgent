@@ -30,6 +30,26 @@ const UNREAD_FOLDERS: [&str; 11] = [
     "__pycache__",
     "Pods",
 ];
+/// Hidden tool and dependency folders, and Python's package folder, whose Markdown belongs to
+/// other projects: walked, their changelogs and readme files would rank as this project's
+/// roadmap or research.
+const DEPENDENCY_FOLDERS: [&str; 13] = [
+    ".venv",
+    ".tox",
+    ".nox",
+    ".cargo",
+    ".terraform",
+    ".yarn",
+    ".pnpm-store",
+    ".gradle",
+    ".direnv",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "site-packages",
+];
+/// The file that marks a Python virtual environment under any folder name.
+const PYTHON_ENVIRONMENT_MARK: &str = "pyvenv.cfg";
 const DEPTH_MAX: usize = 8;
 const ENTRIES_MAX: usize = 6_000;
 const FILE_BYTES_MAX: u64 = 1024 * 1024;
@@ -111,18 +131,18 @@ struct Walk {
     found: Vec<Found>,
 }
 
-/// Reads the project's own documents beneath `repo`, never through a link: Markdown and
-/// plain text files up to eight folders deep, hidden folders included but walked after the
-/// visible ones and within their own entry bound. A local heading scan of each text first
-/// puts roadmaps, then research, then the rest; within each, the docs, doc, documentation,
-/// research and notes folders first, then root files, then the rest, shallower first.
-/// Hidden files, `.git`, `.crazyagent/worktrees`, names that look like secrets, private and
-/// build or vendor folders, other mounts, hard-linked files, files over 1 MiB and whatever
-/// the project's git ignores, except Markdown, are never opened or listed. Each text is cut
-/// at 6 KiB, all of them at 48 KiB and 40 files; files past that and PDF, Word and CSV files
-/// are only listed. Takes the folder and the README name already read. Returns the
-/// documents read and the paths and sizes listed, or `None` when the project's git could
-/// not say which files it ignores, so none is read. Files in the `hidden` folders, given
+/// Reads the project's own documents beneath `repo`, never through a link: Markdown and plain
+/// text files up to eight folders deep, hidden folders included but walked after the visible
+/// ones and within their own entry bound. A local heading scan of each text first puts
+/// roadmaps, then research, then the rest; within each, the docs, doc, documentation, research
+/// and notes folders first, then root files, then the rest, shallower first. Hidden files,
+/// `.git`, the engine's own `.crazyagent` folder, names that look like secrets, private, build,
+/// vendor and dependency folders, Python environments, other mounts, hard-linked files, files
+/// over 1 MiB and whatever the project's git ignores, except Markdown, are never opened or
+/// listed. Each text is cut at 6 KiB, all of them at 48 KiB and 40 files; files past that and
+/// PDF, Word and CSV files are only listed. Takes the folder and the README name already read.
+/// Returns the documents read and the paths and sizes listed, or `None` when the project's git
+/// could not say which files it ignores, so none is read. Files in the `hidden` folders, given
 /// below the project folder, are never read or listed.
 pub(super) fn read(repo: &Path, readme: Option<&str>, hidden: &[String]) -> Option<Reading> {
     let Some((root, device)) = open_folder(repo)
@@ -190,8 +210,9 @@ pub(super) fn read(repo: &Path, readme: Option<&str>, hidden: &[String]) -> Opti
 
 /// Drops each file name that looks like it holds a secret or that git ignores from the
 /// mapping evidence (MAP-2): such top-level entries and each README, manifest, overview and
-/// document line naming one, a code graph line also on any secret word, as its nodes may be
-/// bare names. One `check-ignore` call answers for all; a name git does not clear, or every
+/// document line or heading scan mark naming one, as a mark may come from past the text
+/// shown, and a code graph line also on any secret word, as its nodes may be bare names.
+/// One `check-ignore` call answers for all; a name git does not clear, or every
 /// name when git could not answer, counts as ignored, and so does a name in one of the
 /// `hidden` folders, given below the project folder, written relative or absolute. Takes
 /// the folder, the evidence and the hidden folders.
@@ -204,7 +225,13 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
         .chain(evidence.manifests.iter().map(|(_, text)| text))
         .chain(&evidence.graph)
         .chain(&evidence.overview)
-        .chain(evidence.documents.iter().map(|document| &document.text));
+        .chain(evidence.documents.iter().map(|document| &document.text))
+        .chain(
+            evidence
+                .documents
+                .iter()
+                .flat_map(|document| document.marks.iter()),
+        );
     for text in texts {
         names.extend(paths_in(text).filter(|path| below(path)).map(str::to_owned));
     }
@@ -259,6 +286,7 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
     }
     for document in &mut evidence.documents {
         keep(&mut document.text, false);
+        document.marks.retain(|mark| shown(mark));
     }
     if let Some(text) = &mut evidence.graph {
         keep(text, true);
@@ -312,11 +340,12 @@ fn below(path: &str) -> bool {
 /// each document file it may read or list to `walk_so_far`. Entries are taken in name order, at
 /// most 6,000 in all and 2,000 inside hidden folders, statted without following links;
 /// visible folders go before hidden ones, and a root's document folders first. A hidden
-/// file is skipped, and so are `.git` and `.crazyagent/worktrees`, a hidden folder once the
+/// file is skipped, and so are `.git`, the engine's `.crazyagent` folder, which the
+/// mapping reads its overview from on its own, dependency folders, a hidden folder once the
 /// hidden bound is spent, a file with more than one link, since its other name may be
-/// outside the project, a folder on another device than the root, such as a mount, and a
+/// outside the project, a folder on another device than the root, such as a mount, a
 /// folder holding a `.git` entry, a nested repository or submodule whose own ignores the
-/// project's git does not apply.
+/// project's git does not apply, and a folder holding `pyvenv.cfg`, a Python environment.
 /// Takes the open folder, the root's status, its path, its depth, whether it is a hidden
 /// folder or inside one, and what the walk gathered so far.
 fn walk(
@@ -369,11 +398,11 @@ fn walk(
         };
         match FileType::from_raw_mode(stat.st_mode) {
             FileType::Directory => {
-                let engine_worktrees = format!("{CRAZYAGENT_DIRECTORY}/worktrees");
                 if depth < DEPTH_MAX
                     && !named(&UNREAD_FOLDERS, &name)
+                    && !named(&DEPENDENCY_FOLDERS, &name)
                     && !name.eq_ignore_ascii_case(".git")
-                    && !path.eq_ignore_ascii_case(&engine_worktrees)
+                    && !name.eq_ignore_ascii_case(CRAZYAGENT_DIRECTORY)
                 {
                     folders.push((name, path));
                 }
@@ -410,11 +439,15 @@ fn walk(
         let Ok(child) = rustix::fs::openat(folder, name.as_str(), flags, Mode::empty()) else {
             continue;
         };
-        if rustix::fs::fstat(&child).is_ok_and(|stat| stat.st_dev == root.st_dev)
-            && matches!(
-                rustix::fs::statat(&child, ".git", AtFlags::SYMLINK_NOFOLLOW),
+        let absent = |name: &str| {
+            matches!(
+                rustix::fs::statat(&child, name, AtFlags::SYMLINK_NOFOLLOW),
                 Err(rustix::io::Errno::NOENT)
             )
+        };
+        if rustix::fs::fstat(&child).is_ok_and(|stat| stat.st_dev == root.st_dev)
+            && absent(".git")
+            && absent(PYTHON_ENVIRONMENT_MARK)
         {
             walk(&child, root, &path, depth + 1, hidden, walk_so_far);
         }
@@ -917,15 +950,22 @@ fn without_number(line: &str) -> &str {
 
 /// The milestone label `line` starts with, and its family: `M`, `V` or `v` and digits, or
 /// `Phase`, `Milestone` or `Release` (any case), a space and digits, each followed by the
-/// end, a space, `:` or `.`. Takes the line. Returns the family and the label, or none.
+/// end, a space, `:` or `.`. A `V` or `Release` number followed by `.` and a digit is a
+/// version number, such as a changelog's `v3.0.0`, not a milestone. Takes the line. Returns
+/// the family and the label, or none.
 fn milestone(line: &str) -> Option<(&'static str, String)> {
-    let numbered = |rest: &str| {
+    let numbered = |rest: &str, versioned: bool| {
         let digits = rest.len()
             - rest
                 .trim_start_matches(|character: char| character.is_ascii_digit())
                 .len();
         let after = &rest[digits..];
-        (digits > 0 && (after.is_empty() || after.starts_with([' ', ':', '.']))).then_some(digits)
+        let version = versioned
+            && after
+                .strip_prefix('.')
+                .is_some_and(|tail| tail.starts_with(|character: char| character.is_ascii_digit()));
+        (digits > 0 && !version && (after.is_empty() || after.starts_with([' ', ':', '.'])))
+            .then_some(digits)
     };
     let letter = match line.chars().next() {
         Some('M') => Some("M"),
@@ -933,7 +973,7 @@ fn milestone(line: &str) -> Option<(&'static str, String)> {
         _ => None,
     };
     if let Some(family) = letter
-        && let Some(digits) = numbered(&line[1..])
+        && let Some(digits) = numbered(&line[1..], family == "V")
     {
         return Some((family, format!("{family}{}", &line[1..1 + digits])));
     }
@@ -941,7 +981,7 @@ fn milestone(line: &str) -> Option<(&'static str, String)> {
         let head = line.get(..word.len())?;
         let rest = line[word.len()..].strip_prefix(' ')?;
         head.eq_ignore_ascii_case(word)
-            .then(|| numbered(rest))
+            .then(|| numbered(rest, word == "Release"))
             .flatten()
             .map(|digits| (word, format!("{word} {}", &rest[..digits])))
     })

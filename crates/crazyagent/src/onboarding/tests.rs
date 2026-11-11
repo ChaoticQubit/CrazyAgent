@@ -1971,25 +1971,46 @@ fn the_mapping_answer_keeps_a_roadmap_it_was_shown_and_drops_one_it_was_not() {
 }
 
 #[test]
-fn a_mapping_answer_without_a_roadmap_takes_the_local_scans_roadmap() {
-    let reply = r#"{"about":"x","roadmap":[]}"#;
-    let (merged, _) = mapped(
-        reply,
-        &[
-            ("docs/notes.md", draft::FoundKind::Other),
-            (SS_ROADMAP, draft::FoundKind::Roadmap),
-            ("docs/later-plan.md", draft::FoundKind::Roadmap),
-        ],
+fn a_mapping_answer_without_a_roadmap_list_takes_the_local_scans_roadmap() {
+    let shown = [
+        ("docs/notes.md", draft::FoundKind::Other),
+        (SS_ROADMAP, draft::FoundKind::Roadmap),
+        ("docs/later-plan.md", draft::FoundKind::Roadmap),
+    ];
+    for reply in [
+        r#"{"about":"x"}"#,
+        r#"{"about":"x","roadmap":"none"}"#,
+        "not json",
+    ] {
+        let (merged, answer) = mapped(reply, &shown);
+        assert!(!answer.roadmap_answered, "{reply}");
+        assert_eq!(merged.facts.roadmap, vec![SS_ROADMAP.to_owned()], "{reply}");
+    }
+    let (none, _) = mapped(
+        r#"{"about":"x"}"#,
+        &[("docs/notes.md", draft::FoundKind::Other)],
     );
-    assert_eq!(merged.facts.roadmap, vec![SS_ROADMAP.to_owned()]);
-    let (none, _) = mapped(reply, &[("docs/notes.md", draft::FoundKind::Other)]);
     assert!(none.facts.roadmap.is_empty());
+}
+
+#[test]
+fn a_changelog_the_scan_took_for_a_roadmap_is_not_linked_when_the_answer_names_none() {
+    let (merged, answer) = mapped(
+        r#"{"about":"x","roadmap":[]}"#,
+        &[("CHANGELOG.md", draft::FoundKind::Roadmap)],
+    );
+    assert!(answer.roadmap_answered);
+    assert!(
+        merged.facts.roadmap.is_empty(),
+        "{:?}",
+        merged.facts.roadmap
+    );
 }
 
 #[test]
 fn a_found_roadmap_survives_the_onboarding_row() {
     let (merged, _) = mapped(
-        r#"{"roadmap":[]}"#,
+        r#"{"about":"x"}"#,
         &[(SS_ROADMAP, draft::FoundKind::Roadmap)],
     );
     let column = draft::found_column(&merged).unwrap();
