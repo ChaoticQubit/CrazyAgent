@@ -1129,8 +1129,7 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_leaves_out_the_engine_files_in_the_project() {
-    let graphify = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let graphify = test_graphify();
     let dir = tempfile::Builder::new()
         .prefix("ca-graph-")
         .tempdir_in("/tmp")
@@ -1196,12 +1195,22 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
     assert!(secret.join("vault.py").is_file());
 }
 
+/// The graphify the graph rows run: the file `CRAZYAGENT_GRAPHIFY` names, as CI installs
+/// it pinned in its own state, else the one this machine has. Output: the canonical file,
+/// or a panic naming what is missing.
+#[cfg(target_os = "macos")]
+fn test_graphify() -> std::path::PathBuf {
+    std::env::var_os("CRAZYAGENT_GRAPHIFY")
+        .map(|named| std::fs::canonicalize(named).expect("CRAZYAGENT_GRAPHIFY names a file"))
+        .or_else(service::installed_graphify)
+        .expect("BLOCKED: graphify not installed (CRAZYAGENT_GRAPHIFY, ~/.local/bin or Homebrew)")
+}
+
 /// Builds the code graph of `repo` with the installed graphify and no hidden folders, in a
 /// fresh engine state folder. Takes the project folder. Returns how the build ended.
 #[cfg(target_os = "macos")]
 fn build_graph(repo: &Path) -> graph::GraphEnding {
-    let graphify = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let graphify = test_graphify();
     run_graph(repo, &graphify, &[])
 }
 
@@ -1508,8 +1517,7 @@ fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_the_keep_out_is
     let (_dir, repo, hidden) = graphed_then_hidden();
     write_file(&repo, ".gitignore", "it's/\n");
     write_file(&repo, "it's/cache.py", "def cached():\n    return 1\n");
-    let graphify = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let graphify = test_graphify();
     assert_eq!(
         run_graph(&repo, &graphify, &hidden),
         graph::GraphEnding::Failed(graph::GRAPH_KEEP_OUT_REFUSED)
