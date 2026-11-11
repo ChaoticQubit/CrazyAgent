@@ -1,6 +1,6 @@
 use super::*;
-use crate::engine::owner::{ProcessText, SavedText};
-use crate::protocol::ProjectId;
+use crate::engine::owner::{AppInstructionSettings, ProcessText, Proposal, SavedText};
+use crate::protocol::{CredentialRef, ProjectId};
 
 impl OwnerController {
     fn process_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -34,6 +34,35 @@ impl OwnerController {
     ) -> Result<SavedText, EngineError> {
         self.process_client()?
             .save_process_text(project, text, version, opened)
+            .await
+    }
+
+    /// Asks for a cleaned version of the saved instructions from a model with tools off;
+    /// nothing is saved. Inputs: none for the app-wide text, or the project; and the pool
+    /// the owner picked for this run, needed for the app-wide text and never taken for a
+    /// project. Output: the proposal with the version it was made from, or an
+    /// `instructions_cleanup_*` refusal.
+    pub async fn propose_process(
+        &self,
+        project: Option<ProjectId>,
+        pool: Option<CredentialRef>,
+    ) -> Result<Proposal, EngineError> {
+        self.process_client()?.propose_process(project, pool).await
+    }
+
+    /// Reads the app-wide instruction settings. Output: the settings, on when never stored.
+    pub async fn app_instruction_settings(&self) -> Result<AppInstructionSettings, EngineError> {
+        self.process_client()?.app_instruction_settings().await
+    }
+
+    /// Stores the app-wide instruction settings whole. Input: the settings. Output: the
+    /// settings as stored, or a refusal after which nothing changed.
+    pub async fn save_app_instruction_settings(
+        &self,
+        settings: AppInstructionSettings,
+    ) -> Result<AppInstructionSettings, EngineError> {
+        self.process_client()?
+            .save_app_instruction_settings(settings)
             .await
     }
 

@@ -27,9 +27,9 @@ pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
-    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionMode, InstructionRecord,
-    InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved, ProcessText, SavedText,
-    UncommittedImport,
+    Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile, InstructionMode,
+    InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved,
+    ProcessText, Proposal, SavedText, UncommittedImport,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{

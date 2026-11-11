@@ -363,8 +363,8 @@ pub(crate) fn mates_home(home: &Path) -> PathBuf {
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the
-/// engine data folder (the folder of `engine.db`), the project's recorded folder and which
-/// of the owner's two instruction texts its agents get.
+/// engine data folder (the folder of `engine.db`), the project's recorded folder, which
+/// of the owner's two instruction texts its agents get and whether repeated lines stay.
 /// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
 pub(crate) fn agent_project(
     tx: &Transaction<'_>,
@@ -374,14 +374,13 @@ pub(crate) fn agent_project(
         .map_err(unavailable)?
         .map(|setup| setup.project_folder())
         .filter(|folder| folder.is_absolute());
-    let mode = crate::instruction_files::load(tx, project)
-        .map_err(failure)?
-        .mode;
+    let settings = crate::instruction_files::load(tx, project).map_err(failure)?;
     Ok(crate::agent_home::AgentProject {
         data: engine_root(tx)?,
         id: project.clone(),
         folder,
-        mode,
+        mode: settings.mode,
+        repeated: settings.repeated,
     })
 }
 
