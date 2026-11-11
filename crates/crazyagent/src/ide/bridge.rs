@@ -286,6 +286,8 @@ pub enum IdeCall {
     },
     #[serde(rename = "ide.reveal_ack")]
     RevealAck { request: RequestId },
+    #[serde(rename = "ide.run_ack")]
+    RunAck { request: RequestId },
     #[serde(rename = "ide.events")]
     Events {},
     #[serde(rename = "ide.session")]
@@ -331,8 +333,9 @@ pub enum IdeReply {
     },
 }
 
-/// An event the engine pushes to a project's IDE: something to refresh, or a file the
-/// owner asked to reveal from the TUI.
+/// An event the engine pushes to a project's IDE: something to refresh, a file the owner
+/// asked to reveal from the TUI, or one command the owner confirmed in the desktop to type
+/// into a new terminal, with or without Enter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "name", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IdeEvent {
@@ -340,7 +343,15 @@ pub enum IdeEvent {
     ChangeSetsChanged,
     AgentsChanged,
     MemoriesChanged,
-    Reveal { request: RequestId, path: String },
+    Reveal {
+        request: RequestId,
+        path: String,
+    },
+    RunCommand {
+        request: RequestId,
+        command: String,
+        press_enter: bool,
+    },
 }
 
 impl IdeRequest {
@@ -393,6 +404,7 @@ impl IdeRequest {
             | IdeCall::Agents {}
             | IdeCall::Extensions {}
             | IdeCall::RevealAck { .. }
+            | IdeCall::RunAck { .. }
             | IdeCall::Events {}
             | IdeCall::Session {} => true,
         };
@@ -1111,6 +1123,7 @@ async fn answer(
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
         IdeCall::RevealAck { request } => reveal::acked(runtime, project, &request)?,
+        IdeCall::RunAck { request } => run_command::acked(runtime, project, &request)?,
         IdeCall::Git { args, folder } => git_call(runtime, project, args, folder).await?,
         IdeCall::Events {} | IdeCall::Session {} | IdeCall::Terminal { .. } => {
             return Err(failure("ide_request_invalid"));
