@@ -288,8 +288,8 @@ impl DeleteRefusal {
 }
 
 /// What a Delete everything of a project would take and whether it may go, read in one
-/// transaction: the project's name, its folder followed by every repository it declares, and
-/// either the canonical projects home with the fewest folders to move or the refusal.
+/// transaction: the project's name, its folder followed by every repository it declares, each
+/// once, and either the canonical projects home with the fewest folders to move or the refusal.
 #[derive(Debug)]
 pub(crate) struct DeleteChecked {
     pub name: String,
@@ -315,7 +315,11 @@ pub(crate) fn delete_check(
         return Ok(None);
     };
     let mut folders = vec![found.folder.clone()];
-    folders.extend(found.repositories.iter().cloned());
+    for repository in &found.repositories {
+        if !folders.contains(repository) {
+            folders.push(repository.clone());
+        }
+    }
     let home = home::load(tx)?.and_then(|saved| std::fs::canonicalize(saved).ok());
     let planned = match home {
         _ if !home::delete_offered() => Err(DeleteRefusal::plain("delete_platform_unqualified")),

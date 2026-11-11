@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "macos")]
+use crate::engine::owner::{OwnerMutation, OwnerOperation, OwnerRequest};
 
 const PROJECT: &str = "setup-pooled";
 const NAME: &str = "Meal planner";
@@ -55,6 +57,10 @@ async fn delete_everything_refuses_a_name_that_is_not_exactly_the_projects_name(
     engine.stop().await;
 }
 
+/// A project with a repository outside the projects home offers no delete in its preview,
+/// and a Delete refuses `delete_outside_home` with nothing stopped or moved.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_project_with_a_repository_outside_the_home_offers_no_delete_and_refuses_one() {
     let engine = Engine::start().await;
@@ -90,6 +96,9 @@ async fn a_project_with_a_repository_outside_the_home_offers_no_delete_and_refus
     engine.stop().await;
 }
 
+/// A Trash move that fails keeps the records and the folder and leaves Stop all on.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_trash_move_that_fails_removes_nothing_and_leaves_stop_all_on() {
     let engine = Engine::start().await;
@@ -117,6 +126,9 @@ async fn a_trash_move_that_fails_removes_nothing_and_leaves_stop_all_on() {
     engine.stop().await;
 }
 
+/// The delete plan is gone when the reply arrives, even after a settle that failed.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_delete_plan_is_gone_when_the_reply_arrives_even_after_a_settle_that_failed() {
     let engine = Engine::start().await;
@@ -152,6 +164,8 @@ async fn a_delete_plan_is_gone_when_the_reply_arrives_even_after_a_settle_that_f
 
 /// Delete everything of a project whose folder is already gone removes its records, then its
 /// engine files once the reply is out, and leaves another project's files alone.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records_and_engine_files()
 {
@@ -214,6 +228,9 @@ async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records
     engine.stop().await;
 }
 
+/// Delete everything removes the project's master, its lands and its catch-up choices.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn delete_everything_removes_the_projects_master_lands_and_catch_up_choices() {
     let engine = Engine::start().await;
@@ -323,6 +340,8 @@ async fn removing_a_project_keeps_its_usage_under_removed_projects() {
     engine.stop().await;
 }
 
+/// The removal preview names the project and its folder once, changes nothing, and offers
+/// Delete everything inside the home on the platform that offers it (DEC-118).
 #[tokio::test]
 async fn the_removal_preview_names_the_project_its_folder_and_offers_delete_inside_the_home() {
     let engine = Engine::start().await;
@@ -331,7 +350,11 @@ async fn the_removal_preview_names_the_project_its_folder_and_offers_delete_insi
     let preview = owner.removal_preview(project.clone()).await.unwrap();
     assert_eq!(preview.name, NAME);
     assert_eq!(preview.folders, [folder.to_str().unwrap().to_owned()]);
-    assert!(preview.can_delete);
+    assert_eq!(
+        preview.can_delete,
+        crate::projects_home::delete_offered(),
+        "{preview:?}"
+    );
     assert!(preview.running.is_empty(), "{preview:?}");
     assert_eq!(preview.open_change_sets, 0);
     assert!(preview.losses.is_empty());
@@ -341,8 +364,40 @@ async fn the_removal_preview_names_the_project_its_folder_and_offers_delete_insi
     engine.stop().await;
 }
 
+/// Off macOS, Delete everything is refused with `delete_platform_unqualified` before anything
+/// stops or moves, and the preview names the folder once and says why (DEC-118).
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn off_macos_delete_everything_is_refused_with_nothing_stopped_or_moved() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    let preview = owner.removal_preview(project.clone()).await.unwrap();
+    assert!(!preview.can_delete, "{preview:?}");
+    assert_eq!(preview.folders, [folder.to_str().unwrap().to_owned()]);
+    assert!(
+        preview
+            .blocked
+            .as_deref()
+            .is_some_and(|line| line.contains("only on macOS")),
+        "{preview:?}"
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("delete_platform_unqualified"));
+    assert_eq!(kept(&engine), 2, "the project stays listed");
+    assert_eq!(paused(&engine), 0, "a refused delete stops no agent");
+    assert!(folder.is_dir());
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Sets up a second project, Service A, beside the pooled one. Inputs: the engine's owner
-/// client and the generation. Output: the project and its folder.
+/// client and the generation. Output: the project and its folder. Only the macOS Delete
+/// everything tests use it (DEC-118).
+#[cfg(target_os = "macos")]
 async fn service(owner: &mut OwnerController, generation: u64) -> (ProjectId, PathBuf) {
     let project = ProjectId::new("service-a").unwrap();
     let response = owner
@@ -370,6 +425,8 @@ fn set(engine: &Engine, sql: &str, parameters: impl rusqlite::Params) {
 /// inside the pooled project's folder, neither project offers a delete, the preview names
 /// the other project, and a Delete of either refuses `delete_shared_folder` with nothing
 /// stopped or moved.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn delete_everything_refuses_a_folder_that_holds_another_projects_folder() {
     let engine = Engine::start().await;
@@ -419,6 +476,8 @@ async fn delete_everything_refuses_a_folder_that_holds_another_projects_folder()
 /// Two projects that declare the same repository inside the home: Delete everything of
 /// one would move the other's repository, so the preview offers no delete and names the
 /// other project, and a Delete refuses `delete_shared_folder` with nothing stopped or moved.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn delete_everything_refuses_a_repository_another_project_declares() {
     let engine = Engine::start().await;
@@ -458,6 +517,8 @@ async fn delete_everything_refuses_a_repository_another_project_declares() {
 /// A projects home move and a Delete everything never overlap: a pending move refuses a
 /// delete with nothing stopped, and a move asked while a delete waits for the project's
 /// agents refuses `home_move_delete_in_progress`; the delete's plan is forgotten once it ends, even refused, and the next move goes.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_pending_home_move_holds_a_delete_and_a_planned_delete_holds_a_home_move() {
     let engine = Engine::start().await;
@@ -713,6 +774,8 @@ async fn a_home_move_is_finished_when_its_record_and_first_settle_fail() {
 
 /// When every settle before the reply fails the reply still goes, and the settle after it
 /// forgets the plan, so a home move is not refused until a restart.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_delete_plan_is_forgotten_after_the_reply_when_every_settle_before_it_failed() {
     let engine = Engine::start().await;
@@ -778,7 +841,9 @@ fn engine_files(root: &std::path::Path, agent: i64, run: &str) -> Vec<PathBuf> {
 }
 
 /// Writes the rows of a finished agent and a finished research job of the test project, each
-/// with no process behind it. Input: the engine.
+/// with no process behind it. Input: the engine. Only the macOS Delete everything tests use
+/// it (DEC-118).
+#[cfg(target_os = "macos")]
 fn engine_file_rows(engine: &Engine) {
     write_db(
         engine,
@@ -905,6 +970,8 @@ async fn a_start_stopped_by_one_file_keeps_the_folder_so_the_next_start_finishes
 
 /// A delete records its engine files with the rows it drops and removes every one, the
 /// lead's teammate files too, so only a failed clear leaves the record behind.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_delete_records_its_engine_files_and_removes_every_one() {
     let engine = Engine::start().await;
@@ -969,6 +1036,8 @@ async fn an_engine_start_keeps_a_folder_its_record_s_inode_does_not_name() {
 
 /// A delete refused after its plan was written drops no rows, so it records nothing and a
 /// later start removes nothing.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_delete_refused_after_its_plan_records_and_removes_nothing() {
     let mut engine = Engine::start().await;
@@ -996,6 +1065,8 @@ async fn a_delete_refused_after_its_plan_records_and_removes_nothing() {
 
 /// A replayed delete records and removes nothing twice: files that appear under the same
 /// names after the first delete stay through the replay and a start.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_replayed_delete_records_and_removes_nothing_twice() {
     let mut engine = Engine::start().await;
