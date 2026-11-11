@@ -53,6 +53,7 @@ pub mod quit_settings;
 pub mod rcli_host;
 pub mod recovery;
 pub mod research;
+pub mod roadmap_status;
 pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;

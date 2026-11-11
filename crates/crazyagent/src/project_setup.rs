@@ -2407,7 +2407,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 45] = [
+const REMOVED_WITH_PROJECT: [&str; 47] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2453,6 +2453,8 @@ const REMOVED_WITH_PROJECT: [&str; 45] = [
     "instruction_imports",
     "project_setups",
     "project_doc_links",
+    "roadmap_status",
+    "roadmap_status_settings",
 ];
 
 /// Saves a project's extra read-only folders once each passes

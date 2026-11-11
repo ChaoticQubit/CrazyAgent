@@ -2322,6 +2322,39 @@ async fn a_removed_project_forgets_its_doc_links() {
     engine.stop().await;
 }
 
+/// A removed project takes its roadmap status and its refresh setting with it, so a project
+/// added again under the same id starts unchecked with the default setting.
+#[tokio::test]
+async fn a_removed_project_forgets_its_roadmap_status() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    crate::roadmap_status::set_refresh(&db, &project, crate::roadmap_status::Refresh::RefreshOnly)
+        .unwrap();
+    crate::roadmap_status::refresh(&db, &project).unwrap();
+    drop(db);
+    let status = "SELECT COUNT(*) FROM roadmap_status WHERE project='setup-pooled'";
+    let setting = "SELECT COUNT(*) FROM roadmap_status_settings WHERE project='setup-pooled'";
+    assert_eq!((engine.rows(status), engine.rows(setting)), (1, 1));
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!((engine.rows(status), engine.rows(setting)), (0, 0));
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_stays_gone() {
     let engine = Engine::start().await;
