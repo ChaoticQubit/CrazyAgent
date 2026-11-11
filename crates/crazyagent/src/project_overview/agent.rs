@@ -1,6 +1,6 @@
 use super::{
     Competitors, Ended, RUN_TIME, Research, TREE_PATHS_MAX, brief, competitors, finish, needs_home,
-    requeue,
+    report_text, requeue,
 };
 use crate::project_setup::ResearchKind;
 use crate::project_setup::links;
@@ -82,23 +82,29 @@ pub(crate) fn write(
 }
 
 /// The competitor research a run is shown: the report of the newest finished competitor
-/// research job when there is one, else the competitor research files the owner linked,
-/// each read through the links store with no link followed. The evidence takes at most
-/// `RESEARCH_BYTES_MAX` of them. Inputs: the connection, the project and its folder.
-/// Output: the files, or none when the store cannot be read.
+/// research job, read from the project's state folder where the runner writes it, else
+/// the competitor research files the owner linked, each read with no link followed. A
+/// report that went away since it was listed gives way to the linked files. The evidence
+/// takes at most `RESEARCH_BYTES_MAX` of them. Inputs: the connection, the project and
+/// its folder. Output: the files, or none when the store cannot be read.
 pub(super) fn research(db: &Connection, project: &ProjectId, root: &Path) -> Option<Vec<Research>> {
+    let linked = || -> Option<Vec<Research>> {
+        let files = links::research(db, project, root).ok()?;
+        Some(
+            files
+                .into_iter()
+                .filter(|(kind, _)| *kind == ResearchKind::CompetitorResearch)
+                .map(|(_, file)| file)
+                .collect(),
+        )
+    };
     let found = match competitors(db, project, root).ok()? {
         Competitors::Missing => Vec::new(),
-        Competitors::Report { path } => links::read_linked(root, &path)
-            .map(|text| Research { path, text })
-            .into_iter()
-            .collect(),
-        Competitors::Linked { .. } => links::research(db, project, root)
-            .ok()?
-            .into_iter()
-            .filter(|(kind, _)| *kind == ResearchKind::CompetitorResearch)
-            .map(|(_, file)| file)
-            .collect(),
+        Competitors::Report { path } => match report_text(root, &path) {
+            Some(text) => vec![Research { path, text }],
+            None => linked().unwrap_or_default(),
+        },
+        Competitors::Linked { .. } => linked()?,
     };
     assert!(found.len() <= links::LINKS_MAX);
     Some(found)

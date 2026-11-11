@@ -19,7 +19,8 @@ mod run;
 mod tests;
 
 pub use pack::{
-    EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, parse_reply, prompt,
+    EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, named_tabs,
+    parse_reply, prompt,
 };
 pub use run::{
     Ended, NO_ACCOUNT, NO_TABS, NOT_WRITTEN, REPLY_BYTES_MAX, REPLY_TOO_LONG, RUN_TIME,
@@ -781,7 +782,8 @@ pub fn reject(db: &Connection, project: &ProjectId, tab: Tab) -> Result<(), Engi
 }
 
 /// Marks the project's Overview stale after a landed change set, due once the quiet period
-/// has passed, only while its tabs refresh after landings (the default with no row).
+/// has passed, only while its tabs refresh after landings (the default with no row). A
+/// run that already waits to start at once (the first read, a Refresh) keeps its time.
 /// Inputs: the landing's connection, the project and the time. Output: unit, or
 /// `overview_unavailable`.
 pub fn mark_stale(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<(), EngineError> {
@@ -790,7 +792,8 @@ pub fn mark_stale(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<(
     assert!(due_ms >= now_ms);
     db.execute(
         "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,?2)
-         ON CONFLICT(project) DO UPDATE SET stale=1, due_ms=excluded.due_ms
+         ON CONFLICT(project) DO UPDATE SET stale=1,
+           due_ms=CASE WHEN stale=1 AND due_ms=0 THEN 0 ELSE excluded.due_ms END
          WHERE refresh='after_landing'",
         params![project.as_str(), due_ms],
     )
@@ -937,10 +940,18 @@ fn present(db: &Connection, table: &str) -> Result<bool, EngineError> {
     .map_err(unavailable)
 }
 
+/// The text of a research job's report. The stored path is relative to the project's
+/// state folder, where the research runner writes it, and is opened with no link followed
+/// from that folder down. Inputs: the project folder and the stored path. Output: the
+/// text, or none for a report that is missing or that the links reader refuses.
+pub(crate) fn report_text(folder: &Path, path: &str) -> Option<String> {
+    links::read_linked(&crate::projects_home::state_folder(folder), path)
+}
+
 /// What the Competitors tab can build on: the report of the project's newest finished
-/// competitor research job, else the competitor research files the owner linked that
-/// read as text through no link, else nothing. Inputs: the connection, the project and
-/// its folder. Output: the state, or `overview_unavailable`.
+/// competitor research job when it reads as text, else the competitor research files the
+/// owner linked that read as text through no link, else nothing. Inputs: the connection,
+/// the project and its folder. Output: the state, or `overview_unavailable`.
 pub fn competitors(
     db: &Connection,
     project: &ProjectId,
@@ -957,7 +968,10 @@ pub fn competitors(
             )
             .optional()
             .map_err(unavailable)?;
-        if let Some(path) = report.filter(|path| path.len() <= REPORT_PATH_BYTES_MAX) {
+        let readable = |path: &String| {
+            path.len() <= REPORT_PATH_BYTES_MAX && report_text(folder, path).is_some()
+        };
+        if let Some(path) = report.filter(readable) {
             return Ok(Competitors::Report { path });
         }
     }
@@ -1032,6 +1046,7 @@ pub fn read(
     assert_eq!(tabs.len(), Tab::ALL.len());
     let failure = state
         .failure
+        .filter(|_| !needs_home)
         .map(|failure| clipped(failure, FAILURE_BYTES_MAX));
     assert!(
         failure
@@ -1045,7 +1060,7 @@ pub fn read(
         running: state
             .running_ms
             .is_some_and(|started| now_ms.saturating_sub(started) < run::RUN_MS),
-        stale: state.stale,
+        stale: state.stale && !needs_home,
         checked_ms: state.checked_ms,
         failure,
         refresh: state.refresh,

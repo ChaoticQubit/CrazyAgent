@@ -232,3 +232,18 @@ pub fn parse_reply(reply: &str) -> Vec<(Tab, String)> {
     assert!(tabs.iter().all(|(_, text)| text.len() <= TAB_BYTES_MAX));
     tabs
 }
+
+/// The tabs a reply opens a block for, whether or not [`parse_reply`] kept their text.
+/// Input: the reply. Output: each named tab once, in tab order.
+pub fn named_tabs(reply: &str) -> Vec<Tab> {
+    let named: Vec<Tab> = Tab::ALL
+        .into_iter()
+        .filter(|tab| {
+            reply
+                .lines()
+                .any(|line| line.trim_end().strip_prefix(FENCE) == Some(tab.stem()))
+        })
+        .collect();
+    assert!(named.len() <= Tab::ALL.len());
+    named
+}

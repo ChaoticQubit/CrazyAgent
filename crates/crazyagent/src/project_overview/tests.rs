@@ -779,6 +779,29 @@ fn a_readme_over_the_bound_is_cut_at_a_line_and_says_so() {
     );
 }
 
+/// Stores a finished competitor research job as the research runner does: the report
+/// below the project's `.crazyagent` folder and its path, relative to that folder, in the
+/// job's row. Inputs: the connection, the project folder and the report text. Output: the
+/// stored path.
+fn job_report(db: &Connection, folder: &std::path::Path, text: &str) -> String {
+    let stored = crate::project_setup::ResearchKind::CompetitorResearch.report_path();
+    let report = folder.join(".crazyagent").join(&stored);
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(&report, text).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS research_jobs(id INTEGER PRIMARY KEY, project TEXT,
+           kind TEXT, status TEXT, report_path TEXT);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO research_jobs(project,kind,status,report_path)
+         VALUES('alpha','competitor_research','done',?1)",
+        [stored.as_str()],
+    )
+    .unwrap();
+    stored
+}
+
 fn link_competitor_research(
     db: &mut Connection,
     project: &ProjectId,
@@ -830,22 +853,27 @@ fn competitors_is_missing_without_research_and_linked_with_a_linked_file() {
 fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
     let (mut db, project, folder) = case();
     link_competitor_research(&mut db, &project, folder.path(), "docs/competitors.md");
+    let stored = job_report(&db, folder.path(), "Gamma leads.\n");
     db.execute_batch(
-        "CREATE TABLE research_jobs(id INTEGER PRIMARY KEY, project TEXT, kind TEXT,
-           status TEXT, report_path TEXT);
-         INSERT INTO research_jobs(project,kind,status,report_path) VALUES
-           ('alpha','competitor_research','done','research/old.md'),
-           ('alpha','competitor_research','done','research/new.md'),
+        "INSERT INTO research_jobs(project,kind,status,report_path) VALUES
            ('alpha','competitor_research','running',NULL),
-           ('alpha','market_research','done','research/market.md'),
-           ('beta','competitor_research','done','research/beta.md');",
+           ('alpha','market_research','done','context/research/market_research.md'),
+           ('beta','competitor_research','done','context/research/beta.md');",
     )
     .unwrap();
     assert_eq!(
         read(&db, &project, folder.path(), 1).unwrap().competitors,
         Competitors::Report {
-            path: "research/new.md".into()
+            path: stored.clone()
         }
+    );
+    std::fs::remove_file(folder.path().join(".crazyagent").join(&stored)).unwrap();
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Linked {
+            paths: vec!["docs/competitors.md".into()]
+        },
+        "a report that cannot be read gives way to the linked files"
     );
 }
 
@@ -1298,17 +1326,122 @@ fn a_run_is_shown_the_job_report_else_the_linked_competitor_files() {
     assert_eq!(linked.len(), 1);
     assert_eq!(linked[0].path, "docs/competitors.md");
     assert_eq!(linked[0].text, "Beta is faster at search.\n");
-    std::fs::create_dir_all(folder.path().join("research")).unwrap();
-    std::fs::write(folder.path().join("research/new.md"), "Gamma leads.\n").unwrap();
-    db.execute_batch(
-        "CREATE TABLE research_jobs(id INTEGER PRIMARY KEY, project TEXT, kind TEXT,
-           status TEXT, report_path TEXT);
-         INSERT INTO research_jobs(project,kind,status,report_path) VALUES
-           ('alpha','competitor_research','done','research/new.md');",
-    )
-    .unwrap();
+    let stored = job_report(&db, folder.path(), "Gamma leads.\n");
+    let outside = folder.path().join(&stored);
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, "Not the report.\n").unwrap();
     let report = agent::research(&db, &project, folder.path()).unwrap();
     assert_eq!(report.len(), 1);
-    assert_eq!(report[0].path, "research/new.md");
+    assert_eq!(report[0].path, stored);
     assert_eq!(report[0].text, "Gamma leads.\n");
+    let (asked, with_competitors) = brief(&db, &project, folder.path(), &report, &[], 0).unwrap();
+    assert!(with_competitors);
+    assert!(asked.contains("~~~competitors") && asked.contains("Gamma leads."));
+    std::fs::remove_file(folder.path().join(".crazyagent").join(&stored)).unwrap();
+    let linked = agent::research(&db, &project, folder.path()).unwrap();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].path, "docs/competitors.md");
+}
+
+#[test]
+fn a_landing_does_not_push_back_a_run_that_waits_to_start_at_once() {
+    let (mut db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    landed(&mut db, &project, 1);
+    assert_eq!(
+        tick(&db, &mut runs, 2).unwrap(),
+        1,
+        "the first run does not wait for the quiet period"
+    );
+    refresh(&db, &project).unwrap();
+    landed(&mut db, &project, 5_000);
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 6_000), 1);
+    assert_eq!(
+        tick(&db, &mut runs, 6_001).unwrap(),
+        1,
+        "the Refresh the owner asked for runs as soon as the run before it ends"
+    );
+}
+
+#[test]
+fn a_tab_the_run_could_not_use_is_said_while_the_others_are_written() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let long = format!(
+        "~~~quick-info\nAlpha reads papers.\n~~~\n~~~features\n{}\n~~~\n",
+        "x".repeat(TAB_BYTES_MAX + 1)
+    );
+    let ended = Ended::Reply {
+        reply: &long,
+        with_competitors: false,
+    };
+    assert_eq!(runs.end(&db, folder.path(), ended, 7), 1);
+    let overview = read(&db, &project, folder.path(), 8).unwrap();
+    assert_eq!(
+        tab_of(&overview, Tab::QuickInfo).text.as_deref(),
+        Some("Alpha reads papers.\n")
+    );
+    assert!(tab_of(&overview, Tab::Features).text.is_none());
+    assert_eq!(
+        overview.failure.as_deref(),
+        Some("1 tab in the reply could not be used and stayed as it was")
+    );
+    assert_eq!(overview.checked_ms, Some(7));
+    assert!(!overview.running);
+
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 9).unwrap(), 1);
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 10), 1);
+    let overview = read(&db, &project, folder.path(), 11).unwrap();
+    assert!(overview.failure.is_none(), "a whole reply clears the line");
+    assert_eq!(overview.checked_ms, Some(10));
+}
+
+#[test]
+fn a_failure_line_masks_words_that_look_like_credentials() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let token = "sk-ant-api03-AbCdEf0123456789GhIjKl";
+    let words = format!("Agent stopped: the provider refused {token} for this request");
+    assert_eq!(runs.end(&db, folder.path(), Ended::Failed(&words), 1), 1);
+    let failure = read(&db, &project, folder.path(), 2)
+        .unwrap()
+        .failure
+        .unwrap();
+    assert!(
+        failure.starts_with("Agent stopped: the provider refused"),
+        "{failure}"
+    );
+    assert!(!failure.contains("AbCdEf0123456789"), "{failure}");
+    assert!(failure.len() <= FAILURE_BYTES_MAX);
+    let stored: String = db
+        .query_row(
+            "SELECT failure FROM project_overview WHERE project='alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("AbCdEf0123456789"), "{stored}");
+}
+
+#[test]
+fn a_project_outside_the_projects_home_never_shows_a_run_failure_or_a_due_run() {
+    let (mut db, project, folder) = case();
+    std::fs::remove_dir(folder.path().join(".crazyagent")).unwrap();
+    let mut runs = FakeTabRuns::default();
+    let quiet = crate::roadmap_status::QUIET_MS;
+    landed(&mut db, &project, 0);
+    assert_eq!(tick(&db, &mut runs, quiet).unwrap(), 1);
+    let (_, claim) = runs.claims.pop().unwrap();
+    assert!(fail(&db, &project, claim, NO_ACCOUNT, quiet + 1).unwrap());
+    landed(&mut db, &project, quiet + 2);
+    let overview = read(&db, &project, folder.path(), quiet + 3).unwrap();
+    assert!(overview.needs_home);
+    assert!(overview.failure.is_none());
+    assert!(!overview.stale && !overview.running);
 }

@@ -1,11 +1,11 @@
 use super::{
-    FAILURE_BYTES_MAX, Offered, Research, Tab, clipped, evidence, offer, parse_reply, prompt, read,
-    unavailable,
+    FAILURE_BYTES_MAX, Offered, Research, Tab, clipped, evidence, named_tabs, offer, parse_reply,
+    prompt, read, unavailable,
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{Claim, Runs};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::path::Path;
 use std::time::Duration;
 
@@ -47,11 +47,11 @@ pub enum Ended<'a> {
     Skipped,
 }
 
-/// One line saying why a run failed, safe to store and show: hidden characters shown
-/// escaped, control characters turned into spaces, trimmed, within [`FAILURE_BYTES_MAX`].
-/// Input: the words. Output: the line.
+/// One line saying why a run failed, safe to store and show: words that look like
+/// credentials masked, hidden characters shown escaped, control characters turned into
+/// spaces, trimmed, within [`FAILURE_BYTES_MAX`]. Input: the words. Output: the line.
 fn line(words: &str) -> String {
-    let shown: String = crate::memory::visible_text(words)
+    let shown: String = crate::memory::visible_text(&crate::project_setup::redact(words))
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
@@ -161,36 +161,37 @@ pub fn brief(
     Ok((text, with_competitors))
 }
 
-/// Whether the run a claim names is still the project's run in flight. Inputs: the
-/// connection, the project and the claim. Output: the answer, or `overview_unavailable`.
-fn live(db: &Connection, project: &ProjectId, claim: Claim) -> Result<bool, EngineError> {
-    db.query_row(
-        "SELECT 1 FROM project_overview WHERE project=?1 AND running_ms=?2",
-        params![project.as_str(), claim.ms()],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|found| found.is_some())
-    .map_err(unavailable)
+/// What a run says when its reply named tabs it could not use: too long, blank, cut off
+/// or refused by the tab's file. Input: how many. Output: the line, none for zero.
+fn left_note(left: usize) -> Option<String> {
+    let note = match left {
+        0 => return None,
+        1 => "1 tab in the reply could not be used and stayed as it was".to_owned(),
+        more => format!("{more} tabs in the reply could not be used and stayed as they were"),
+    };
+    assert!(note.len() <= FAILURE_BYTES_MAX);
+    Some(note)
 }
 
 /// Offers the tabs of a reply. Inputs: the connection, the project, its folder, the reply
 /// and whether competitor research was in the evidence (without it a Competitors tab in
 /// the reply is dropped). Output: Ok when a tab was written, proposed or already the same,
-/// else the words saying why the run failed.
+/// with a line when the reply named more tabs than could be used, else the words saying
+/// why the run failed.
 fn offered(
     db: &Connection,
     project: &ProjectId,
     folder: &Path,
     reply: &str,
     with_competitors: bool,
-) -> Result<(), &'static str> {
+) -> Result<Option<String>, &'static str> {
     if reply.len() > REPLY_BYTES_MAX {
         return Err(REPLY_TOO_LONG);
     }
+    let asked = |tab: &Tab| with_competitors || *tab != Tab::Competitors;
     let tabs: Vec<(Tab, String)> = parse_reply(reply)
         .into_iter()
-        .filter(|(tab, _)| with_competitors || *tab != Tab::Competitors)
+        .filter(|(tab, _)| asked(tab))
         .collect();
     if tabs.is_empty() {
         return Err(NO_TABS);
@@ -210,15 +211,22 @@ fn offered(
     if taken == 0 {
         return Err(NOT_WRITTEN);
     }
-    Ok(())
+    let named = named_tabs(reply)
+        .into_iter()
+        .filter(|tab| asked(tab))
+        .count();
+    assert!(taken <= named, "every tab taken was named in the reply");
+    Ok(left_note(named - taken))
 }
 
-/// Ends the run a claim names, and only that run: a reply's tabs are offered and the time
-/// stored, a failure stores one plain line and is not retried until the next landing or
-/// Refresh, a skip only closes the run. A run that was closed for its time, or whose project is
-/// gone, ends nothing and writes no tab. Inputs: the connection, the project, its folder,
-/// the claim, how the run ended and now. Output: whether this run was the one in flight,
-/// or `overview_unavailable`.
+/// Ends the run a claim names, and only that run. The run is closed first, by its claim:
+/// a run that was closed for its time, or whose project is gone, ends nothing and writes
+/// no tab. A reply's tabs are offered only after that, then the time is stored, with a
+/// line when some named tab could not be used; a failure stores one plain line and is not
+/// retried until the next landing or Refresh; a skip only closes the run. A reply whose
+/// offers do not finish leaves the run closed as unfinished. Inputs: the connection, the
+/// project, its folder, the claim, how the run ended and now. Output: whether this run
+/// was the one in flight, or `overview_unavailable`.
 pub fn finish(
     db: &Connection,
     project: &ProjectId,
@@ -228,30 +236,43 @@ pub fn finish(
     now_ms: i64,
 ) -> Result<bool, EngineError> {
     assert!(claim.ms() >= 0 && now_ms >= 0);
-    if !live(db, project, claim)? {
-        return Ok(false);
-    }
-    let failure = match ended {
-        Ended::Reply {
-            reply,
-            with_competitors,
-        } => offered(db, project, folder, reply, with_competitors)
-            .err()
-            .map(str::to_owned),
+    let closing = match ended {
+        Ended::Reply { .. } => Some(UNFINISHED.to_owned()),
         Ended::Failed(words) => Some(line(words)),
         Ended::Skipped => None,
     };
-    let checked = matches!(ended, Ended::Reply { .. }) && failure.is_none();
+    let closed = db
+        .execute(
+            "UPDATE project_overview SET running_ms=NULL, failure=?3
+             WHERE project=?1 AND running_ms=?2",
+            params![project.as_str(), claim.ms(), closing],
+        )
+        .map_err(unavailable)?;
+    assert!(closed <= 1);
+    if closed == 0 {
+        return Ok(false);
+    }
+    let Ended::Reply {
+        reply,
+        with_competitors,
+    } = ended
+    else {
+        return Ok(true);
+    };
+    let (failure, checked) = match offered(db, project, folder, reply, with_competitors) {
+        Ok(left) => (left, true),
+        Err(words) => (Some(words.to_owned()), false),
+    };
     let stored = db
         .execute(
             "UPDATE project_overview
-             SET running_ms=NULL, failure=?3, checked_ms=CASE WHEN ?4 THEN ?5 ELSE checked_ms END
-             WHERE project=?1 AND running_ms=?2",
-            params![project.as_str(), claim.ms(), failure, checked, now_ms],
+             SET failure=?2, checked_ms=CASE WHEN ?3 THEN ?4 ELSE checked_ms END
+             WHERE project=?1 AND running_ms IS NULL",
+            params![project.as_str(), failure, checked, now_ms],
         )
         .map_err(unavailable)?;
     assert!(stored <= 1);
-    Ok(stored == 1)
+    Ok(true)
 }
 
 /// Ends the run a claim names with the words saying why it failed, for a run that never
