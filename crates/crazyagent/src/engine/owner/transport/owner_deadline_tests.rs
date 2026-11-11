@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 const OWNER_TIMEOUT_MS: u64 = 250;
 const AGENT: i64 = 7;
-const FOLDER_FILES: usize = 40_000;
+const BUILD_FILES: usize = 40_000;
 const SWEPT_FILES: usize = 40_000;
 const LOCK_HELD: Duration = Duration::from_millis(1000);
 const SKILL: &str = "---\nname: release-notes\ndescription: Writes release notes from merged changes.\n---\n\n# Release notes\n";
@@ -162,9 +162,10 @@ fn repository(under: &Path, home: &Path) -> PathBuf {
 }
 
 /// Adds one finished sub-agent as the runtime leaves it: its worktree under the project's
-/// state folder with its start recorded, an agent folder of `FOLDER_FILES` files, its
-/// sandbox profile and its rows. Inputs: the engine root, the repository, the owner home
-/// and the project. Output: the worktree.
+/// state folder with its start recorded and an ignored build folder of `BUILD_FILES` files,
+/// which its removal deletes with it (DEC-123 keeps the agent folder as history), its agent
+/// folder, its sandbox profile and its rows. Inputs: the engine root, the repository, the
+/// owner home and the project. Output: the worktree.
 fn finished_agent(engine_root: &Path, repo: &Path, home: &Path, project: &ProjectId) -> PathBuf {
     let worktree = crate::projects_home::state_folder(repo)
         .join("worktrees")
@@ -187,15 +188,18 @@ fn finished_agent(engine_root: &Path, repo: &Path, home: &Path, project: &Projec
     crate::storage::initialize_authority_schemas(&db).unwrap();
     crate::ide::workspace::tests::add_project(&db, project.as_str(), repo);
     crate::landing::record_worktree_start(&db, repo, &worktree, &git_dir).unwrap();
+    let build = worktree.join("target");
+    std::fs::create_dir(&build).unwrap();
+    for index in 0..BUILD_FILES {
+        std::fs::write(build.join(index.to_string()), b"x").unwrap();
+    }
     let team = engine_root.join("team");
     let cache = team
         .join("agents")
         .join(format!("agent-{AGENT}"))
         .join("home/cache");
     std::fs::create_dir_all(&cache).unwrap();
-    for index in 0..FOLDER_FILES {
-        std::fs::write(cache.join(index.to_string()), b"x").unwrap();
-    }
+    std::fs::write(cache.join("0"), b"x").unwrap();
     std::fs::create_dir_all(team.join("profiles")).unwrap();
     std::fs::write(
         team.join("profiles").join(format!("agent-{AGENT}.sb")),
