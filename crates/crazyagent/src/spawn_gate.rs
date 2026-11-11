@@ -280,7 +280,8 @@ pub fn bind_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::ne
 /// Binds a blocking TCP listener like [`bind_tcp_std`] but without `SO_REUSEADDR`, so the
 /// bind fails with `AddrInUse` while any socket holds the port, including a wildcard
 /// listener of this user that `std`'s bind would sit beside, and a closed connection
-/// still in TIME_WAIT. Input: the address. Output: the close-on-exec listener.
+/// still in TIME_WAIT. It queues up to the system's `SOMAXCONN` connections, the largest
+/// queue nix takes (128 on macOS). Input: the address. Output: the close-on-exec listener.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
@@ -301,7 +302,7 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
         std::net::SocketAddr::V4(v4) => bind(socket.as_raw_fd(), &SockaddrIn::from(v4))?,
         std::net::SocketAddr::V6(v6) => bind(socket.as_raw_fd(), &SockaddrIn6::from(v6))?,
     }
-    listen(&socket, Backlog::new(LISTEN_BACKLOG)?)?;
+    listen(&socket, Backlog::MAXCONN)?;
     Ok(std::net::TcpListener::from(socket))
 }
 
@@ -311,11 +312,6 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
 pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
     bind_tcp_std(address)
 }
-
-/// How many connections a [`bind_tcp_std_exclusive`] listener queues before it accepts
-/// them.
-#[cfg(unix)]
-const LISTEN_BACKLOG: i32 = 128;
 
 /// Binds a blocking UDP socket inside the gate.
 /// Input: the address. Output: the socket.
