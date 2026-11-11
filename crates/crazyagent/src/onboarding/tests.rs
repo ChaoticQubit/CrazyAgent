@@ -1,6 +1,6 @@
 use super::draft::{self, Drafted};
 use super::*;
-use crate::project_setup::{Platform, ResearchKind};
+use crate::project_setup::{Platform, ResearchKind, StoredSetup, TeamPlan};
 use std::os::unix::fs::symlink;
 
 const OTHER_GRAPH_MARKER: &str = "# Other project graph 6620";
@@ -1890,4 +1890,77 @@ fn an_overview_entry_that_is_not_a_text_file_is_reported_and_left_as_it_is() {
         std::fs::read_to_string(&target).unwrap(),
         "# Notes\n\nKept outside.\n"
     );
+}
+
+#[test]
+fn a_setup_saved_without_the_mappings_answers_offers_them_once_the_mapping_is_done() {
+    let dir = rust_repo();
+    let mut database = Connection::open_in_memory().unwrap();
+    crate::storage::plugins::initialize(&database).unwrap();
+    crate::storage::setup::initialize(&database).unwrap();
+    crate::project_setup::initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    let mut drafted = Drafted::new("demo".into(), &pool());
+    drafted.draft.about = "Finds papers.".into();
+    drafted.draft.tech_stack = vec!["Python".into()];
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES ('demo',?1,'main','failed','running',?2,1,1)",
+            params![
+                dir.path().to_str().unwrap(),
+                serde_json::to_string(&drafted).unwrap()
+            ],
+        )
+        .unwrap();
+    let mut stored = StoredSetup {
+        project_id: ProjectId::new("demo").unwrap(),
+        name: "demo".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: Some(pool()),
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 16,
+        },
+        documents: vec![],
+        folder: dir.path().to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 2,
+    };
+    database
+        .execute(
+            "INSERT INTO project_setups VALUES ('demo',?1)",
+            [serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    let viewed = |database: &mut Connection| {
+        let tx = database.transaction().unwrap();
+        status(&tx, &ProjectId::new("demo").unwrap())
+            .unwrap()
+            .unwrap()
+    };
+
+    let running = viewed(&mut database);
+    assert!(running.finished);
+    assert_eq!(running.proposed, None);
+    database
+        .execute("UPDATE onboarding SET mapping_state='done'", [])
+        .unwrap();
+    let done = viewed(&mut database);
+    assert_eq!(done.draft.about, "");
+    assert_eq!(done.proposed, Some(drafted.draft.clone()));
+    stored.tech_stack = vec!["Rust".into()];
+    database
+        .execute(
+            "UPDATE project_setups SET body=?1",
+            [serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(viewed(&mut database).proposed, None);
 }
