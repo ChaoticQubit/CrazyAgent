@@ -359,19 +359,22 @@ impl Updates {
     }
 
     /// Starts the job thread: it does the work, stores the record, frees the slot, then
-    /// runs the follow-up. Inputs: the hold, the work and the follow-up.
-    /// Output: Ok once the thread runs; a thread that cannot start frees the slot.
+    /// runs the follow-up with whether the work ended well. Inputs: the hold, the work and
+    /// the follow-up. Output: Ok once the thread runs; a thread that cannot start frees
+    /// the slot.
     fn spawn(
         running: Running,
         work: impl FnOnce() -> LastUpdate + Send + 'static,
-        then: impl FnOnce() + Send + 'static,
+        then: impl FnOnce(bool) + Send + 'static,
     ) -> Result<(), &'static str> {
         std::thread::Builder::new()
             .name(JOB_THREAD.into())
             .spawn(move || {
                 let last = work();
+                let ok = last.ok;
+                assert!(ok == last.code.is_none());
                 running.finish(last);
-                then();
+                then(ok);
             })
             .map(|_| ())
             .map_err(|_| START_FAILED)
@@ -503,13 +506,14 @@ impl Updates {
 
     /// Starts the one update of an installed harness in the background, with the harness's
     /// own documented updater. Inputs: the engine database, the catalog entry, the roots and
-    /// what to do once the update ended. Output: Ok once it runs, or the refusal code.
+    /// what to do once the update ended, told whether it ended well. Output: Ok once it
+    /// runs, or the refusal code.
     pub fn start(
         self: &Arc<Self>,
         db: &Connection,
         entry: &HarnessEntry,
         roots: &Roots,
-        after: impl FnOnce() + Send + 'static,
+        after: impl FnOnce(bool) + Send + 'static,
     ) -> Result<(), &'static str> {
         let id = harnesses::spec(&entry.id).ok_or(UNKNOWN_HARNESS)?.id;
         match settings(db).map_err(|_| SETTINGS_UNREADABLE)?.mode {
@@ -546,6 +550,6 @@ impl Updates {
         let running = self.begin(id)?;
         let fixed = install_command(id, roots)?;
         let home = roots.home.clone();
-        Self::spawn(running, move || installed_now(&fixed, &home, after), || {})
+        Self::spawn(running, move || installed_now(&fixed, &home, after), |_| {})
     }
 }

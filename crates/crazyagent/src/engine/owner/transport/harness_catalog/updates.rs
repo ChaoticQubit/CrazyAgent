@@ -224,7 +224,7 @@ async fn blocking(
 }
 
 /// Pins the sign-in and master host of a harness the engine's own job just installed or
-/// updated, when the engine started without it. Only the engine's PATH is searched and a
+/// updated with success, when the engine started without it. Only the engine's PATH is searched and a
 /// refusal is logged by its code alone. Inputs: the owner runtime and the harness id.
 fn pin(owner: &OwnerRuntimeHandle, id: &str) {
     let path = std::env::var_os("PATH");
@@ -297,8 +297,10 @@ async fn answer(
             let entry = entry(engine, search.clone(), &id, true).await?;
             blocking(move || {
                 let id = entry.id.clone();
-                let after = move || {
-                    pin(&owner, &id);
+                let after = move |updated: bool| {
+                    if updated {
+                        pin(&owner, &id);
+                    }
                     runtime.spawn(async move {
                         let _ = probe.entries(search, true).await;
                     });

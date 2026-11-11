@@ -849,8 +849,9 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
 /// Checks that a program is safe to start as this user: it resolves to a regular runnable
 /// file owned by root or this user that neither the group nor everyone can write, and no one
 /// else can swap it through a folder everyone can write. A folder its group can write is
-/// accepted only for this user's own group or the macOS administrators (Homebrew's folders),
-/// who can already act as root. Input: the absolute program path. Output: Ok or the refusal code.
+/// accepted on macOS only for the administrators (Homebrew's folders), who can already act
+/// as root, since every local user shares the staff group; elsewhere only for this user's
+/// own group. Input: the absolute program path. Output: Ok or the refusal code.
 #[cfg(unix)]
 fn trusted(program: &Path) -> Result<(), &'static str> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -861,13 +862,17 @@ fn trusted(program: &Path) -> Result<(), &'static str> {
     let metadata = std::fs::metadata(&target).map_err(|_| TOOL_MISSING)?;
     let user = rustix::process::geteuid().as_raw();
     let group = rustix::process::getegid().as_raw();
-    let own_group = |id: u32| id == group || (cfg!(target_os = "macos") && id == ADMIN_GROUP);
+    let trusted_group = if cfg!(target_os = "macos") {
+        ADMIN_GROUP
+    } else {
+        group
+    };
     let open_folder = |path: &Path| {
         path.parent()
             .and_then(|folder| std::fs::metadata(folder).ok())
             .is_none_or(|folder| {
                 let mode = folder.permissions().mode();
-                mode & 0o002 != 0 || (mode & 0o020 != 0 && !own_group(folder.gid()))
+                mode & 0o002 != 0 || (mode & 0o020 != 0 && folder.gid() != trusted_group)
             })
     };
     let mode = metadata.permissions().mode();

@@ -132,7 +132,7 @@ impl FakeNative {
         let updates = Updates::new();
         let db = database();
         let entry = self.catalog_entry(&ProbeCache::new(Duration::ZERO), true);
-        updates.start(&db, &entry, &self.roots(), || {}).unwrap();
+        updates.start(&db, &entry, &self.roots(), |_| {}).unwrap();
         wait_idle(&updates);
         let last = updates
             .versions(&db, &entry, &self.roots(), false)
