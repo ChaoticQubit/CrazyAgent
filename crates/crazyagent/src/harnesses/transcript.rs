@@ -423,7 +423,9 @@ fn find_rollout(
             file.metadata()
                 .is_ok_and(|metadata| earlier.binary_search(&file_key(&metadata, &path)).is_err())
         })?;
-        let meta = session_meta(&file).filter(|meta| meta["cwd"].as_str() == Some(cwd))?;
+        let meta = session_meta(&file).filter(|meta| {
+            meta["cwd"].as_str() == Some(cwd) && meta["source"].get("subagent").is_none()
+        })?;
         Some((rewound(file)?, conversation_id(&meta["id"]), path))
     })
 }

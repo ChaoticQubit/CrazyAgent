@@ -3190,35 +3190,41 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 3);
-    assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
-    assert!(
-        view.notice
-            .as_ref()
-            .unwrap()
-            .text
-            .contains("has no native teammates"),
-        "{:?}",
-        view.notice
+    let reply = view.key(press(KeyCode::Right));
+    coord_send(&mut view, &mut controller, reply, 3).await;
+    assert_eq!(
+        harness_row(&view, HarnessKind::Codex).0,
+        SubagentMode::Native
     );
-    assert!(!view.busy(), "a refused mode sends nothing");
 
     view.key(press(KeyCode::Down));
     let reply = view.key(press(KeyCode::Left));
-    coord_send(&mut view, &mut controller, reply, 3).await;
+    coord_send(&mut view, &mut controller, reply, 4).await;
     assert_eq!(
         harness_row(&view, HarnessKind::Codex),
-        (SubagentMode::AppSpawned, Delivery::TypingOnly)
+        (SubagentMode::Native, Delivery::TypingOnly)
     );
 
-    for _ in 0..4 {
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.coord.as_ref().unwrap().row, 5);
+    assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            crate::coord::settings::RCLI_NATIVE_UNAVAILABLE
+        ))
+    );
+    assert!(!view.busy(), "a refused mode sends nothing");
+
+    for _ in 0..3 {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 8);
     for (generation, overlaps) in [
-        (4, Overlaps::Block),
-        (5, Overlaps::Off),
-        (6, Overlaps::Wait),
-        (7, Overlaps::Warn),
+        (5, Overlaps::Block),
+        (6, Overlaps::Off),
+        (7, Overlaps::Wait),
+        (8, Overlaps::Warn),
     ] {
         let reply = view.key(press(KeyCode::Right));
         coord_send(&mut view, &mut controller, reply, generation).await;
@@ -3242,12 +3248,12 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     clear_counted(&mut view);
     typed(&mut view, "a, a b*");
     let reply = view.key(press(KeyCode::Enter));
-    coord_send(&mut view, &mut controller, reply, 8).await;
+    coord_send(&mut view, &mut controller, reply, 9).await;
     assert!(!view.typing(), "an applied list closes the input");
     assert_eq!(coordination_of(&view).settings.counted_tools, ["a", "b*"]);
 
     let reply = view.key(press(KeyCode::Char('r')));
-    coord_send(&mut view, &mut controller, reply, 9).await;
+    coord_send(&mut view, &mut controller, reply, 10).await;
     assert_eq!(
         coordination_of(&view).settings.counted_tools,
         COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec()

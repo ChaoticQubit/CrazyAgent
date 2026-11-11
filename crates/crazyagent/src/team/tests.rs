@@ -5271,15 +5271,19 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     };
     assert_eq!(too_many.validate().unwrap_err().0, "coord_settings_invalid");
     assert_eq!(act(too_many).unwrap_err(), "coord_settings_invalid");
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
-        let native = TeamAction::HarnessMode {
-            project_id: project.clone(),
-            harness,
-            mode: SubagentMode::Native,
-        };
-        assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
-        assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
-    }
+    let native = TeamAction::HarnessMode {
+        project_id: project.clone(),
+        harness: HarnessKind::Rcli,
+        mode: SubagentMode::Native,
+    };
+    assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
+    assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
+    let codex = TeamAction::HarnessMode {
+        project_id: project.clone(),
+        harness: HarnessKind::Codex,
+        mode: SubagentMode::Native,
+    };
+    assert!(codex.validate().is_ok());
 
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,

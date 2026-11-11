@@ -483,6 +483,10 @@ fn a_piped_claude_turn_reports_the_usage_its_result_carries_before_it_finishes()
 }
 
 fn codex_driver_in_a_turn() -> Driver {
+    codex_driver_in_a_turn_keeping(false)
+}
+
+fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
     let working_dir = std::env::temp_dir();
     let cwd = working_dir.to_str().unwrap().to_owned();
     let request = LaunchRequest {
@@ -501,7 +505,7 @@ fn codex_driver_in_a_turn() -> Driver {
         git_identity: None,
         limits: LaunchLimits::default(),
     };
-    let (mut driver, startup) = Driver::new(&request).unwrap();
+    let (mut driver, startup) = Driver::new(&request, native_threads).unwrap();
     assert_eq!(startup.len(), 1);
     assert!(driver.send("Reply with OK.").unwrap().is_none());
     let (_, writes) = driver
@@ -564,6 +568,46 @@ fn a_team_codex_agent_interrupts_a_codex_native_sub_agent_and_finishes_its_turn(
             "turn":{"id":"own-turn","items":[],"status":"completed"}
         }})))
         .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LaunchEvent::TurnFinished { success: true }))
+    );
+}
+
+/// PA-7: a native Codex lead's sub-agent threads run on; the lead's own turn still ends
+/// on its own `turn/completed`, whatever its children send.
+#[test]
+fn a_native_codex_lead_keeps_its_codex_sub_agents_running_and_finishes_its_turn() {
+    let mut driver = codex_driver_in_a_turn_keeping(true);
+    for frame in [
+        json!({"method":"turn/started","params":{
+            "threadId":"child-thread",
+            "turn":{"id":"child-turn","rootTurnId":"own-turn","items":[],"status":"inProgress"}
+        }}),
+        json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"child-thread", "turnId":"child-turn", "itemId":"child-item",
+            "delta":"child text"
+        }}),
+        json!({"method":"turn/completed","params":{
+            "threadId":"child-thread",
+            "turn":{"id":"child-turn","items":[],"status":"completed"}
+        }}),
+    ] {
+        let (events, writes) = driver.receive(&line(frame)).unwrap();
+        assert!(events.is_empty(), "{events:?}");
+        assert!(
+            writes.is_empty(),
+            "a native lead never interrupts its sub-agents"
+        );
+    }
+    let (events, writes) = driver
+        .receive(&line(json!({"method":"turn/completed","params":{
+            "threadId":"own-thread",
+            "turn":{"id":"own-turn","items":[],"status":"completed"}
+        }})))
+        .unwrap();
+    assert!(writes.is_empty());
     assert!(
         events
             .iter()

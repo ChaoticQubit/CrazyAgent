@@ -128,10 +128,11 @@ test("Overlapping edits lists the engine's choices in the mockup's order and wor
   assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: [...words, "hold"], checked: ["hold"] });
 });
 
-test("a harness's sub-agents read as the mockup words them, native agent teams first where the harness has them", async () => {
+test("a harness's sub-agents read as the mockup words them, native first for every harness", async () => {
   const coord = await import("../src/screens/team/coordination.tsx");
-  assert.deepEqual(coord.modeOptions(true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
-  assert.deepEqual(coord.modeOptions(false), [{ value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("claude-code", true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("codex", true), [{ value: "native", label: "Native Codex sub-agents" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("rcli", false), [{ value: "native", label: "Native sub-agents", disabledReason: coord.NATIVE_UNAVAILABLE.rcli }, { value: "app_spawned", label: "CrazyAgent workers" }]);
   const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
   const sub = /(?:^|\n)\.set-sub \{([^}]*)\}/.exec(css)?.[1] ?? "";
   assert.ok(sub.length > 0, "the sub-heading has its rule");

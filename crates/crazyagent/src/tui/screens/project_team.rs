@@ -7,8 +7,8 @@ use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
-    HarnessKind, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
-    TaskStart,
+    HarnessKind, NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole,
+    SubagentMode, TaskStart, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -2382,7 +2382,7 @@ impl TeamView {
     }
 
     /// Moves one coordination row to its next or previous choice and sends the change.
-    /// Native is offered only for a harness kind with native teammates.
+    /// Native is offered only for a harness kind with native sub-agents.
     /// Takes the row, the current settings and the direction. Output: the change, or Handled.
     fn coord_step(&mut self, row: CoordRow, view: &CoordinationView, forward: bool) -> TeamReply {
         let project_id = self.project.clone();
@@ -2395,9 +2395,7 @@ impl TeamView {
                 };
                 let name = harness_name(kind.as_str(), None);
                 if !current.native {
-                    self.notice = Some(Notice::plain(format!(
-                        "{name} has no native teammates, so its sub-agents are app-spawned."
-                    )));
+                    self.notice = Some(Notice::plain(native_unavailable(kind)));
                     return TeamReply::Handled;
                 }
                 let mode = match current.mode {
@@ -2410,7 +2408,7 @@ impl TeamView {
                         harness: kind,
                         mode,
                     },
-                    format!("{name} sub-agents are now {}.", mode_words(mode)),
+                    format!("{name} sub-agents are now {}.", mode_words(kind, mode)),
                 )
             }
             CoordRow::Delivery(kind) => {
@@ -2699,10 +2697,10 @@ impl TeamView {
                 CoordRow::Mode(kind) => (
                     format!("{} sub-agents", harness_name(kind.as_str(), None)),
                     found(kind)
-                        .map_or("", |row| mode_words(row.mode))
+                        .map_or("", |row| mode_words(kind, row.mode))
                         .to_owned(),
                     if found(kind).is_some_and(|row| !row.native) {
-                        "  no native teammates"
+                        "  no native sub-agents"
                     } else {
                         ""
                     },
@@ -3690,12 +3688,32 @@ fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
     all[next]
 }
 
-fn mode_words(mode: SubagentMode) -> &'static str {
-    match mode {
-        SubagentMode::AppSpawned => "app-spawned",
-        SubagentMode::Native => "native teammates",
+/// The words a coordination row shows for a harness kind's sub-agent mode (PA-7): Native
+/// names what the kind runs, an agent team's teammates or its own harness's sub-agents.
+/// Takes the kind and the mode. Returns the words.
+fn mode_words(kind: HarnessKind, mode: SubagentMode) -> &'static str {
+    match (mode, native_sub_agents(kind)) {
+        (SubagentMode::AppSpawned, _) => "app-spawned",
+        (SubagentMode::Native, NativeSubAgents::Teams) => "native teammates",
+        (SubagentMode::Native, NativeSubAgents::Threads | NativeSubAgents::Unavailable(_)) => {
+            "native sub-agents"
+        }
     }
 }
+
+/// Why a harness kind's sub-agents stay app-spawned, as the coordination editor says it
+/// when Native is chosen on a kind without native sub-agents (PA-7). Takes the kind.
+/// Returns the kind's own reason, or the general one for a kind this build runs natively.
+fn native_unavailable(kind: HarnessKind) -> &'static str {
+    match native_sub_agents(kind) {
+        NativeSubAgents::Unavailable(reason) => reason,
+        NativeSubAgents::Teams | NativeSubAgents::Threads => NATIVE_UNSUPPORTED,
+    }
+}
+
+/// The general reason a harness kind's sub-agents stay app-spawned (`coord_native_unsupported`).
+const NATIVE_UNSUPPORTED: &str =
+    "This harness has no native sub-agents, so its sub-agents are app-spawned.";
 
 fn delivery_words(delivery: Delivery) -> &'static str {
     match delivery {
@@ -3907,9 +3925,7 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_teammate_not_found" => "That teammate has already ended.".into(),
         "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),
         "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
-        "coord_native_unsupported" => {
-            "This harness has no native teammates, so its sub-agents are app-spawned.".into()
-        }
+        "coord_native_unsupported" => NATIVE_UNSUPPORTED.into(),
         "coord_settings_invalid" => {
             "Count at most 32 tools, each named once with letters, digits, _, - or *.".into()
         }

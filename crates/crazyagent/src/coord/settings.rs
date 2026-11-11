@@ -436,10 +436,34 @@ pub fn set_delivery(
     Ok(())
 }
 
-/// Says whether a harness kind has native teammates the engine can use: Claude Code
-/// agent teams only (Q10). Takes the kind.
+/// How a harness kind runs the Native sub-agent mode, the lead's own harness running its
+/// sub-agents (Q10, DEC-141 PA-7): Claude Code as an agent team in tmux panes, Codex as
+/// multi-agent threads of the lead's own process, or not at all, with the reason the
+/// setting shows beside the choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSubAgents {
+    Teams,
+    Threads,
+    Unavailable(&'static str),
+}
+
+/// Why an RCLI lead has no native sub-agents: RCLI runs without tools (PA-3, V3).
+pub const RCLI_NATIVE_UNAVAILABLE: &str = "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.";
+
+/// Names how a harness kind runs native sub-agents, every kind answered (DEC-141). Takes
+/// the kind. Returns the answer.
+pub fn native_sub_agents(harness: HarnessKind) -> NativeSubAgents {
+    match harness {
+        HarnessKind::ClaudeCode => NativeSubAgents::Teams,
+        HarnessKind::Codex => NativeSubAgents::Threads,
+        HarnessKind::Rcli => NativeSubAgents::Unavailable(RCLI_NATIVE_UNAVAILABLE),
+    }
+}
+
+/// Says whether a harness kind has native sub-agents the engine can use: Claude Code agent
+/// teams and Codex threads (Q10, PA-7). Takes the kind.
 pub fn native_supported(harness: HarnessKind) -> bool {
-    harness == HarnessKind::ClaudeCode
+    !matches!(native_sub_agents(harness), NativeSubAgents::Unavailable(_))
 }
 
 fn column(

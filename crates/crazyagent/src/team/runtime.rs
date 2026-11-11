@@ -196,7 +196,8 @@ struct Grant {
 /// conversation a live master continues instead of starting one; `toolchains` the families
 /// its sandbox profile, built once for every turn, lets it use; `native` marks a
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
-/// and `tmux` is that server's program, which its teammates are split off with; `hookless`
+/// and `tmux` is that server's program, which its teammates are split off with;
+/// `native_threads` is a native-mode Codex lead's sub-agent thread cap (PA-7); `hookless`
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
@@ -225,6 +226,7 @@ struct Plan {
     continues: bool,
     native: bool,
     tmux: Option<PathBuf>,
+    native_threads: Option<u8>,
     hookless: bool,
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
@@ -247,18 +249,27 @@ const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block or Wait needs hoo
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
-    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
-    /// model proxy also points the launch's variables at it (S4b). Every plan gives its
-    /// Claude Code terminal the project's display (N-D9). Takes the context. Returns it.
+    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions, and a native
+    /// Codex lead its sub-agent threads (PA-7). A plan with a model proxy also points the
+    /// launch's variables at it (S4b). Every plan gives its Claude Code terminal the
+    /// project's display (N-D9). Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
+        assert!(
+            !(self.native && self.native_threads.is_some()),
+            "a lead runs an agent team or sub-agent threads, never both"
+        );
         let context = context.with_claude_display(self.claude_display);
         let context = match &self.proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
+            None => context,
+        };
+        let context = match self.native_threads {
+            Some(cap) => context.with_native_sub_agents(cap),
             None => context,
         };
         match &self.tmux {
@@ -4352,9 +4363,7 @@ impl TeamRuntime {
                 Some(Some(callers)) if callers.intact() => continue,
                 Some(Some(callers)) => (Some(true), callers.pins()),
                 Some(None) => (Some(false), self.caller_pins.remove(id).unwrap_or_default()),
-                None if self.stored_mode(*id).ok().flatten().as_deref()
-                    == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
-                {
+                None if leads_native_team(&self.connection, project, *id) == Some(true) => {
                     (None, Vec::new())
                 }
                 None => continue,
@@ -6543,11 +6552,11 @@ impl TeamRuntime {
         }
     }
 
-    /// Whether an agent starts as a native-mode lead (DEC-104): its own stored mode
-    /// ([`super::lead_mode`], fixed at its first start, never the live setting) is Native.
-    /// A Native lead also needs to be a Sub the master started on a harness kind with
-    /// native teammates and a terminal host to start its own server in. Takes the project,
-    /// the agent, its role and its launch harness. Returns the answer, or the plain reason.
+    /// Whether an agent starts as a native-mode lead with an agent team (DEC-104): its own
+    /// stored mode ([`super::lead_mode`], fixed at its first start) is Native and
+    /// [`Self::native_kind`] gives teams, which need a terminal host to start its own server
+    /// in; a Codex lead's threads are no team (PA-7). Takes the project, the agent, its role
+    /// and its launch harness. Returns the answer, or the plain reason.
     fn native_lead(
         &self,
         project: &ProjectId,
@@ -6555,18 +6564,9 @@ impl TeamRuntime {
         role: AgentRole,
         launch: &str,
     ) -> Result<bool, String> {
-        use crate::coord::settings::{HarnessKind, SubagentMode, native_supported};
-        let chosen = super::lead_mode(&self.connection, project, id)
-            .map_err(|e| with_code("the agent's sub-agent mode could not be read", Some(&e.0)))?;
-        if chosen == SubagentMode::AppSpawned {
+        use crate::coord::settings::NativeSubAgents;
+        if self.native_kind(project, id, role, launch)? != Some(NativeSubAgents::Teams) {
             return Ok(false);
-        }
-        let kind_native = HarnessKind::from_harness(launch).is_some_and(native_supported);
-        if role != AgentRole::Sub || !kind_native || self.has_lead(id) {
-            return Err(with_code(
-                "only a Claude Code lead the master starts runs sub-agents as native teammates",
-                Some("native_mode_unsupported"),
-            ));
         }
         if self.terminal.is_none() {
             return Err(with_code(
@@ -6575,6 +6575,61 @@ impl TeamRuntime {
             ));
         }
         Ok(true)
+    }
+
+    /// The native sub-agents an agent runs as a native-mode lead (DEC-104, PA-7): None when
+    /// its stored mode is App-spawned, else its harness kind's native sub-agents when it is a
+    /// Sub the master started on a kind that has them. Takes the project, the agent, its role
+    /// and its launch harness. Returns the kind, or the plain reason for a lead that cannot.
+    fn native_kind(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        launch: &str,
+    ) -> Result<Option<crate::coord::settings::NativeSubAgents>, String> {
+        use crate::coord::settings::{
+            HarnessKind, NativeSubAgents, SubagentMode, native_sub_agents,
+        };
+        let chosen = super::lead_mode(&self.connection, project, id)
+            .map_err(|e| with_code("the agent's sub-agent mode could not be read", Some(&e.0)))?;
+        if chosen == SubagentMode::AppSpawned {
+            return Ok(None);
+        }
+        match HarnessKind::from_harness(launch).map(native_sub_agents) {
+            Some(kind @ (NativeSubAgents::Teams | NativeSubAgents::Threads))
+                if role == AgentRole::Sub && !self.has_lead(id) =>
+            {
+                Ok(Some(kind))
+            }
+            _ => Err(with_code(
+                "only a lead the master starts, on a harness with native sub-agents, runs them natively",
+                Some("native_mode_unsupported"),
+            )),
+        }
+    }
+
+    /// How many Codex sub-agent threads a native-mode Codex lead may run at once (PA-7): the
+    /// project's Max teammates, or the largest choice under No limit; None for any agent whose
+    /// native sub-agents are not threads of its own harness. Takes the project, the agent, its
+    /// role and its launch harness. Returns the cap, or the plain reason it cannot be read.
+    fn native_threads(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        launch: &str,
+    ) -> Result<Option<u8>, String> {
+        use crate::coord::settings::NativeSubAgents;
+        if self.native_kind(project, id, role, launch)? != Some(NativeSubAgents::Threads) {
+            return Ok(None);
+        }
+        let cap = super::teammate_cap(&self.connection, project)
+            .map_err(|e| with_code("the project's Max teammates could not be read", Some(&e.0)))?;
+        let most = super::CAP_CHOICES[super::CAP_CHOICES.len() - 1];
+        let cap = cap.unwrap_or(most);
+        assert!(cap > 0 && cap <= most, "a thread cap is one of the choices");
+        Ok(Some(cap))
     }
 
     /// Binds a native lead's caller socket in its short temp folder, where its team servers
@@ -7289,12 +7344,30 @@ impl TeamRuntime {
         self.note_lead(project, lead, body)
     }
 
-    /// What a harness reads about its git branch with each task (DEC-100): its task branch
-    /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
-    /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
-    /// the task branch before it reports done; an app-spawned lead delegates only through
-    /// the spawn tool. Takes the project and the agent. Returns the line, empty for an agent
-    /// with no task branch of its own.
+    /// Tells whether a stored agent runs on a harness kind whose native sub-agents are threads
+    /// of its own process (PA-7), read from its row. Takes the agent. Returns the answer,
+    /// false when unread.
+    fn native_threads_lead(&self, agent: i64) -> bool {
+        use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
+        self.connection
+            .query_row(
+                "SELECT harness FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|harness| HarnessKind::from_harness(&harness))
+            .map(native_sub_agents)
+            == Some(NativeSubAgents::Threads)
+    }
+
+    /// What a harness reads about its git branch with each task (DEC-100): its task branch,
+    /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
+    /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
+    /// done, or a Codex lead's sub-agents in its own worktree (PA-7). Takes the project and
+    /// the agent. Returns the line, empty for an agent with no task branch of its own.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
             .connection
@@ -7333,6 +7406,11 @@ impl TeamRuntime {
         ) {
             return format!(
                 "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+            );
+        }
+        if self.native_threads_lead(agent) {
+            return format!(
+                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They cannot call the team tools: wait for each one, close it, then commit and report done yourself."
             );
         }
         format!(
@@ -7602,6 +7680,11 @@ impl TeamRuntime {
             ));
         }
         let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        let native_threads = if tools {
+            self.native_threads(&stored.project_id, id, role, launch)?
+        } else {
+            None
+        };
         if native && hookless {
             return Err(with_code(
                 NATIVE_NEEDS_HOOKS,
@@ -7935,6 +8018,7 @@ impl TeamRuntime {
             continues: role == AgentRole::Sub,
             native,
             tmux: native_tmux,
+            native_threads,
             hookless,
             #[cfg(unix)]
             scratch_pin,
@@ -11354,6 +11438,27 @@ impl Drop for TeamService {
     }
 }
 
+/// Tells whether a stored agent leads a native agent team (DEC-104): its stored mode is
+/// Native on a harness kind whose native sub-agents are teams, so never a Codex lead, whose
+/// sub-agents are threads of its own process (PA-7). Takes the connection, project and
+/// agent. Returns the answer, or None when its row is unread.
+fn leads_native_team(connection: &Connection, project: &ProjectId, agent: i64) -> Option<bool> {
+    use crate::coord::settings::{HarnessKind, NativeSubAgents, SubagentMode, native_sub_agents};
+    let (mode, harness): (Option<String>, String) = connection
+        .query_row(
+            "SELECT mode,harness FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .ok()??;
+    Some(
+        mode.as_deref() == Some(SubagentMode::Native.as_str())
+            && HarnessKind::from_harness(&harness).map(native_sub_agents)
+                == Some(NativeSubAgents::Teams),
+    )
+}
+
 /// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead stored as leading
 /// native teammates shares that mailbox with them, so the pane the engine named the call
 /// by from the caller's process decides (DEC-111 Q18): the lead's own pane, found under the
@@ -11369,16 +11474,7 @@ pub fn team_caller(
     (lead, label): (i64, &str),
     pane: Option<(&str, u32)>,
 ) -> Option<(i64, String)> {
-    let mode: Option<String> = connection
-        .query_row(
-            "SELECT mode FROM team_agents WHERE id=?1 AND project=?2",
-            params![lead, project.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()?
-        .flatten();
-    if mode.as_deref() != Some(crate::coord::settings::SubagentMode::Native.as_str()) {
+    if !leads_native_team(connection, project, lead)? {
         return Some((lead, label.to_owned()));
     }
     match pane_member(connection, host, project, lead, pane?)? {
