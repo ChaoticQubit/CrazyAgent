@@ -19,7 +19,7 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    RUN_TIME_MAX, claude_bare,
+    RUN_TIME_MAX, Secret, claude_bare,
 };
 use crate::harnesses::leftovers::Unstopped;
 use crate::harnesses::terminal_session::{
@@ -28,6 +28,7 @@ use crate::harnesses::terminal_session::{
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
+use crate::model_gateway::relay::Relay;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
@@ -196,12 +197,15 @@ struct Grant {
 /// conversation a live master continues instead of starting one; `toolchains` the families
 /// its sandbox profile, built once for every turn, lets it use; `native` marks a
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
-/// and `tmux` is that server's program, which its teammates are split off with; `hookless`
+/// and `tmux` is that server's program, which its teammates are split off with;
+/// `native_threads` is a native-mode Codex lead's sub-agent thread cap (PA-7); `hookless`
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
-/// through, the only network its profile allows (S4b); `network` is the project network its
-/// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
+/// through, the only network its profile allows (S4b); `relay` is the key relay a keyed
+/// endpoint agent reaches its model through, so the key stays in the engine (DEC-141 PA-4);
+/// `network` is the project network its profile was made for, which a narrower saved choice
+/// stops it for (CS-2); `claude_display`
 /// is the project's Claude Code terminal display, read when the agent is prepared (N-D9);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
 /// (T3-15, DEC-116).
@@ -225,12 +229,37 @@ struct Plan {
     continues: bool,
     native: bool,
     tmux: Option<PathBuf>,
+    native_threads: Option<u8>,
     hookless: bool,
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
     proxy: Option<Arc<ModelProxy>>,
+    relay: Option<Arc<Relay>>,
     claude_display: crate::coord::settings::ClaudeDisplay,
     task_start: Option<String>,
+}
+
+/// Why a pane an earlier engine left running on a keyed endpoint is not taken over: its key
+/// relay lived in that engine's memory and ended with it (DEC-141 PA-4).
+const KEYED_PANE_NOT_ADOPTED: &str = "its key relay ended with the earlier engine";
+
+/// The owner's sentence for a keyed endpoint agent whose key relay did not start.
+/// Input: the refusal code. Output: the sentence, which names the fix for a missing key.
+fn key_relay_sentence(code: &str) -> &'static str {
+    if code == "account_key_missing" {
+        "The account's key is not saved on this computer. Add the key again in Accounts"
+    } else {
+        "The account's key relay could not start"
+    }
+}
+
+/// Tells whether a later engine may take over a pane that reaches its model this way.
+/// Input: the account's reach. Output: Ok, or the reason it starts afresh instead.
+fn adoptable(reach: &TeamReach) -> Result<(), String> {
+    match reach {
+        TeamReach::Endpoint { key: Some(_), .. } => Err(KEYED_PANE_NOT_ADOPTED.to_owned()),
+        TeamReach::Endpoint { key: None, .. } | TeamReach::Managed { .. } => Ok(()),
+    }
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -247,18 +276,27 @@ const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block or Wait needs hoo
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
-    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
-    /// model proxy also points the launch's variables at it (S4b). Every plan gives its
-    /// Claude Code terminal the project's display (N-D9). Takes the context. Returns it.
+    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions, and a native
+    /// Codex lead its sub-agent threads (PA-7). A plan with a model proxy also points the
+    /// launch's variables at it (S4b). Every plan gives its Claude Code terminal the
+    /// project's display (N-D9). Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
+        assert!(
+            !(self.native && self.native_threads.is_some()),
+            "a lead runs an agent team or sub-agent threads, never both"
+        );
         let context = context.with_claude_display(self.claude_display);
         let context = match &self.proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
+            None => context,
+        };
+        let context = match self.native_threads {
+            Some(cap) => context.with_native_sub_agents(cap),
             None => context,
         };
         match &self.tmux {
@@ -348,6 +386,16 @@ impl Launch {
         match self {
             Launch::Fresh(plan, _) => plan.proxy.clone(),
             Launch::Adopt(adoption) => adoption.proxy.clone(),
+        }
+    }
+
+    /// Names the key relay a keyed endpoint agent reaches its model through, which its worker
+    /// thread holds until the thread ends (DEC-141 PA-4). An adopted pane has none: a keyed
+    /// pane is never adopted. Takes the launch. Returns the relay, if any.
+    fn relay(&self) -> Option<Arc<Relay>> {
+        match self {
+            Launch::Fresh(plan, _) => plan.relay.clone(),
+            Launch::Adopt(_) => None,
         }
     }
 
@@ -1165,6 +1213,9 @@ impl TeamRuntime {
                 .map(|account| account.reach.clone()),
             _ => None,
         };
+        if let Some(Err(problem)) = account_reach.as_ref().map(adoptable) {
+            return Ok(Err(problem));
+        }
         let reach = account_reach
             .as_ref()
             .map(|reach| matches!(reach, TeamReach::Endpoint { .. }));
@@ -2641,7 +2692,8 @@ impl TeamRuntime {
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
         super::events::forward_to_parents(&self.connection, project, now_ms())?;
-        let asleep = self.asleep(project);
+        let mut asleep = self.asleep(project);
+        asleep.extend(self.unreached(project)?);
         let held = self.held_for_background(project);
         let reach = crate::coord::delivery::Reach {
             host: self.terminal.as_deref(),
@@ -2683,6 +2735,41 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    /// Lists a project's idle sub-agents in a kept session that the Delivery setting leaves
+    /// no channel of their own ([`crate::coord::delivery::no_channel`]): a tools-off Codex
+    /// agent under Native only has no bridge and is never typed into, so `wake_for_messages`
+    /// brings it its messages as a task of their own, as it does an asleep agent's (PA-11).
+    /// Takes the project. Returns their ids, or a database failure.
+    fn unreached(&self, project: &ProjectId) -> Result<BTreeSet<i64>, EngineError> {
+        let mut found = BTreeSet::new();
+        for (id, worker) in &self.workers {
+            let idle = &worker.project == project
+                && !worker.managed
+                && !worker.live
+                && worker.busy.is_none()
+                && !worker.stopping;
+            if idle
+                && crate::coord::delivery::no_channel(
+                    &self.connection,
+                    project,
+                    worker.role,
+                    &worker.harness,
+                    worker.tools,
+                    true,
+                )?
+                .is_some()
+            {
+                found.insert(*id);
+            }
+        }
+        assert!(
+            found
+                .iter()
+                .all(|id| self.workers[id].role == AgentRole::Sub && !self.workers[id].tools)
+        );
+        Ok(found)
     }
 
     /// Lists a project's agents whose task turn is held for the commands they started in the
@@ -4352,9 +4439,7 @@ impl TeamRuntime {
                 Some(Some(callers)) if callers.intact() => continue,
                 Some(Some(callers)) => (Some(true), callers.pins()),
                 Some(None) => (Some(false), self.caller_pins.remove(id).unwrap_or_default()),
-                None if self.stored_mode(*id).ok().flatten().as_deref()
-                    == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
-                {
+                None if leads_native_team(&self.connection, project, *id) == Some(true) => {
                     (None, Vec::new())
                 }
                 None => continue,
@@ -6543,11 +6628,11 @@ impl TeamRuntime {
         }
     }
 
-    /// Whether an agent starts as a native-mode lead (DEC-104): its own stored mode
-    /// ([`super::lead_mode`], fixed at its first start, never the live setting) is Native.
-    /// A Native lead also needs to be a Sub the master started on a harness kind with
-    /// native teammates and a terminal host to start its own server in. Takes the project,
-    /// the agent, its role and its launch harness. Returns the answer, or the plain reason.
+    /// Whether an agent starts as a native-mode lead with an agent team (DEC-104): its own
+    /// stored mode ([`super::lead_mode`], fixed at its first start) is Native and
+    /// [`Self::native_kind`] gives teams, which need a terminal host to start its own server
+    /// in; a Codex lead's threads are no team (PA-7). Takes the project, the agent, its role
+    /// and its launch harness. Returns the answer, or the plain reason.
     fn native_lead(
         &self,
         project: &ProjectId,
@@ -6555,18 +6640,9 @@ impl TeamRuntime {
         role: AgentRole,
         launch: &str,
     ) -> Result<bool, String> {
-        use crate::coord::settings::{HarnessKind, SubagentMode, native_supported};
-        let chosen = super::lead_mode(&self.connection, project, id)
-            .map_err(|e| with_code("the agent's sub-agent mode could not be read", Some(&e.0)))?;
-        if chosen == SubagentMode::AppSpawned {
+        use crate::coord::settings::NativeSubAgents;
+        if self.native_kind(project, id, role, launch)? != Some(NativeSubAgents::Teams) {
             return Ok(false);
-        }
-        let kind_native = HarnessKind::from_harness(launch).is_some_and(native_supported);
-        if role != AgentRole::Sub || !kind_native || self.has_lead(id) {
-            return Err(with_code(
-                "only a Claude Code lead the master starts runs sub-agents as native teammates",
-                Some("native_mode_unsupported"),
-            ));
         }
         if self.terminal.is_none() {
             return Err(with_code(
@@ -6575,6 +6651,68 @@ impl TeamRuntime {
             ));
         }
         Ok(true)
+    }
+
+    /// The native sub-agents an agent runs as a native-mode lead (DEC-104, PA-7): None when
+    /// its stored mode is App-spawned, else its harness kind's native sub-agents when it is a
+    /// Sub the master started on a kind that has them. Takes the project, the agent, its role
+    /// and its launch harness. Returns the kind, or the plain reason for a lead that cannot.
+    fn native_kind(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        launch: &str,
+    ) -> Result<Option<crate::coord::settings::NativeSubAgents>, String> {
+        use crate::coord::settings::{
+            HarnessKind, NativeSubAgents, SubagentMode, native_sub_agents,
+        };
+        let chosen = super::lead_mode(&self.connection, project, id)
+            .map_err(|e| with_code("the agent's sub-agent mode could not be read", Some(&e.0)))?;
+        if chosen == SubagentMode::AppSpawned {
+            return Ok(None);
+        }
+        match HarnessKind::from_harness(launch).map(native_sub_agents) {
+            Some(kind @ (NativeSubAgents::Teams | NativeSubAgents::Threads))
+                if role == AgentRole::Sub && !self.has_lead(id) =>
+            {
+                Ok(Some(kind))
+            }
+            _ => Err(with_code(
+                "only a lead the master starts, on a harness with native sub-agents, runs them natively",
+                Some("native_mode_unsupported"),
+            )),
+        }
+    }
+
+    /// How many Codex sub-agent threads a native-mode Codex lead may run at once (PA-7): Max
+    /// teammates, or the largest choice under No limit; None for any agent whose native
+    /// sub-agents are not threads. Its terminal is the one place they show, so it needs the
+    /// terminal host, as a team does (r1). Takes the project, agent, role and launch harness.
+    /// Returns the cap, or the plain reason.
+    fn native_threads(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        launch: &str,
+    ) -> Result<Option<u8>, String> {
+        use crate::coord::settings::NativeSubAgents;
+        if self.native_kind(project, id, role, launch)? != Some(NativeSubAgents::Threads) {
+            return Ok(None);
+        }
+        if self.terminal.is_none() {
+            return Err(with_code(
+                "this lead runs Codex sub-agents natively, which needs the engine's terminal host, the only place they show",
+                Some("native_mode_unavailable"),
+            ));
+        }
+        let cap = super::teammate_cap(&self.connection, project)
+            .map_err(|e| with_code("the project's Max teammates could not be read", Some(&e.0)))?;
+        let most = super::CAP_CHOICES[super::CAP_CHOICES.len() - 1];
+        let cap = cap.unwrap_or(most);
+        assert!(cap > 0 && cap <= most, "a thread cap is one of the choices");
+        Ok(Some(cap))
     }
 
     /// Binds a native lead's caller socket in its short temp folder, where its team servers
@@ -7289,12 +7427,31 @@ impl TeamRuntime {
         self.note_lead(project, lead, body)
     }
 
-    /// What a harness reads about its git branch with each task (DEC-100): its task branch
-    /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
-    /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
-    /// the task branch before it reports done; an app-spawned lead delegates only through
-    /// the spawn tool. Takes the project and the agent. Returns the line, empty for an agent
-    /// with no task branch of its own.
+    /// Tells whether a stored agent with tools runs on a harness kind whose native sub-agents
+    /// are threads of its own process (PA-7), read from its row; tools off runs none (r1).
+    /// Takes the agent. Returns the answer, false when unread.
+    fn native_threads_lead(&self, agent: i64) -> bool {
+        use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
+        self.connection
+            .query_row(
+                "SELECT harness,tools FROM team_agents WHERE id=?1",
+                [agent],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .filter(|(_, tools)| *tools)
+            .and_then(|(harness, _)| HarnessKind::from_harness(&harness))
+            .map(native_sub_agents)
+            == Some(NativeSubAgents::Threads)
+    }
+
+    /// What a harness reads about its git branch with each task (DEC-100): its task branch,
+    /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
+    /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
+    /// done, or a Codex lead's sub-agents in its own worktree (PA-7). Takes the project and
+    /// the agent. Returns the line, empty for an agent with no task branch of its own.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
             .connection
@@ -7333,6 +7490,11 @@ impl TeamRuntime {
         ) {
             return format!(
                 "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+            );
+        }
+        if self.native_threads_lead(agent) {
+            return format!(
+                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
             );
         }
         format!(
@@ -7558,11 +7720,31 @@ impl TeamRuntime {
             private_directory(directory)
                 .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
+        let relay = match &account.reach {
+            TeamReach::Endpoint {
+                base_url,
+                key: Some(key),
+                ..
+            } => Some(Arc::new(
+                crate::harnesses::key_relay(&self.root, base_url, key)
+                    .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?,
+            )),
+            _ => None,
+        };
+        let relay_url = relay.as_ref().map(|relay| relay.base_url());
+        let relay_token = relay
+            .as_ref()
+            .map(|relay| Secret::new(relay.token().to_owned()))
+            .transpose()
+            .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?;
         let (home, remote, model) = match &account.reach {
-            TeamReach::Endpoint { base_url, model } => {
+            TeamReach::Endpoint {
+                base_url, model, ..
+            } => {
                 let endpoint = ResearchAccount::Endpoint {
-                    base_url: base_url.clone(),
+                    base_url: relay_url.clone().unwrap_or_else(|| base_url.clone()),
                     model: model.clone(),
+                    key: None,
                 };
                 let remote = model_remote(&endpoint).map_err(|e| {
                     with_code("the endpoint address was refused", Some(run_code(&e)))
@@ -7602,6 +7784,11 @@ impl TeamRuntime {
             ));
         }
         let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        let native_threads = if tools {
+            self.native_threads(&stored.project_id, id, role, launch)?
+        } else {
+            None
+        };
         if native && hookless {
             return Err(with_code(
                 NATIVE_NEEDS_HOOKS,
@@ -7935,10 +8122,12 @@ impl TeamRuntime {
             continues: role == AgentRole::Sub,
             native,
             tmux: native_tmux,
+            native_threads,
             hookless,
             #[cfg(unix)]
             scratch_pin,
             proxy,
+            relay,
             claude_display,
             task_start,
         };
@@ -7946,8 +8135,8 @@ impl TeamRuntime {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
                 account: AccountBinding::Url {
                     home,
-                    base_url: base_url.clone(),
-                    key: None,
+                    base_url: relay_url.unwrap_or_else(|| base_url.clone()),
+                    key: relay_token,
                 },
                 context: Box::new(context),
             },
@@ -9375,6 +9564,7 @@ fn work(
     leave: Arc<AtomicBool>,
 ) {
     let _proxy = launch.proxy();
+    let _relay = launch.relay();
     let launch = match launch {
         Launch::Fresh(plan, mode) if plan.live => {
             let problem = live(&plan, *mode, &orders, &reports, &cancel, &leave);
@@ -11354,6 +11544,27 @@ impl Drop for TeamService {
     }
 }
 
+/// Tells whether a stored agent leads a native agent team (DEC-104): its stored mode is
+/// Native on a harness kind whose native sub-agents are teams, so never a Codex lead, whose
+/// sub-agents are threads of its own process (PA-7). Takes the connection, project and
+/// agent. Returns the answer, or None when its row is unread.
+fn leads_native_team(connection: &Connection, project: &ProjectId, agent: i64) -> Option<bool> {
+    use crate::coord::settings::{HarnessKind, NativeSubAgents, SubagentMode, native_sub_agents};
+    let (mode, harness): (Option<String>, String) = connection
+        .query_row(
+            "SELECT mode,harness FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .ok()??;
+    Some(
+        mode.as_deref() == Some(SubagentMode::Native.as_str())
+            && HarnessKind::from_harness(&harness).map(native_sub_agents)
+                == Some(NativeSubAgents::Teams),
+    )
+}
+
 /// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead stored as leading
 /// native teammates shares that mailbox with them, so the pane the engine named the call
 /// by from the caller's process decides (DEC-111 Q18): the lead's own pane, found under the
@@ -11369,16 +11580,7 @@ pub fn team_caller(
     (lead, label): (i64, &str),
     pane: Option<(&str, u32)>,
 ) -> Option<(i64, String)> {
-    let mode: Option<String> = connection
-        .query_row(
-            "SELECT mode FROM team_agents WHERE id=?1 AND project=?2",
-            params![lead, project.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()?
-        .flatten();
-    if mode.as_deref() != Some(crate::coord::settings::SubagentMode::Native.as_str()) {
+    if !leads_native_team(connection, project, lead)? {
         return Some((lead, label.to_owned()));
     }
     match pane_member(connection, host, project, lead, pane?)? {

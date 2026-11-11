@@ -146,7 +146,11 @@ impl OwnerRuntimeHandle {
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
         let process = match claude {
-            true => claude_process(&prepared.instructions, process),
+            true => fit_process(
+                &prepared.instructions,
+                process,
+                crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize,
+            ),
             false => process,
         };
         let turn = if claude {
@@ -221,25 +225,27 @@ pub(super) const CLAUDE_PROCESS_BYTES_MAX: usize =
         - crate::instruction_files::SECTION_BYTES_MAX
         - 1;
 
-const CUT_NOTE: &str = "\n\n[CrazyAgent cut the app and project instructions here: a Claude master takes only this much of them beside its project context and instruction files. Shorten them on the Process page.]\n";
+const CUT_NOTE: &str = "\n\n[CrazyAgent cut the app and project instructions here: a master takes only this much of them beside its project context and instruction files. Shorten them on the Process page.]\n";
 
 const _: () = assert!(CUT_NOTE.len() < CLAUDE_PROCESS_BYTES_MAX);
 
-/// Fits what a Claude master gets from the Process page within the Claude host's prompt
-/// file limit beside its startup instruction, so no instruction text ever fails a turn:
-/// past the room the owner's app and project instructions are cut at a character boundary
-/// and end with a plain note, which the agent card shows, while the instruction files
-/// section, which has its own reserved room, stays whole. Inputs: the startup instruction
-/// and what `agent_home::text` built. Output: what the master gets and its home records.
-fn claude_process(
+/// Fits what a master gets from the Process page within its instruction file limit beside
+/// its startup instruction, so no instruction text ever fails a turn: past the room the
+/// owner's app and project instructions are cut at a character boundary and end with a
+/// plain note, which the agent card shows, while the instruction files section, which has
+/// its own reserved room, stays whole. Inputs: the startup instruction, what
+/// `agent_home::text` built and the harness's file limit. Output: what the master gets.
+pub(super) fn fit_process(
     instructions: &str,
     process: crate::agent_home::Given,
+    limit: usize,
 ) -> crate::agent_home::Given {
     assert!(instructions.len() <= crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
     assert!(process.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     assert!(process.section_bytes <= crate::instruction_files::SECTION_BYTES_MAX);
     assert!(process.section_bytes <= process.text.len());
-    let room = crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize - instructions.len() - 1;
+    assert!(limit >= crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize);
+    let room = limit - instructions.len() - 1;
     if process.text.len() <= room {
         return process;
     }
@@ -264,7 +270,7 @@ fn claude_process(
 /// instructions and the instruction files the engine read. Claude Code runs with setting
 /// sources off, which skips every `CLAUDE.md`, so its prompt file carries the same text.
 /// Input: both texts. Output: the prompt.
-fn master_prompt(instructions: &str, process: &str) -> String {
+pub(super) fn master_prompt(instructions: &str, process: &str) -> String {
     assert!(process.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     if process.is_empty() {
         return instructions.to_owned();
@@ -1198,23 +1204,6 @@ pub(super) fn write_master_instructions(
     Ok(runtime.path.join(MASTER_INSTRUCTIONS))
 }
 
-/// Gives one RCLI master turn the owner's instructions as they are now: the app and project
-/// text is read again for every turn and written into that turn's own folder, so a change made
-/// between turns reaches the next one, as RCLI keeps no session to resume (DEC-141 PA-18).
-/// Inputs: the owner root, the turn's runtime reference and the agent project. Output: the
-/// file, None for an empty text, or the read or write failure.
-pub(super) fn rcli_turn_instructions(
-    root: &Root,
-    runtime_ref: &RequestId,
-    project: &crate::agent_home::AgentProject,
-) -> Result<Option<PathBuf>, EngineError> {
-    let given = crate::agent_home::text(project).map_err(|problem| EngineError(problem.0))?;
-    if given.text.is_empty() {
-        return Ok(None);
-    }
-    write_master_instructions(root, runtime_ref, &given.text).map(Some)
-}
-
 /// Refuses the master instruction file where the owner-only turn directory cannot be made.
 /// Takes the owner root, turn reference and text, all unused.
 /// Returns `master_capture_unavailable`.
@@ -1552,41 +1541,6 @@ mod tests {
             "the Process page warns at exactly the room the largest context and the largest instruction files leave"
         );
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
-    }
-
-    /// DEC-141 PA-18 (PALOW-L1): an RCLI master turn after the owner changed the instructions
-    /// is given the new text and not the old, since every turn reads the text again; a turn
-    /// with no text gets no file.
-    #[test]
-    fn an_rcli_master_turn_after_an_instruction_change_is_given_the_new_text() {
-        let temporary = private_root();
-        let root = Root::open(temporary.path()).unwrap();
-        let data = tempfile::tempdir().unwrap();
-        let project = crate::agent_home::AgentProject {
-            data: data.path().canonicalize().unwrap(),
-            id: crate::protocol::ProjectId::new("rcli").unwrap(),
-            folder: None,
-            mode: crate::instruction_files::Mode::Both,
-            repeated: crate::agent_home::Repeated::LeaveOut,
-        };
-        let turn = |root: &Root| {
-            let (runtime_ref, _, _) = allocate_master_capture(root).unwrap();
-            rcli_turn_instructions(root, &runtime_ref, &project)
-                .unwrap()
-                .map(|path| std::fs::read_to_string(path).unwrap())
-        };
-
-        assert_eq!(turn(&root), None, "no text gives no file");
-        crate::agent_home::save_app(&project.data, "OWNER-ALPHA-41\n").unwrap();
-        let first = turn(&root).unwrap();
-        crate::agent_home::save_app(&project.data, "OWNER-BETA-42\n").unwrap();
-        let second = turn(&root).unwrap();
-
-        assert!(first.contains("OWNER-ALPHA-41"), "{first}");
-        assert!(
-            second.contains("OWNER-BETA-42") && !second.contains("OWNER-ALPHA-41"),
-            "the next turn keeps the old text: {second}"
-        );
     }
 
     #[test]

@@ -789,9 +789,10 @@ async fn a_rebound_session_keeps_its_bindings_in_order_and_admits_only_its_own_a
         change(&mut copy);
         copy.rebinds_valid()
     };
-    assert!(!tampered(
-        &|copy| copy.selection.backend = MasterBackend::Rcli
-    ));
+    assert!(
+        tampered(&|copy| copy.selection.backend = MasterBackend::Rcli),
+        "an RCLI master rebinds as the others do (PA-6)"
+    );
     assert!(!tampered(
         &|copy| copy.rebound[0].at = copy.owner.revision_after.clone()
     ));

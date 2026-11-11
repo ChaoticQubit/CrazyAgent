@@ -30,6 +30,10 @@ const POLL: Duration = Duration::from_millis(100);
 const OWN_FACTS_MAX: usize = 4096;
 /// The most background commands of the app one session follows at once.
 const BACKGROUND_MAX: usize = 64;
+/// The most recent ends of commands a session never saw start that it remembers, so a
+/// Codex command that ends in the instant after it yields, read before its start, never
+/// holds a turn (PA-10).
+const ENDED_KEPT: usize = 16;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const GROUP_FRESH: Duration = Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -68,6 +72,7 @@ pub struct TerminalSession {
     took_none: bool,
     facts: VecDeque<TranscriptEvent>,
     background: BTreeSet<String>,
+    ended: VecDeque<String>,
     exited: bool,
     stopped: bool,
     group_ended: bool,
@@ -357,6 +362,7 @@ impl TerminalSession {
             took_none: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
+            ended: VecDeque::new(),
             exited: false,
             stopped: false,
             group_ended: false,
@@ -413,6 +419,31 @@ impl TerminalSession {
     /// Output: the answer.
     pub fn held(&self) -> bool {
         self.held && self.queue.is_empty()
+    }
+
+    /// Ends the turn held for background commands once the last one ended, for a harness
+    /// that starts no turn of its own on that end (Codex, PA-10): an engine-typed turn ends
+    /// with the success it was held with, and a turn the app started by itself gives its
+    /// held end to its facts. Claude Code ends both on the turn its task notification
+    /// starts. Input: the session. Output: none.
+    fn release_held(&mut self) {
+        assert!(self.background.is_empty());
+        if self.held {
+            self.held = false;
+            self.over_hold = false;
+            self.noticed = false;
+            self.turn = false;
+            self.queue
+                .push_back(LaunchEvent::TurnFinished { success: true });
+        }
+        if self.own_held {
+            self.own_held = false;
+            if self.facts.len() < OWN_FACTS_MAX {
+                self.facts
+                    .push_back(TranscriptEvent::TurnFinished { success: true });
+            }
+        }
+        assert!(!self.held && !self.own_held);
     }
 
     /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
@@ -783,7 +814,9 @@ impl TerminalSession {
             }
             match fact {
                 TranscriptEvent::BackgroundStarted { id } => {
-                    if self.background.len() < BACKGROUND_MAX {
+                    if let Some(early) = self.ended.iter().position(|ended| *ended == id) {
+                        self.ended.remove(early);
+                    } else if self.background.len() < BACKGROUND_MAX {
                         self.background.insert(id);
                     }
                     continue;
@@ -791,11 +824,20 @@ impl TerminalSession {
                 TranscriptEvent::BackgroundEnded { id } => {
                     let ended = self.background.remove(&id);
                     self.noticed |= self.held && ended;
+                    if !ended {
+                        self.ended.push_back(id);
+                        if self.ended.len() > ENDED_KEPT {
+                            self.ended.pop_front();
+                        }
+                    } else if self.background.is_empty() && !self.reader.notifies_background_end() {
+                        self.release_held();
+                    }
                     continue;
                 }
                 _ => {}
             }
             assert!(self.background.len() <= BACKGROUND_MAX);
+            assert!(self.ended.len() <= ENDED_KEPT);
             if !self.turn {
                 if self.own
                     && self.facts.len() < OWN_FACTS_MAX

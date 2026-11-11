@@ -1340,7 +1340,7 @@ fn no_channel_names_only_a_tools_off_codex_sub_agent_in_a_kept_session_under_nat
     );
     assert_eq!(
         NO_CHANNEL,
-        "Can't receive messages: Native only needs tools on for Codex."
+        "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent."
     );
 }
 

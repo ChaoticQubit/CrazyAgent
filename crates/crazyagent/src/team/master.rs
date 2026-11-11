@@ -28,7 +28,7 @@ const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
-const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
+const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run your sub-agents natively. Start them with your own harness instead: an agent team in Claude Code, sub-agents in Codex.";
 const MASTER_LABEL: &str = "Master";
 const RECALL_LEFT_OUT: &str =
     "More memories matched and were left out. Search for something narrower.\n";
@@ -1563,8 +1563,8 @@ fn lead_delegate(
 }
 
 /// Tells whether a project's pool holds an account a harness kind can run on now
-/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: a keyless endpoint,
-/// or a native managed profile whose latest sign-in observed an account. Takes the
+/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: an endpoint, keyed or
+/// not, or a native managed profile whose latest sign-in observed an account. Takes the
 /// database, the live access, the project and the launch harness. Returns the answer, or
 /// a SQLite failure.
 fn signed_in_account(
@@ -2044,7 +2044,7 @@ fn delegate(
         {
             return Ok((
                 format!(
-                    "Not handed off: a {} lead has no native teammates; leave mode out or use app_spawned (native_mode_unsupported).",
+                    "Not handed off: a {} lead has no native sub-agents; leave mode out or use app_spawned (native_mode_unsupported).",
                     super::bound_text(&chosen, AGENT_SHOWN_MAX)
                 ),
                 true,

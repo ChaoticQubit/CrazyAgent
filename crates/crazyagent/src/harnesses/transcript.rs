@@ -78,6 +78,7 @@ pub struct TranscriptReader {
     aside: bool,
     dropped: bool,
     consumed: u64,
+    codex_calls: CodexExecCalls,
 }
 
 impl TranscriptReader {
@@ -128,6 +129,7 @@ impl TranscriptReader {
             aside: false,
             dropped: false,
             consumed: 0,
+            codex_calls: CodexExecCalls::default(),
         }
     }
 
@@ -185,9 +187,19 @@ impl TranscriptReader {
     }
 
     /// Says whether this record reports the commands its harness starts in the background
-    /// and their ends, as a Claude Code transcript does; a Codex rollout reports neither.
+    /// and their ends: a Claude Code transcript and a Codex 0.164 rollout both do (PA-10).
     /// Output: the answer.
     pub fn reports_background(&self) -> bool {
+        matches!(
+            self.source,
+            Transcript::ClaudeSession { .. } | Transcript::CodexRollouts { .. }
+        )
+    }
+
+    /// Says whether the harness starts a turn of its own when a background command ends, as
+    /// Claude Code does with its task notification; Codex only records the end, so a session
+    /// holding a turn for its commands ends that turn itself. Output: the answer.
+    pub fn notifies_background_end(&self) -> bool {
         matches!(self.source, Transcript::ClaudeSession { .. })
     }
 
@@ -261,7 +273,10 @@ impl TranscriptReader {
                 continue;
             };
             let facts = match self.source {
-                Transcript::CodexRollouts { .. } => codex_facts(&value),
+                Transcript::CodexRollouts { .. } => {
+                    let exec = self.codex_calls.sees(&value);
+                    codex_facts(&value, exec)
+                }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
                 Transcript::Unavailable => Vec::new(),
             };
@@ -423,7 +438,9 @@ fn find_rollout(
             file.metadata()
                 .is_ok_and(|metadata| earlier.binary_search(&file_key(&metadata, &path)).is_err())
         })?;
-        let meta = session_meta(&file).filter(|meta| meta["cwd"].as_str() == Some(cwd))?;
+        let meta = session_meta(&file).filter(|meta| {
+            meta["cwd"].as_str() == Some(cwd) && meta["source"].get("subagent").is_none()
+        })?;
         Some((rewound(file)?, conversation_id(&meta["id"]), path))
     })
 }
@@ -537,7 +554,11 @@ fn line_text(text: &str) -> TranscriptEvent {
     TranscriptEvent::Text { text }
 }
 
-fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
+/// The facts of one Codex rollout line. Takes the line and whether it is the output of an
+/// exec tool call ([`CodexExecCalls::sees`]), the only output whose header can name a
+/// command left running. Returns the facts, none for a line that says nothing the session
+/// follows.
+fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
     let payload = &value["payload"];
     match (value["type"].as_str(), payload["type"].as_str()) {
         (Some("event_msg"), Some("task_started")) => vec![TranscriptEvent::TurnStarted],
@@ -579,8 +600,141 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
                 .unwrap_or("tool")
                 .to_owned(),
         }],
+        (Some("response_item"), Some("function_call_output")) if exec => {
+            output_texts(&payload["output"])
+                .first()
+                .copied()
+                .and_then(codex_running)
+                .map(|id| TranscriptEvent::BackgroundStarted { id })
+                .into_iter()
+                .collect()
+        }
+        (Some("event_msg"), Some("item_completed"))
+            if payload["item"]["type"] == "CommandExecution"
+                && payload["item"]["status"] != "in_progress" =>
+        {
+            payload["item"]["process_id"]
+                .as_str()
+                .and_then(codex_session_id)
+                .map(|id| TranscriptEvent::BackgroundEnded { id })
+                .into_iter()
+                .collect()
+        }
         _ => Vec::new(),
     }
+}
+
+/// The header line Codex 0.164 writes into an exec tool output while the command it started
+/// still runs, followed by the session id of that command (core tools/context.rs
+/// `response_header`).
+const CODEX_RUNNING: &str = "Process running with session ID ";
+
+/// The line that ends the header of a Codex exec tool output; every line after it is the
+/// command's own output, which the command, the repository or fetched text controls.
+const CODEX_OUTPUT: &str = "Output:";
+
+/// The most lines a Codex 0.164 exec output header has: chunk id, wall time, exit code,
+/// running session, original token count and `Output:`.
+const CODEX_HEADER_LINES_MAX: usize = 6;
+
+/// The Codex 0.164 tools whose output header names a command left running (unified exec).
+const CODEX_EXEC_TOOLS: [&str; 2] = ["exec_command", "write_stdin"];
+
+/// The most exec tool calls a reader waits for the output of at once; past it the oldest
+/// is forgotten, and its output then starts no background command.
+const CODEX_EXEC_CALLS_MAX: usize = 64;
+
+/// The longest Codex tool call id a reader keeps.
+const CODEX_CALL_ID_BYTES_MAX: usize = 128;
+
+/// The exec tool calls of a Codex rollout whose output is still to come, oldest first: only
+/// the header Codex writes on an exec output can name a command left running, so the
+/// output of any other tool, or text in an output's body, never starts one (PA9-F1).
+#[derive(Debug, Default)]
+struct CodexExecCalls {
+    waiting: std::collections::VecDeque<String>,
+}
+
+impl CodexExecCalls {
+    /// Takes one rollout line: remembers an exec_command or write_stdin call by its call
+    /// id, and tells whether the line is the output of a remembered call, which it then
+    /// forgets. Takes the line. Returns true only for such an output.
+    fn sees(&mut self, value: &Value) -> bool {
+        let payload = &value["payload"];
+        let call = payload["call_id"]
+            .as_str()
+            .filter(|call| !call.is_empty() && call.len() <= CODEX_CALL_ID_BYTES_MAX);
+        let Some(call) = call.filter(|_| value["type"] == "response_item") else {
+            return false;
+        };
+        let exec = match payload["type"].as_str() {
+            Some("function_call") => {
+                let tool = payload["name"].as_str().unwrap_or_default();
+                if CODEX_EXEC_TOOLS.contains(&tool) {
+                    self.waiting.push_back(call.to_owned());
+                    if self.waiting.len() > CODEX_EXEC_CALLS_MAX {
+                        self.waiting.pop_front();
+                    }
+                }
+                false
+            }
+            Some("function_call_output") => {
+                match self.waiting.iter().position(|waiting| waiting == call) {
+                    Some(at) => self.waiting.remove(at).is_some(),
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        assert!(self.waiting.len() <= CODEX_EXEC_CALLS_MAX);
+        exec
+    }
+}
+
+/// The session id the header of a Codex exec output names as still running. The header is
+/// the lines before the first `Output:` line, at most `CODEX_HEADER_LINES_MAX`; the lines
+/// after it are never read. Takes the output's first text. Returns the id, none for text
+/// with no header or no running line in it.
+fn codex_running(text: &str) -> Option<String> {
+    let mut running = None;
+    for line in text.lines().take(CODEX_HEADER_LINES_MAX) {
+        if line == CODEX_OUTPUT {
+            return running;
+        }
+        if let Some(id) = line.strip_prefix(CODEX_RUNNING) {
+            running = codex_session_id(id);
+        }
+    }
+    None
+}
+
+/// The most digits a Codex session id is read with.
+const CODEX_SESSION_DIGITS_MAX: usize = 20;
+
+/// The texts of a Codex tool output in the shapes a rollout keeps it: a string, a list of
+/// content parts with text, or an object whose `content` is either. Takes the output.
+/// Returns its texts, none for any other value.
+fn output_texts(output: &Value) -> Vec<&str> {
+    match output {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+        Value::Object(_) if !output["content"].is_object() => output_texts(&output["content"]),
+        _ => Vec::new(),
+    }
+}
+
+/// A Codex background command's session id as the engine keeps it: digits only, at most
+/// `CODEX_SESSION_DIGITS_MAX`. Takes the text after the marker. Returns the id, none for
+/// any other text.
+fn codex_session_id(text: &str) -> Option<String> {
+    let id = text.trim();
+    let digits = !id.is_empty()
+        && id.len() <= CODEX_SESSION_DIGITS_MAX
+        && id.bytes().all(|byte| byte.is_ascii_digit());
+    digits.then(|| id.to_owned())
 }
 
 /// The texts of a Claude Code content value: the string itself, or each text block of an

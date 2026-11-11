@@ -30,7 +30,7 @@ const GROUPS = [
 const MASTER = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
-  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
+  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
 const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main", "rcli sub-agents", "Messages to rcli agents"];
@@ -75,7 +75,7 @@ test("the master's settings drawer holds its four groups with nothing past the d
     await page.evaluate(fixture);
     const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "drawer", ${JSON.stringify(STATUS)})`);
     const measured = await page.evaluate("Fixture.measure()");
-    const controls = MASTER.flatMap(([, rows]) => rows);
+    const controls = MASTER.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row));
     const reached = await tabThrough(page, controls);
     return { mounted, measured, reached, controls };
   });

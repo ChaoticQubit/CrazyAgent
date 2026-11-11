@@ -17,7 +17,7 @@ export const STEP_LIMIT_CHOICES: { choice: StepLimit; title: string; help: strin
 ];
 
 /** What a step is and what a stopped turn says, the same words in the TUI. */
-export const STEP_LIMIT_NOTE = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers a Claude master with tools on; a Codex master counts no steps.";
+export const STEP_LIMIT_NOTE = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers Claude and Codex masters with tools on. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it.";
 
 /** The setting an owner has until they pick another: the engine's `MasterTimeSettings` default. */
 export const TIME_LIMIT_DEFAULT: MasterTimeSettings = { limit: "no_limit" };

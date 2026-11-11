@@ -301,7 +301,7 @@ const copy: Record<string, string> = {
   team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
   team_land_on_invalid: "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.",
   team_background_grace_invalid: "Pick a grace time from 10 to 3600 seconds.",
-  coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
+  coord_native_unsupported: "This harness has no native sub-agents, so its sub-agents are app-spawned.",
   coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
   coord_project_unknown: "This project was not found.",
   team_agent_unknown: "That agent is not running anymore.",

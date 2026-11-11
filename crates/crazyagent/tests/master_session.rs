@@ -929,22 +929,29 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
     f.restart().await;
     let reader = f.owner(OwnerClientKind::Desktop).await;
     assert_eq!(f.page(&reader, &session).await.turns, vec![ended.clone()]);
-    rejected_with(
-        reader
-            .request(mutation(
-                "stale-turn",
-                f.revision(&reader).await,
-                MasterOwnerAction::Submit {
-                    project_id: project("p"),
-                    session_id: session.session_id.clone(),
-                    text: "Use the revised requirement.".into(),
-                },
-            ))
-            .await
-            .unwrap(),
-        "master_source_conflict",
+    f.submit(
+        &reader,
+        "after-restart",
+        &session,
+        "Use the revised requirement.",
+    )
+    .await;
+    let resent = f.settled(&reader, &session, "after-restart").await;
+    blocked(
+        &resent,
+        &session,
+        "after-restart",
+        MasterReason::RuntimeUnavailable,
     );
-    assert_eq!(f.page(&reader, &session).await.turns, vec![ended]);
+    assert_eq!(
+        resent.cause.as_deref(),
+        Some("rcli_profile_configuration_required")
+    );
+    assert_eq!(resent.ordinal, 2);
+    assert_eq!(
+        f.page(&reader, &session).await.turns,
+        vec![ended, resent.clone()]
+    );
     assert_eq!(f.session(&reader, "p").await.unwrap().current_turn, None);
     assert_eq!(f.history(&reader, "p").await.entries.len(), 1);
     f.close(&reader, "close-stale", &session).await;

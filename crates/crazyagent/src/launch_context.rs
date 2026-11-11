@@ -170,6 +170,7 @@ pub struct AgentContext {
     transcripts: bool,
     off_tools: Vec<(String, Vec<String>)>,
     native_team: Option<(PathBuf, PathBuf)>,
+    native_threads: Option<u8>,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
     claude_display: ClaudeDisplay,
@@ -200,6 +201,7 @@ pub struct Installed {
     relay: bool,
     denied: Vec<String>,
     native: Option<NativeTeam>,
+    native_threads: bool,
     model_proxy: Option<u16>,
     claude_display: ClaudeDisplay,
     _lock: File,
@@ -266,6 +268,7 @@ pub fn for_project(
         transcripts,
         off_tools,
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -346,6 +349,20 @@ fn teammate_section(worktree: &Path) -> Result<String, LaunchError> {
     Ok(format!(
         "\n## You are a teammate\n\nYou are a teammate in the Claude Code agent team of a CrazyAgent lead, which works in `{folder}`. Your own worktree has no project graph: run graphify with `--graph {folder}/graphify-out/graph.json`.\n"
     ))
+}
+
+/// The part only a native Codex lead's sub-agents read after the lead's own instructions
+/// (PA-7): they share the lead's worktree, task and team tools, whose calls the engine
+/// answers as the lead's, so they leave the work and lead tools and their own sub-agents to
+/// the lead. Input: nothing. Output: the section.
+fn codex_sub_agent_section() -> String {
+    use crate::team::tool::{
+        FINISH_WORK_TOOL, MERGE_TOOL, SPAWN_TOOL, START_WORK_TOOL, STOP_TOOL, TRANSFER_WORK_TOOL,
+        UPDATE_WORK_TOOL,
+    };
+    format!(
+        "\n## You are a sub-agent\n\nYou are a Codex sub-agent your CrazyAgent lead started. You work in your lead's worktree on its task: change only the files your lead gave you. The CrazyAgent team tools answer as your lead, so never call {START_WORK_TOOL}, {UPDATE_WORK_TOOL}, {TRANSFER_WORK_TOOL}, {FINISH_WORK_TOOL}, {SPAWN_TOOL}, {STOP_TOOL} or {MERGE_TOOL}, and start no sub-agents of your own. When you are done, tell your lead what you changed.\n"
+    )
 }
 
 /// Where a native-team lead's launch writes the command Claude Code runs for each teammate
@@ -706,6 +723,17 @@ impl AgentContext {
         self
     }
 
+    /// Lets a Codex lead with tools on run Codex's own sub-agents (DEC-141 PA-7, native mode):
+    /// multi-agent v2 on, at most `cap` sub-agents open at once, each started with the lead's
+    /// instructions plus the sub-agent section. Claude Code gets its team through
+    /// `with_native_team`; other harnesses and tools-off launches ignore it. Input: the cap,
+    /// 1 or more. Output: the context.
+    pub fn with_native_sub_agents(mut self, cap: u8) -> Self {
+        assert!(cap > 0);
+        self.native_threads = Some(cap);
+        self
+    }
+
     /// Sends a team agent's model traffic through its model proxy (S4b): its launch gets
     /// `HTTPS_PROXY` and `HTTP_PROXY` naming the proxy on 127.0.0.1 and an empty `NO_PROXY`,
     /// and its pane record keeps the port for a later engine. Input: the proxy's port.
@@ -994,6 +1022,7 @@ impl AgentContext {
             relay: false,
             denied: Vec::new(),
             native: None,
+            native_threads: false,
             model_proxy: self.model_proxy,
             claude_display: self.claude_display,
             _lock: lock,
@@ -1066,8 +1095,18 @@ impl AgentContext {
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
             );
+            let native = self.native_threads.filter(|_| tools);
+            let sub_agents = native.map(|cap| {
+                let mut sub = developer.clone();
+                sub.push_str(&codex_sub_agent_section());
+                (cap, sub)
+            });
+            installed.native_threads = sub_agents.is_some();
             remove(&config);
-            write_secret(&config, codex_config(&developer, servers, &self.off_tools)?)?;
+            write_secret(
+                &config,
+                codex_config(&developer, servers, &self.off_tools, sub_agents.as_ref())?,
+            )?;
         } else {
             installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
@@ -1156,6 +1195,7 @@ impl AgentContext {
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
         assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
         assert!(installed.native.is_none() || (id == "claude-code" && tools));
+        assert!(!installed.native_threads || (id == "codex" && tools));
         assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
@@ -1218,6 +1258,12 @@ impl Installed {
         self.native.as_ref()
     }
 
+    /// Tells whether this Codex launch is a native lead whose Codex runs its own sub-agents
+    /// (PA-7), so its launch keeps multi-agent v2 on and its child threads running.
+    pub fn native_threads(&self) -> bool {
+        self.native_threads
+    }
+
     /// Names the loopback port of the model proxy this launch's variables point at, none
     /// for a launch that reaches its model directly.
     pub fn model_proxy(&self) -> Option<u16> {
@@ -1250,6 +1296,7 @@ impl Installed {
             relay: false,
             denied: Vec::new(),
             native: None,
+            native_threads: false,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
             _lock: lock,
@@ -1679,14 +1726,34 @@ fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -
     denied
 }
 
+/// Writes a Codex agent's `config.toml`: instructions, no project docs, MCP servers less
+/// switched-off tools; a native lead (PA-7) gets multi-agent v2 with `max_threads`, its
+/// sub-agents' instructions and no model or effort offered on spawn, though a sent one runs.
+/// Inputs: the instructions, servers, switched-off tools and the native lead's cap and
+/// sub-agent instructions. Output: the text, or `launch_context_server_name_taken`.
 fn codex_config(
     instructions: &str,
     servers: &[LaunchServer],
     off_tools: &[(String, Vec<String>)],
+    sub_agents: Option<&(u8, String)>,
 ) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
     document["project_doc_max_bytes"] = toml_edit::value(0);
+    if let Some((cap, sub)) = sub_agents {
+        assert!(*cap > 0 && sub.starts_with(instructions));
+        let mut v2 = toml_edit::Table::new();
+        v2["enabled"] = toml_edit::value(true);
+        v2["subagent_developer_instructions"] = toml_edit::value(sub.as_str());
+        v2["expose_spawn_agent_model_overrides"] = toml_edit::value(false);
+        let mut features = toml_edit::Table::new();
+        features.set_implicit(true);
+        features.insert("multi_agent_v2", toml_edit::Item::Table(v2));
+        document["features"] = toml_edit::Item::Table(features);
+        let mut agents = toml_edit::Table::new();
+        agents["max_threads"] = toml_edit::value(i64::from(*cap));
+        document["agents"] = toml_edit::Item::Table(agents);
+    }
     if !servers.is_empty() {
         let mut table = toml_edit::Table::new();
         table.set_implicit(true);
@@ -1803,6 +1870,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         relay: false,
         denied: Vec::new(),
         native: None,
+        native_threads: false,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
         _lock: lock,

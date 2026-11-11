@@ -965,3 +965,106 @@ fn a_turn_that_starts_a_thousand_native_sub_agents_still_ends_completed() {
     );
     assert_eq!(protocol.state(), State::Idle);
 }
+
+fn item_started(thread: &str, turn: &str, kind: &str, id: &str) -> Vec<u8> {
+    wire(json!({"method":"item/started","params":{
+        "threadId":thread, "turnId":turn, "startedAtMs":1,
+        "item":{"type":kind,"id":id}
+    }}))
+}
+
+fn tokens_counted(thread: &str, turn: &str) -> Vec<u8> {
+    wire(json!({"method":"thread/tokenUsage/updated","params":{
+        "threadId":thread, "turnId":turn,
+        "tokenUsage":{"last":{"cachedInputTokens":0,"inputTokens":1,"outputTokens":1,
+            "reasoningOutputTokens":0,"totalTokens":2},
+            "total":{"cachedInputTokens":0,"inputTokens":1,"outputTokens":1,
+            "reasoningOutputTokens":0,"totalTokens":2}}
+    }}))
+}
+
+/// The Codex adapter counts the steps of the master step limit (PA-9) as Claude Code's
+/// --max-turns does: one step per model round that started a tool, ended by the token count
+/// Codex 0.164 sends once the round's tools are done. Parallel tools in one round are one
+/// step, a token count with no tool before it (a compaction, the final answer) is none, and
+/// another thread's tools and a later turn's count start from nothing.
+#[test]
+fn a_codex_turn_counts_one_step_per_model_round_that_started_a_tool() {
+    let mut protocol = active();
+    assert_eq!(protocol.steps(), 0);
+    for kind in ["commandExecution", "fileChange", "mcpToolCall"] {
+        let events = protocol
+            .receive(&item_started("thread-unit", "turn-unit", kind, kind))
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![Event::UnsupportedNotification {
+                method: "item/started".into()
+            }]
+        );
+    }
+    assert_eq!(protocol.steps(), 0);
+    protocol
+        .receive(&tokens_counted("thread-unit", "turn-unit"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 1);
+    protocol
+        .receive(&tokens_counted("thread-unit", "turn-unit"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 1);
+    for kind in [
+        "agentMessage",
+        "reasoning",
+        "plan",
+        "userMessage",
+        "contextCompaction",
+    ] {
+        protocol
+            .receive(&item_started("thread-unit", "turn-unit", kind, kind))
+            .unwrap();
+    }
+    protocol
+        .receive(&tokens_counted("thread-unit", "turn-unit"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 1);
+    for kind in [
+        "dynamicToolCall",
+        "collabAgentToolCall",
+        "webSearch",
+        "imageView",
+        "imageGeneration",
+    ] {
+        protocol
+            .receive(&item_started("thread-unit", "turn-unit", kind, kind))
+            .unwrap();
+        protocol
+            .receive(&tokens_counted("thread-unit", "turn-unit"))
+            .unwrap();
+    }
+    assert_eq!(protocol.steps(), 6);
+    protocol
+        .receive(&item_started(
+            "thread-other",
+            "turn-other",
+            "commandExecution",
+            "x",
+        ))
+        .unwrap();
+    protocol
+        .receive(&tokens_counted("thread-other", "turn-other"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 6);
+    let ended = notification("turn/completed", "turn-unit", "completed");
+    protocol.receive(&ended).unwrap();
+    assert_eq!(protocol.state(), State::Idle);
+    assert_eq!(protocol.steps(), 6);
+    let next = request(&protocol.start_turn("unit input").unwrap());
+    let id = next["id"].as_i64().unwrap();
+    reply(
+        &mut protocol,
+        id,
+        json!({"turn":turn("turn-two","inProgress")}),
+    );
+    assert_eq!(protocol.state(), State::Active);
+    assert_eq!(protocol.steps(), 0);
+}

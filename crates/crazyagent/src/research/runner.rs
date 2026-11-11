@@ -89,16 +89,16 @@ const PANE_EVENTS_MAX: usize = 200_000;
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
-const CLAUDE_ARGUMENTS: [&str; 8] = [
+const CLAUDE_ARGUMENTS: [&str; 6] = [
     "--print",
     "--output-format",
     "text",
     "--strict-mcp-config",
     "--setting-sources",
     "",
-    "--settings",
-    "{\"disableAllHooks\":true}",
 ];
+/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
 /// and a reader of a stored report reads up to this many.
@@ -167,8 +167,13 @@ impl ResearchHarness {
 /// The pool account a research agent runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResearchAccount {
-    /// An OpenAI-compatible URL or a local model server, with no key, for Codex.
-    Endpoint { base_url: String, model: String },
+    /// An OpenAI-compatible URL or a local model server for Codex, with the reference of
+    /// its saved key when it has one; a keyed run reaches it only through a key relay.
+    Endpoint {
+        base_url: String,
+        model: String,
+        key: Option<CredentialRef>,
+    },
     /// A managed Codex connection of the project's pool. Each launch proves
     /// it is signed in for this engine run and holds its profile under the
     /// engine's custody lease while the agent runs.
@@ -176,9 +181,13 @@ pub enum ResearchAccount {
         connection: ModelConnection,
         model: Option<String>,
     },
-    /// An Anthropic Messages URL or local model server, with no key, for
-    /// Claude Code.
-    AnthropicEndpoint { base_url: String, model: String },
+    /// An Anthropic Messages URL or local model server for Claude Code, keyed or not
+    /// like [`ResearchAccount::Endpoint`].
+    AnthropicEndpoint {
+        base_url: String,
+        model: String,
+        key: Option<CredentialRef>,
+    },
     /// A managed Claude connection of the project's pool, held like
     /// [`ResearchAccount::ManagedCodex`].
     ManagedClaude {
@@ -769,7 +778,16 @@ impl ResearchRunner {
             }
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
-        self.launch_leased(jobs, job, account, place, lease)
+        let (account, relay) = relayed(self.engine_folder()?, account)?;
+        self.launch_leased(jobs, job, &account, place, lease, relay.as_ref())
+    }
+
+    /// The engine folder, which holds `engine.db` and the saved account keys.
+    /// Output: the folder, or a refusal for a database path with no parent.
+    fn engine_folder(&self) -> Result<&Path, RunError> {
+        self.database
+            .parent()
+            .ok_or_else(|| RunError::Invalid("engine folder".into()))
     }
 
     /// Checks that a claimed job can launch and names its run: the canonical project
@@ -844,8 +862,9 @@ impl ResearchRunner {
 
     /// Runs a claimed job's agent once its account is taken: the managed credential copy
     /// in the agent's home, the project context, the sandboxed worktree and the harness.
-    /// Inputs: the job store, the job, its account, where it runs and the held lease, none
-    /// for an endpoint account. Output: how the agent ended, its process group and output.
+    /// Inputs: the job store, the job, its account, where it runs, the held lease, none for
+    /// an endpoint account, and the key relay a keyed endpoint account runs behind, which
+    /// outlives this call. Output: how the agent ended, its process group and output.
     fn launch_leased(
         &self,
         jobs: &ResearchJobs,
@@ -853,6 +872,7 @@ impl ResearchRunner {
         account: &ResearchAccount,
         place: JobPlace,
         lease: Option<(NativeProfileUse, Option<Hold>)>,
+        relay: Option<&crate::model_gateway::relay::Relay>,
     ) -> Result<(Ending, u32, PathBuf), RunError> {
         let JobPlace {
             root,
@@ -972,7 +992,7 @@ impl ResearchRunner {
                 ResearchHarness::Codex => tmp.join("report.md"),
                 ResearchHarness::ClaudeCode => agent.join("output.md"),
             };
-            let (binding, model) = pane_account(account, &home);
+            let (binding, model) = pane_account(account, &home, relay)?;
             let request = LaunchRequest {
                 harness: harness.id().to_owned(),
                 executable: program.clone(),
@@ -1033,6 +1053,9 @@ impl ResearchRunner {
             drop(credential);
             drop(lease);
             return Ok((ending?, group, output));
+        }
+        if let Some(relay) = relay {
+            write_relay_token(&home, relay)?;
         }
         let mut launch = Command::new(&program);
         let (output, stdout_log) = match harness {
@@ -1539,6 +1562,8 @@ impl ResearchRunner {
                 "read-only run lease does not fit its account".into(),
             ));
         }
+        let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
+        let account = &behind;
         let folder = run.folder.canonicalize()?;
         if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
             return Err(RunError::Invalid(
@@ -1556,10 +1581,10 @@ impl ResearchRunner {
             &home,
             crate::usage::capture::RunKind::Research,
             run.project,
-            run.account,
+            account,
             run.agent,
         );
-        let harness = run.account.harness();
+        let harness = account.harness();
         let executable = &self.harness(harness).ok_or_else(|| {
             RunError::Invalid(match harness {
                 ResearchHarness::Codex => "codex executable missing".into(),
@@ -1582,7 +1607,7 @@ impl ResearchRunner {
             &work,
             &home,
             &tmp,
-            SandboxNetwork::Only(vec![model_remote(run.account)?]),
+            SandboxNetwork::Only(vec![model_remote(account)?]),
         )?
         .allow_read(&folder)?;
         let program =
@@ -1610,18 +1635,11 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
-                codex_arguments(&mut command, &folder, &output, &home, false, run.account)?;
+                codex_arguments(&mut command, &folder, &output, &home, false, account)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(
-                    &mut command,
-                    &home,
-                    &tmp,
-                    false,
-                    run.output_tokens,
-                    run.account,
-                )?;
+                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
                 (agent.join("output.md"), "output.md")
             }
         };
@@ -1630,6 +1648,9 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(relay) = &relay {
+            write_relay_token(&home, relay)?;
+        }
         let mut running = AgentProcess::spawn(&mut command)?;
         let counted = Arc::new(AtomicU64::new(0));
         let mut drains = Vec::with_capacity(2);
@@ -1857,6 +1878,72 @@ pub(crate) fn job_reach(
     Ok((network, Some(proxy)))
 }
 
+/// Puts a keyed endpoint account behind an engine key relay for one run (DEC-141 PA-8): the
+/// relay reads the saved key from the engine folder and holds it in memory, and the account
+/// comes back naming the relay's loopback URL, so the agent never gets the key. Inputs: the
+/// engine folder holding `account-keys` and the account. Output: the account to run and its
+/// relay, which must outlive the run; any other account unchanged with no relay.
+fn relayed(
+    engine: &Path,
+    account: &ResearchAccount,
+) -> Result<(ResearchAccount, Option<crate::model_gateway::relay::Relay>), RunError> {
+    let (upstream, key) = match account {
+        ResearchAccount::Endpoint {
+            base_url,
+            key: Some(key),
+            ..
+        }
+        | ResearchAccount::AnthropicEndpoint {
+            base_url,
+            key: Some(key),
+            ..
+        } => (base_url, key),
+        _ => return Ok((account.clone(), None)),
+    };
+    let relay = crate::harnesses::key_relay(engine, upstream, key)
+        .map_err(|problem| RunError::Account(problem.0))?;
+    let mut behind = account.clone();
+    if let ResearchAccount::Endpoint { base_url, .. }
+    | ResearchAccount::AnthropicEndpoint { base_url, .. } = &mut behind
+    {
+        *base_url = relay.base_url();
+    }
+    assert!(
+        matches!(model_remote(&behind), Ok(SandboxRemote::Loopback(port)) if port == relay.port())
+    );
+    Ok((behind, Some(relay)))
+}
+
+/// The key file a keyed research run's harness reads its relay token from, once the
+/// account's URL is checked to be a relay's: plain http on 127.0.0.1, so a keyed account is
+/// never reached directly. Inputs: the agent home and the account URL. Output: the file's
+/// path as text, or a refusal.
+fn relay_key_file(home: &Path, url: &url::Url) -> Result<String, RunError> {
+    let relayed = url.scheme() == "http"
+        && url.host() == Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST));
+    if !relayed {
+        return Err(RunError::Invalid(
+            "a keyed endpoint runs only through its key relay".into(),
+        ));
+    }
+    crate::harnesses::launch::key_file_text(&home.join(crate::harnesses::interactive::KEY_FILE))
+        .map_err(|problem| RunError::Invalid(problem.0))
+}
+
+/// Writes a relayed run's placeholder token where its harness reads it, `<home>/.crazyagent-key`,
+/// owner-only; the provider key itself stays in the relay. Inputs: the agent home and the
+/// relay. Output: Ok, or the refusal of a token or file that cannot be written.
+fn write_relay_token(
+    home: &Path,
+    relay: &crate::model_gateway::relay::Relay,
+) -> Result<(), RunError> {
+    let token = crate::harnesses::launch::Secret::new(relay.token().to_owned())
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    crate::harnesses::interactive::write_key(home, &token)
+        .map(|_| ())
+        .map_err(|problem| RunError::Invalid(problem.0))
+}
+
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
         ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. } => {
@@ -1967,7 +2054,11 @@ fn codex_arguments(
         command.args(["-c", crate::harnesses::launch::CODEX_NO_USER_INPUT]);
     }
     match account {
-        ResearchAccount::Endpoint { base_url, model } => {
+        ResearchAccount::Endpoint {
+            base_url,
+            model,
+            key,
+        } => {
             let url = endpoint_url(base_url)?;
             if !valid_model(model) {
                 return Err(RunError::Invalid("endpoint model name".into()));
@@ -1982,9 +2073,14 @@ fn codex_arguments(
                 .arg(format!(
                     "model_providers.crazyagent_endpoint.base_url=\"{}\"",
                     url.as_str().trim_end_matches('/')
-                ))
-                .arg("-m")
-                .arg(model);
+                ));
+            if key.is_some() {
+                let file = relay_key_file(home, &url)?;
+                command.arg("-c").arg(format!(
+                    "model_providers.crazyagent_endpoint.auth={{command=\"/bin/cat\",args=[\"{file}\"]}}"
+                ));
+            }
+            command.arg("-m").arg(model);
         }
         ResearchAccount::ManagedCodex { model, .. } => {
             command.args([
@@ -2026,8 +2122,27 @@ fn claude_arguments(
     output_tokens: Option<u32>,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
+    let key_file = match account {
+        ResearchAccount::AnthropicEndpoint {
+            base_url,
+            key: Some(_),
+            ..
+        } => Some(relay_key_file(home, &endpoint_url(base_url)?)?),
+        _ => None,
+    };
+    let settings = match &key_file {
+        Some(file) => {
+            let mut settings: serde_json::Value =
+                serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
+            settings["apiKeyHelper"] = format!("/bin/cat '{file}'").into();
+            settings.to_string()
+        }
+        None => CLAUDE_SETTINGS.to_owned(),
+    };
     command
         .args(CLAUDE_ARGUMENTS)
+        .arg("--settings")
+        .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home)
         .env("CLAUDE_CODE_TMPDIR", tmp)
@@ -2051,7 +2166,9 @@ fn claude_arguments(
         command.env(CLAUDE_OUTPUT_TOKENS, tokens.to_string());
     }
     match account {
-        ResearchAccount::AnthropicEndpoint { base_url, model } => {
+        ResearchAccount::AnthropicEndpoint {
+            base_url, model, ..
+        } => {
             let url = endpoint_url(base_url)?;
             if !valid_model(model) {
                 return Err(RunError::Invalid("endpoint model name".into()));
@@ -2060,9 +2177,11 @@ fn claude_arguments(
                 .arg("--bare")
                 .arg("--model")
                 .arg(model)
-                .env("ANTHROPIC_API_KEY", LOCAL_PLACEHOLDER_KEY)
                 .env("ANTHROPIC_BASE_URL", url.as_str().trim_end_matches('/'))
                 .env("ANTHROPIC_SMALL_FAST_MODEL", model);
+            if key_file.is_none() {
+                command.env("ANTHROPIC_API_KEY", LOCAL_PLACEHOLDER_KEY);
+            }
         }
         ResearchAccount::ManagedClaude { model, .. } => {
             if let Some(model) = model {
@@ -2080,25 +2199,55 @@ fn claude_arguments(
 }
 
 /// Names the account and model a research pane launches on, in the agent's home.
-/// Takes the research account and the home. Returns the binding and the model; research
-/// accounts carry no key.
-fn pane_account(account: &ResearchAccount, home: &Path) -> (AccountBinding, Option<String>) {
+/// Takes the research account, already behind its relay when keyed, the home and that
+/// relay. Returns the binding and the model: a keyed account binds the relay's URL and
+/// placeholder token, never the provider key; a keyed account with no relay is refused.
+fn pane_account(
+    account: &ResearchAccount,
+    home: &Path,
+    relay: Option<&crate::model_gateway::relay::Relay>,
+) -> Result<(AccountBinding, Option<String>), RunError> {
     let home = home.to_path_buf();
-    match account {
-        ResearchAccount::Endpoint { base_url, model }
-        | ResearchAccount::AnthropicEndpoint { base_url, model } => (
-            AccountBinding::Url {
-                home,
-                base_url: base_url.clone(),
-                key: None,
-            },
-            Some(model.clone()),
-        ),
+    Ok(match account {
+        ResearchAccount::Endpoint {
+            base_url,
+            model,
+            key,
+        }
+        | ResearchAccount::AnthropicEndpoint {
+            base_url,
+            model,
+            key,
+        } => {
+            let token = match (key, relay) {
+                (None, None) => None,
+                (Some(_), Some(relay)) => {
+                    assert_eq!(base_url, &relay.base_url());
+                    Some(
+                        crate::harnesses::launch::Secret::new(relay.token().to_owned())
+                            .map_err(|problem| RunError::Invalid(problem.0))?,
+                    )
+                }
+                _ => {
+                    return Err(RunError::Invalid(
+                        "a keyed endpoint runs only through its key relay".into(),
+                    ));
+                }
+            };
+            (
+                AccountBinding::Url {
+                    home,
+                    base_url: base_url.clone(),
+                    key: token,
+                },
+                Some(model.clone()),
+            )
+        }
         ResearchAccount::ManagedCodex { model, .. }
         | ResearchAccount::ManagedClaude { model, .. } => {
             (AccountBinding::Subscription { home }, model.clone())
         }
-    }
+    })
 }
 
 /// The error every owner-only research file or folder reports where none can be made.
@@ -3536,6 +3685,7 @@ mod tests {
         let local = ResearchAccount::Endpoint {
             base_url: "http://localhost:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         };
         let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
         assert!(unproxied.is_none());
@@ -3546,6 +3696,7 @@ mod tests {
         let unnamed = ResearchAccount::Endpoint {
             base_url: "http://203.0.113.9:8080/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         };
         assert!(matches!(
             job_reach(&none, true, &unnamed, 41, &[]),
@@ -3675,6 +3826,7 @@ mod tests {
             account: Some(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "local-model".into(),
+                key: None,
             }),
         };
         let stale = Duration::from_millis(1500);
@@ -3770,6 +3922,7 @@ mod tests {
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "local-model".into(),
+            key: None,
         };
         let project = ProjectId::new("alpha").unwrap();
         let run = ReadOnlyRun {
@@ -4430,6 +4583,7 @@ mod tests {
         let loopback = ResearchAccount::Endpoint {
             base_url: "http://localhost:11434/v1".into(),
             model: "m".into(),
+            key: None,
         };
         assert_eq!(
             model_remote(&loopback).unwrap(),
@@ -4438,6 +4592,7 @@ mod tests {
         let remote = ResearchAccount::Endpoint {
             base_url: "https://openrouter.ai/api/v1".into(),
             model: "m".into(),
+            key: None,
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
     }
@@ -5060,6 +5215,7 @@ mod tests {
         let account = ResearchAccount::AnthropicEndpoint {
             base_url: "http://127.0.0.1:11434".into(),
             model: "local-model".into(),
+            key: None,
         };
         let launch = |tools: bool, output_tokens: Option<u32>| {
             let mut command = Command::new("/usr/bin/true");
@@ -5168,6 +5324,7 @@ mod windows_tests {
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "windows-model".into(),
+            key: None,
         };
         let run = ReadOnlyRun {
             name: "onboard-m-windows",
@@ -5184,6 +5341,9 @@ mod windows_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "runner/keyed_tests.rs"]
+mod keyed_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_claude_tests.rs"]
 mod live_claude_tests;

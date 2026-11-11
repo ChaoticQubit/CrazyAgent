@@ -1228,7 +1228,7 @@ test("every desktop memory list and count reads all memory batches, never one en
 });
 
 test("a Team panel row carries the engine's sentence for an agent the Delivery setting leaves without messages, and no other row does", () => {
-  const note = "Can't receive messages: Native only needs tools on for Codex.";
+  const note = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
   const panel = research.teamPanel({ agents: [teamAgent(2, "idle", { tools: false, message_note: note }), teamAgent(3, "idle")], tasks: [] }, [], (id) => id, "all", 0);
   assert.deepEqual(panel.agents.map((row) => [row.key, row.messageNote]), [["agent-2", note], ["agent-3", null]]);
 });

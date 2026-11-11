@@ -153,10 +153,10 @@ export function actionNote(result: Receipted, what: string): string | null {
 
 /** The helper under the Message box: where the message goes and how its receipt shows, that
  * its receipts are unavailable when its launch fires no hooks, and the engine's sentence when
- * the Delivery setting leaves the agent no way to get it yet. Input: the node. Output: the
- * helper text. */
+ * the Delivery setting leaves the agent no channel while it works. Input: the node. Output:
+ * the helper text. */
 export function messageHelper(node: Pick<GraphNode, "hookless" | "message_note">): string {
-  if (node.message_note) return `${node.message_note} It waits in the agent's mailbox until tools are on or message delivery changes.`;
+  if (node.message_note) return `${node.message_note} It waits in the agent's mailbox until then.`;
   return node.hookless
     ? `It goes to the agent's mailbox. Its receipts are ${HOOKLESS_WORDS}.`
     : "It goes to the agent's mailbox. Its receipt shows on the graph: one tick sent, two delivered, then read and answered.";
