@@ -4013,7 +4013,9 @@ fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window()
 
 /// The Agent access box keeps its save line, or the Full access warning with its y and n, on
 /// screen when the window is shorter than the box, and the settings above follow the cursor
-/// down to the IDE hooks switch with the lines left out counted (FB-TUI row 3).
+/// down to the IDE hooks switch with the lines left out counted (FB-TUI row 3). The Full
+/// access warning is checked on macOS only: Linux offers Sandboxed alone in this version
+/// (`LINUX_UNAVAILABLE`), so there the level stays and Enter saves.
 #[test]
 fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     use crate::sandbox::policy::ToolchainView;
@@ -4069,9 +4071,16 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     screen.key(key(KeyCode::Right));
     screen.key(key(KeyCode::Enter));
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
-    assert!(
-        shown.contains("Full access: Agents run with your user's permissions")
-            && shown.contains("[> y Allow Full access ]"),
-        "{shown}"
-    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            shown.contains("Full access: Agents run with your user's permissions")
+                && shown.contains("[> y Allow Full access ]"),
+            "{shown}"
+        );
+    } else if cfg!(target_os = "linux") {
+        assert!(
+            shown.contains("> Access      < Sandboxed >") && shown.contains("Saving..."),
+            "{shown}"
+        );
+    }
 }

@@ -600,3 +600,23 @@ fn confined(
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod unavailable_tests {
+    /// Off macOS no private index is carried, since the step runs the Command Line Tools
+    /// git under Seatbelt: it is refused with `index_git_unavailable` before any copy is
+    /// made, so nothing is written beside the private folder.
+    #[test]
+    fn a_private_index_off_macos_is_refused_before_any_copy_is_made() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let refused = super::recorded(
+            &root.join("private"),
+            &root.join("engine"),
+            &root.join("project"),
+            "77",
+        );
+        assert_eq!(refused.err(), Some("index_git_unavailable"));
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    }
+}

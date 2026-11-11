@@ -11909,6 +11909,7 @@ fn cargo_workspace(case: &mut Case) {
 /// The notes the engine left in the owner's team conversation, oldest first, read every
 /// 50 ms until one is there or `within` passes. Inputs: the case and the time. Output: the
 /// texts.
+#[cfg(target_os = "macos")]
 fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
     let started = Instant::now();
     loop {
@@ -11929,6 +11930,7 @@ fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
 
 /// What the owner reads once a set they heard waits in Changes went back to its agent.
 /// Input: the set. Output: the note.
+#[cfg(target_os = "macos")]
 fn went_back_note(set: &ChangeSetView) -> String {
     format!(
         "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
@@ -11995,6 +11997,9 @@ fn regenerate_leftovers(case: &Case) -> Vec<String> {
 /// worktree confined like an agent, and commits it as its own commit on top of the set with
 /// the set's head and main as parents; the set stays Pending on main, its agent is told to
 /// reset to the commit, and nothing temporary is left (OS-8).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_lockfile_only_clash_is_rewritten_by_its_tool_as_an_engine_commit_on_top_of_the_set() {
     let mut case = Case::new();
@@ -12113,6 +12118,9 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
 /// never listens on the owner's configured local model port, while another free port stays
 /// open to it, and owner settings that do not read refuse the regeneration instead of
 /// running the tool with that port unknown: nothing changes and nothing is left behind.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_lockfile_tool_never_listens_on_a_configured_model_port_and_unread_settings_refuse_it() {
     let mut case = Case::new();
@@ -12182,6 +12190,7 @@ pools = [{{ id = "local-pool", members = ["local-connection"], projects = [], ro
 
 const TURN_END_WITHIN: Duration = Duration::from_secs(20);
 const REGENERATED_WITHIN: Duration = Duration::from_secs(120);
+#[cfg(target_os = "macos")]
 const OWNER_NOTE_WITHIN: Duration = Duration::from_secs(5);
 
 /// Ends the agent's turn the way a team turn does, on its own thread and store connection,
@@ -12332,6 +12341,7 @@ fn holds_blob(case: &Case, bytes: &str) -> bool {
 
 /// Tells whether one commit of the owner repository is an ancestor of another. Inputs: the
 /// case and the two commits. Output: the answer.
+#[cfg(target_os = "macos")]
 fn is_ancestor(case: &Case, older: &str, newer: &str) -> bool {
     crate::spawn_gate::status(
         Command::new("/usr/bin/git")
@@ -12378,6 +12388,9 @@ fn survivors(token: &str) -> Vec<String> {
 /// returns at once and the engine rewrites the lockfile with cargo on top of its set, moves
 /// the agent's worktree there and tells it, so the set waits for the owner on main with
 /// both dependencies locked, and its Accept lands with no conflict shown (OS-8).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
     let mut case = Case::new();
@@ -12465,6 +12478,9 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
 
 /// Once a later turn moves a regenerated set's head, Changes no longer says the project's
 /// tools wrote its lockfile, since the agent may have rewritten it (T8-R1-WORDING).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools() {
     let mut case = Case::new();
@@ -12485,6 +12501,9 @@ fn a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools() {
 /// fetched, the turn end falls back to Task 7's update: the set goes back to its agent with
 /// main merged into its worktree, no regeneration note goes out and nothing temporary is
 /// left (OS-8).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_end() {
     let mut case = Case::new();
@@ -12514,6 +12533,60 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
         owner_notes_within(&case, OWNER_NOTE_WITHIN),
         vec![went_back_note(&set)],
         "the owner, told the edits wait in Changes, hears they went back"
+    );
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// Off macOS the engine runs no lockfile tool, since a regeneration is confined by Seatbelt
+/// alone. `lockfiles::regenerate` lands nothing for a Cargo.lock-only clash that cargo could
+/// rewrite (`Regenerated::Refused`), and at its turn end the set goes back to its agent at
+/// once: reported Waiting, with main merged into its worktree and nothing temporary left.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_a_lockfile_only_clash_is_never_regenerated_and_goes_back_to_its_agent() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
+    let tip = case.tip();
+    let mut record = store::load(&case.db, &id).unwrap();
+    let before = (record.head.clone(), record.base.clone(), record.state);
+    assert_eq!(
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
+        None
+    );
+    assert_eq!(
+        (record.head.clone(), record.base.clone(), record.state),
+        before
+    );
+    assert_eq!(case.tip(), tip, "main does not move");
+    assert!(engine_notes(&case).is_empty(), "no note goes out");
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, landed) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Waiting(id.clone()))
+    );
+    let set = set_within(&case, &id, TURN_END_WITHIN, |set| {
+        set.state == ChangeState::Updating
+    });
+    assert_eq!(
+        (set.state, set.conflicts.clone(), set.regenerated.clone()),
+        (
+            ChangeState::Updating,
+            vec!["Cargo.lock".to_owned()],
+            Vec::<String>::new()
+        )
+    );
+    let agent_lock = std::fs::read_to_string(case.workspace.worktree.join("Cargo.lock")).unwrap();
+    assert!(agent_lock.contains("<<<<<<<"), "{agent_lock}");
+    assert!(
+        engine_notes(&case)
+            .iter()
+            .all(|note| !note.contains("regenerated")),
+        "no regeneration note goes out"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
@@ -12592,6 +12665,9 @@ rm -f .swapped"#,
 /// never stalls the agent's turn end or keeps the repository held: the turn end returns at
 /// once, the regeneration ends within its time and lands, the repository is free after and
 /// no process of the run is left (OS-8).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_child_holding_the_version_pipe_never_stalls_the_turn_end_or_the_repository() {
     let mut case = Case::new();
@@ -12624,6 +12700,9 @@ fn a_child_holding_the_version_pipe_never_stalls_the_turn_end_or_the_repository(
 
 /// A tool still running when the whole regeneration's time is up is stopped and the set
 /// goes back to its agent through Task 7's update, well before the tool would end (OS-8).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
     let mut case = Case::new();
@@ -12653,6 +12732,7 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
 /// registry is asked. Fields: the program, its lockfile, the manifest both sides edit, that
 /// manifest and the lockfile at the start, the owner's and the agent's, the other files, what
 /// the tool's lockfile must name and what the landed manifest must hold.
+#[cfg(target_os = "macos")]
 struct RealTool {
     program: &'static str,
     lockfile: &'static str,
@@ -12667,6 +12747,7 @@ struct RealTool {
 
 /// Whether a program runs on the PATH the engine gives its tools. Input: the program.
 /// Output: the answer.
+#[cfg(target_os = "macos")]
 fn runs_for_the_engine(program: &str) -> bool {
     crate::spawn_gate::status(
         Command::new("/usr/bin/env")
@@ -12686,6 +12767,7 @@ fn runs_for_the_engine(program: &str) -> bool {
 /// Commits the tool's workspace on main, then the owner's and the agent's edits that clash in
 /// its lockfile alone, and ends the agent's turn. Inputs: the case and the tool. Output: the
 /// agent's change set and what the turn end reported.
+#[cfg(target_os = "macos")]
 fn tool_clash_at_turn_end(
     case: &mut Case,
     tool: &RealTool,
@@ -12721,6 +12803,7 @@ fn tool_clash_at_turn_end(
 /// (T8-R1-TOOLS). A tool this machine does not have fails the row, so a missing tool is
 /// never counted as proof. pnpm has no row yet, since it does not regenerate in the tool
 /// sandbox today. Input: the tool.
+#[cfg(target_os = "macos")]
 fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
     let program = tool.program;
     assert!(
@@ -12770,6 +12853,7 @@ fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
 
 /// A package.json whose two dependency lists sit far enough apart for git to merge edits to
 /// each. Inputs: the two lists' entries. Output: the text.
+#[cfg(target_os = "macos")]
 fn node_app(dependencies: &str, dev_dependencies: &str) -> String {
     format!(
         "{{\n  \"name\": \"app\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {{{dependencies}}},\n  \"private\": true,\n  \"license\": \"MIT\",\n  \"devDependencies\": {{{dev_dependencies}}}\n}}\n"
@@ -12778,6 +12862,7 @@ fn node_app(dependencies: &str, dev_dependencies: &str) -> String {
 
 /// The packages a Node workspace links, beside its root manifest. Input: extra root fields.
 /// Output: the files.
+#[cfg(target_os = "macos")]
 fn node_packages(root_fields: &str) -> Vec<(&'static str, String)> {
     vec![
         (
@@ -12795,6 +12880,9 @@ fn node_packages(root_fields: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn real_npm_rewrites_a_clashing_package_lock() {
     let lock = |version: &str| {
@@ -12820,6 +12908,7 @@ fn real_npm_rewrites_a_clashing_package_lock() {
 
 /// A uv workspace of two local packages whose app the owner and the agent each give one
 /// more dependency, so only uv.lock clashes. Output: the workspace.
+#[cfg(target_os = "macos")]
 fn uv_workspace() -> RealTool {
     let manifest = |dependencies: &str, dev: &str| {
         format!(
@@ -12851,6 +12940,9 @@ fn uv_workspace() -> RealTool {
 /// T8 row 6: a clash in uv.lock alone is rewritten by the real uv in the tool sandbox, on a
 /// cache the engine primes for that run under the SM1-R rule, and the run leaves nothing
 /// behind; land-14 sent it back to its agent unregenerated. Fails without uv.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn real_uv_rewrites_a_clashing_uv_lock() {
     a_real_tool_rewrites_its_clashing_lockfile(&uv_workspace());
@@ -12926,6 +13018,7 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
 /// Starts a Cargo.lock-only clash whose stand-in tool is still running when the turn end
 /// returns, then runs `during`. Inputs: the case and what happens while the tool runs.
 /// Output: the set, its head before the regeneration and what `during` returned.
+#[cfg(target_os = "macos")]
 fn clash_during_a_slow_tool<T>(
     case: &mut Case,
     during: impl FnOnce(&Case) -> T,
@@ -12953,6 +13046,7 @@ fn clash_during_a_slow_tool<T>(
 }
 
 /// Waits until a set's regeneration has ended. Input: the set. Output: none.
+#[cfg(target_os = "macos")]
 fn regeneration_ended(id: &ChangeSetId) {
     let deadline = Instant::now() + REGENERATED_WITHIN;
     while lockfiles::is_running(id) {
@@ -12963,6 +13057,9 @@ fn regeneration_ended(id: &ChangeSetId) {
 
 /// T8-R2-S2: the owner's stop while the tool runs lands nothing, keeps the set for the owner
 /// and sends the agent no note.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_stop_while_the_lockfile_tool_runs_lands_nothing() {
     let mut case = Case::new();
@@ -12991,6 +13088,9 @@ fn an_owner_stop_while_the_lockfile_tool_runs_lands_nothing() {
 
 /// T8-R2-S2 and S3: a pause while the tool runs lands nothing, and the engine's update waits
 /// too, so the paused team's worktree is left alone.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_pause_while_the_lockfile_tool_runs_lands_nothing_and_starts_no_update() {
     let mut case = Case::new();
@@ -13015,6 +13115,9 @@ fn a_pause_while_the_lockfile_tool_runs_lands_nothing_and_starts_no_update() {
 
 /// T8-R2-S2: main moving while the tool runs throws that run away and regenerates on the new
 /// main.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn main_moving_while_the_lockfile_tool_runs_regenerates_on_the_new_main() {
     let mut case = Case::new();
@@ -13034,6 +13137,9 @@ fn main_moving_while_the_lockfile_tool_runs_regenerates_on_the_new_main() {
 
 /// T8-R2-S2: an edit the agent makes while the tool runs stops the regeneration from landing
 /// and survives, on a file the regeneration would not change.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
     let mut case = Case::new();
@@ -13051,6 +13157,9 @@ fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
 /// rv-code T8 r1 N2: only a uv.lock clash primes uv, so a Cargo.lock clash never runs or
 /// waits on uv priming and its tool gets no uv cache, whatever uv the owner has. Red only
 /// where the owner's tool PATH finds a uv the engine may run.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_cargo_lock_regeneration_primes_no_uv_cache() {
     let mut case = Case::new();
@@ -13092,6 +13201,9 @@ fn a_third_lockfile_regeneration_in_one_repository_goes_to_the_agent_update() {
 }
 
 /// T8-R2-S4: under that limit a regeneration still runs.
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_second_lockfile_regeneration_in_one_repository_still_runs() {
     let mut case = Case::new();
@@ -13217,6 +13329,9 @@ fn a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to_never_runs_in_a_r
 
 /// An agent that ignores the engine's note and edits on keeps the regenerated lockfile: its
 /// worktree already holds the engine's commit, so its next turn end builds on it (OS-8).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_agent_that_ignores_the_note_keeps_the_regenerated_lockfile_at_its_next_turn_end() {
     let mut case = Case::new();
@@ -14110,6 +14225,9 @@ fn a_restore_stopped_inside_its_reset_keeps_the_mark_of_an_earlier_restore() {
 
 /// A lockfile regeneration an engine stopped the same way puts the set and its pending ref
 /// back on the agent's own head (RK-R1-S2).
+/// macOS only: a lockfile tool runs confined by Seatbelt, so elsewhere the engine regenerates
+/// nothing (`Regenerated::Refused`) and the clash goes back to its agent, as the Linux row asserts.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_regeneration_stopped_inside_its_reset_is_put_back_once_the_agent_committed() {
     let mut case = Case::new();

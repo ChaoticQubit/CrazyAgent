@@ -294,6 +294,8 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
 
 /// SECAUDIT-13 F1: a tick that cannot use a Codex agent's bridge keeps the plain code, so
 /// the engine log names a refusal once; here the agent has a home but no pane to compare.
+/// Off macOS no Codex daemon folder exists, so there the code kept is the bridge's own
+/// `codex_bridge_unsupported`.
 #[test]
 fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
     let fixture = Fixture::new();
@@ -310,10 +312,12 @@ fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
             &reach(None, None, &fixture.base, &asleep),
         )
         .unwrap();
-    assert_eq!(
-        deliveries.bridge_refused.get(&agent),
-        Some(&"codex_bridge_peer_unknown")
-    );
+    let refused = if cfg!(target_os = "macos") {
+        "codex_bridge_peer_unknown"
+    } else {
+        "codex_bridge_unsupported"
+    };
+    assert_eq!(deliveries.bridge_refused.get(&agent), Some(&refused));
 }
 
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back

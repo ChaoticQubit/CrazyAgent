@@ -1253,6 +1253,9 @@ async fn research_passes_over_an_account_whose_sign_in_was_rejected_to_the_next_
     .expect("the research rejection case exceeded 60 seconds");
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next_one() {
     use crate::team::{MessageAuthor, MessageState, TaskStatus, TeamAction};
@@ -1315,6 +1318,9 @@ async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next
     .expect("the team rejection case exceeded 60 seconds");
 }
 
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next_account_takes_over()
  {

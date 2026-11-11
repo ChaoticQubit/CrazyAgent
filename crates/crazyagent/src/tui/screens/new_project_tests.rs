@@ -961,6 +961,17 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     );
 }
 
+/// On Linux, where agents run Sandboxed alone in this version, the form preselects Sandboxed,
+/// so creating a project never asks the engine to save a level it refuses there with
+/// `agent_access_unavailable`.
+#[cfg(target_os = "linux")]
+#[test]
+fn review_preselects_sandboxed_where_own_branch_cannot_run() {
+    use crate::sandbox::policy::AgentAccess;
+    let wizard = Wizard::new(pool_choices(&config()), None);
+    assert_eq!(wizard.access, AgentAccess::Sandboxed);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn review_preselects_own_branch_and_left_and_right_change_the_agent_access() {
