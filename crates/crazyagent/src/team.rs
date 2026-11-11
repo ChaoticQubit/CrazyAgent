@@ -1284,6 +1284,29 @@ pub fn pick_account_held<'a>(
     Some(open[stays.unwrap_or(top)])
 }
 
+/// The accounts a pick looks at first under Spread harnesses across accounts: every usable
+/// account no other agent of the project runs on, and the held account even when another
+/// agent shares it, so `pick_account_held` weighs work that already runs against the unused
+/// accounts and it never leaves a shared account for one that is not clearly before it.
+/// Takes the usable accounts in pool order, the connections other agents of the project
+/// run on and the held connection, none for new work. Returns those accounts in pool order.
+pub fn spread_candidates(
+    accounts: &[TeamAccount],
+    used: &BTreeSet<&CredentialRef>,
+    held: Option<&CredentialRef>,
+) -> Vec<TeamAccount> {
+    let apart: Vec<TeamAccount> = accounts
+        .iter()
+        .filter(|account| {
+            let connection = &account.connection;
+            !used.contains(connection) || held == Some(connection)
+        })
+        .cloned()
+        .collect();
+    assert!(apart.len() <= accounts.len());
+    apart
+}
+
 /// Tells whether a master conversation kept while the master ran on `kept` may resume on the
 /// `picked` account: always on the same account, and across accounts only from one native
 /// subscription in the pool to another, never to or from an endpoint whose model may not take

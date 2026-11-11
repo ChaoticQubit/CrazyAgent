@@ -3049,13 +3049,8 @@ impl TeamRuntime {
                 .filter(|(id, w)| Some(**id) != holder && &w.project == project && !w.stopping)
                 .map(|(_, w)| &w.connection)
                 .collect();
-            let unused: Vec<TeamAccount> = accounts
-                .iter()
-                .filter(|account| !used.contains(&account.connection))
-                .cloned()
-                .collect();
-            assert!(unused.len() <= accounts.len());
-            if let Some(account) = pick_account_held(&unused, &load, paused, &choice, held) {
+            let apart = super::spread_candidates(&accounts, &used, held);
+            if let Some(account) = pick_account_held(&apart, &load, paused, &choice, held) {
                 return Ok(Some(account.clone()));
             }
         }
