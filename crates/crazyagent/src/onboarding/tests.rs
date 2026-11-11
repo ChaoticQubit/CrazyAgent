@@ -1252,10 +1252,7 @@ fn the_graph_never_reads_secret_like_or_git_ignored_files() {
             "notes/api-keys.md",
             "# API keys\n\nDECOY_CANARY_8080\n\n## Rotation\n\nMonthly.\n",
         ),
-        (
-            "config/Credentials.py",
-            "def credential_loader():\n    return 1\n",
-        ),
+        ("config/Credentials.yaml", "loader: credential_loader\n"),
         (
             "tokens/store.py",
             "def token_store_reader():\n    return 1\n",
@@ -1280,11 +1277,9 @@ fn the_graph_never_reads_secret_like_or_git_ignored_files() {
     for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
         let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
         for leaked in [
-            "api-keys",
             "API keys",
             "Rotation",
             "DECOY_CANARY_8080",
-            "Credentials.py",
             "credential_loader",
             "token_store_reader",
             "Private plan heading",
@@ -1292,6 +1287,12 @@ fn the_graph_never_reads_secret_like_or_git_ignored_files() {
             "excluded_local",
         ] {
             assert!(!text.contains(leaked), "{leaked} reached {name}: {text}");
+        }
+    }
+    for name in ["graph.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for named in ["api-keys", "Credentials.yaml"] {
+            assert!(!text.contains(named), "{named} is named in {name}: {text}");
         }
     }
     for (path, _) in kept_out {
@@ -1699,8 +1700,8 @@ fn a_folder_outside_git_gets_a_graph_without_its_secret_like_files() {
     );
     write_file(
         &repo,
-        "config/Credentials.py",
-        "def credential_loader():\n    return 1\n",
+        "config/Credentials.yaml",
+        "loader: credential_loader\n",
     );
     write_file(
         &repo,
@@ -1717,7 +1718,6 @@ fn a_folder_outside_git_gets_a_graph_without_its_secret_like_files() {
     for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
         let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
         for leaked in [
-            "api-keys",
             "API keys",
             "DECOY_CANARY_8080",
             "credential_loader",
@@ -1725,6 +1725,10 @@ fn a_folder_outside_git_gets_a_graph_without_its_secret_like_files() {
         ] {
             assert!(!text.contains(leaked), "{leaked} reached {name}: {text}");
         }
+    }
+    for name in ["graph.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        assert!(!text.contains("api-keys"), "named in {name}: {text}");
     }
 }
 
@@ -1823,6 +1827,129 @@ fn a_graph_update_drops_a_file_kept_out_since_the_last_build() {
         }
     }
     assert!(repo.join("notes/rotation.md").is_file());
+}
+
+#[test]
+fn kept_out_spares_source_files_named_with_a_secret_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(&repo, "internal/auth/token.go", "package auth\n");
+    write_file(&repo, "web/src/lib/tokens.ts", "export const scale = 4;\n");
+    write_file(&repo, "config/api_token.json", "{}\n");
+    write_file(&repo, "secrets/readme.md", "# Secrets\n");
+    assert_eq!(
+        draft::kept_out(&repo).unwrap(),
+        vec!["config/api_token.json".to_owned(), "secrets/".to_owned()]
+    );
+}
+
+#[test]
+fn kept_out_outside_git_spares_source_files_named_with_a_secret_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    assert!(draft::outside_git(&root));
+    write_file(&root, "internal/auth/token.go", "package auth\n");
+    write_file(&root, "web/src/lib/tokens.ts", "export const scale = 4;\n");
+    write_file(&root, "web/src/lib/Keys.TS", "export const scale = 4;\n");
+    write_file(&root, "config/api_token.json", "{}\n");
+    write_file(&root, "deploy/.env", "A=1\n");
+    write_file(&root, "notes/token", "one\n");
+    write_file(&root, "secrets/loader.py", "def load():\n    return 1\n");
+    assert_eq!(
+        draft::kept_out(&root).unwrap(),
+        vec![
+            "config/api_token.json".to_owned(),
+            "deploy/.env".to_owned(),
+            "notes/token".to_owned(),
+            "secrets/".to_owned(),
+            "web/src/lib/Keys.TS".to_owned(),
+        ]
+    );
+}
+
+/// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
+/// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_graph_builds_when_source_imports_a_kept_out_file() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(&repo, ".gitignore", "vendor/\n");
+    write_file(
+        &repo,
+        "vendor/lib.ts",
+        "export const vendored = \"VENDOR_CANARY_3\";\n",
+    );
+    write_file(
+        &repo,
+        "web/src/lib/tokens.ts",
+        "export function design_token_scale() {\n  return 4;\n}\n",
+    );
+    write_file(
+        &repo,
+        "web/src/lib/secrets.json",
+        "{\"owner\": \"KEPT_OUT_CANARY_9\"}\n",
+    );
+    write_file(
+        &repo,
+        "web/test/a.test.ts",
+        "import { design_token_scale } from \"../src/lib/tokens\";\nimport data from \"../src/lib/secrets.json\";\nexport const both = [design_token_scale(), data];\n",
+    );
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(graph.contains("design_token_scale"), "{graph}");
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for leaked in ["KEPT_OUT_CANARY_9", "VENDOR_CANARY_3"] {
+            assert!(!text.contains(leaked), "{leaked} reached {name}: {text}");
+        }
+    }
+}
+
+/// Pins what the code graph takes from a source file that a secret word in its name no
+/// longer keeps out (DEC-132 Q12, accepted): graphify 0.9.9 copies its docstrings and its
+/// NOTE and TODO comments into the graph, and never the value of a string. macOS only, as
+/// the graph build runs under Seatbelt alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_spared_source_files_docstrings_and_notes_reach_the_graph_but_its_string_values_do_not() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "web/src/lib/tokens.ts",
+        "export function design_token_scale() {\n  // NOTE: NOTE_CANARY_TS_52 rotate this value every quarter\n  const literal = \"LITERAL_CANARY_TS_63\";\n  return literal.length;\n}\n",
+    );
+    write_file(
+        &repo,
+        "config/secrets.py",
+        "API_KEY = \"LITERAL_CANARY_PY_85\"\n\n\ndef load_secret():\n    \"\"\"FUNC_DOC_CANARY_PY_96 returns the key read at import time.\"\"\"\n    return API_KEY\n",
+    );
+    assert_eq!(
+        draft::kept_out(&repo).unwrap(),
+        Vec::<String>::new(),
+        "both files are source, so neither is kept out"
+    );
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    for reached in ["NOTE_CANARY_TS_52", "FUNC_DOC_CANARY_PY_96"] {
+        assert!(graph.contains(reached), "{reached} is not in the graph");
+    }
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for value in ["LITERAL_CANARY_TS_63", "LITERAL_CANARY_PY_85"] {
+            assert!(!text.contains(value), "{value} reached {name}: {text}");
+        }
+    }
 }
 
 #[test]
