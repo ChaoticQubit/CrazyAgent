@@ -1263,6 +1263,7 @@ mod tests {
             name: "Claude-ChaoticQubit".into(),
             provider: "ChatGPT".into(),
             status: "Signed in".into(),
+            no_window: None,
         }]);
         let mut screen = Pools::new();
         screen.shown(&mut ctx);

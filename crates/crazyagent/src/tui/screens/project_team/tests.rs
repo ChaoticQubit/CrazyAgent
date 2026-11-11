@@ -34,6 +34,7 @@ fn accounts() -> Vec<AccountRow> {
         name: name.into(),
         provider: String::new(),
         status: String::new(),
+        no_window: None,
     })
     .collect()
 }
@@ -791,6 +792,7 @@ fn two_accounts_with_one_name_show_their_ids() {
         name: name.into(),
         provider: String::new(),
         status: String::new(),
+        no_window: None,
     };
     let rows = [
         row("claude-account-1a", "Claude"),
@@ -3210,7 +3212,38 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         (SubagentMode::AppSpawned, Delivery::TypingOnly)
     );
 
-    for _ in 0..4 {
+    let (lines, _) = view.rows(116, 40, &accounts(), &Look::plain());
+    let shown: Vec<String> = lines.iter().map(Row::text).collect();
+    for label in ["rcli sub-agents", "Messages to rcli agents"] {
+        let line = shown
+            .iter()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{label} keeps its row: {shown:?}"));
+        assert!(
+            line.contains("Not available"),
+            "{label} says it cannot apply: {line}"
+        );
+    }
+    let before = harness_row(&view, HarnessKind::Rcli);
+    for row in [5, 6] {
+        view.key(press(KeyCode::Down));
+        assert_eq!(view.coord.as_ref().unwrap().row, row);
+        assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+        assert!(
+            view.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains(crate::team::NO_SUB_AGENTS)),
+            "row {row}: {:?}",
+            view.notice
+        );
+        assert!(
+            !view.busy(),
+            "row {row}: a row that cannot apply sends nothing"
+        );
+    }
+    assert_eq!(harness_row(&view, HarnessKind::Rcli), before);
+
+    for _ in 0..2 {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 8);

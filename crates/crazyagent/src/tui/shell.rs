@@ -1290,6 +1290,7 @@ mod tests {
             name: "Team key".into(),
             provider: "Anthropic API".into(),
             status: crate::accounts::AccountStatus::KeySaved.label().into(),
+            no_window: None,
         }]);
         let mut shell = at(Place::Home, known);
         assert!(drain(&mut shell).contains(&"Settings".to_owned()));

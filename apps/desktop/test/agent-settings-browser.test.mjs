@@ -33,7 +33,7 @@ const MASTER = [
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
-const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];
+const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main", "rcli sub-agents", "Messages to rcli agents"];
 
 /** Presses Tab until every wanted row had the focus or the presses run out. Inputs: the page's
  * handles and the row labels. Output: the rows the focus reached, in order, once each. */

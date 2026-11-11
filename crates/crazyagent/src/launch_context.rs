@@ -1190,7 +1190,7 @@ impl Installed {
     }
 
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
-    /// project's "Keep transcripts for headless Claude runs" setting says.
+    /// project's "Keep transcripts for headless runs" setting says.
     pub fn keeps_transcript(&self) -> bool {
         self.transcripts
     }
@@ -1824,10 +1824,12 @@ static PARKED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// makes an empty `skills` folder of the engine's again. Whatever `skills` is, even a link, is
 /// moved by descriptor into a fresh folder beside the home ([`park`]) and released and removed
 /// only there ([`clear`]), so no tool ever runs on a path an agent can swap (team-19 r1 M1).
-/// A `skills` folder that does not move has only its own pins cleared, by its fixed path, and
-/// is moved once more. A `skills` of another user is left alone. Input: the validated agent
-/// home. Output: Ok, or [`SKILLS_KEPT`] when `skills` stays in the home, comes back, or is
-/// no longer a folder once the engine made it.
+/// A `skills` that does not move has the home's own pins and its own cleared, each by its
+/// fixed path, and is moved once more, so a pin an earlier run left refuses no Codex launch a
+/// Claude Code launch would make (DEC-141 PA-19). A file with a second link keeps its pins: it
+/// may be the owner's file an agent linked in. A `skills` of another user is left alone. Input:
+/// the validated agent home. Output: Ok, or [`SKILLS_KEPT`] when `skills` stays in the home,
+/// comes back, or is no longer a folder once the engine made it.
 #[cfg(unix)]
 fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, FileType};
@@ -1849,8 +1851,11 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     };
     let move_out = || rustix::fs::renameat(&parent, "skills", &place, "skills").is_ok();
     let mut moved = move_out();
-    if !moved && FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
-        release(&home.join("skills"), false);
+    if !moved {
+        release(home, false);
+        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory || stat.st_nlink == 1 {
+            release(&home.join("skills"), false);
+        }
         moved = move_out();
     }
     clear(&parked);

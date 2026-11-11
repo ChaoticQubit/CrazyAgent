@@ -195,6 +195,7 @@ pub fn account_row(account: &AccountView) -> AccountRow {
         name: account.name.clone(),
         provider: provider_word(account.provider).into(),
         status: account.status_label.clone(),
+        no_window: crate::usage::no_window(account.method, account.provider),
     }
 }
 

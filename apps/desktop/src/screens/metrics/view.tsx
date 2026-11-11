@@ -11,7 +11,7 @@ import { HARNESS_NAMES } from "../team/coordination";
 import { Activities, Models, ToolsOverTime } from "./activity";
 import { barLabel, barWords, chartBars, ChartSvg } from "./chart";
 import { LeadPanel } from "./lead";
-import { AccountLimitsPanel, CheckLimits, type LimitsControls } from "./limits";
+import { AccountLimitsPanel, CheckLimits, noWindow, type LimitsControls, type NoWindow } from "./limits";
 import { COST_LABEL, Figure, dollarText, dollarsBeside, figure, unpricedNote } from "./money";
 import { DaysPanel, LinesPanel, TokenPanel, type BreakdownRow } from "./panels";
 import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, healthText, offsetMinutes, PartialNotice, rangeStart, RANGES, rowName, tokenText, windowNow, type UsageRange } from "./usage-model";
@@ -73,10 +73,12 @@ const RESULTS: Record<string, string> = {
   needs_pool: "Waiting",
 };
 
-/** Names shown in place of usage keys: agents by usage key and accounts by id. */
+/** Names shown in place of usage keys: agents by usage key and accounts by id, and the
+ * accounts with no 5-hour or weekly window, each with what it has instead. */
 export interface MetricsNames {
   agents: Map<string, string>;
   accounts: Map<string, string>;
+  noWindow?: readonly NoWindow[];
 }
 
 /** What makes a Metrics page the app page: the engine's projects, the action that picks one,
@@ -414,7 +416,7 @@ function AppNotices({ usage, failure, nowMs, accountWide }: { usage: UsageReport
 function AccountWide({ usage, filter, names, nowMs, accountWide }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; accountWide: boolean }) {
   if (!accountWide) return <p className="muted">{LIMITS_HIDDEN_NOTE}</p>;
   return <>
-    <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
+    <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} noWindow={names.noWindow} />
     {filter.limits.next}
   </>;
 }
@@ -651,7 +653,9 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
       agents.set(agentKey(id, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harness}`);
     }
   }
-  const names: MetricsNames = { agents, accounts: accountLabels(accounts.kind === "ok" ? accounts.value : []) };
+  const listed = accounts.kind === "ok" ? accounts.value : [];
+  const plain = listed.flatMap((account) => { const note = noWindow(account); return note === null ? [] : [{ account: account.id, note }]; });
+  const names: MetricsNames = { agents, accounts: accountLabels(listed), noWindow: plain };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
     sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter} notices={notices.kind === "ok" ? notices.value : ""}

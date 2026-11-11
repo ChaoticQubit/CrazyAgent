@@ -701,13 +701,13 @@ fn immutable(path: &Path) -> bool {
 
 /// team-19 r1 M1, CTX-M1 r2 I3: a folder an agent left in its home under the name the
 /// engine once parked skills at, holding a file made immutable, is left as it is by the next
-/// Codex launch, which releases nothing at a name the agent can swap. When `skills` itself
-/// cannot be moved away, here because a Full access agent denied new folders and removals in
-/// its own home with an ACL the engine leaves alone, the Codex launch is refused with an
-/// ordinary error rather than started with the planted system skills.
+/// Codex launch, which releases nothing at a name the agent can swap. A Full access agent that
+/// denied new folders and removals in its own home with an ACL no longer refuses the next
+/// launch (DEC-141 PA-19): the engine releases the home at its fixed path and removes the
+/// planted system skills.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
+fn a_parked_name_is_left_alone_and_a_home_denying_removals_still_loses_planted_skills() {
     let directory = tempfile::tempdir().unwrap();
     let _unpinned = Unpinned(directory.path().to_path_buf());
     let home = directory.path().canonicalize().unwrap().join("codex");
@@ -764,13 +764,17 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
     let hold = lock_only(&home, "codex");
 
     assert_eq!(
-        hold.err().map(|problem| problem.0),
-        Some(SKILLS_KEPT.to_owned()),
-        "a launch that keeps the planted system skills is refused"
+        hold.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "a home denying removals refuses the launch"
     );
     assert!(
-        planted.exists(),
-        "the refusal leaves the skills it could not move"
+        !planted.exists(),
+        "the launch leaves the planted system skills"
+    );
+    assert!(
+        immutable(&held),
+        "the launch released the parked name's file"
     );
 }
 
@@ -1048,13 +1052,13 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
     }
 }
 
-/// team-19 r1 (rv-secreview L1): a Codex launch through `install` whose earlier skills, Codex's
-/// own system skills or the engine's copies, cannot be moved out of the home, here because a
-/// Full access agent denied removals in its own home with an ACL the engine leaves alone, is
-/// refused with an ordinary error and leaves them where they are.
+/// team-19 r1 (rv-secreview L1), DEC-141 PA-19: a Codex launch through `install` whose earlier
+/// skills, Codex's own system skills or the engine's copies, sit in a home where a Full access
+/// agent denied removals with an ACL, releases the home at its fixed path, moves them out and
+/// starts, as a Claude Code launch in that home does.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() {
+fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
     for entry in [CODEX_SYSTEM_SKILLS, STATE] {
         let directory = tempfile::tempdir().unwrap();
         let _unpinned = Unpinned(directory.path().to_path_buf());
@@ -1084,14 +1088,83 @@ fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() 
 
         assert_eq!(
             launch.as_ref().err().map(|problem| problem.0.as_str()),
-            Some(SKILLS_KEPT),
-            "{entry}: a launch that keeps earlier skills is refused"
+            None,
+            "{entry}: a home denying removals refuses the launch"
         );
         assert!(
-            planted.exists(),
-            "{entry}: the refusal leaves the skills it could not move"
+            !planted.exists(),
+            "{entry}: the launch leaves earlier skills for Codex to load"
         );
     }
+}
+
+/// DEC-141 PA-19: what an earlier run left pinned in an agent home, an ACL on the home that
+/// denies new folders and removals or an immutable file at `skills`, refuses no launch of any
+/// harness. Codex, which loads skills from its home, has those pins released and starts with
+/// an empty `skills` folder, on the same terms as Claude Code and RCLI.
+#[cfg(target_os = "macos")]
+#[test]
+fn skills_left_pinned_in_a_home_refuse_no_launch_of_any_harness() {
+    for harness in ["claude-code", "codex", "rcli"] {
+        for pin in ["home acl", "skills file flag"] {
+            let directory = tempfile::tempdir().unwrap();
+            let _unpinned = Unpinned(directory.path().to_path_buf());
+            let home = directory.path().canonicalize().unwrap().join("home");
+            fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+            let skills = home.join("skills");
+            if pin == "home acl" {
+                let planted = skills.join(CODEX_SYSTEM_SKILLS).join("planted");
+                fs::create_dir_all(&planted).unwrap();
+                fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+                let denied = &["+a", "everyone deny add_subdirectory,delete_child"];
+                assert!(chmod(denied, &home), "{harness}, {pin}: pinned");
+            } else {
+                fs::write(&skills, "planted\n").unwrap();
+                assert!(chflags("uchg", &skills), "{harness}, {pin}: pinned");
+            }
+
+            let held = lock_only(&home, harness);
+
+            assert_eq!(
+                held.as_ref().err().map(|problem| problem.0.as_str()),
+                None,
+                "{harness}, {pin}: the launch is refused"
+            );
+            if harness == "codex" {
+                let empty = fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none());
+                assert!(empty, "{harness}, {pin}: skills left for Codex to load");
+            }
+            drop(held);
+        }
+    }
+}
+
+/// DEC-141 PA-19: a `skills` file an agent hard-linked to an owner's file the owner made
+/// immutable is the one pin a Codex launch does not release, since releasing it would clear
+/// the owner's flag; that launch is refused with [`SKILLS_KEPT`] and the owner's flag stays.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_entry_linked_to_an_owner_s_immutable_file_keeps_its_flag_and_refuses_codex() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    fs::hard_link(&owner, home.join("skills")).unwrap();
+    assert!(
+        chflags("uchg", &owner),
+        "the owner makes the file immutable"
+    );
+
+    let held = lock_only(&home, "codex");
+
+    assert_eq!(
+        held.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned())
+    );
+    assert!(immutable(&owner), "the launch cleared the owner's flag");
 }
 
 #[cfg(target_os = "macos")]
@@ -3720,4 +3793,188 @@ fn the_team_tools_section_asks_for_log_activity_only_while_it_is_on() {
     assert!(on.len() <= TOOLS_SECTION_BYTES_MAX);
     let off = team_tools_section(&["log_activity".to_owned()], true, false);
     assert!(!off.contains("log_activity"), "{off}");
+}
+
+/// Answers one model request the way the Responses API streams a short reply, and keeps the
+/// request's body: a stand-in for a model server, so a real Codex runs with no account. A
+/// request other than a POST gets 404. Inputs: the connection and the kept bodies.
+#[cfg(target_os = "macos")]
+fn answer_as_responses(stream: std::net::TcpStream, bodies: &std::sync::Mutex<Vec<String>>) {
+    use std::io::{BufRead, Read, Write};
+    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut first = String::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if first.is_empty() {
+            first = line.clone();
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut stream = stream;
+    if !first.starts_with("POST ") {
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let mut body = vec![0; length.min(8 * 1024 * 1024)];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    bodies
+        .lock()
+        .unwrap()
+        .push(String::from_utf8_lossy(&body).into_owned());
+    let message = serde_json::json!({"type": "message", "role": "assistant", "id": "m1",
+        "content": [{"type": "output_text", "text": "ok"}]});
+    let events = [
+        serde_json::json!({"type": "response.created", "response": {"id": "r1"}}),
+        serde_json::json!({"type": "response.output_item.done", "output_index": 0, "item": message}),
+        serde_json::json!({"type": "response.completed", "response": {"id": "r1", "usage": {
+            "input_tokens": 1, "input_tokens_details": null, "output_tokens": 1,
+            "output_tokens_details": null, "total_tokens": 2}}}),
+    ];
+    let data: String = events
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        data.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(data.as_bytes());
+}
+
+/// DEC-141 PA-18 (PARITY-AUDIT): a real Codex resumed with `resume <id>` after the owner
+/// changed the instructions follows the new text. The engine's launch writes the owner's text
+/// into the home's AGENTS.md before each start, and Codex reads it again on resume and tells
+/// the model it replaces the earlier one, as `--system-prompt-snapshot off` does for Claude
+/// Code. The model is a stand-in server, so no account is used.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "live qualification: needs codex in /opt/homebrew/bin"]
+fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
+    let binary = fs::canonicalize("/opt/homebrew/bin/codex")
+        .unwrap_or_else(|_| panic!("BLOCKED: codex is not installed in /opt/homebrew/bin"));
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let work = root.join("work");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = bodies.clone();
+    std::thread::spawn(move || {
+        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+            answer_as_responses(stream, &sink);
+        }
+    });
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data: data.clone(),
+                id: ProjectId::new("resume").unwrap(),
+                folder: None,
+                mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
+            },
+            hooks: Vec::new(),
+            agent: String::new(),
+        })),
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
+    };
+    let base_url = format!("model_providers.stand.base_url=\"http://127.0.0.1:{port}/v1\"");
+    let codex = |turn: &[&str]| -> String {
+        let mut command = std::process::Command::new(&binary);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CODEX_HOME", &home)
+            .env("TMPDIR", &home)
+            .args([
+                "exec",
+                "-c",
+                "model_provider=\"stand\"",
+                "-c",
+                "model=\"stand-model\"",
+            ])
+            .args([
+                "-c",
+                "model_providers.stand.name=\"stand\"",
+                "-c",
+                base_url.as_str(),
+            ])
+            .args(["-c", "model_providers.stand.wire_api=\"responses\""])
+            .args(["--skip-git-repo-check", "-C"])
+            .arg(&work)
+            .args(turn)
+            .stdin(std::process::Stdio::null());
+        let output = crate::spawn_gate::output(&mut command).unwrap();
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{shown}");
+        shown
+    };
+
+    crate::agent_home::save_app(&data, "OWNER-ALPHA-41\n").unwrap();
+    let first = context.install("codex", &home, false).unwrap();
+    let shown = codex(&["first message"]);
+    drop(first);
+    let session = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("session id: "))
+        .unwrap_or_else(|| panic!("no session id: {shown}"))
+        .trim()
+        .to_owned();
+    crate::agent_home::save_app(&data, "OWNER-BETA-42\n").unwrap();
+    let second = context.install("codex", &home, false).unwrap();
+    codex(&["resume", &session, "second message"]);
+    drop(second);
+
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies.len() >= 2, "a request per turn: {}", bodies.len());
+    let (opened, resumed) = (&bodies[0], &bodies[bodies.len() - 1]);
+    assert!(opened.contains("OWNER-ALPHA-41") && !opened.contains("OWNER-BETA-42"));
+    assert!(
+        resumed.contains("OWNER-BETA-42"),
+        "the resumed turn is not given the new text"
+    );
+    assert!(
+        resumed.contains(
+            "These AGENTS.md instructions replace all previously provided AGENTS.md instructions."
+        ),
+        "the resumed turn is not told the new text replaces the old"
+    );
 }

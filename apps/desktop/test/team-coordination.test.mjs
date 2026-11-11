@@ -198,3 +198,26 @@ test("a coordination save keeps the value the TUI or another window set since, e
   await assert.rejects(coord.saveCoordSettings("wrong", { nudges: "off" }), /its own project's team read/);
   assert.equal(engine.sent.length, 3, "a save on another project's read sends nothing");
 });
+
+test("a harness kind no sub-agent runs on keeps its rows, each saying why instead of a live control (PA-15, DEC-141)", () => {
+  const team = readFileSync(new URL("../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8");
+  const start = team.indexOf("pub fn launch_harness");
+  const runs = [...team.slice(start, team.indexOf("\n}\n", start)).matchAll(/"([a-z-]+)"/gu)].map((match) => match[1]);
+  const sentence = team.match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u);
+  assert.ok(sentence, "the engine names the reason once");
+  const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
+  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
+  for (const harness of coord.COORD_HARNESSES) {
+    const live = runs.includes(harness);
+    assert.equal(coord.subAgentsUnavailable(harness), live ? undefined : sentence[1], harness);
+    assert.equal(lead.includes(`id="tg-mode-${harness}-p"`), live, `${harness} sub-agent mode control`);
+    assert.equal(per.includes(`id="tg-delivery-${harness}-p"`), live, `${harness} delivery control`);
+    const name = coord.HARNESS_NAMES[harness];
+    for (const [markup, label] of [[lead, `${name} sub-agents`], [per, `Messages to ${name} agents`]]) {
+      const row = markup.slice(markup.indexOf(`data-setting="${label}"`));
+      assert.ok(markup.includes(`data-setting="${label}"`), `${label} keeps its row`);
+      assert.equal(row.slice(0, row.indexOf("</div>")).includes("Not available"), !live, label);
+    }
+  }
+});

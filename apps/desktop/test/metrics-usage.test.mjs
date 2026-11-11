@@ -387,3 +387,27 @@ test("a usage step kind that worked again after its last panic says when, withou
   assert.ok(shown.includes(line), shown);
   assert.doesNotMatch(shown, /keeps retrying|may be out of date/u);
 });
+
+test("a key, URL or local account says what it has in place of limits, every account kind covered (PA-16, DEC-141)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/usage.rs", import.meta.url), "utf8");
+  const sentence = (name) => engine.match(new RegExp(`pub const ${name}: &str =\\s*"([^"]+)";`, "u"))?.[1];
+  const [key, url, local] = ["NO_WINDOW_KEY", "NO_WINDOW_URL", "NO_WINDOW_LOCAL"].map(sentence);
+  assert.ok(key && url && local, "the engine names each sentence once");
+  for (const provider of ["chatgpt", "claude", "openrouter", "openai_api", "anthropic_api", "openai_compatible", "local"]) {
+    assert.equal(limitsView.noWindow({ method: "subscription", provider }), null, provider);
+    for (const method of ["api_key", "url"]) {
+      assert.equal(limitsView.noWindow({ method, provider }), provider === "local" ? local : method === "api_key" ? key : url, `${method} ${provider}`);
+    }
+  }
+  const controls = { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
+  const names = { k: "Team key", o: "Ollama box", s: "Work Claude" };
+  const panel = (limits) => text(renderToStaticMarkup(createElement(limitsView.AccountLimitsPanel, {
+    limits, name: (id) => names[id] ?? id, nowMs: NOW, controls,
+    noWindow: [{ account: "k", note: key }, { account: "o", note: local }],
+  })));
+  const words = panel([]);
+  for (const shown of ["Team key", key, "Ollama box", local]) assert.ok(words.includes(shown), words);
+  assert.doesNotMatch(words, /No limits read yet/);
+  const read = panel([limits({ account: "k" })]);
+  assert.equal(read.split(key).length - 1, 0, "an account with a read of its own shows that read, not the sentence");
+});

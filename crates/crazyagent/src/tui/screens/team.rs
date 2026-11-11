@@ -2324,19 +2324,17 @@ fn instruction_lines(
     lines
 }
 
-const CLAUDE_GIVEN: &str =
-    "none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt";
-const CLAUDE_NO_RECORD: &str =
-    "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off.";
+const GIVEN_AT_LAUNCH: &str =
+    "none loaded by the harness itself; CrazyAgent gives its instructions at launch";
+const NO_RECORD: &str = "A headless run reports nothing here while it keeps no transcript.";
 
 /// The lines saying what an agent's harness reported in its own session records: the
-/// instruction file names it loaded and the skills it invoked, then each file's place.
-/// Claude loads no instruction file itself, since CrazyAgent gives it the instructions in
-/// its launch prompt, and a headless Claude run writes no session record while its project
-/// keeps no transcripts, so the lines say so.
-/// Inputs: the view, the box width and context. Output: the lines and a blank line.
+/// instruction file names it loaded and the skills it invoked, then each file's place. The
+/// words are the same for every harness (DEC-141 PA-14): with no file loaded, the line says
+/// CrazyAgent gave the instructions at launch, and before any record it says a headless run
+/// that keeps no transcript reports nothing. Inputs: the view, the box width and context.
+/// Output: the lines and a blank line.
 fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
-    let claude = view.harness == "claude-code";
     let mut names: Vec<&str> = Vec::new();
     for file in &view.loaded {
         if !names.contains(&file.name.as_str()) {
@@ -2350,17 +2348,7 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     let used: Vec<&str> = view.skills_used.iter().map(String::as_str).collect();
     let (files, skills) = match view.sessions {
         0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
-        _ => (
-            listed(
-                &names,
-                if claude {
-                    CLAUDE_GIVEN
-                } else {
-                    "none loaded by its harness"
-                },
-            ),
-            listed(&used, "none"),
-        ),
+        _ => (listed(&names, GIVEN_AT_LAUNCH), listed(&used, "none")),
     };
     let mut lines: Vec<Line<'static>> = Vec::new();
     for text in [
@@ -2369,9 +2357,9 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     ] {
         lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
     }
-    if claude && view.sessions == 0 {
+    if view.sessions == 0 {
         lines.extend(
-            wrap(CLAUDE_NO_RECORD, limit)
+            wrap(NO_RECORD, limit)
                 .into_iter()
                 .map(|line| styled(line, Role::Muted, &ctx.theme)),
         );

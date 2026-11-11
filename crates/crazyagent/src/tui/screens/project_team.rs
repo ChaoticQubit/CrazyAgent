@@ -2388,6 +2388,13 @@ impl TeamView {
         let project_id = self.project.clone();
         let harness = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
         let mut settings = view.settings.clone();
+        if let CoordRow::Mode(kind) | CoordRow::Delivery(kind) = row
+            && let Some(reason) = crate::team::sub_agents_unavailable(kind)
+        {
+            let name = harness_name(kind.as_str(), None);
+            self.notice = Some(Notice::plain(format!("{name} sub-agents: {reason}")));
+            return TeamReply::Handled;
+        }
         let (action, done) = match row {
             CoordRow::Mode(kind) => {
                 let Some(current) = harness(kind) else {
@@ -2696,6 +2703,18 @@ impl TeamView {
         for (index, row) in COORD_ROWS.into_iter().enumerate() {
             let found = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
             let (label, value, note) = match row {
+                CoordRow::Mode(kind) if crate::team::sub_agents_unavailable(kind).is_some() => (
+                    format!("{} sub-agents", harness_name(kind.as_str(), None)),
+                    "Not available".to_owned(),
+                    "  runs only as a master",
+                ),
+                CoordRow::Delivery(kind) if crate::team::sub_agents_unavailable(kind).is_some() => {
+                    (
+                        format!("Messages to {} agents", harness_name(kind.as_str(), None)),
+                        "Not available".to_owned(),
+                        "  runs only as a master",
+                    )
+                }
                 CoordRow::Mode(kind) => (
                     format!("{} sub-agents", harness_name(kind.as_str(), None)),
                     found(kind)
