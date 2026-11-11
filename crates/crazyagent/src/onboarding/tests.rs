@@ -904,7 +904,8 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
     assert_eq!(draft::reused(&layout), Some(kept));
 
     let prose = "## Structure\n\nOne binary that greets people.\n\n```json\n{}\n```\n";
-    let (step, _, wrote) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
+    let (step, _, wrote, _) =
+        service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
     assert_eq!(step, Step::Done);
     assert_eq!(wrote, draft::overview(&layout));
     assert!(
@@ -913,7 +914,7 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
             .contains("One binary that greets people.")
     );
 
-    let (step, _, wrote) =
+    let (step, _, wrote, _) =
         service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
     assert_eq!(wrote, None);
     assert_eq!(
@@ -970,7 +971,7 @@ fn a_secret_like_path_the_agent_writes_is_neither_stored_nor_written() {
         ..MappingFacts::default()
     };
     let base = Drafted::new("demo".into(), &pool());
-    let (step, kept, wrote) = service::answered(&layout, &base, text, &found, &[]);
+    let (step, kept, wrote, _) = service::answered(&layout, &base, text, &found, &[]);
     assert_eq!(step, Step::Done);
     let stored = [
         format!("{answer:?}"),
@@ -1934,4 +1935,122 @@ fn a_setup_saved_without_the_mappings_answers_offers_them_once_the_mapping_is_do
         )
         .unwrap();
     assert_eq!(viewed(&mut database).proposed, None);
+}
+
+fn mapped(reply: &str, shown: &[(&str, draft::FoundKind)]) -> (Drafted, draft::Answer) {
+    let dir = tempfile::tempdir().unwrap();
+    let evidence = draft::Evidence {
+        documents: shown
+            .iter()
+            .map(|(path, kind)| draft::Document {
+                path: (*path).into(),
+                size: 1,
+                text: "x".into(),
+                cut: false,
+                kind: *kind,
+                marks: Vec::new(),
+            })
+            .collect(),
+        ..draft::Evidence::default()
+    };
+    let (found, stack) = draft::found_facts(&evidence, dir.path());
+    let answer = draft::parse_answer(&format!(
+        "## Structure\n\nA reader.\n\n```json\n{reply}\n```\n"
+    ));
+    let base = Drafted::new("demo".into(), &pool());
+    (draft::merge(&base, &answer, &found, &stack), answer)
+}
+
+const SS_ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
+
+#[test]
+fn the_mapping_answer_keeps_a_roadmap_it_was_shown_and_drops_one_it_was_not() {
+    let reply = r#"{"about":"x","roadmap":["research/docs/ss-phase1-revision/report.md","docs/elsewhere.md"]}"#;
+    let (merged, _) = mapped(reply, &[(SS_ROADMAP, draft::FoundKind::Other)]);
+    assert_eq!(merged.facts.roadmap, vec![SS_ROADMAP.to_owned()]);
+}
+
+#[test]
+fn a_mapping_answer_without_a_roadmap_takes_the_local_scans_roadmap() {
+    let reply = r#"{"about":"x","roadmap":[]}"#;
+    let (merged, _) = mapped(
+        reply,
+        &[
+            ("docs/notes.md", draft::FoundKind::Other),
+            (SS_ROADMAP, draft::FoundKind::Roadmap),
+            ("docs/later-plan.md", draft::FoundKind::Roadmap),
+        ],
+    );
+    assert_eq!(merged.facts.roadmap, vec![SS_ROADMAP.to_owned()]);
+    let (none, _) = mapped(reply, &[("docs/notes.md", draft::FoundKind::Other)]);
+    assert!(none.facts.roadmap.is_empty());
+}
+
+#[test]
+fn a_found_roadmap_survives_the_onboarding_row() {
+    let (merged, _) = mapped(
+        r#"{"roadmap":[]}"#,
+        &[(SS_ROADMAP, draft::FoundKind::Roadmap)],
+    );
+    let column = draft::found_column(&merged).unwrap();
+    let mut facts = MappingFacts::default();
+    draft::restore_found(&mut facts, Some(&column)).unwrap();
+    assert_eq!(facts.roadmap, vec![SS_ROADMAP.to_owned()]);
+    let saved: Drafted = serde_json::from_str(&serde_json::to_string(&merged).unwrap()).unwrap();
+    assert!(saved.facts.roadmap.is_empty());
+}
+
+#[test]
+fn the_mapping_questions_become_setup_questions() {
+    let reply = r#"{"about":"x","questions":[{"question":"Is the desktop app still planned?","kind":"single","options":["Yes","No"],"recommended":"Yes"},{"question":"","kind":"single","options":[]}]}"#;
+    let (_, answer) = mapped(reply, &[]);
+    assert_eq!(answer.questions.len(), 1);
+    assert_eq!(
+        answer.questions[0].kind,
+        crate::questions::QuestionKind::Single
+    );
+    assert_eq!(
+        answer.questions[0].context.as_deref(),
+        Some(draft::SETUP_QUESTION_CONTEXT)
+    );
+    let prompt = draft::prompt(&draft::Evidence::default(), &MappingFacts::default());
+    assert!(prompt.contains("\"roadmap\": []"), "{prompt}");
+    assert!(prompt.contains("\"questions\": []"), "{prompt}");
+    assert!(prompt.contains("Under roadmap list"), "{prompt}");
+}
+
+#[test]
+fn a_finished_mappings_questions_are_raised_as_its_own_and_a_refusal_stops_quietly() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-onboarding-questions-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (root, folder) = (base.join("engine"), base.join("project"));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir_all(folder.join(CRAZYAGENT_DIRECTORY)).unwrap();
+    let db = crate::questions::open(&root).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::team::initialize(&db).unwrap();
+    crate::ide::workspace::tests::add_project(&db, "demo", &folder);
+    let reply = r#"{"questions":[{"question":"Is the desktop app still planned?","kind":"single","options":["Yes","No"],"recommended":"Yes"},{"question":"Which market first?","kind":"text","options":[],"recommended":"Researchers"}]}"#;
+    let (_, answer) = mapped(reply, &[]);
+    assert_eq!(answer.questions.len(), 2);
+
+    service::raise_setup_questions(&db, "demo", &answer.questions);
+    let raised = crate::questions::pending(&db, &ProjectId::new("demo").unwrap()).unwrap();
+    assert_eq!(raised.len(), 2);
+    assert!(
+        raised
+            .iter()
+            .all(|question| question.asker == "engine:mapping")
+    );
+    service::raise_setup_questions(&db, "demo", &answer.questions);
+    assert_eq!(
+        crate::questions::pending(&db, &ProjectId::new("demo").unwrap())
+            .unwrap()
+            .len(),
+        2
+    );
+    service::raise_setup_questions(&db, "missing", &answer.questions);
 }

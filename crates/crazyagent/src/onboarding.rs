@@ -47,9 +47,11 @@ pub enum Step {
 
 /// What the manifest scan and the mapping agent found that has no field in
 /// [`ProjectSetup`]: languages, build and test commands, entry points, the research the
-/// project's own documents already hold and its other documents, as paths below the
-/// folder. `shown` is the engine's own list of the documents the mapping prompt gave with
-/// their text, the only paths an answer may name; it never leaves the engine.
+/// project's own documents already hold, its other documents and the files that plan its
+/// versions, milestones or phases as `roadmap`, as paths below the folder. `shown` is the
+/// engine's own list of the documents the mapping prompt gave with their text, the only
+/// paths an answer may name, and `shown_roadmap` those the local heading scan took for a
+/// roadmap, in reading order; neither leaves the engine.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MappingFacts {
@@ -61,8 +63,12 @@ pub struct MappingFacts {
     pub research: Vec<FoundResearch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub documents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roadmap: Vec<String>,
     #[serde(skip)]
     pub(crate) shown: Vec<String>,
+    #[serde(skip)]
+    pub(crate) shown_roadmap: Vec<String>,
 }
 
 /// One kind of research the project's own documents already hold, as the mapping agent
