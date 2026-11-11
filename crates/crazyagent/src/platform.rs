@@ -60,6 +60,10 @@ impl FileExt for std::fs::File {
 #[cfg(windows)]
 pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+/// The Windows open flag that lets a folder be opened as a handle.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
 /// Reports whether the engine's effective user owns the file the metadata describes.
 /// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
 /// Unix owner to compare, so an ownership check refuses rather than passes.
@@ -320,8 +324,11 @@ pub(crate) fn open_beneath(
 }
 
 /// Opens a file below a folder the engine holds to read, with no link followed from that
-/// folder down and no FIFO waited on ([`open_beneath`]); on Windows through [`open_plain`].
-/// Inputs: the folder and the path below it. Output: the open file or the I/O error.
+/// folder down and no FIFO waited on ([`open_beneath`]). On Windows the file opens through
+/// [`open_plain`] and is kept only when its real place, read from the open handle, is below
+/// the folder's own ([`name_under`]), so a folder junction or link in any part, the folder
+/// itself included, is refused, not followed. Inputs: the folder and the path below it,
+/// plain names only. Output: the open file or the I/O error.
 pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -331,8 +338,45 @@ pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<s
     }
     #[cfg(windows)]
     {
-        open_plain(&base.join(below))
+        use std::os::windows::fs::OpenOptionsExt;
+        let plain = below
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+        if !plain || below.as_os_str().is_empty() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let folder = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(base)?;
+        let file = open_plain(&base.join(below))?;
+        let held = crazyagent_win_sandbox::final_name(&folder)?;
+        let found = crazyagent_win_sandbox::final_name(&file)?;
+        if !name_under(&held, &found) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the path leaves its folder",
+            ));
+        }
+        Ok(file)
     }
+}
+
+/// Tells whether a real place lies below a folder's real place, both as the device names
+/// Windows gives for open handles: the folder's name, then a `\`, then at least one more
+/// unit. Names are compared unit for unit, so a sibling whose name only starts with the
+/// folder's, the folder itself and an empty folder name are never below. Inputs: the
+/// folder's name and the found name, in UTF-16 units. Output: the answer.
+#[cfg(any(windows, test))]
+fn name_under(folder: &[u16], found: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let folder = folder.strip_suffix(&[SEPARATOR]).unwrap_or(folder);
+    let under = !folder.is_empty()
+        && found.len() > folder.len() + 1
+        && found.starts_with(folder)
+        && found[folder.len()] == SEPARATOR;
+    assert!(!under || found.len() >= 3);
+    under
 }
 
 /// Opens a path to read as the reparse point itself, never a link's target.
@@ -453,6 +497,9 @@ fn explorer(target: &OsStr, select: bool) -> Result<Command, &'static str> {
     }
     Ok(command)
 }
+
+#[cfg(test)]
+mod beneath_tests;
 
 #[cfg(test)]
 mod tests {
