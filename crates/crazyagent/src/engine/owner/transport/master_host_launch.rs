@@ -2524,9 +2524,10 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let profile = sandbox.sandbox().profile();
-        let owner = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .canonicalize()
-            .unwrap();
+        let owner = crate::sandbox::toolchains::ToolHomes::owner()
+            .unwrap()
+            .home()
+            .to_path_buf();
         for denied in [".claude", ".codex", "Library/Keychains"] {
             assert!(
                 profile.contains(&format!("(subpath \"{}\")", owner.join(denied).display())),
