@@ -1184,7 +1184,7 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
         "documents": [],
         "roadmap": [ROADMAP]
     });
-    let (mut connection, project) = found_project(&base, &found, 2);
+    let (mut connection, project) = found_project(&base, &found, FIRST_REVISION);
     let confirm =
         |revision: u64, kept: Option<Vec<KeptFile>>| found_confirm(&project, revision, kept);
     let kept = vec![
@@ -1196,10 +1196,10 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
         ),
         kept_file(&long, Some(ResearchKind::MarketResearch)),
     ];
-    assert_eq!(confirm(2, Some(kept.clone())).validate(), Ok(()));
+    assert_eq!(confirm(1, Some(kept.clone())).validate(), Ok(()));
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &config(), &confirm(2, Some(kept)), 1).unwrap(),
+        execute(&tx, &config(), &confirm(1, Some(kept)), 1).unwrap(),
         Outcome::Applied
     );
     assert_eq!(
@@ -1229,23 +1229,10 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
     assert!(queued.contains(&ResearchKind::MarketResearch), "{queued:?}");
 
     assert_eq!(
-        execute(&tx, &config(), &confirm(3, None), 1).unwrap(),
+        execute(&tx, &config(), &confirm(2, None), 1).unwrap(),
         Outcome::Applied
     );
     assert_eq!(links::list(&tx, &project).unwrap().len(), 2);
-    assert_eq!(
-        execute(&tx, &config(), &confirm(4, Some(Vec::new())), 1).unwrap(),
-        Outcome::Applied
-    );
-    assert!(links::list(&tx, &project).unwrap().is_empty());
-    assert_eq!(
-        load_setup(&tx, &project).unwrap().unwrap().research,
-        [
-            ResearchKind::CompetitorResearch,
-            ResearchKind::MarketResearch,
-            ResearchKind::RoadmapPlanning,
-        ]
-    );
     let too_many = confirm(
         5,
         Some(vec![kept_file("docs/a.md", None); links::LINKS_MAX + 1]),
@@ -1258,6 +1245,86 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
         confirm(5, Some(vec![too_wide])).validate().unwrap_err().0,
         "project_setup_bounds"
     );
+}
+
+#[test]
+fn kept_files_are_taken_on_the_first_confirm_only_so_a_later_update_leaves_the_links_alone() {
+    const RIVALS: &str = "docs/rivals.md";
+    const MARKET: &str = "docs/market.md";
+    let asked = [
+        ResearchKind::CompetitorResearch,
+        ResearchKind::MarketResearch,
+        ResearchKind::RoadmapPlanning,
+    ];
+    let found = serde_json::json!({
+        "research": [
+            {"kind": "competitor_research", "files": [RIVALS]},
+            {"kind": "market_research", "files": [MARKET]}
+        ],
+        "documents": [],
+        "roadmap": []
+    });
+    let rivals = vec![links::DocLink {
+        path: RIVALS.into(),
+        kind: links::LinkKind::Research(ResearchKind::CompetitorResearch),
+    }];
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let (mut connection, project) = found_project(&base, &found, FIRST_REVISION);
+    let tx = connection.transaction().unwrap();
+    let first = vec![kept_file(RIVALS, Some(ResearchKind::CompetitorResearch))];
+    assert_eq!(
+        execute(&tx, &config(), &found_confirm(&project, 1, Some(first)), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(links::list(&tx, &project).unwrap(), rivals);
+    assert_eq!(
+        load_setup(&tx, &project).unwrap().unwrap().research,
+        [ResearchKind::MarketResearch, ResearchKind::RoadmapPlanning]
+    );
+
+    let cleared = found_confirm(&project, 2, Some(Vec::new()));
+    assert_eq!(
+        execute(&tx, &config(), &cleared, 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        links::list(&tx, &project).unwrap(),
+        rivals,
+        "an empty kept list on a saved setup clears no link"
+    );
+    let swapped = found_confirm(
+        &project,
+        3,
+        Some(vec![kept_file(MARKET, Some(ResearchKind::MarketResearch))]),
+    );
+    assert_eq!(
+        execute(&tx, &config(), &swapped, 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        links::list(&tx, &project).unwrap(),
+        rivals,
+        "a kept list on a saved setup replaces no link"
+    );
+    assert_eq!(
+        load_setup(&tx, &project).unwrap().unwrap().research,
+        asked,
+        "and switches off no research the update asked for"
+    );
+    drop(tx);
+
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let (mut connection, project) = found_project(&base, &found, FIRST_REVISION);
+    let tx = connection.transaction().unwrap();
+    let none = found_confirm(&project, 1, Some(Vec::new()));
+    assert_eq!(execute(&tx, &config(), &none, 1).unwrap(), Outcome::Applied);
+    assert!(
+        links::list(&tx, &project).unwrap().is_empty(),
+        "a first confirm that keeps no file links none"
+    );
+    assert_eq!(load_setup(&tx, &project).unwrap().unwrap().research, asked);
 }
 
 #[test]
@@ -1274,7 +1341,7 @@ fn a_found_file_is_linked_only_under_the_group_the_owner_kept_it_in() {
         "documents": [],
         "roadmap": [PLAN]
     });
-    let (mut connection, project) = found_project(&base, &found, 2);
+    let (mut connection, project) = found_project(&base, &found, FIRST_REVISION);
     let kept = vec![
         kept_file(PLAN, Some(ResearchKind::MarketResearch)),
         kept_file(NEXT, Some(ResearchKind::MarketResearch)),
@@ -1284,7 +1351,7 @@ fn a_found_file_is_linked_only_under_the_group_the_owner_kept_it_in() {
     ];
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &config(), &found_confirm(&project, 2, Some(kept)), 1).unwrap(),
+        execute(&tx, &config(), &found_confirm(&project, 1, Some(kept)), 1).unwrap(),
         Outcome::Applied
     );
     assert_eq!(
@@ -1308,11 +1375,11 @@ fn a_found_file_is_linked_only_under_the_group_the_owner_kept_it_in() {
 
     let root = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
-    let (mut connection, project) = found_project(&base, &found, 2);
+    let (mut connection, project) = found_project(&base, &found, FIRST_REVISION);
     let kept = vec![kept_file(NEXT, Some(ResearchKind::RoadmapPlanning))];
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &config(), &found_confirm(&project, 2, Some(kept)), 1).unwrap(),
+        execute(&tx, &config(), &found_confirm(&project, 1, Some(kept)), 1).unwrap(),
         Outcome::Applied
     );
     assert_eq!(

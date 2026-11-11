@@ -2110,9 +2110,10 @@ fn rejected(code: &str) -> Outcome {
 }
 
 /// Changes an existing project's name, description, stack, platforms, research, pool and team.
-/// With `kept`, the files the setup mapping found that the owner kept become the project's
-/// links, each under the group it was kept in, replacing earlier ones, and no research job
-/// is queued for a kind they cover.
+/// With `kept` on the first confirm, the files the setup mapping found that the owner kept
+/// become the project's links, each under the group it was kept in, and no research job is
+/// queued for a kind they cover. Once the owner saved the setup, `kept` is left unread, so
+/// no later update from any client replaces or clears the links.
 /// Takes the transaction, configuration, project, the setup revision the owner edited, an
 /// optional new name, the new setup and the kept files, none to leave the links alone;
 /// documents keep their own add and delete actions. Returns Applied, or a plain rejection
@@ -2132,6 +2133,7 @@ fn update(
     if stored.revision != expected_revision {
         return Ok(rejected("stale_revision"));
     }
+    let first_confirm = !stored.saved();
     if setup.pool != stored.pool
         && setup
             .pool
@@ -2161,7 +2163,9 @@ fn update(
         .collect();
     stored.platforms = setup.platforms.clone();
     stored.research = setup.research.clone();
-    if let Some(kept) = kept {
+    if let Some(kept) = kept
+        && first_confirm
+    {
         let linked = crate::onboarding::found_links(tx, project_id, kept)?;
         links::set(tx, project_id, &linked)?;
         stored.research.retain(|kind| {
