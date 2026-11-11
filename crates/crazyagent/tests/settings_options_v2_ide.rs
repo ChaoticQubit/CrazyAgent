@@ -201,7 +201,10 @@ impl Hooked {
 /// Commits through the IDE's git shim in a folder with the environment the IDE server
 /// gives every git it starts: the forced configuration and the search ceiling at the
 /// project's agents root, the only root it has while the engine records no agent in an
-/// older one. Inputs: the shim, the project folder and where git runs.
+/// older one, and the forwarder variables the connected extension host adds, without which
+/// the shim refuses an index-writing command in the project folder. The forwarder here is
+/// `/usr/bin/true`, as in the shim's own rows: an empty commit's carry step, if any, is not
+/// what these rows check. Inputs: the shim, the project folder and where git runs.
 /// Output: git's output; a failed commit fails the test.
 fn ide_commit(shim: &Path, project: &Path, folder: &Path, message: &str) -> Output {
     let mut command = Command::new("/bin/sh");
@@ -219,6 +222,9 @@ fn ide_commit(shim: &Path, project: &Path, folder: &Path, message: &str) -> Outp
         .env("GIT_AUTHOR_EMAIL", "e2e@example.invalid")
         .env("GIT_COMMITTER_NAME", "E2E Owner")
         .env("GIT_COMMITTER_EMAIL", "e2e@example.invalid")
+        .env("CRAZYAGENT_IDE_GIT_NODE", "/usr/bin/true")
+        .env("CRAZYAGENT_IDE_GIT_FORWARD", "/dev/null")
+        .env("CRAZYAGENT_IDE_GIT_SECRET", "synthetic")
         .env(
             ide::git::CEILING_VARIABLE,
             crazyagent::projects_home::state_folder(project).join("worktrees"),

@@ -397,14 +397,18 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         build.iter().cloned().collect::<BTreeSet<_>>(),
         "the invoke handler and build.rs list the same commands"
     );
-    let capabilities: serde_json::Value =
-        serde_json::from_str(&desktop_source("capabilities/main-window.json")).unwrap();
-    let allowed = capabilities["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|permission| permission.as_str())
-        .collect::<BTreeSet<_>>();
+    let granted = |file: &str| -> BTreeSet<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(&desktop_source(&format!("capabilities/{file}"))).unwrap();
+        capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|permission| permission.as_str().map(str::to_owned))
+            .collect()
+    };
+    let main = granted("main-window.json");
+    let wall = granted("terminal-wall.json");
     for command in &build {
         assert!(
             command_function(&lib, command),
@@ -412,8 +416,8 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         );
         let permission = format!("allow-{}", command.replace('_', "-"));
         assert!(
-            allowed.contains(permission.as_str()),
-            "{permission} is missing from main-window.json"
+            main.contains(&permission) || wall.contains(&permission),
+            "{permission} is in neither main-window.json nor terminal-wall.json"
         );
     }
 

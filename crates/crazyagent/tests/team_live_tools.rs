@@ -88,6 +88,12 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     crazyagent::team::initialize(&connection).unwrap();
     crazyagent::coord::ensure(&connection).unwrap();
     crazyagent::project_setup::initialize(&connection).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+             INSERT INTO projects VALUES ('{PROJECT}','{{}}');"
+        ))
+        .unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();

@@ -7,7 +7,7 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"));
     std::fs::create_dir_all(package.join("src/bin")).unwrap();
     let workspace = source.parent().unwrap().parent().unwrap();
-    for name in ["Cargo.toml", "Cargo.lock"] {
+    for name in ["Cargo.toml", "Cargo.lock", "THIRD_PARTY_NOTICES.md"] {
         std::fs::copy(workspace.join(name), root.path().join(name)).unwrap();
     }
     let members = workspace_members(workspace);

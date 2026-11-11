@@ -48,8 +48,13 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .collect();
+    let wall_only = [
+        "desktop_extend_terminal_windows",
+        "desktop_focus_terminal_window",
+    ];
     assert!(handlers.len() >= 34);
-    assert_eq!(permissions.len(), handlers.len());
+    assert!(wall_only.iter().all(|name| handlers.contains(name)));
+    assert_eq!(permissions.len() + wall_only.len(), handlers.len());
     for handler in &handlers {
         assert_eq!(
             build.matches(&format!("\"{handler}\"")).count(),
@@ -62,8 +67,8 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
                 .iter()
                 .filter(|permission| **permission == allowed.as_str())
                 .count(),
-            1,
-            "{handler} needs one main-window permission"
+            usize::from(!wall_only.contains(handler)),
+            "{handler} needs one main-window permission, none when only a wall window calls it"
         );
     }
     assert_eq!(

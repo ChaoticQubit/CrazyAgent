@@ -857,7 +857,8 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
 
 /// OWNER-PORTS-FAIL-OPEN (rv-secreview IDE-6 note): a settings file that stops reading
 /// after the engine started leaves the configured local model port unknown, so the check
-/// is refused with `owner_ports_settings_unreadable` and never listens on that port.
+/// is refused with `owner_ports_settings_unreadable`, shown in its own sentence, and never
+/// listens on that port.
 #[tokio::test]
 async fn a_server_check_with_unreadable_settings_is_refused_not_run_without_kept_ports() {
     let kept = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
@@ -889,7 +890,9 @@ async fn a_server_check_with_unreadable_settings_is_refused_not_run_without_kept
     );
     assert_eq!(
         checked.problem.as_deref(),
-        Some("owner_ports_settings_unreadable")
+        Some(
+            "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again."
+        )
     );
     case.close().await;
 }

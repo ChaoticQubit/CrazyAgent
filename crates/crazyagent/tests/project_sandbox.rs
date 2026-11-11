@@ -101,7 +101,8 @@ fn command_env(sandbox: &ProjectSandbox, profile: &Path) -> BTreeMap<String, Str
 }
 
 /// T8 row 1 and C1: the tool cache is one more writable root, listed as a non-working-tree
-/// root in the SM1-R rule, whose other lines stay as they were.
+/// root in the SM1-R rule, whose other lines stay as they were. The rule's closing
+/// parentheses ride on its last line, so the lines are compared without them.
 #[test]
 fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
     let case = case();
@@ -114,13 +115,13 @@ fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
     let rule = |text: &str| -> Vec<String> {
         text.lines()
             .filter(|line| line.contains("[gG][iI][tT](/.*)?$"))
-            .map(str::to_owned)
+            .map(|line| line.trim_end_matches(')').to_owned())
             .collect()
     };
     let (before, after) = (rule(&without.profile()), rule(&with.profile()));
     let added: Vec<&String> = after.iter().filter(|line| !before.contains(line)).collect();
     assert_eq!(after.len(), before.len() + 1);
-    assert_eq!(added.len(), 1);
+    assert_eq!(added.len(), 1, "{before:#?}\n{after:#?}");
     assert!(added[0].contains("runtime") && added[0].contains("/(.+/)?"));
     assert!(
         with.profile()
@@ -541,6 +542,10 @@ fn sandboxed_child_cannot_read_outside_files_or_the_owner_codex_and_claude_dirs(
     }
 }
 
+/// A sandboxed child commits in a worktree inside the project that the engine's own git
+/// step added, since only that step's profile may register a worktree
+/// (SECAUDIT-WORKTREE-ADMIN-PLANT): the child's own `git worktree add` is refused. It
+/// still cannot write the project's hooks or config.
 #[test]
 fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
     let case = case();
@@ -570,8 +575,32 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
         .unwrap();
         assert!(status.success());
     }
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-one",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let planted = case.project.join("worktrees").join("agent-two");
+    let refused = run(
+        &sandbox,
+        &profile,
+        &format!("git worktree add -q -b agent-two {}", quoted(&planted)),
+    );
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Operation not permitted"),
+        "{refused:?}"
+    );
     let script = format!(
-        "git worktree add -q -b agent-one {wt} && cd {wt} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
+        "cd {wt} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
         wt = quoted(&worktree)
     );
     let output = run(&sandbox, &profile, &script);
