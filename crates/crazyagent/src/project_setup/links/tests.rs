@@ -1,5 +1,6 @@
 use super::*;
 use std::os::unix::fs::symlink;
+use std::path::PathBuf;
 
 fn db() -> Connection {
     let db = Connection::open_in_memory().unwrap();
@@ -14,10 +15,29 @@ fn link(path: &str, kind: LinkKind) -> DocLink {
     }
 }
 
+fn text(path: &str, text: &str) -> LinkedText {
+    LinkedText {
+        path: path.into(),
+        text: text.into(),
+    }
+}
+
 fn saved(db: &mut Connection, project: &ProjectId, links: &[DocLink]) {
     let tx = db.transaction().unwrap();
     set(&tx, project, links).unwrap();
     tx.commit().unwrap();
+}
+
+fn project_folder() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = std::fs::canonicalize(dir.path()).unwrap();
+    (dir, folder)
+}
+
+fn write(folder: &Path, path: &str, body: &[u8]) {
+    let file = folder.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, body).unwrap();
 }
 
 #[test]
@@ -86,6 +106,11 @@ fn a_link_outside_the_project_folder_is_refused() {
         "docs/x.md/",
         "",
         ".crazyagent/context/brief.md",
+        ".CrazyAgent/context/brief.md",
+        ".CRAZYAGENT/x.md",
+        "docs\\..\\x.md",
+        "C:x.md",
+        "docs/a:b.md",
         "docs/\u{7}.md",
         long.as_str(),
     ] {
@@ -121,6 +146,10 @@ fn more_links_than_the_bound_or_a_planning_research_link_are_refused() {
         .0,
         "project_link_invalid"
     );
+    assert_eq!(
+        list(&tx, &project).unwrap(),
+        vec![link("kept.md", LinkKind::Roadmap)]
+    );
     set(&tx, &project, &many[..LINKS_MAX]).unwrap();
     assert_eq!(list(&tx, &project).unwrap().len(), LINKS_MAX);
 }
@@ -129,6 +158,16 @@ fn more_links_than_the_bound_or_a_planning_research_link_are_refused() {
 fn a_stored_row_of_an_unknown_kind_or_a_path_outside_is_left_out() {
     let db = db();
     let project = ProjectId::new("alpha").unwrap();
+    let insert = |path: &str, kind: &str| {
+        db.execute(
+            "INSERT INTO project_doc_links(project,path,kind) VALUES (?1,?2,?3)",
+            params![project.as_str(), path, kind],
+        )
+        .unwrap();
+    };
+    for index in 0..LINKS_MAX + 8 {
+        insert(&format!("0/{index:03}.md"), "research:newer_kind");
+    }
     for (path, kind) in [
         ("a.md", "roadmap"),
         ("b.md", "research:market_research"),
@@ -136,12 +175,9 @@ fn a_stored_row_of_an_unknown_kind_or_a_path_outside_is_left_out() {
         ("d.md", "release"),
         ("../e.md", "roadmap"),
         (".crazyagent/f.md", "research:market_research"),
+        (".CrazyAgent/g.md", "roadmap"),
     ] {
-        db.execute(
-            "INSERT INTO project_doc_links(project,path,kind) VALUES (?1,?2,?3)",
-            params![project.as_str(), path, kind],
-        )
-        .unwrap();
+        insert(path, kind);
     }
     assert_eq!(
         list(&db, &project).unwrap(),
@@ -153,81 +189,44 @@ fn a_stored_row_of_an_unknown_kind_or_a_path_outside_is_left_out() {
 }
 
 #[test]
-fn the_roadmap_file_is_the_linked_one_before_the_planned_one() {
+fn the_roadmap_is_the_linked_one_before_the_planned_one() {
     let mut db = db();
-    let folder = tempfile::tempdir().unwrap();
-    let folder = std::fs::canonicalize(folder.path()).unwrap();
-    std::fs::create_dir_all(folder.join(".crazyagent/context")).unwrap();
-    std::fs::write(folder.join(".crazyagent/context/roadmap.md"), "# Roadmap\n").unwrap();
+    let (_dir, folder) = project_folder();
+    write(&folder, ".crazyagent/context/roadmap.md", b"# Roadmap\n");
     let project = ProjectId::new("alpha").unwrap();
+    let planned = text(".crazyagent/context/roadmap.md", "# Roadmap\n");
     assert_eq!(
-        roadmap_file(&db, &project, &folder).unwrap(),
-        Some(folder.join(".crazyagent/context/roadmap.md"))
+        roadmap(&db, &project, &folder).unwrap(),
+        Some(planned.clone())
     );
     saved(
         &mut db,
         &project,
         &[link("docs/plan-2026.md", LinkKind::Roadmap)],
     );
+    assert_eq!(roadmap(&db, &project, &folder).unwrap(), Some(planned));
+    write(&folder, "docs/plan-2026.md", b"# Plan\n");
     assert_eq!(
-        roadmap_file(&db, &project, &folder).unwrap(),
-        Some(folder.join(".crazyagent/context/roadmap.md"))
-    );
-    std::fs::create_dir_all(folder.join("docs")).unwrap();
-    std::fs::write(folder.join("docs/plan-2026.md"), "# Plan\n").unwrap();
-    assert_eq!(
-        roadmap_file(&db, &project, &folder).unwrap(),
-        Some(folder.join("docs/plan-2026.md"))
+        roadmap(&db, &project, &folder).unwrap(),
+        Some(text("docs/plan-2026.md", "# Plan\n"))
     );
 }
 
 #[test]
 fn no_roadmap_without_a_link_or_a_planned_file() {
     let db = db();
-    let folder = tempfile::tempdir().unwrap();
+    let (_dir, folder) = project_folder();
     let project = ProjectId::new("alpha").unwrap();
-    assert_eq!(roadmap_file(&db, &project, folder.path()).unwrap(), None);
+    assert_eq!(roadmap(&db, &project, &folder).unwrap(), None);
 }
 
 #[test]
-fn a_linked_file_reached_through_a_link_is_not_returned() {
+fn research_is_the_text_of_each_linked_research_file_present_in_the_folder() {
     let mut db = db();
-    let outside = tempfile::tempdir().unwrap();
-    std::fs::write(outside.path().join("plan.md"), "# Elsewhere\n").unwrap();
-    let folder = tempfile::tempdir().unwrap();
-    let folder = std::fs::canonicalize(folder.path()).unwrap();
-    symlink(outside.path(), folder.join("away")).unwrap();
-    std::fs::create_dir_all(folder.join("docs")).unwrap();
-    std::fs::write(folder.join("docs/real.md"), "# Real\n").unwrap();
-    symlink(folder.join("docs/real.md"), folder.join("docs/alias.md")).unwrap();
-    let project = ProjectId::new("alpha").unwrap();
-    saved(
-        &mut db,
-        &project,
-        &[
-            link("away/plan.md", LinkKind::Roadmap),
-            link(
-                "docs/alias.md",
-                LinkKind::Research(ResearchKind::MarketResearch),
-            ),
-            link(
-                "away/plan.md",
-                LinkKind::Research(ResearchKind::DesignResearch),
-            ),
-        ],
-    );
-    assert_eq!(roadmap_file(&db, &project, &folder).unwrap(), None);
-    assert!(research_files(&db, &project, &folder).unwrap().is_empty());
-}
-
-#[test]
-fn research_files_are_the_linked_research_files_present_in_the_folder() {
-    let mut db = db();
-    let folder = tempfile::tempdir().unwrap();
-    let folder = std::fs::canonicalize(folder.path()).unwrap();
+    let (_dir, folder) = project_folder();
     std::fs::create_dir_all(folder.join("docs/gone")).unwrap();
-    std::fs::write(folder.join("docs/market.md"), "# Market\n").unwrap();
-    std::fs::write(folder.join("docs/plan.md"), "# Plan\n").unwrap();
+    write(&folder, "docs/market.md", b"# Market\n");
+    write(&folder, "docs/plan.md", b"# Plan\n");
     let project = ProjectId::new("alpha").unwrap();
     saved(
         &mut db,
@@ -249,7 +248,84 @@ fn research_files_are_the_linked_research_files_present_in_the_folder() {
         ],
     );
     assert_eq!(
-        research_files(&db, &project, &folder).unwrap(),
-        vec![(ResearchKind::MarketResearch, folder.join("docs/market.md"))]
+        research(&db, &project, &folder).unwrap(),
+        vec![(
+            ResearchKind::MarketResearch,
+            text("docs/market.md", "# Market\n")
+        )]
     );
+}
+
+#[test]
+fn a_linked_file_or_folder_swapped_for_a_link_after_linking_is_not_read() {
+    let mut db = db();
+    let (_outside, away) = project_folder();
+    write(&away, "research.md", b"SECRET research\n");
+    write(&away, "plan.md", b"SECRET plan\n");
+    let (_dir, folder) = project_folder();
+    write(&folder, "docs/research.md", b"# Research\n");
+    write(&folder, "notes/plan.md", b"# Plan\n");
+    let project = ProjectId::new("alpha").unwrap();
+    saved(
+        &mut db,
+        &project,
+        &[
+            link(
+                "docs/research.md",
+                LinkKind::Research(ResearchKind::MarketResearch),
+            ),
+            link("notes/plan.md", LinkKind::Roadmap),
+        ],
+    );
+    assert_eq!(
+        research(&db, &project, &folder).unwrap(),
+        vec![(
+            ResearchKind::MarketResearch,
+            text("docs/research.md", "# Research\n")
+        )]
+    );
+    assert_eq!(
+        roadmap(&db, &project, &folder).unwrap(),
+        Some(text("notes/plan.md", "# Plan\n"))
+    );
+
+    std::fs::remove_file(folder.join("docs/research.md")).unwrap();
+    symlink(away.join("research.md"), folder.join("docs/research.md")).unwrap();
+    std::fs::rename(folder.join("notes"), folder.join("notes-before")).unwrap();
+    symlink(&away, folder.join("notes")).unwrap();
+
+    assert_eq!(read_linked(&folder, "docs/research.md"), None);
+    assert_eq!(read_linked(&folder, "notes/plan.md"), None);
+    assert!(research(&db, &project, &folder).unwrap().is_empty());
+    assert_eq!(roadmap(&db, &project, &folder).unwrap(), None);
+}
+
+#[test]
+fn a_hard_linked_fifo_oversized_or_non_utf8_file_is_not_read() {
+    let (_dir, folder) = project_folder();
+    write(&folder, "docs/one.md", b"# One\n");
+    std::fs::hard_link(folder.join("docs/one.md"), folder.join("docs/two.md")).unwrap();
+    assert_eq!(read_linked(&folder, "docs/one.md"), None);
+    assert_eq!(read_linked(&folder, "docs/two.md"), None);
+
+    let made = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(folder.join("docs/pipe.md")),
+    )
+    .unwrap();
+    assert!(made.success());
+    assert_eq!(read_linked(&folder, "docs/pipe.md"), None);
+
+    let cap = usize::try_from(LINK_BYTES_MAX).unwrap();
+    write(&folder, "docs/full.md", &vec![b'a'; cap]);
+    assert_eq!(
+        read_linked(&folder, "docs/full.md").map(|text| text.len()),
+        Some(cap)
+    );
+    write(&folder, "docs/over.md", &vec![b'a'; cap + 1]);
+    assert_eq!(read_linked(&folder, "docs/over.md"), None);
+    write(&folder, "docs/bytes.md", &[0xff, 0xfe, b'\n']);
+    assert_eq!(read_linked(&folder, "docs/bytes.md"), None);
+    write(&folder, ".CrazyAgent/context/brief.md", b"# Brief\n");
+    assert_eq!(read_linked(&folder, ".CrazyAgent/context/brief.md"), None);
+    assert_eq!(read_linked(&folder, "../one.md"), None);
 }
