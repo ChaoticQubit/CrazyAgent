@@ -7,7 +7,7 @@ use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
 use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
-use crate::project_setup::{Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{KeptFile, Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
@@ -141,17 +141,11 @@ impl Review {
     /// a roadmap planning file that the links store takes. The engine then plans no
     /// roadmap, so the roadmap toggle shows off and is skipped. Returns the answer.
     fn roadmap_linked(&self) -> bool {
-        let facts = &self.onboarding.facts;
-        let planned = |path: &String| {
-            facts.research.iter().any(|found| {
-                found.kind == ResearchKind::RoadmapPlanning && found.files.contains(path)
-            })
-        };
         !self.onboarding.finished
             && self.linked
-            && self.found().iter().any(|path| {
-                crate::project_setup::links::below_folder(path)
-                    && (facts.roadmap.contains(path) || planned(path))
+            && self.found().iter().any(|file| {
+                matches!(file.research, None | Some(ResearchKind::RoadmapPlanning))
+                    && crate::project_setup::links::below_folder(&file.path)
             })
     }
 
@@ -161,17 +155,27 @@ impl Review {
         self.roadmap && !self.roadmap_linked()
     }
 
-    /// The repository files the mapping found to link, its roadmap files first, each once
-    /// and at most [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX). Returns the paths.
-    fn found(&self) -> Vec<String> {
+    /// The repository files the mapping found to link, each with the group it was found
+    /// under, its roadmap files first, each once per group and at most
+    /// [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX). Returns the files.
+    fn found(&self) -> Vec<KeptFile> {
         let facts = &self.onboarding.facts;
-        let research = facts.research.iter().flat_map(|found| found.files.iter());
-        let mut found: Vec<String> = Vec::new();
-        for path in facts.roadmap.iter().chain(research) {
-            if found.len() < crate::project_setup::links::LINKS_MAX && !found.contains(path) {
-                found.push(path.clone());
+        let roadmap = facts.roadmap.iter().map(|path| (path, None));
+        let research = facts
+            .research
+            .iter()
+            .flat_map(|group| group.files.iter().map(move |path| (path, Some(group.kind))));
+        let mut found: Vec<KeptFile> = Vec::new();
+        for (path, research) in roadmap.chain(research) {
+            let file = KeptFile {
+                path: path.clone(),
+                research,
+            };
+            if found.len() < crate::project_setup::links::LINKS_MAX && !found.contains(&file) {
+                found.push(file);
             }
         }
+        assert!(found.len() <= crate::project_setup::links::LINKS_MAX);
         found
     }
 

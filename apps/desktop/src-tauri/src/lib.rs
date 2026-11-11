@@ -43,7 +43,7 @@ use crazyagent::plugins::{
 };
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
+    ContextChunk, KeptFile, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
@@ -1926,7 +1926,7 @@ async fn desktop_update_project_setup(
     name: Option<String>,
     revision: Option<u64>,
     generation: u64,
-    kept: Option<Vec<String>>,
+    kept: Option<Vec<KeptFile>>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)

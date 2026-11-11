@@ -1085,28 +1085,15 @@ fn only_a_linked_item_carries_the_linked_field_on_the_wire() {
     assert_eq!(serde_json::from_str::<ContextItem>(&wire).unwrap(), linked);
 }
 
-#[test]
-fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for_them() {
-    const ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
-    const RIVALS: &str = "docs/research-competitors.md";
-    let long = format!("docs/{}market.md", "deep/".repeat(120));
-    assert!(long.len() > links::LINK_PATH_BYTES_MAX);
-    assert!(long.len() <= DOCUMENT_PATH_BYTES_MAX);
-    let root = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(root.path()).unwrap();
+/// An imported project whose mapping is done and whose setup the owner has not confirmed
+/// since `revision`. Inputs: the folder to work in, what the mapping found as the stored
+/// column holds it, and the setup revision. Output: the engine connection and the project.
+fn found_project(base: &Path, found: &serde_json::Value, revision: u64) -> (Connection, ProjectId) {
     let folder = base.join("project");
     std::fs::create_dir_all(folder.join(".crazyagent/context")).unwrap();
-    let mut connection = database(&base);
+    let connection = database(base);
     crate::onboarding::initialize(&connection).unwrap();
     let project = ProjectId::new("found-project").unwrap();
-    let found = serde_json::json!({
-        "research": [
-            {"kind": "competitor_research", "files": [RIVALS, ".crazyagent/context/brief.md"]},
-            {"kind": "market_research", "files": ["docs/market.md", long]}
-        ],
-        "documents": [],
-        "roadmap": [ROADMAP]
-    });
     connection
         .execute(
             "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,
@@ -1137,7 +1124,7 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
         documents: vec![],
         folder: folder.to_str().unwrap().into(),
         created_ms: 1,
-        revision: 2,
+        revision,
     };
     connection
         .execute(
@@ -1145,7 +1132,14 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
             params![project.as_str(), serde_json::to_string(&stored).unwrap()],
         )
         .unwrap();
-    let confirm = |revision: u64, kept: Option<Vec<String>>| SetupAction::Update {
+    (connection, project)
+}
+
+/// A confirm of the found project's setup that asks for competitor research, market
+/// research and a planned roadmap. Inputs: the project, the setup revision the owner
+/// edited and the kept files. Output: the action.
+fn found_confirm(project: &ProjectId, revision: u64, kept: Option<Vec<KeptFile>>) -> SetupAction {
+    SetupAction::Update {
         project_id: project.clone(),
         expected_revision: revision,
         name: None,
@@ -1163,12 +1157,44 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
             documents: vec![],
         },
         kept,
-    };
+    }
+}
+
+fn kept_file(path: &str, research: Option<ResearchKind>) -> KeptFile {
+    KeptFile {
+        path: path.to_owned(),
+        research,
+    }
+}
+
+#[test]
+fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for_them() {
+    const ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
+    const RIVALS: &str = "docs/research-competitors.md";
+    let long = format!("docs/{}market.md", "deep/".repeat(120));
+    assert!(long.len() > links::LINK_PATH_BYTES_MAX);
+    assert!(long.len() <= DOCUMENT_PATH_BYTES_MAX);
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let found = serde_json::json!({
+        "research": [
+            {"kind": "competitor_research", "files": [RIVALS, ".crazyagent/context/brief.md"]},
+            {"kind": "market_research", "files": ["docs/market.md", long]}
+        ],
+        "documents": [],
+        "roadmap": [ROADMAP]
+    });
+    let (mut connection, project) = found_project(&base, &found, 2);
+    let confirm =
+        |revision: u64, kept: Option<Vec<KeptFile>>| found_confirm(&project, revision, kept);
     let kept = vec![
-        ROADMAP.to_owned(),
-        RIVALS.to_owned(),
-        ".crazyagent/context/brief.md".to_owned(),
-        long.clone(),
+        kept_file(ROADMAP, None),
+        kept_file(RIVALS, Some(ResearchKind::CompetitorResearch)),
+        kept_file(
+            ".crazyagent/context/brief.md",
+            Some(ResearchKind::CompetitorResearch),
+        ),
+        kept_file(&long, Some(ResearchKind::MarketResearch)),
     ];
     assert_eq!(confirm(2, Some(kept.clone())).validate(), Ok(()));
     let tx = connection.transaction().unwrap();
@@ -1220,10 +1246,88 @@ fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for
             ResearchKind::RoadmapPlanning,
         ]
     );
-    let too_many = confirm(5, Some(vec!["docs/a.md".to_owned(); links::LINKS_MAX + 1]));
+    let too_many = confirm(
+        5,
+        Some(vec![kept_file("docs/a.md", None); links::LINKS_MAX + 1]),
+    );
     assert_eq!(too_many.validate().unwrap_err().0, "project_setup_bounds");
-    let widest = confirm(5, Some(vec!["a".repeat(DOCUMENT_PATH_BYTES_MAX)]));
-    assert_eq!(widest.validate(), Ok(()));
-    let too_wide = confirm(5, Some(vec!["a".repeat(DOCUMENT_PATH_BYTES_MAX + 1)]));
-    assert_eq!(too_wide.validate().unwrap_err().0, "project_setup_bounds");
+    let widest = kept_file(&"a".repeat(DOCUMENT_PATH_BYTES_MAX), None);
+    assert_eq!(confirm(5, Some(vec![widest])).validate(), Ok(()));
+    let too_wide = kept_file(&"a".repeat(DOCUMENT_PATH_BYTES_MAX + 1), None);
+    assert_eq!(
+        confirm(5, Some(vec![too_wide])).validate().unwrap_err().0,
+        "project_setup_bounds"
+    );
+}
+
+#[test]
+fn a_found_file_is_linked_only_under_the_group_the_owner_kept_it_in() {
+    const PLAN: &str = "docs/plan.md";
+    const NEXT: &str = "docs/next.md";
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let found = serde_json::json!({
+        "research": [
+            {"kind": "market_research", "files": [PLAN]},
+            {"kind": "roadmap_planning", "files": [NEXT]}
+        ],
+        "documents": [],
+        "roadmap": [PLAN]
+    });
+    let (mut connection, project) = found_project(&base, &found, 2);
+    let kept = vec![
+        kept_file(PLAN, Some(ResearchKind::MarketResearch)),
+        kept_file(NEXT, Some(ResearchKind::MarketResearch)),
+        kept_file(NEXT, None),
+        kept_file("docs/invented.md", None),
+        kept_file("docs/invented.md", Some(ResearchKind::MarketResearch)),
+    ];
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &config(), &found_confirm(&project, 2, Some(kept)), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        links::list(&tx, &project).unwrap(),
+        vec![links::DocLink {
+            path: PLAN.into(),
+            kind: links::LinkKind::Research(ResearchKind::MarketResearch),
+        }],
+        "the roadmap group was turned off, a file kept under a group it was not found in \
+         and a file the mapping did not find are left out"
+    );
+    assert_eq!(
+        load_setup(&tx, &project).unwrap().unwrap().research,
+        [
+            ResearchKind::CompetitorResearch,
+            ResearchKind::RoadmapPlanning
+        ],
+        "no roadmap is linked, so the planning the owner asked for stays"
+    );
+    drop(tx);
+
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let (mut connection, project) = found_project(&base, &found, 2);
+    let kept = vec![kept_file(NEXT, Some(ResearchKind::RoadmapPlanning))];
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &config(), &found_confirm(&project, 2, Some(kept)), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        links::list(&tx, &project).unwrap(),
+        vec![links::DocLink {
+            path: NEXT.into(),
+            kind: links::LinkKind::Roadmap,
+        }],
+        "a kept roadmap planning file is linked as the roadmap"
+    );
+    assert_eq!(
+        load_setup(&tx, &project).unwrap().unwrap().research,
+        [
+            ResearchKind::CompetitorResearch,
+            ResearchKind::MarketResearch
+        ]
+    );
 }

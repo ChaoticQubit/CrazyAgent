@@ -684,11 +684,16 @@ export function openLink(url: string): Promise<Result<void>> {
   return call<void>("desktop_open_link", { url });
 }
 
+/** One file the setup mapping found that the owner keeps linked, with the group it was found
+ * under: `research` is the research kind, null for a file found as the roadmap. */
+export interface KeptFile { path: string; research: JobKind | null }
+
 /** Changes a project's details, research, pool and team in one engine change. Inputs: project id,
  * the whole new setup (no documents), a generation, the new name or null to keep it, the setup
  * revision the screen showed, so a change made elsewhere is refused, and the files the setup
- * mapping found that the owner keeps linked, null to leave the links alone. Output: the receipt. */
-export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null, kept: string[] | null = null): Promise<Result<IntentReceipt>> {
+ * mapping found that the owner keeps linked, each with its group, null to leave the links alone.
+ * Output: the receipt. */
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null, kept: KeptFile[] | null = null): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation, kept });
 }
 

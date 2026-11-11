@@ -784,6 +784,16 @@ pub enum SetupView {
     LiveWithoutSession(String),
 }
 
+/// One file the setup mapping found that the owner kept linked, with the group it was found
+/// under: `research` is the research kind, none for a file found as the roadmap. A file
+/// found under two groups is kept once per group the owner left on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptFile {
+    pub path: String,
+    pub research: Option<ResearchKind>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SetupAction {
@@ -811,7 +821,7 @@ pub enum SetupAction {
         name: Option<String>,
         setup: ProjectSetup,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        kept: Option<Vec<String>>,
+        kept: Option<Vec<KeptFile>>,
     },
     Remove {
         project_id: ProjectId,
@@ -923,7 +933,9 @@ impl SetupAction {
                 }
                 if kept.as_ref().is_some_and(|kept| {
                     kept.len() > links::LINKS_MAX
-                        || kept.iter().any(|path| path.len() > DOCUMENT_PATH_BYTES_MAX)
+                        || kept
+                            .iter()
+                            .any(|file| file.path.len() > DOCUMENT_PATH_BYTES_MAX)
                 }) {
                     return Err(failure("project_setup_bounds"));
                 }
@@ -2099,9 +2111,10 @@ fn rejected(code: &str) -> Outcome {
 
 /// Changes an existing project's name, description, stack, platforms, research, pool and team.
 /// With `kept`, the files the setup mapping found that the owner kept become the project's
-/// links, replacing earlier ones, and no research job is queued for a kind they cover.
+/// links, each under the group it was kept in, replacing earlier ones, and no research job
+/// is queued for a kind they cover.
 /// Takes the transaction, configuration, project, the setup revision the owner edited, an
-/// optional new name, the new setup and the kept paths, none to leave the links alone;
+/// optional new name, the new setup and the kept files, none to leave the links alone;
 /// documents keep their own add and delete actions. Returns Applied, or a plain rejection
 /// such as `stale_revision` after a concurrent change.
 fn update(
@@ -2111,7 +2124,7 @@ fn update(
     expected_revision: u64,
     name: Option<&str>,
     setup: &ProjectSetup,
-    kept: Option<&[String]>,
+    kept: Option<&[KeptFile]>,
 ) -> Result<Outcome, EngineError> {
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));

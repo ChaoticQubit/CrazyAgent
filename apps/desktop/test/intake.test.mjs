@@ -791,9 +791,14 @@ test("the first confirm keeps the found roadmap and research files the owner lef
     ],
   };
   const mapped = view({ facts });
-  assert.deepEqual(intake.confirmKept(mapped, []), ["research/docs/ss-phase1-revision/report.md", "docs/rivals.md", "docs/market.md"]);
-  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "market_research"]), ["docs/rivals.md", "research/docs/ss-phase1-revision/report.md"]);
+  const roadmap = "research/docs/ss-phase1-revision/report.md";
+  const rivals = [{ path: "docs/rivals.md", research: "competitor_research" }, { path: roadmap, research: "competitor_research" }];
+  assert.deepEqual(intake.confirmKept(mapped, []), [{ path: roadmap, research: null }, ...rivals, { path: "docs/market.md", research: "market_research" }]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "market_research"]), rivals, "a file also found as the roadmap goes only with the group left on");
+  assert.deepEqual(intake.confirmKept(mapped, ["competitor_research"]), [{ path: roadmap, research: null }, { path: "docs/market.md", research: "market_research" }]);
   assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "competitor_research", "market_research"]), []);
+  const twice = view({ facts: { ...facts, roadmap: [roadmap, roadmap] } });
+  assert.deepEqual(intake.confirmKept(twice, ["competitor_research", "market_research"]), [{ path: roadmap, research: null }], "a file named twice in one group is kept once");
   assert.equal(intake.confirmKept(view({ facts, finished: true }), []), null, "a saved setup leaves its links alone");
   assert.equal(intake.confirmKept(view(), []), null, "nothing found, nothing to link");
   const many = view({ facts: { ...view().facts, research: [{ kind: "market_research", files: Array.from({ length: 40 }, (_, at) => `docs/${at}.md`) }] } });

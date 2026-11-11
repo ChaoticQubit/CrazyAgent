@@ -7,7 +7,7 @@ use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
-use crate::project_setup::{ProjectSetup, ResearchKind, SetupAction, SetupQuery};
+use crate::project_setup::{KeptFile, ProjectSetup, ResearchKind, SetupAction, SetupQuery};
 use crate::projects_home::icloud::Progress;
 use crate::projects_home::{AddMode, AddOverride, Measured};
 use crate::protocol::ProjectId;
@@ -1632,9 +1632,18 @@ fn confirming_links_the_found_files_unless_the_owner_turns_them_off() {
         );
         kept
     };
+    let file = |path: &str, research: Option<ResearchKind>| KeptFile {
+        path: path.to_owned(),
+        research,
+    };
     assert_eq!(
         sent(false),
-        Some(vec![ROADMAP.to_owned(), "docs/rivals.md".to_owned()])
+        Some(vec![
+            file(ROADMAP, None),
+            file("docs/rivals.md", Some(ResearchKind::CompetitorResearch)),
+            file(ROADMAP, Some(ResearchKind::CompetitorResearch)),
+        ]),
+        "each found file goes with the group it was found under"
     );
     assert_eq!(sent(true), Some(Vec::new()));
 }
@@ -1644,6 +1653,10 @@ fn planning_a_roadmap_is_off_and_skipped_while_the_found_roadmap_is_linked() {
     const ROADMAP: &str = "docs/roadmap.md";
     const PLAN: &str = "[x] Plan a roadmap after research";
     const NOTE: &str = "Not planned while the found roadmap is linked.";
+    let roadmap_file = || KeptFile {
+        path: ROADMAP.to_owned(),
+        research: None,
+    };
     let sent = |shell: &mut Shell| {
         shell.key(Key::Enter);
         let Some(Request::Setup(SetupQuery::Change { action, .. })) =
@@ -1713,7 +1726,7 @@ fn planning_a_roadmap_is_off_and_skipped_while_the_found_roadmap_is_linked() {
     linked.key(Key::Tab);
     assert_eq!(
         sent(&mut linked),
-        (false, Some(vec![ROADMAP.to_owned()])),
+        (false, Some(vec![roadmap_file()])),
         "the toggle is skipped, so no planning is asked for beside the linked roadmap"
     );
 
@@ -1744,7 +1757,7 @@ fn planning_a_roadmap_is_off_and_skipped_while_the_found_roadmap_is_linked() {
     again.key(Key::Tab);
     assert_eq!(
         sent(&mut again),
-        (false, Some(vec![ROADMAP.to_owned()])),
+        (false, Some(vec![roadmap_file()])),
         "linking the files again takes the planning back off"
     );
 }
