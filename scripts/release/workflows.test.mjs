@@ -256,26 +256,56 @@ test("macOS CI names the Codex and Claude Code it installed, and a graphify inst
   assert(pin && engine.includes(`"aarch64-apple-darwin",\n        "${pin[1]}",`), "CI checks uv against the engine's own uv pin");
   assert.match(graphify, /\n\s+if ! echo "\$UV_SHA256  \$work\/uv\.tar\.gz" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n/);
   assert.match(graphify, / UV_PYTHON_PREFERENCE=only-managed\n/, "no system Python");
+  assert.match(graphify, / venv --no-project --no-config --python 3\.12\.15 "\$venv"\n/, "an exact Python, not the newest 3.12 the uv table knows");
   assert.match(graphify, /pip install --no-config --python "\$venv\/bin\/python" --require-hashes --no-build --requirements crates\/crazyagent\/src\/setup\/locks\/graphifyy-0\.9\.9\.txt\n/);
   assert.match(graphify, /\n\s+echo "CRAZYAGENT_GRAPHIFY=\$venv\/bin\/graphify" >> "\$GITHUB_ENV"$/);
   assert.doesNotMatch(graphify, /GITHUB_PATH|\$HOME/, "graphify reaches only the rows that name it");
   assert(macos.indexOf(graphify) < macos.findIndex((text) => text.includes("name: Test engine and desktop crates")));
 });
 
-test("macOS CI installs the context-mode the default pack pins the way the engine does, scripts only after npm's record of the tarball hash matches the pin, and names it to the shared-install rows", async () => {
+test("macOS CI installs the context-mode the default pack pins from the committed lock with no package scripts, then builds only better-sqlite3, and names it to the shared-install rows", async () => {
   const macos = steps(await workflow("ci.yml"), "macos");
   const step = macos.find((text) => text.includes("name: Install the pinned context-mode for the shared-install rows"));
   assert(step, "macOS CI installs context-mode");
   assert.match(step, /' crates\/crazyagent\/src\/setup\/pack\.toml\)\n/, "version and hash come from the default pack");
-  const install = step.indexOf("npm install --prefix \"$install\" --ignore-scripts --no-save");
+  const copy = step.indexOf("cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json \"$install/\"");
+  const locked = step.indexOf('test "$locked" = "$version $integrity"');
+  const install = step.indexOf("npm ci --prefix \"$install\" --ignore-scripts --no-audit");
   const compare = step.indexOf('test "$recorded" = "$integrity"');
-  const rebuild = step.indexOf("npm rebuild --prefix \"$install\"");
-  assert(install > 0 && install < compare && compare < rebuild, "no package script runs before the hash check");
+  const rebuild = step.indexOf("npm rebuild better-sqlite3 --prefix \"$install\" --no-audit");
+  assert(copy > 0 && copy < locked && locked < install && install < compare && compare < rebuild, "the lock is checked against the pin, installed with no scripts and checked again before the one build");
+  assert.equal(step.match(/npm rebuild/g)?.length, 1, "one rebuild");
+  assert.doesNotMatch(step, /npm install|npm i |npx /, "nothing resolves a version outside the lock");
   assert.match(step, /npm_config_build_from_source=true npm_config_nodedir=/, "the native module builds from source against the pinned Node's own headers");
   assert.match(step, /\n\s+install="\$RUNNER_TEMP\/context-mode"\n/);
   assert.match(step, /\n\s+echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=\$install" >> "\$GITHUB_ENV"$/);
   assert.doesNotMatch(step, /GITHUB_PATH|\$HOME|npm install -g|--global/);
   assert(macos.indexOf(step) < macos.findIndex((text) => text.includes("name: Test engine and desktop crates")));
+});
+
+test("the committed context-mode lock CI installs from holds the default pack's version and hash and pins every package by hash from the npm registry", async () => {
+  const root = new URL("../../", import.meta.url);
+  const pack = await readFile(new URL("crates/crazyagent/src/setup/pack.toml", root), "utf8");
+  const entry = pack.split("[[entries]]").find((block) => /^id = "context-mode"$/m.test(block));
+  const version = entry?.match(/^install = ".*\bcontext-mode@([0-9]+\.[0-9]+\.[0-9]+) /m)?.[1];
+  const integrity = entry?.match(/^integrity = "(sha512-[A-Za-z0-9+/]+=*)"$/m)?.[1];
+  assert(version && integrity, "the default pack pins an exact context-mode");
+  const manifest = JSON.parse(await readFile(new URL(".github/ci/context-mode/package.json", root), "utf8"));
+  assert.deepEqual(manifest.dependencies, { "context-mode": version });
+  assert.equal(manifest.private, true);
+  const lock = JSON.parse(await readFile(new URL(".github/ci/context-mode/package-lock.json", root), "utf8"));
+  assert.equal(lock.lockfileVersion, 3);
+  assert.equal(lock.name, manifest.name);
+  assert.deepEqual(lock.packages[""].dependencies, manifest.dependencies);
+  assert.equal(lock.packages["node_modules/context-mode"].version, version);
+  assert.equal(lock.packages["node_modules/context-mode"].integrity, integrity);
+  const packages = Object.entries(lock.packages).filter(([path]) => path !== "");
+  assert(packages.length > 1 && packages.length < 1000, `${packages.length} packages`);
+  for (const [path, locked] of packages) {
+    assert.match(locked.integrity ?? "", /^sha512-[A-Za-z0-9+/]+=*$/, `${path} is pinned by hash`);
+    assert.equal(new URL(locked.resolved).origin, "https://registry.npmjs.org", `${path} comes from the npm registry`);
+    assert.notEqual(locked.link, true, `${path} is no link`);
+  }
 });
 
 test("Linux CI installs Codex from the pinned, checksum-checked release archive and names it and Claude Code to the rows that run them, before the tests", async () => {

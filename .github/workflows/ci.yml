@@ -633,7 +633,7 @@ jobs:
           venv="$RUNNER_TEMP/graphify"
           rm -rf "$venv"
           export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
-          "$work/bin/uv" venv --no-project --no-config --python 3.12 "$venv"
+          "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
           "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
           "$venv/bin/graphify" --help > /dev/null
           echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
@@ -652,11 +652,14 @@ jobs:
           install="$RUNNER_TEMP/context-mode"
           rm -rf "$install"
           mkdir -p "$install"
-          npm install --prefix "$install" --ignore-scripts --no-save --no-audit --no-fund --no-update-notifier --loglevel=error "context-mode@$version"
+          cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json "$install/"
+          locked="$(node -p 'const entry = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"]; `${entry.version} ${entry.integrity}`' "$install/package-lock.json")"
+          test "$locked" = "$version $integrity"
+          npm ci --prefix "$install" --ignore-scripts --no-audit --no-fund --no-update-notifier --loglevel=error
           recorded="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"].integrity' "$install/node_modules/.package-lock.json")"
           test "$recorded" = "$integrity"
           npm_config_build_from_source=true npm_config_nodedir="$(dirname "$(dirname "$(command -v node)")")" \
-            npm rebuild --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
+            npm rebuild better-sqlite3 --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
           test -f "$install/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
           test "$(node -p 'require(process.argv[1]).version' "$install/node_modules/context-mode/package.json")" = "$version"
           echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=$install" >> "$GITHUB_ENV"
