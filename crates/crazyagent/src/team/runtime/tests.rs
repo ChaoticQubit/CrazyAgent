@@ -15666,13 +15666,13 @@ fn a_wake_task_with_its_message_already_delivered_says_so() {
     team.workers.clear();
 }
 
-/// A wake task whose turn never reached its agent before CrazyAgent closed, and whose run
-/// then gives up resuming after the owner's retry, is let go and handed out again as the
-/// same task: a fresh conversation gets the still unread message that woke it under
+/// A wake task whose turn never reached its agent before CrazyAgent closed is let go by the
+/// next start, which settles that delivery with no run left to resume, and handed out again
+/// as the same task: a fresh conversation gets the still unread message that woke it under
 /// "Messages for you", while a kept session is told it was already delivered and gets no
 /// text (HB-S5-C-RESIDUAL). Messages the agent read or replied to stay out of both.
 #[test]
-fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only() {
+fn a_wake_task_let_go_at_start_brings_its_unread_message_to_a_fresh_conversation_only() {
     use super::super::master::{WAKE_DELIVERED, WAKE_TASK};
     for fresh in [true, false] {
         let fixture = Fixture::new(2);
@@ -15761,30 +15761,33 @@ fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only()
                 |row| row.get(0),
             )
             .unwrap();
-
-        team.workers.clear();
-        drop(team);
-        let mut team = fixture.runtime();
-        crate::recovery::settle(&fixture.connection).unwrap();
-        let none = BTreeSet::new();
-        team.resume_interrupted(&fixture.setup, &fixture.access, &none)
-            .unwrap();
-        assert!(crate::recovery::retry(&fixture.base, woken).unwrap());
-        team.resume_interrupted(&fixture.setup, &fixture.access, &none)
-            .unwrap();
-        let run: (String, Option<i64>) = fixture
+        let working: (String, Option<i64>) = fixture
             .connection
             .query_row(
-                "SELECT state,task FROM recovery_runs WHERE agent=?1",
+                "SELECT status,task FROM team_agents WHERE id=?1",
                 [woken],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(
-            run,
-            ("failed".to_owned(), None),
-            "the run gave up and let go of its task"
+            working,
+            ("working".to_owned(), Some(task)),
+            "CrazyAgent closes while the wake turn is out"
         );
+
+        team.workers.clear();
+        drop(team);
+        let mut team = fixture.runtime();
+        let runs: i64 = fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM recovery_runs WHERE agent=?1",
+                [woken],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(runs, 0, "the start let go of the turn that never arrived");
+        assert!(!crate::recovery::retry(&fixture.base, woken).unwrap());
         let (status, receipt): (String, String) = fixture
             .connection
             .query_row(
