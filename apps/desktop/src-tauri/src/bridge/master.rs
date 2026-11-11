@@ -928,7 +928,14 @@ fallback_allowed = false
                 .map_err(|error| error.code)?;
             phases.push(match stopped.outcome {
                 ActionOutcome::Applied => MasterTurnPhase::Cancelled,
-                ActionOutcome::Rejected => MasterTurnPhase::Blocked,
+                ActionOutcome::Rejected => {
+                    assert_eq!(
+                        stopped.rejection.as_deref(),
+                        Some("master_turn_not_current"),
+                        "turn {round}"
+                    );
+                    MasterTurnPhase::Blocked
+                }
                 other => panic!("stopping turn {round} ended {other:?}"),
             });
             ids.push(sent.intent.operation_id);
