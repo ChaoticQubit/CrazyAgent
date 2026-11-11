@@ -524,6 +524,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_cant_start", "The server can't start."),
     (
+        crate::sandbox::OWNER_PORTS_UNREADABLE,
+        "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
+    ),
+    (
         "server_cleanup_uncertain",
         "The server's processes could not be confirmed stopped.",
     ),
