@@ -27022,12 +27022,14 @@ fn the_teammate_ref_rules_name_the_lead_s_recorded_branch() {
 /// AGENT-REF-ALLOW-NARROW r1 L1: a native lead adopted in its own clone with no recorded
 /// agent branch, as a clone made before task branches were on `agent/<folder>`, leaves its
 /// teammates no ref write at all: their profile has no teammate ref exemption. The old clone
-/// is cut from the project repository the engine makes, as a lead's start makes it first.
+/// is cut from the project repository the engine makes, as a lead's start makes it first,
+/// and the change set store is open, as every engine start opens it before any launch.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_clone_lead_with_no_recorded_agent_branch_gives_its_teammates_no_ref_write() {
     let fixture = Fixture::new(1);
     own_branch_access(&fixture);
+    drop(crate::landing::open(&fixture.base).unwrap());
     let root = fixture.base.join("project").canonicalize().unwrap();
     let git_home = fixture.base.join("repository-home");
     std::fs::create_dir(&git_home).unwrap();
