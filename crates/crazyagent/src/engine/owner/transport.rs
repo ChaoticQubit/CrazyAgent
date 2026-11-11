@@ -2859,10 +2859,16 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     Ok(bytes)
 }
 
+/// The most bytes of a repository's `.git/config` a dispatch reads: the bound the
+/// repository admission puts on the same config's listing, so a repository with thousands
+/// of tracked branches that was admitted is also dispatched.
+#[cfg(unix)]
+const DISPATCH_CONFIG_BYTES_MAX: usize = 8 * 1024 * 1024;
+
 #[cfg(unix)]
 fn dispatch_config(path: &Path) -> Result<(), EngineError> {
     crate::worktrees::validate_metadata(path)?;
-    let bytes = dispatch_file(&path.join(".git/config"), 65536)?;
+    let bytes = dispatch_file(&path.join(".git/config"), DISPATCH_CONFIG_BYTES_MAX)?;
     let text = std::str::from_utf8(&bytes).map_err(io_error)?;
     let mut section = String::new();
     for raw in text.lines() {
