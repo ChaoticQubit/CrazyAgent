@@ -275,11 +275,6 @@ jobs:
             echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
             echo "VCPKGRS_TRIPLET=x64-windows-static-md"
           } >> "$GITHUB_ENV"
-      - if: runner.environment == 'github-hosted'
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: release-${{ matrix.target }}
-          cache-on-failure: true
       - name: Use a clean Rust build folder
         if: runner.environment != 'github-hosted'
         run: |

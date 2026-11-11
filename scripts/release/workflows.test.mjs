@@ -141,10 +141,10 @@ test("the Windows CI job runs on every event and shows its failures, but cannot 
 
 const RUST_CACHE = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0";
 
-test("every GitHub-hosted Rust job keeps its build cache with the pinned rust-cache action, saved even when the job fails, and no job caches the whole target folder", async () => {
+test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust-cache action, saved even when the job fails; the release build, which holds the signing keys, runs no third-party cache action; and no job caches the whole target folder", async () => {
   const ci = await workflow("ci.yml");
   const release = await workflow("release.yml");
-  for (const [text, job, prefix] of [[ci, "linux", "ci-linux"], [ci, "macos", "ci-macos"], [ci, "windows", "ci-windows"], [release, "build", "release-${{ matrix.target }}"]]) {
+  for (const [text, job, prefix] of [[ci, "linux", "ci-linux"], [ci, "macos", "ci-macos"], [ci, "windows", "ci-windows"]]) {
     const all = steps(text, job);
     const at = all.findIndex((step) => step.includes("rust-cache@"));
     assert(at >= 0, `${job} restores a Rust build cache`);
@@ -158,6 +158,7 @@ test("every GitHub-hosted Rust job keeps its build cache with the pinned rust-ca
     ].join("\n"), job);
     assert(all.findIndex((step) => step.includes("- name: Install Rust toolchain")) < at, `${job} keys its cache on the installed toolchain`);
   }
+  assert.doesNotMatch(release, /rust-cache/, "no third-party action runs beside the release signing keys");
   for (const [text, jobs] of [[ci, ["linux", "macos", "windows"]], [release, ["prepare", "build", "publish"]]]) {
     assert.match(text, /^ {2}CARGO_INCREMENTAL: "0"$/m);
     for (const job of jobs) {
@@ -189,7 +190,7 @@ test("on a self-hosted runner CI and release install nothing globally, and CI ke
   for (const [name, job] of [["ci.yml", "linux"], ["ci.yml", "macos"], ["release.yml", "build"]]) {
     const all = steps(name === "ci.yml" ? ci : release, job);
     const text = all.join("\n");
-    assert.match(text, /- if: runner\.environment == 'github-hosted'\n\s+uses: Swatinem\/rust-cache@/, job);
+    if (name === "ci.yml") assert.match(text, /- if: runner\.environment == 'github-hosted'\n\s+uses: Swatinem\/rust-cache@/, job);
     assert.match(text, /command -v rustup/, job);
     for (const step of all) {
       for (const install of step.matchAll(/^(?!\s*echo ).*(\bsudo (?!-n true|apt-get)\S+|\bbrew install\b).*$/gm)) {
