@@ -9,7 +9,8 @@ const { consoleLines, turnLines } = await import("../src/screens/project/convers
 const sessions = await import("../src/screens/project/sessions.tsx");
 
 const turn = (patch) => ({ id: "t1", ordinal: 1, phase: "succeeded", reason: null, reply: null, ...patch });
-const row = (seq, speaker, mode, text, harness = mode === "live" ? "claude-code" : "rcli") => ({ seq, speaker, mode, harness, text, at_ms: 1000 + seq });
+const sourceOf = (speaker, mode) => speaker === "switch" ? "switch" : mode === "live" ? "terminal" : "turn";
+const row = (seq, speaker, mode, text, harness = mode === "live" ? "claude-code" : "rcli", source = sourceOf(speaker, mode)) => ({ seq, speaker, mode, harness, text, at_ms: 1000 + seq, source });
 const lines = (rows, turns, sent = {}) => stored.conversationLines(rows, turns, (one) => turnLines(one, sent, {}, 0));
 const said = (list) => list.map((line) => `${line.kind}: ${line.text}`);
 const SWITCHED = "Switched to Claude Code. The conversation continues: Claude Code got its earlier turns, newest first, and the open tasks.";
@@ -54,6 +55,34 @@ test("stored messages alone read as the owner's words, replies, engine requests 
     `engine: ${stored.NO_TEXT}`, "reply: launch shipped", "engine: A result came in.", `engine: ${BACK}`,
   ]);
   assert.deepEqual(stored.messageLines(rows).map((line) => line.id), ["m-1", "m-2", "m-3", "m-4-switch"]);
+});
+
+test("words read from the harness record never show as words the owner typed here", () => {
+  const rows = [
+    row(1, "owner", "live", "ship it", "claude-code", "record"), row(2, "master", "live", "shipped", "claude-code", "record"),
+    row(3, "owner", "live", null, "claude-code", "counter"), row(4, "master", "live", "last line", "claude-code", "counter"),
+    row(5, "engine", "live", "A result came in."), row(6, "owner", "live", "seen typed"), row(7, "master", "live", "done"),
+    row(8, "switch", "live", SWITCHED, "claude-code", "backfill"),
+  ];
+  assert.deepEqual(rows.map(stored.fromRecord), [true, true, true, true, false, false, false, false]);
+  assert.deepEqual(said(stored.messageLines(rows)), [
+    `engine: ${stored.RECORD_TYPED} ship it`, "reply: shipped", `engine: ${stored.NO_TEXT}`, "reply: last line",
+    "engine: A result came in.", "owner: seen typed", "reply: done", `engine: ${SWITCHED}`,
+  ]);
+  assert.equal(stored.messageLines(rows).filter((line) => line.kind === "owner").length, 1, "only the words the engine saw are an owner line");
+  const list = stored.messageRows(rows, CATALOG);
+  assert.deepEqual(list.filter((one) => one.kind !== "switch").map((one) => one.who), [
+    "You (read from the harness record)", "Claude Code (read from the harness record)",
+    "You (read from the harness record)", "Claude Code (read from the harness record)",
+    "CrazyAgent", "You", "Claude Code",
+  ]);
+  assert.equal(list[2].text, stored.NO_TEXT, "a counted turn has no words");
+  const html = renderToStaticMarkup(createElement(stored.MessageList, { rows: list }));
+  assert.equal(html.match(/read from the harness record/g).length, 4);
+  const mixed = [row(1, "owner", "one_turn", "plan"), row(2, "master", "one_turn", "planned"), row(3, "switch", "live", SWITCHED), row(4, "owner", "live", "ship it", "claude-code", "record")];
+  assert.deepEqual(said(lines(mixed, [turn({ id: "t1", reply: { text: "planned" } })], { t1: "plan" })), [
+    "owner: plan", "reply: planned", `engine: ${SWITCHED}`, `engine: ${stored.RECORD_TYPED} ship it`,
+  ]);
 });
 
 test("a move from the one-turn master to Claude Code keeps the earlier turns above the Switched to divider", () => {

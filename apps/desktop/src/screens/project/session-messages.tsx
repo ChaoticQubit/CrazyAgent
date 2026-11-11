@@ -13,6 +13,10 @@ export const MESSAGES_HELD_MAX = 4096;
 export const NO_TEXT = "Typed in the master's terminal. The words were not read.";
 /** What the master view says when a session holds more messages than the view reads. */
 export const TOO_LONG = "This session has more messages than this view holds. Open it in Sessions to read the earlier ones.";
+/** What marks a message whose words the engine did not see typed. */
+export const FROM_RECORD = "read from the harness record";
+/** What leads the owner's words in the console when they were read from the harness record. */
+export const RECORD_TYPED = "Typed in the master's terminal, as the harness record has it:";
 /** What a plain message list says once it holds `MESSAGES_HELD_MAX` rows and older ones exist. */
 export const EARLIER_NOT_SHOWN = `Earlier messages are not shown. This list holds the newest ${MESSAGES_HELD_MAX}.`;
 
@@ -84,12 +88,23 @@ export function heldView(rows: readonly SessionMessage[], cursor: number | null,
   return { whole, capped };
 }
 
+/** Whether a stored message holds words the engine did not see typed: text read from the
+ * harness's own record, or a row that stands for a terminal turn an older engine only
+ * counted. Input: the row. Output: whether a view marks it. */
+export function fromRecord(row: SessionMessage): boolean {
+  return row.source === "record" || row.source === "counter";
+}
+
 /** One stored message as a console line: the owner's words, the engine's request, the
  * master's reply, or the divider where another master took the conversation over. An owner
- * row with no text says the words were typed in the terminal. Input: the row. Output: the
- * line, or null for a row of any other speaker with no text. */
+ * row with no text says the words were typed in the terminal, and owner words read from the
+ * harness record show as a note that says so, never as the owner's own line. Input: the
+ * row. Output: the line, or null for a row of any other speaker with no text. */
 export function messageLine(row: SessionMessage): ConsoleLine | null {
-  if (row.speaker === "owner") return row.text === null ? { id: `m-${row.seq}`, kind: "engine", text: NO_TEXT } : { id: `m-${row.seq}`, kind: "owner", text: row.text };
+  if (row.speaker === "owner") {
+    if (row.text === null) return { id: `m-${row.seq}`, kind: "engine", text: NO_TEXT };
+    return fromRecord(row) ? { id: `m-${row.seq}`, kind: "engine", text: `${RECORD_TYPED} ${row.text}` } : { id: `m-${row.seq}`, kind: "owner", text: row.text };
+  }
   if (row.text === null) return null;
   if (row.speaker === "switch") return { id: `m-${row.seq}-switch`, kind: "engine", text: row.text };
   return { id: `m-${row.seq}`, kind: row.speaker === "master" ? "reply" : "engine", text: row.text };
@@ -137,16 +152,18 @@ export type MessageRow = { key: string; kind: "switch"; text: string } | { key: 
 
 /** The rows of the plain message list a session shows when opened: each message with who
  * said it, the owner as "You", the engine as "CrazyAgent" and the master by `ranBy`, and
- * each master switch as a divider. Inputs: the stored rows and the harness catalog, if read.
- * Output: the rows, oldest first. */
+ * each master switch as a divider. A message read from the harness record says so beside
+ * who said it. Inputs: the stored rows and the harness catalog, if read. Output: the rows,
+ * oldest first. */
 export function messageRows(rows: readonly SessionMessage[], harnesses: HarnessEntry[] | null): MessageRow[] {
   const shown: MessageRow[] = [];
   for (const row of rows) {
     const key = `m-${row.seq}`;
+    const said = (who: string) => fromRecord(row) ? `${who} (${FROM_RECORD})` : who;
     if (row.speaker === "switch") {
       if (row.text !== null) shown.push({ key, kind: "switch", text: row.text });
-    } else if (row.speaker === "owner") shown.push({ key, kind: "owner", who: "You", text: row.text ?? NO_TEXT });
-    else if (row.text !== null) shown.push({ key, kind: row.speaker, who: row.speaker === "engine" ? "CrazyAgent" : ranBy(row.mode, row.harness, harnesses), text: row.text });
+    } else if (row.speaker === "owner") shown.push({ key, kind: "owner", who: said("You"), text: row.text ?? NO_TEXT });
+    else if (row.text !== null) shown.push({ key, kind: row.speaker, who: said(row.speaker === "engine" ? "CrazyAgent" : ranBy(row.mode, row.harness, harnesses)), text: row.text });
   }
   assert(shown.length <= rows.length, "more list rows than stored rows");
   return shown;
