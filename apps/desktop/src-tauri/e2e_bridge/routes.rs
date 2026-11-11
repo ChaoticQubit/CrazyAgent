@@ -2773,14 +2773,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: u64,
                 version: u64,
-                option: Option<u8>,
-                text: Option<String>,
+                picks: Vec<u8>,
+                comment: Option<String>,
             }
-            let Args { id, version, option, text } = match parse(args) {
+            let Args { id, version, picks, comment } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option.into_iter().collect(), text)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, picks, comment)?; call.await }.await;
             routed(result)
         }
         "desktop_dismiss_question" => {

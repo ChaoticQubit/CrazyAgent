@@ -585,7 +585,7 @@ async function main() {
         const row = question(id);
         if (row?.status !== "answered" || row.answer !== "Postgres") throw new Refused("not_answered", JSON.stringify(row));
         const typed = await deliveredOnce(id, "answered", "Postgres");
-        await staleAgain("desktop_answer_question", { id, version: 0, option: 1, text: null });
+        await staleAgain("desktop_answer_question", { id, version: 0, picks: [1], comment: null });
         if (question(id).answer !== "Postgres") throw new Refused("stale_answer_changed_the_record");
         return `delivered once: ${typed.split("\n")[0].slice(0, 120)}`;
       });
