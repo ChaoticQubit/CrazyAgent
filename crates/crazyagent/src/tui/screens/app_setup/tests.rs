@@ -1566,7 +1566,7 @@ fn the_sockets_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
     for (width, height) in ASK_SIZES {
         let mut shell = settings(width, height);
         shell.key(Key::Char('l'));
-        let (first, last) = ("Linux limited-network sockets:", "other sockets reach any");
+        let (first, last) = ("Linux limited-network sockets:", "host.");
         ask_in_body(&mut shell, width, height, first, last);
     }
 }
