@@ -63,6 +63,10 @@ const PATCH_TOO_LARGE: &str = "CrazyAgent: overlapping edits are checked in this
 /// Why a patch is held when the engine did not answer for all its files in one wait.
 const PATCH_UNCHECKED: &str = "CrazyAgent: the engine did not check every file of this patch in time, so it is held. Try again in a moment, or split it.";
 const _: () = assert!(PATCH_PATHS_MAX == 32);
+const _: () = assert!(
+    PANE_WAIT.as_millis() + ASK_WAIT.as_millis() + REQUEST_WAIT.as_millis()
+        < 1000 * Event::CodexEdit.timeout_seconds() as u128
+);
 
 /// The hook events the relay runs on, each named by its `coord-hook` argument: Claude
 /// Code's after every tool call, at a stop, before AskUserQuestion, on a permission prompt
@@ -723,10 +727,14 @@ fn first_edit(folder: &Mailbox, socket: Option<&Path>, who: &Identity) -> Option
 /// refused (Q15, OS-8, PA1213-F1, F2). Takes the folder, the caller-socket mailbox, the
 /// identity and the hook input. Returns the reason to deny, or None to let it run.
 fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value) -> Option<String> {
+    let edit = edited(input);
+    if edit == Edit::Files(Vec::new()) {
+        return None;
+    }
     if who.unnamed {
         return Some(UNNAMED_EDIT.to_owned());
     }
-    let refused = match edited(input) {
+    let refused = match edit {
         Edit::Files(files) => return guard_files(folder, socket, who, &files),
         Edit::Unplaced => UNPLACED_PATCH,
         Edit::TooMany => PATCH_TOO_LARGE,

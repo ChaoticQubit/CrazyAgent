@@ -7591,10 +7591,8 @@ impl TeamRuntime {
         let endpoint = matches!(account.reach, TeamReach::Endpoint { .. });
         let hookless =
             crate::coord::settings::HarnessKind::from_harness(launch).is_some_and(|kind| {
-                kind != crate::coord::settings::HarnessKind::Rcli
-                    && kind
-                        .lacks(endpoint, crate::coord::settings::Protection::EditGuard)
-                        .is_some()
+                kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
+                    .is_some()
             });
         self.connection
             .execute(

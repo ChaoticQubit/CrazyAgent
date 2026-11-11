@@ -160,7 +160,7 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
             (_, SignInMethod::Subscription) => out.push(choice(
                 Some(NativeAuthMethod::ClaudeOfficial),
                 "Sign in with your Claude subscription",
-                "Recommended. Uses your Claude Pro or Max plan. Claude opens in your browser.",
+                "Recommended. Uses your Claude Pro or Max plan. Claude opens in your browser. Claude Code has no sign-in code.",
             )),
             (Provider::Chatgpt | Provider::OpenaiApi, SignInMethod::ApiKey) => out.push(choice(
                 None,

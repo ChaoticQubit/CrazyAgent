@@ -313,6 +313,16 @@ fn a_codex_edit_runs_the_guard_alone() {
         held["hookSpecificOutput"]["permissionDecisionReason"],
         UNNAMED_EDIT
     );
+    assert_eq!(
+        in_mailbox(
+            Event::CodexEdit,
+            &folder,
+            &who(None, true),
+            &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": base})
+        ),
+        None,
+        "a shell call that edits nothing is never held, named or not"
+    );
 
     roster(Overlaps::Block);
     let outside = in_mailbox(
