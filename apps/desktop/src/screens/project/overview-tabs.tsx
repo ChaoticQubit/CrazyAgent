@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { loadRunMode } from "../../api-ide";
 import { acceptOverviewTab, loadOverview, overviewCopy, refreshOverview, rejectOverviewTab, saveOverviewTab, OVERVIEW_POLL_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
@@ -41,6 +41,10 @@ export interface OverviewActions {
  * was refused. */
 export interface TabReview { busy: boolean; note: string }
 
+/** What one generated tab's panel shows for the keyboard's sake: its mode, and whether a
+ * refresh proposal's banner is on it. */
+export interface PanelState { mode: "idle" | "editing" | "reviewing"; proposal: boolean }
+
 /** How an accept or a reject ended: done, or refused and why. */
 export interface ChoiceOutcome { done: boolean; note: string }
 
@@ -69,6 +73,9 @@ const BLOCKED: Record<string, string> = { blank: "its file is empty", too_large:
 const COMPETITOR = "competitor_research";
 const LINKS_SHOWN = 5;
 const TAB_CHANGED = "overview_tab_changed";
+const EDIT_OPEN = "ov-edit-open";
+const REVIEW_OPEN = "ov-review-open";
+const REVIEW_PANEL = "ov-review";
 const TAB_KEY = "crazyagent.overview-tab.";
 const FIRST: StripId = "quick_info";
 const LOADING = "Loading the Overview tabs...";
@@ -213,6 +220,34 @@ export async function saveTab(projectId: string, opened: { tab: OverviewTabId; v
   return refused(overviewCopy(result), result.code === TAB_CHANGED);
 }
 
+/** Where the keyboard goes when a panel changes and the control it was on left the page:
+ * into the review when it opens, back to Review when it closes with the proposal still
+ * waiting, else back to Edit after an editor or a review closes or a banner leaves. The
+ * editor's text box takes the keyboard itself.
+ * Inputs: the panel before and now. Output: the id of the element to focus, or null. */
+export function focusAfter(previous: PanelState, current: PanelState): string | null {
+  if (current.mode === "editing") return null;
+  if (current.mode === "reviewing") return previous.mode === "reviewing" ? null : REVIEW_PANEL;
+  if (previous.mode === "editing") return EDIT_OPEN;
+  if (previous.mode === "reviewing") return current.proposal ? REVIEW_OPEN : EDIT_OPEN;
+  return previous.proposal && !current.proposal ? EDIT_OPEN : null;
+}
+
+/** Moves the keyboard as `focusAfter` says whenever a panel changes. A banner that left on a
+ * plain read moves it only when nothing else holds it, so a read never takes the keyboard
+ * from where the owner is working. Input: the panel now. Output: none. */
+function useReturnFocus(current: PanelState): void {
+  const previous = useRef(current);
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = current;
+    const target = focusAfter(before, current);
+    if (target === null) return;
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (before.mode !== current.mode || lost) document.getElementById(target)?.focus({ preventScroll: before.mode === current.mode });
+  }, [current.mode, current.proposal]);
+}
+
 /** Says how an accept or a reject ended. A tab changed since the diff was made gets its own
  * sentence, since the page then shows a new diff. Input: the result. Output: the outcome. */
 function choiceOutcome(result: Result<void>): ChoiceOutcome {
@@ -253,7 +288,7 @@ export function ProposalReview({ label, state, busy, note, onAccept, onReject, o
   const rows = lineDiff(current, state.proposal);
   const removed = rows?.filter((row) => row.kind === "removed").length ?? 0;
   const added = rows?.filter((row) => row.kind === "added").length ?? 0;
-  return <section className="pj-stack-s ov-review" aria-label={`Proposed changes to ${label}`}>
+  return <section className="pj-stack-s ov-review" id={REVIEW_PANEL} tabIndex={-1} aria-label={`Proposed changes to ${label}`}>
     {state.edited && <p className="pj-note warn">You edited this tab. Accept replaces your text with the proposal; Reject keeps yours.</p>}
     {rows !== null ? <>
       <p className="pj-secondary">{`${removed} ${removed === 1 ? "line" : "lines"} removed, ${added} added. Nothing changes until you accept.`}</p>
@@ -291,7 +326,7 @@ export function TabEditor({ label, text, busy, note, onText, onSave, onCancel }:
 }) {
   return <form className="pj-stack-s ov-editor" onSubmit={(event) => { event.preventDefault(); if (!busy) onSave(); }}>
     <label className="pj-label" htmlFor="ov-edit">Edit {label}</label>
-    <textarea id="ov-edit" className="pj-input ov-edit-text" rows={18} value={text} readOnly={busy} spellCheck={false} aria-describedby="ov-edit-help"
+    <textarea id="ov-edit" className="pj-input ov-edit-text" rows={18} value={text} readOnly={busy} spellCheck={false} autoFocus aria-describedby="ov-edit-help"
       onChange={(event) => onText(event.target.value)}
       onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !busy) { event.preventDefault(); onSave(); } }} />
     <p className="pj-help" id="ov-edit-help">Markdown. The tab is saved to this project's .crazyagent folder; a later refresh proposes changes instead of replacing your text.</p>
@@ -413,7 +448,7 @@ function Proposal({ data, label, state, review, onReview, actions }: {
 }) {
   assert(state.proposal !== null, "a proposal banner was shown for a tab with none");
   if (review === null) return <div className="pj-need"><span>A refresh proposes changes to this tab.</span>
-    <button type="button" className="btn" onClick={() => onReview({ busy: false, note: "" })}>Review</button></div>;
+    <button type="button" className="btn" id={REVIEW_OPEN} onClick={() => onReview({ busy: false, note: "" })}>Review</button></div>;
   const choose = async (send: () => Promise<ChoiceOutcome>, told: string) => {
     assert(!review.busy, "a choice was made while another was still sent");
     onReview({ busy: true, note: "" });
@@ -450,6 +485,8 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
 }) {
   const state = overview.tabs.find((item) => item.tab === tab);
   const facts = tab === "quick_info";
+  const shown = state !== undefined && !overview.needs_home && !state.blocked;
+  useReturnFocus({ mode: draft !== null ? "editing" : review !== null && shown && state.proposal !== null ? "reviewing" : "idle", proposal: shown && draft === null && state.proposal !== null });
   if (overview.needs_home) return <><NeedsHome data={data} />{facts && quickInfo(null)}</>;
   if (!state) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
   if (state.blocked) return <><Blocked tab={tab} reason={state.blocked} />{facts && quickInfo(null)}</>;
@@ -457,7 +494,7 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
   const label = STRIP.find((item) => item.id === tab)?.label ?? "";
   if (draft === null) return <>
     {state.proposal !== null && <Proposal data={data} label={label} state={state} review={review} onReview={onReview} actions={actions} />}
-    <div className="ov-edit-row"><button type="button" className="btn" onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false })}>Edit</button></div>
+    <div className="ov-edit-row"><button type="button" className="btn" id={EDIT_OPEN} onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false })}>Edit</button></div>
     {body}
   </>;
   const save = async () => {
@@ -530,7 +567,7 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
       {selected === "activity" && activity}
       {overview === null && selected === "quick_info" && quickInfo(null)}
       {overview !== null && selected === "readme" && <ReadmePanel projectId={data.id} readme={overview.readme} />}
-      {overview !== null && selected !== "readme" && selected !== "activity" && <GeneratedPanel data={data} overview={overview} tab={selected} draft={drafts[selected] ?? null}
+      {overview !== null && selected !== "readme" && selected !== "activity" && <GeneratedPanel key={selected} data={data} overview={overview} tab={selected} draft={drafts[selected] ?? null}
         onDraft={(draft) => setDrafts((open) => ({ ...open, [selected]: draft ?? undefined }))} review={reviews[selected] ?? null}
         onReview={(review) => setReviews((open) => ({ ...open, [selected]: review ?? undefined }))} actions={actions} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />}
     </div>

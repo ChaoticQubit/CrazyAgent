@@ -589,3 +589,33 @@ test("Reject names the tab and keeps the tab's text", async () => {
   const refused = await view.rejectTab("alpha", "features", () => Promise.resolve({ kind: "error", code: "overview_no_proposal" }));
   assert.deepEqual(refused, { done: false, note: api.overviewCopy("overview_no_proposal") });
 });
+
+test("opening the editor puts the keyboard in its text box, and the review in its panel", () => {
+  assert.match(editor(), /<textarea[^>]*autofocus=""/i);
+  const state = featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n"));
+  assert.match(review(state), /<section[^>]*id="ov-review"[^>]*tabindex="-1"/i);
+});
+
+test("the keyboard goes back to Edit after Save or Cancel, and to Review or Edit after a review closes", () => {
+  const idle = (proposal = false) => ({ mode: "idle", proposal });
+  const editing = (proposal = false) => ({ mode: "editing", proposal });
+  const reviewing = { mode: "reviewing", proposal: true };
+  assert.equal(view.focusAfter(editing(), idle()), "ov-edit-open", "Save or Cancel returns to Edit");
+  assert.equal(view.focusAfter(editing(true), idle(true)), "ov-edit-open");
+  assert.equal(view.focusAfter(idle(true), reviewing), "ov-review", "Review moves into the panel");
+  assert.equal(view.focusAfter(reviewing, idle(true)), "ov-review-open", "Close returns to Review");
+  assert.equal(view.focusAfter(reviewing, idle(false)), "ov-edit-open", "after Accept or Reject the banner is gone, so Edit takes it");
+  assert.equal(view.focusAfter(idle(true), idle(false)), "ov-edit-open", "the banner the keyboard was on left with the proposal");
+  assert.equal(view.focusAfter(idle(), editing()), null, "the text box takes the keyboard itself");
+  assert.equal(view.focusAfter(idle(), idle()), null, "nothing moves on a plain read");
+  assert.equal(view.focusAfter(idle(false), idle(true)), null, "a new proposal does not take the keyboard");
+  assert.equal(view.focusAfter(reviewing, reviewing), null);
+  assert.equal(view.focusAfter(editing(), editing()), null);
+});
+
+test("Edit and Review carry the ids the keyboard returns to", () => {
+  const overview = withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n");
+  const html = page({ selected: "features", overview });
+  assert.match(html, /<button[^>]*id="ov-edit-open"[^>]*>Edit<\/button>/);
+  assert.match(html, /<button[^>]*id="ov-review-open"[^>]*>Review<\/button>/);
+});
