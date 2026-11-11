@@ -139,14 +139,10 @@ jobs:
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ci-linux-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          prefix-key: ci-linux
+          cache-on-failure: true
       - name: Keep the Rust build cache under 20 GiB
         if: runner.environment != 'github-hosted'
         run: |
@@ -291,14 +287,10 @@ jobs:
           test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ci-macos-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          prefix-key: ci-macos
+          cache-on-failure: true
       - name: Keep the Rust build cache under 20 GiB
         if: runner.environment != 'github-hosted'
         run: |
@@ -405,14 +397,11 @@ jobs:
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - if: runner.environment == 'github-hosted'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ci-windows-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          prefix-key: ci-windows
+          cache-on-failure: true
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail
