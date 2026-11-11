@@ -3,9 +3,9 @@ import { listSkills, type Result } from "../api";
 import { loadTeamStatus } from "../api-projects";
 import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
+  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, REPEATED_LINES, commitInstructionImport, committedMessage, confirmInstructionImport,
   defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
-  processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
+  processTextError, repeatedNote, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
   type InstructionSettings, type InstructionView, type SavedText, type SkillEntry, type EditDelivery,
 } from "../api-process";
 import { sameJson, useAppSession, useHeld, useLoad, type Loaded } from "../state";
@@ -238,6 +238,8 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[0];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
+  const repeated = REPEATED_LINES.find((option) => option.value === current.repeated) ?? REPEATED_LINES[0];
+  const repeats = settings.kind === "ok" ? settings.value.repeats ?? 0 : 0;
   const save = (next: InstructionSettings) => {
     if (busy) return;
     const settled = hold(next);
@@ -261,6 +263,13 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
         options={EDIT_DELIVERIES.map(({ value, label }) => ({ value, label }))}
         onValue={(edits) => save({ ...current, edits })} />
       <span className="small muted pr-del-note" id="agent-edits-note">{delivery.note}</span>
+    </div>
+    <div className="pr-del-row">
+      <span className="pr-del-label">Lines the project file repeats</span>
+      <Segmented label="Lines the project file repeats" value={repeated.value} describedBy="agent-repeated-note"
+        options={REPEATED_LINES.map(({ value, label }) => ({ value, label }))}
+        onValue={(value) => save({ ...current, repeated: value })} />
+      <span className="small muted pr-del-note" id="agent-repeated-note">{repeatedNote({ ...current, repeated: repeated.value }, repeats)}</span>
     </div>
     <div className="pr-del-row pr-del-toggle">
       <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless Claude runs</span></span>

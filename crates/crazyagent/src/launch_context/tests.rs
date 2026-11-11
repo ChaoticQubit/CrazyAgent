@@ -1452,6 +1452,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
@@ -2085,6 +2086,7 @@ fn context_with(
                 id: ProjectId::new("launch").unwrap(),
                 folder: Some(folder),
                 mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
             },
             hooks: Vec::new(),
             agent: String::new(),
@@ -2790,6 +2792,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
                 id: ProjectId::new("hooked").unwrap(),
                 folder: Some(folder),
                 mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
             },
             hooks: vec![
                 hook("SessionStart", None, None),

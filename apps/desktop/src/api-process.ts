@@ -274,22 +274,47 @@ export type InstructionMode = "project_only" | "app_only" | "both";
 /** How an edit to the instructions reaches agents that already run (DEC-111 QR1). */
 export type EditDelivery = "next_message" | "restart" | "badge";
 
+/** What agents get of a project line the app instructions already have (DEC-132 Q7). */
+export type Repeated = "leave_out" | "keep";
+
 /** One project's agent settings: which instructions its agents get, whether headless
- * Claude runs keep their transcript and how an instruction edit reaches running agents. */
+ * Claude runs keep their transcript, how an instruction edit reaches running agents and
+ * whether project lines the app instructions already have are left out. */
 export interface InstructionSettings {
   mode: InstructionMode;
   transcripts: boolean;
   edits?: EditDelivery;
+  repeated?: Repeated;
 }
 
-/** One project's agent settings and the version they were read at, which a save names. */
+/** One project's agent settings, the version they were read at, which a save names, and how
+ * many lines of the project's file repeat the app instructions. */
 export interface InstructionView {
   settings: InstructionSettings;
   version: number;
+  repeats?: number;
 }
 
 /** The settings of a project the owner never changed. */
 export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true, edits: "next_message" };
+
+/** Both answers to a project line the app instructions already have, the default first. */
+export const REPEATED_LINES: readonly { value: Repeated; label: string }[] = [
+  { value: "leave_out", label: "Leave out" },
+  { value: "keep", label: "Keep" },
+];
+
+/** What the page says beside the repeated lines choice: how many lines of the project's file
+ * repeat the app instructions and what agents get of them. Inputs: the project's settings and
+ * the count the engine gave. */
+export function repeatedNote(settings: InstructionSettings, repeats: number): string {
+  if (!Number.isInteger(repeats) || repeats < 0) throw new Error(`repeatedNote: ${repeats} repeated lines is not a count`);
+  if (settings.mode !== "both") return "Repeated lines only matter when agents get both the app and the project instructions.";
+  if (repeats === 0) return "No line of this project's file repeats the app instructions.";
+  const lines = repeats === 1 ? "1 line of this project's file repeats" : `${repeats} lines of this project's file repeat`;
+  if (settings.repeated === "keep") return `${lines} the app instructions, and agents get ${repeats === 1 ? "it" : "them"} twice.`;
+  return `${lines} the app instructions and ${repeats === 1 ? "is" : "are"} left out for agents. Headings, code blocks, tables and rules always stay.`;
+}
 
 /** Every way an instruction edit can reach running agents, in the order the page lists
  * them, with what each does. */

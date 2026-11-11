@@ -596,7 +596,11 @@ fn stale_agent_instructions_save_is_refused() {
     );
 
     let given = crate::agent_home::with_agent(
-        crate::agent_home::render("App rule.", "Project rule."),
+        crate::agent_home::render(
+            "App rule.",
+            "Project rule.",
+            crate::agent_home::Repeated::LeaveOut,
+        ),
         "Write the docs.\n",
     );
     let (app, own, mine) = (
@@ -660,6 +664,7 @@ fn saves_at_once_land_only_on_the_version_they_read() {
             mode,
             transcripts,
             edits,
+            ..Default::default()
         })
         .collect();
     assert_eq!(options.len(), 6);
@@ -684,7 +689,8 @@ fn saves_at_once_land_only_on_the_version_they_read() {
                                     saved,
                                     InstructionView {
                                         settings,
-                                        version: read.version + 1
+                                        version: read.version + 1,
+                                        repeats: 0,
                                     }
                                 );
                                 landed += 1;
@@ -713,6 +719,60 @@ fn saves_at_once_land_only_on_the_version_they_read() {
     assert!(options.contains(&now.settings));
 }
 
+/// A project's agents get each line the app text already has once, the settings read counts
+/// those lines, and the project's Keep choice gives both texts whole again; a save reports
+/// the size of the text agents then get (DEC-129 item 5, DEC-132 Q7).
+#[test]
+fn a_project_leaves_out_lines_the_app_text_has_until_its_setting_says_keep() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let own = "- Use TDD.\n- No em dash.\n- Run make check.\n";
+    save(&root, None, "- Use TDD.\n- No em dash.\n", 0).unwrap();
+    let sized = |saved: SavedText| match saved {
+        SavedText::Saved {
+            size: Some(size), ..
+        } => size.bytes as usize,
+        other => panic!("{other:?}"),
+    };
+    let left_out = sized(save(&root, Some(project.clone()), own, 0).unwrap());
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(fresh.settings.repeated, Repeated::LeaveOut);
+    assert_eq!(fresh.repeats, 2);
+    let given = given_text(&root, &project).unwrap();
+    assert_eq!(given.matches("- Use TDD.").count(), 1);
+    assert!(given.ends_with("## Project instructions\n\n- Run make check.\n"));
+    assert_eq!(left_out, given.len());
+    let keep = InstructionSettings {
+        repeated: Repeated::Keep,
+        ..fresh.settings
+    };
+    let kept = instruction_settings(&root, &project, Some((keep, Some(fresh.version)))).unwrap();
+    assert_eq!((kept.settings.repeated, kept.repeats), (Repeated::Keep, 2));
+    let given = given_text(&root, &project).unwrap();
+    assert_eq!(given.matches("- Use TDD.").count(), 2);
+    assert_eq!(
+        sized(save(&root, Some(project.clone()), own, 1).unwrap()),
+        given.len()
+    );
+    assert!(given.len() > left_out);
+    let alone = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        ..fresh.settings
+    };
+    let alone = instruction_settings(&root, &project, Some((alone, Some(kept.version)))).unwrap();
+    assert_eq!(
+        alone.repeats, 0,
+        "a project that gets one text has no repeat"
+    );
+    assert_eq!(
+        given_text(&root, &project).unwrap(),
+        format!("# Instructions from CrazyAgent\n\n## Project instructions\n\n{own}")
+    );
+}
+
 /// A save from an older version is refused as stale and leaves the stored settings and
 /// version as they were; a save naming no version is refused while the stored settings are
 /// readable and replaces them, at the next version, once they are not (Q35).
@@ -731,26 +791,30 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
         fresh,
         InstructionView {
             settings: InstructionSettings::default(),
-            version: 0
+            version: 0,
+            repeats: 0,
         }
     );
     let none = InstructionSettings {
         mode: Mode::ProjectOnly,
         transcripts: false,
         edits: EditDelivery::Restart,
+        ..Default::default()
     };
     let saved = instruction_settings(&root, &project, Some((none, Some(0)))).unwrap();
     assert_eq!(
         saved,
         InstructionView {
             settings: none,
-            version: 1
+            version: 1,
+            repeats: 0,
         }
     );
     let user = InstructionSettings {
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::Badge,
+        ..Default::default()
     };
     assert_eq!(
         instruction_settings(&root, &project, Some((user, Some(0))))
@@ -783,7 +847,8 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
         instruction_settings(&root, &project, Some((user, None))).unwrap(),
         InstructionView {
             settings: user,
-            version: 2
+            version: 2,
+            repeats: 0,
         },
         "unreadable settings are replaced at the next version"
     );
@@ -807,6 +872,7 @@ fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_whe
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::Badge,
+        ..Default::default()
     };
     assert_ne!(settings, InstructionSettings::default());
     let save_settings = || -> Result<InstructionView, EngineError> {
@@ -848,7 +914,8 @@ fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_whe
         instruction_settings(&root, &project, None).unwrap(),
         InstructionView {
             settings: InstructionSettings::default(),
-            version: 0
+            version: 0,
+            repeats: 0,
         }
     );
     let saved = save(&root, None, "App rule.\n", 0).unwrap();
@@ -867,7 +934,8 @@ fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_whe
         save_settings().unwrap(),
         InstructionView {
             settings,
-            version: 1
+            version: 1,
+            repeats: 0,
         }
     );
 }
@@ -938,6 +1006,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
@@ -1073,6 +1142,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
     assert_eq!(
@@ -1116,6 +1186,7 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: crate::instruction_files::Mode::Both,
+        repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let given = Given {
         text: "# Rules\n".into(),
@@ -1212,7 +1283,11 @@ fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
     let both = given(&root, &project).unwrap();
     assert_eq!(
         both,
-        crate::agent_home::render("App rule.\n", "  Project rule.\n\n")
+        crate::agent_home::render(
+            "App rule.\n",
+            "  Project rule.\n\n",
+            crate::agent_home::Repeated::LeaveOut
+        )
     );
     assert!(
         both.starts_with("# Instructions from CrazyAgent\n") && both.contains("Project rule.\n"),
@@ -1233,7 +1308,7 @@ fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
             .version;
         assert_eq!(
             given(&root, &project).unwrap(),
-            crate::agent_home::render(app, own),
+            crate::agent_home::render(app, own, crate::agent_home::Repeated::LeaveOut),
             "{mode:?}"
         );
     }
@@ -1289,7 +1364,10 @@ fn a_delivery_switch_that_leaves_agents_no_instructions_is_refused() {
     save(&root, None, "App rule.\n", 0).unwrap();
     let before = instruction_settings(&root, &project, None).unwrap();
     let given_before = given(&root, &project).unwrap();
-    assert_eq!(given_before, crate::agent_home::render("App rule.\n", ""));
+    assert_eq!(
+        given_before,
+        crate::agent_home::render("App rule.\n", "", crate::agent_home::Repeated::LeaveOut)
+    );
     assert_eq!(
         switch(&root, &project, Mode::ProjectOnly),
         Err(EngineError(NONE_GIVEN_CODE.into())),
@@ -1323,7 +1401,7 @@ fn a_delivery_switch_that_leaves_agents_no_instructions_is_refused() {
     assert_eq!(instruction_settings(&root, &project, None).unwrap(), before);
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("", "Project rule.\n")
+        crate::agent_home::render("", "Project rule.\n", crate::agent_home::Repeated::LeaveOut)
     );
 }
 
@@ -1358,7 +1436,7 @@ fn an_app_text_save_that_leaves_agents_no_instructions_is_refused() {
     assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("App rule.\n", "")
+        crate::agent_home::render("App rule.\n", "", crate::agent_home::Repeated::LeaveOut)
     );
 
     save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
@@ -1371,7 +1449,7 @@ fn an_app_text_save_that_leaves_agents_no_instructions_is_refused() {
     );
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("", "Project rule.\n")
+        crate::agent_home::render("", "Project rule.\n", crate::agent_home::Repeated::LeaveOut)
     );
 }
 
@@ -1406,7 +1484,7 @@ fn a_project_text_save_that_leaves_agents_no_instructions_is_refused() {
     );
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("", "Project rule.\n")
+        crate::agent_home::render("", "Project rule.\n", crate::agent_home::Repeated::LeaveOut)
     );
 
     save(&root, None, "App rule.\n", 0).unwrap();
@@ -1420,7 +1498,7 @@ fn a_project_text_save_that_leaves_agents_no_instructions_is_refused() {
     );
     assert_eq!(
         given(&root, &project).unwrap(),
-        crate::agent_home::render("App rule.\n", "")
+        crate::agent_home::render("App rule.\n", "", crate::agent_home::Repeated::LeaveOut)
     );
 }
 

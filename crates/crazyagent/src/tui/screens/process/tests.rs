@@ -91,7 +91,11 @@ fn opened(scope: Scope, saved: &str) -> Shell {
 }
 
 fn at(settings: InstructionSettings, version: u64) -> InstructionView {
-    InstructionView { settings, version }
+    InstructionView {
+        settings,
+        version,
+        repeats: 0,
+    }
 }
 
 /// A project's adoption view as the real coordination store reads it before any agent ran.
@@ -783,6 +787,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
             mode: Mode::Both,
             transcripts: false,
             edits: crate::instruction_files::EditDelivery::NextMessage,
+            ..Default::default()
         },
         version: Some(version),
     };
@@ -799,6 +804,83 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     );
     assert!(
         flat.contains("nothing was saved. Change it again."),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_project_page_offers_the_repeated_lines_choice_and_says_how_many_lines_repeat() {
+    use crate::instruction_files::Repeated;
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = opened(scope, "");
+    let flat = |shell: &mut Shell| {
+        screen(shell)
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let shown = flat(&mut shell);
+    assert!(
+        shown.contains("Lines the project file repeats: Leave out"),
+        "{shown}"
+    );
+    assert!(shown.contains("Ctrl-L changes"), "{shown}");
+    assert!(
+        shown.contains("No line of this project's file repeats the app instructions."),
+        "{shown}"
+    );
+    let mut stored = InstructionSettings::default();
+    for (version, repeated, repeats, words, note) in [
+        (
+            0,
+            Repeated::Keep,
+            3,
+            "Lines the project file repeats: Keep",
+            "3 lines of this project's file repeat the app instructions, and agents get them twice.",
+        ),
+        (
+            1,
+            Repeated::LeaveOut,
+            1,
+            "Lines the project file repeats: Leave out",
+            "1 line of this project's file repeats the app instructions and is left out for agents.",
+        ),
+    ] {
+        shell.key(Key::Ctrl('l'));
+        stored.repeated = repeated;
+        let save = ProcessQuery::SaveSettings {
+            project: project.clone(),
+            settings: stored,
+            version: Some(version),
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        let view = InstructionView {
+            settings: stored,
+            version: version + 1,
+            repeats,
+        };
+        shell.arrive(settings(save, Ok(view)));
+        let shown = flat(&mut shell);
+        assert!(shown.contains(words), "{shown}");
+        assert!(shown.contains(note), "{shown}");
+    }
+    stored.mode = Mode::ProjectOnly;
+    shell.key(Key::Ctrl('f'));
+    let save = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: stored,
+        version: Some(2),
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(settings(save, Ok(at(stored, 3))));
+    let shown = flat(&mut shell);
+    assert!(
+        shown.contains("Repeated lines only matter when agents get both"),
         "{shown}"
     );
 }
@@ -843,6 +925,7 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
                 mode: Mode::ProjectOnly,
                 transcripts: true,
                 edits: crate::instruction_files::EditDelivery::NextMessage,
+                ..Default::default()
             },
             version: None,
         }],
@@ -870,6 +953,7 @@ fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_name
             mode: Mode::Both,
             transcripts: false,
             edits: EditDelivery::NextMessage,
+            ..Default::default()
         },
         version: Some(0),
     };
@@ -885,6 +969,7 @@ fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_name
         mode: Mode::ProjectOnly,
         transcripts: false,
         edits: EditDelivery::NextMessage,
+        ..Default::default()
     };
     shell.arrive(settings(read, Ok(at(saved, 3))));
     assert_eq!(
@@ -913,6 +998,7 @@ fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_name
                 mode: Mode::ProjectOnly,
                 transcripts: true,
                 edits: EditDelivery::NextMessage,
+                ..Default::default()
             },
             version: Some(3),
         }]
@@ -938,6 +1024,7 @@ fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the
             mode: Mode::Both,
             transcripts: false,
             edits: EditDelivery::NextMessage,
+            ..Default::default()
         },
         version: Some(0),
     };
@@ -966,6 +1053,7 @@ fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the
         mode: Mode::Both,
         transcripts: false,
         edits: EditDelivery::NextMessage,
+        ..Default::default()
     };
     shell.arrive(settings(read, Ok(at(landed, 1))));
     assert_eq!(
@@ -989,6 +1077,7 @@ fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the
                 mode: Mode::Both,
                 transcripts: true,
                 edits: EditDelivery::NextMessage,
+                ..Default::default()
             },
             version: Some(1),
         }],

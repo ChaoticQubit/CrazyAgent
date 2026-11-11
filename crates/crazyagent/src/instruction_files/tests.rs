@@ -10,6 +10,7 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
             mode: Mode::Both,
             transcripts: true,
             edits: EditDelivery::NextMessage,
+            ..Default::default()
         },
         "a database that never stored settings gets the defaults"
     );
@@ -21,6 +22,7 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
                 mode,
                 transcripts,
                 edits: EditDelivery::NextMessage,
+                ..Default::default()
             };
             save(&connection, &project, settings).unwrap();
             assert_eq!(load(&connection, &project).unwrap(), settings);
@@ -80,6 +82,7 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
                 mode: Mode::Both,
                 transcripts,
                 edits: EditDelivery::NextMessage,
+                ..Default::default()
             },
             "{project}"
         );
@@ -89,6 +92,7 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::NextMessage,
+        ..Default::default()
     };
     save(&connection, &project, chosen).unwrap();
     initialize(&connection).unwrap();
@@ -118,6 +122,7 @@ fn every_edit_delivery_is_stored_and_a_project_that_never_chose_gets_next_messag
             mode: Mode::AppOnly,
             transcripts: false,
             edits,
+            ..Default::default()
         };
         save(&connection, &project, settings).unwrap();
         assert_eq!(load(&connection, &project).unwrap(), settings);
@@ -163,6 +168,7 @@ fn a_settings_table_from_before_edit_delivery_reads_next_message_and_stores_a_ch
             mode: Mode::AppOnly,
             transcripts: false,
             edits: EditDelivery::NextMessage,
+            ..Default::default()
         }
     );
     let chosen = Settings {
@@ -171,6 +177,62 @@ fn a_settings_table_from_before_edit_delivery_reads_next_message_and_stores_a_ch
     };
     save(&connection, &project, chosen).unwrap();
     assert_eq!(load(&connection, &project).unwrap(), chosen);
+}
+
+#[test]
+fn the_repeated_lines_choice_is_stored_and_a_table_from_before_it_reads_leave_out() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE agent_instruction_settings (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                transcripts INTEGER NOT NULL,
+                edits TEXT NOT NULL DEFAULT 'next_message'
+            );
+            INSERT INTO agent_instruction_settings VALUES ('kept', 'both', 1, 'badge');",
+        )
+        .unwrap();
+    let project = ProjectId::new("kept").unwrap();
+    assert_eq!(Settings::default().repeated, Repeated::LeaveOut);
+    assert_eq!(
+        load(&connection, &project).unwrap().repeated,
+        Repeated::LeaveOut,
+        "a read-only reader of a table made before the column"
+    );
+    initialize(&connection).unwrap();
+    initialize(&connection).unwrap();
+    let stored = load(&connection, &project).unwrap();
+    assert_eq!(stored.edits, EditDelivery::Badge);
+    assert_eq!(stored.repeated, Repeated::LeaveOut);
+    for repeated in [Repeated::Keep, Repeated::LeaveOut] {
+        assert_eq!(Repeated::parse(repeated.as_str()), Some(repeated));
+        let chosen = Settings { repeated, ..stored };
+        save(&connection, &project, chosen).unwrap();
+        assert_eq!(load(&connection, &project).unwrap(), chosen);
+    }
+    assert_eq!(Repeated::parse("sometimes"), None);
+    connection
+        .execute(
+            "UPDATE agent_instruction_settings SET repeated='sometimes' WHERE project=?1",
+            [project.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        load(&connection, &project).unwrap_err(),
+        "instruction_settings_invalid"
+    );
+    let wire: Settings =
+        serde_json::from_str(r#"{"mode":"both","transcripts":true,"edits":"badge"}"#).unwrap();
+    assert_eq!(wire.repeated, Repeated::LeaveOut, "an older client's save");
+    assert_eq!(
+        serde_json::to_string(&Settings {
+            repeated: Repeated::Keep,
+            ..Settings::default()
+        })
+        .unwrap(),
+        r#"{"mode":"both","transcripts":true,"edits":"next_message","repeated":"keep"}"#
+    );
 }
 
 #[test]
@@ -477,6 +539,7 @@ mod launch {
                     mode: Mode::Both,
                     transcripts,
                     edits: EditDelivery::NextMessage,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -589,9 +652,18 @@ mod launch {
         crate::agent_home::save_app(&case.data, &app).unwrap();
         crate::agent_home::save_project(&case.checkout, &own).unwrap();
         let options = [
-            (Mode::ProjectOnly, crate::agent_home::render("", &own)),
-            (Mode::AppOnly, crate::agent_home::render(&app, "")),
-            (Mode::Both, crate::agent_home::render(&app, &own)),
+            (
+                Mode::ProjectOnly,
+                crate::agent_home::render("", &own, crate::agent_home::Repeated::LeaveOut),
+            ),
+            (
+                Mode::AppOnly,
+                crate::agent_home::render(&app, "", crate::agent_home::Repeated::LeaveOut),
+            ),
+            (
+                Mode::Both,
+                crate::agent_home::render(&app, &own, crate::agent_home::Repeated::LeaveOut),
+            ),
         ];
         for (mode, expected) in options {
             save(
@@ -601,6 +673,7 @@ mod launch {
                     mode,
                     transcripts: true,
                     edits: EditDelivery::NextMessage,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -644,13 +717,13 @@ mod launch {
                 }
             }
         }
-        let both = crate::agent_home::render(&app, &own);
+        let both = crate::agent_home::render(&app, &own, crate::agent_home::Repeated::LeaveOut);
         assert!(both.find(APP_RULE).unwrap() < both.find(PROJECT_RULE).unwrap());
         crate::agent_home::save_project(&case.checkout, "").unwrap();
         let handed = launch_all(&case, &connection, &project, "empty-project");
         assert_eq!(
             handed.claude,
-            crate::agent_home::render(&app, ""),
+            crate::agent_home::render(&app, "", crate::agent_home::Repeated::LeaveOut),
             "Both with an empty project text gives the app text as it is"
         );
         crate::agent_home::save_app(&case.data, "").unwrap();

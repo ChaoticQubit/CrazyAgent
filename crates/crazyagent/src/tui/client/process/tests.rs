@@ -103,7 +103,7 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
     };
     assert_eq!(
         alone.bytes as usize,
-        crate::agent_home::render(&app, "").len()
+        crate::agent_home::render(&app, "", crate::agent_home::Repeated::LeaveOut).len()
     );
     assert_eq!(alone.claude_bytes_max, claude_room());
     assert_eq!(
@@ -191,7 +191,8 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
         Ok(ProcessReply::Saved(SavedText::Saved {
             version: 2,
             size: Some(crate::engine::owner::ProcessSaved {
-                bytes: crate::agent_home::render("", &own).len() as u32,
+                bytes: crate::agent_home::render("", &own, crate::agent_home::Repeated::LeaveOut)
+                    .len() as u32,
                 claude_bytes_max: claude_room(),
             }),
         })),
@@ -257,7 +258,12 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
             Ok(ProcessReply::Saved(SavedText::Saved {
                 version: 1,
                 size: Some(crate::engine::owner::ProcessSaved {
-                    bytes: crate::agent_home::render(given.0, given.1).len() as u32,
+                    bytes: crate::agent_home::render(
+                        given.0,
+                        given.1,
+                        crate::agent_home::Repeated::LeaveOut
+                    )
+                    .len() as u32,
                     claude_bytes_max: claude_room(),
                 }),
             }))
@@ -442,7 +448,8 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             .result,
         Ok(ProcessReply::Settings(InstructionView {
             settings: InstructionSettings::default(),
-            version: 0
+            version: 0,
+            repeats: 0,
         })),
         "a project the owner never changed gets both texts and keeps transcripts"
     );
@@ -474,10 +481,12 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
                 mode,
                 transcripts,
                 edits,
+                ..Default::default()
             };
             let saved = InstructionView {
                 settings,
                 version: version + 1,
+                repeats: u32::from(mode == Mode::Both),
             };
             assert_eq!(
                 native

@@ -7,7 +7,7 @@ use crate::coord::settings::Nudges;
 use crate::engine::owner::{
     Adoption, InstructionSettings, InstructionView, ProcessText, SavedText,
 };
-use crate::instruction_files::{EditDelivery, Mode};
+use crate::instruction_files::{EditDelivery, Mode, Repeated};
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -285,6 +285,46 @@ fn edits_note(edits: EditDelivery) -> &'static str {
     }
 }
 
+/// The owner's words for whether project lines the app instructions already have are left
+/// out. Input: the choice. Output: its name.
+fn repeated_label(repeated: Repeated) -> &'static str {
+    match repeated {
+        Repeated::LeaveOut => "Leave out",
+        Repeated::Keep => "Keep",
+    }
+}
+
+/// The choice Ctrl-L moves to from one choice. Input: the choice. Output: the other one.
+fn next_repeated(repeated: Repeated) -> Repeated {
+    match repeated {
+        Repeated::LeaveOut => Repeated::Keep,
+        Repeated::Keep => Repeated::LeaveOut,
+    }
+}
+
+/// What the repeated lines choice does for this project now, in one sentence naming how
+/// many of its lines the app instructions already have. Inputs: the project's settings and
+/// that count. Output: the sentence.
+fn repeated_note(settings: &InstructionSettings, repeats: u32) -> String {
+    let (lines, repeat, are, them) = match repeats {
+        1 => ("1 line".to_owned(), "repeats", "is", "it"),
+        count => (format!("{count} lines"), "repeat", "are", "them"),
+    };
+    match (settings.mode, settings.repeated, repeats) {
+        (Mode::ProjectOnly | Mode::AppOnly, _, _) => {
+            "Repeated lines only matter when agents get both the app and the project instructions."
+                .into()
+        }
+        (Mode::Both, _, 0) => "No line of this project's file repeats the app instructions.".into(),
+        (Mode::Both, Repeated::LeaveOut, _) => format!(
+            "{lines} of this project's file {repeat} the app instructions and {are} left out for agents. Headings, code blocks, tables and rules always stay."
+        ),
+        (Mode::Both, Repeated::Keep, _) => format!(
+            "{lines} of this project's file {repeat} the app instructions, and agents get {them} twice."
+        ),
+    }
+}
+
 /// Writes a byte count the way the Process pages show sizes. Input: bytes. Output: words.
 pub(in crate::tui) fn size(bytes: usize) -> String {
     if bytes < 1024 {
@@ -526,7 +566,8 @@ impl Editor {
 /// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
 /// process, each into a preview first. For one project it also shows the agent settings:
 /// Ctrl-F picks the instruction files its agents get, Ctrl-T whether headless Claude runs
-/// keep their transcript and Ctrl-R how an instruction edit reaches running agents, each
+/// keep their transcript, Ctrl-R how an instruction edit reaches running agents and Ctrl-L
+/// whether project lines the app instructions already have are left out, each
 /// saved at once at the version read; one refused because the settings changed since reads
 /// them again. A stale save of the text shows the conflict and keeps the draft until the
 /// owner reloads the saved text (Ctrl-R, which reloads while the conflict shows) or keeps
@@ -1082,6 +1123,10 @@ impl ProcessPage {
             }
             Some(Ok(view)) => view.settings,
         };
+        let repeats = match &self.settings {
+            Some(Ok(view)) => view.repeats,
+            _ => 0,
+        };
         let transcripts = if settings.transcripts { "On" } else { "Off" };
         for (name, option, key) in [
             ("Agent instructions", mode_label(settings.mode), "Ctrl-F"),
@@ -1091,6 +1136,11 @@ impl ProcessPage {
                 "Ctrl-T",
             ),
             ("Instruction edits", edits_label(settings.edits), "Ctrl-R"),
+            (
+                "Lines the project file repeats",
+                repeated_label(settings.repeated),
+                "Ctrl-L",
+            ),
         ] {
             lines.push(row(
                 width,
@@ -1102,7 +1152,12 @@ impl ProcessPage {
                 ctx.glyphs,
             ));
         }
-        for note in [mode_note(settings.mode), edits_note(settings.edits)] {
+        let repeated = repeated_note(&settings, repeats);
+        for note in [
+            mode_note(settings.mode),
+            edits_note(settings.edits),
+            repeated.as_str(),
+        ] {
             lines.extend(
                 wrap(note, width)
                     .into_iter()
@@ -1245,6 +1300,7 @@ impl Screen for ProcessPage {
             if self.conflict.is_none() {
                 hints.push(hint("Ctrl-R", "Instruction edits"));
             }
+            hints.push(hint("Ctrl-L", "Repeated lines"));
         }
         if self.scope == Scope::App {
             hints.push(hint("Ctrl-G", "Import from file"));
@@ -1303,6 +1359,13 @@ impl Screen for ProcessPage {
             }
             (State::Ready { .. }, Key::Ctrl('r')) if self.settings.is_some() => {
                 self.change_settings(|settings| settings.edits = next_edits(settings.edits), ctx);
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('l')) if self.settings.is_some() => {
+                self.change_settings(
+                    |settings| settings.repeated = next_repeated(settings.repeated),
+                    ctx,
+                );
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('o')) => self.open_skill(ctx),

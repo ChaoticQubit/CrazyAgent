@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
+use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, Repeated, TEXT_BYTES_MAX};
 pub use crate::coord::adoption::Adoption;
 pub use crate::instruction_files::{
     ImportCommit, ImportFile, Mode as InstructionMode, Record as InstructionRecord,
@@ -169,6 +169,8 @@ enum Reply {
     Settings {
         settings: InstructionSettings,
         version: u64,
+        #[serde(default)]
+        repeats: u32,
     },
     Adoption {
         adoption: Adoption,
@@ -212,11 +214,15 @@ pub struct AgentInstructions {
 
 /// One project's agent instruction settings and the version they were read at. A save names
 /// that version, so it never replaces settings saved since the owner's screen read them.
+/// `repeats` counts the project's lines the app text already has, which the joined text
+/// leaves out unless the project keeps them; zero when its agents do not get both texts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstructionView {
     pub settings: InstructionSettings,
     pub version: u64,
+    #[serde(default)]
+    pub repeats: u32,
 }
 
 /// One instructions text and the version it was read at. A save names that version, so it
@@ -650,9 +656,18 @@ impl OwnerClient {
 
     async fn process_settings_reply(&self, action: Action) -> Result<InstructionView, EngineError> {
         match self.process_exchange(action, None).await? {
-            (Reply::Settings { settings, version }, None) => {
-                Ok(InstructionView { settings, version })
-            }
+            (
+                Reply::Settings {
+                    settings,
+                    version,
+                    repeats,
+                },
+                None,
+            ) if repeats as usize <= TEXT_BYTES_MAX => Ok(InstructionView {
+                settings,
+                version,
+                repeats,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -874,6 +889,7 @@ pub(super) async fn serve(
             Reply::Settings {
                 settings: view.settings,
                 version: view.version,
+                repeats: view.repeats,
             },
             None,
         ),
@@ -1254,7 +1270,7 @@ fn refuse_none_given(
             Err(_) => return Ok(()),
         },
     };
-    match crate::agent_home::render(&app, &own).is_empty() {
+    match crate::agent_home::render(&app, &own, agent.repeated).is_empty() {
         true => Err(failure(NONE_GIVEN)),
         false => Ok(()),
     }
@@ -1356,14 +1372,17 @@ const _: () = assert!(super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32
 /// sizes.
 fn sized(root: &Path, project: Option<&ProjectId>, saved: &str) -> ProcessSaved {
     let given = match project {
-        Some(_) => {
+        Some(project) => {
             let app = crate::agent_home::read_app(root).unwrap_or_default();
-            crate::agent_home::render(&app, saved).len()
+            crate::agent_home::render(&app, saved, repeated_choice(root, project)).len()
         }
         None => project_texts(root)
             .iter()
-            .map(|own| crate::agent_home::render(saved, own).len())
-            .fold(crate::agent_home::render(saved, "").len(), usize::max),
+            .map(|(own, repeated)| crate::agent_home::render(saved, own, *repeated).len())
+            .fold(
+                crate::agent_home::render(saved, "", Repeated::Keep).len(),
+                usize::max,
+            ),
     };
     assert!(given <= PROCESS_BYTES_MAX);
     ProcessSaved {
@@ -1372,10 +1391,23 @@ fn sized(root: &Path, project: Option<&ProjectId>, saved: &str) -> ProcessSaved 
     }
 }
 
+/// Reads whether a project's joined text leaves out the lines the app text already has,
+/// for the size a save reports. Settings that cannot be read count as Keep, the larger
+/// text, so the Claude warning never understates. Inputs: the engine root and the project.
+/// Output: the choice.
+fn repeated_choice(root: &Path, project: &ProjectId) -> Repeated {
+    let stored = read_only(root).ok().and_then(|connection| {
+        let tx = connection.unchecked_transaction().ok()?;
+        crate::instruction_files::load(&tx, project).ok()
+    });
+    stored.map_or(Repeated::Keep, |settings| settings.repeated)
+}
+
 /// Reads the instructions of the set-up projects, at most `SAVED_PROJECTS_MAX`, so an app
 /// save can tell whether it pushes one past what a Claude master takes. A project whose
-/// folder or text cannot be read is left out. Input: the engine root. Output: the texts.
-fn project_texts(root: &Path) -> Vec<String> {
+/// folder or text cannot be read is left out. Input: the engine root. Output: each text
+/// with whether its project leaves repeated lines out.
+fn project_texts(root: &Path) -> Vec<(String, Repeated)> {
     let Ok(connection) = read_only(root) else {
         return Vec::new();
     };
@@ -1394,10 +1426,9 @@ fn project_texts(root: &Path) -> Vec<String> {
     ids.iter()
         .filter_map(|id| {
             let project = ProjectId::new(id).ok()?;
-            let folder = crate::launch_context::agent_project(&tx, &project)
-                .ok()?
-                .folder?;
-            crate::agent_home::read_project(&folder).ok()
+            let agent = crate::launch_context::agent_project(&tx, &project).ok()?;
+            let text = crate::agent_home::read_project(&agent.folder?).ok()?;
+            Some((text, agent.repeated))
         })
         .collect()
 }
@@ -1549,6 +1580,7 @@ fn instruction_settings(
     let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
     let version = current(&tx)?;
     assert!(expected.is_none_or(|expected| expected == (stored, version)));
+    let repeats = repeats(&tx, project, stored);
     tx.commit().map_err(|_| match expected {
         Some(_) => unknown(),
         None => failure("instruction_settings_unavailable"),
@@ -1556,7 +1588,34 @@ fn instruction_settings(
     Ok(InstructionView {
         settings: stored,
         version,
+        repeats,
     })
+}
+
+/// Counts the project's lines the app text already has, for the note beside the repeated
+/// lines choice. Zero when the project's agents do not get both texts or a text cannot be
+/// read: the count is a note, never a refusal. Inputs: the settings read's transaction, the
+/// project and its stored settings. Output: the count, at most `TEXT_BYTES_MAX`.
+fn repeats(
+    tx: &rusqlite::Transaction<'_>,
+    project: &ProjectId,
+    settings: InstructionSettings,
+) -> u32 {
+    if settings.mode != InstructionMode::Both {
+        return 0;
+    }
+    let Ok(agent) = crate::launch_context::agent_project(tx, project) else {
+        return 0;
+    };
+    let (Some(folder), Ok(app)) = (&agent.folder, crate::agent_home::read_app(&agent.data)) else {
+        return 0;
+    };
+    let Ok(own) = crate::agent_home::read_project(folder) else {
+        return 0;
+    };
+    let lines = crate::agent_home::repeated_lines(&app, &own);
+    assert!(lines <= TEXT_BYTES_MAX && TEXT_BYTES_MAX <= u32::MAX as usize);
+    lines as u32
 }
 
 /// Reads one set-up project's workflow adoption from the engine store, read-only, with a

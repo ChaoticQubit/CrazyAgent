@@ -1,3 +1,4 @@
+pub use crate::agent_home::Repeated;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -148,9 +149,10 @@ impl EditDelivery {
 }
 
 /// One project's agent instruction settings: which instruction texts its agents get,
-/// whether headless Claude runs keep their transcript and how an instruction edit reaches
-/// agents already running. A project the owner never changed gets both texts, keeps
-/// transcripts and sends an edit in each running agent's next task.
+/// whether headless Claude runs keep their transcript, how an instruction edit reaches
+/// agents already running and whether project lines the app text already has are left out
+/// of the joined text. A project the owner never changed gets both texts, keeps transcripts,
+/// sends an edit in each running agent's next task and leaves repeated lines out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -158,6 +160,8 @@ pub struct Settings {
     pub transcripts: bool,
     #[serde(default)]
     pub edits: EditDelivery,
+    #[serde(default)]
+    pub repeated: Repeated,
 }
 
 impl Default for Settings {
@@ -166,6 +170,7 @@ impl Default for Settings {
             mode: Mode::Both,
             transcripts: true,
             edits: EditDelivery::NextMessage,
+            repeated: Repeated::LeaveOut,
         }
     }
 }
@@ -674,7 +679,8 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
             project TEXT PRIMARY KEY,
             mode TEXT NOT NULL,
             transcripts INTEGER NOT NULL,
-            edits TEXT NOT NULL DEFAULT 'next_message'
+            edits TEXT NOT NULL DEFAULT 'next_message',
+            repeated TEXT NOT NULL DEFAULT 'leave_out'
         );
         CREATE TABLE IF NOT EXISTS instruction_imports (
             project TEXT PRIMARY KEY,
@@ -697,20 +703,28 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
               WHERE mode IN ('project', 'project_and_user', 'none');",
         )?;
     }
-    if !edits_column(connection)? {
+    if !column(connection, "edits")? {
         connection.execute_batch(
             "ALTER TABLE agent_instruction_settings ADD COLUMN edits TEXT NOT NULL DEFAULT 'next_message';",
+        )?;
+    }
+    if !column(connection, "repeated")? {
+        connection.execute_batch(
+            "ALTER TABLE agent_instruction_settings ADD COLUMN repeated TEXT NOT NULL DEFAULT 'leave_out';",
         )?;
     }
     Ok(())
 }
 
-/// Tells whether the settings table holds the edit delivery column, which tables made
-/// before DEC-111 QR1 lack. Input: a connection to `engine.db`. Output: the answer.
-fn edits_column(connection: &Connection) -> rusqlite::Result<bool> {
+/// Tells whether the settings table holds a column added after its first shape: the edit
+/// delivery column tables made before DEC-111 QR1 lack, or the repeated lines column tables
+/// made before v2.2.1 lack. Inputs: a connection to `engine.db` and the column name.
+/// Output: the answer.
+fn column(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
+    assert!(matches!(name, "edits" | "repeated"));
     connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name='edits')",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name=?1)",
+        [name],
         |row| row.get(0),
     )
 }
@@ -731,21 +745,25 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
     if !table {
         return Ok(Settings::default());
     }
-    let edits = match edits_column(connection).map_err(unavailable)? {
+    let edits = match column(connection, "edits").map_err(unavailable)? {
         true => "edits",
         false => "'next_message'",
     };
-    let stored: Option<(String, i64, String)> = connection
+    let repeated = match column(connection, "repeated").map_err(unavailable)? {
+        true => "repeated",
+        false => "'leave_out'",
+    };
+    let stored: Option<(String, i64, String, String)> = connection
         .query_row(
             &format!(
-                "SELECT mode, transcripts, {edits} FROM agent_instruction_settings WHERE project=?1"
+                "SELECT mode, transcripts, {edits}, {repeated} FROM agent_instruction_settings WHERE project=?1"
             ),
             [project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((mode, transcripts, edits)) = stored else {
+    let Some((mode, transcripts, edits, repeated)) = stored else {
         return Ok(Settings::default());
     };
     let mode = Mode::parse(&mode).ok_or("instruction_settings_invalid")?;
@@ -755,10 +773,12 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
         _ => return Err("instruction_settings_invalid"),
     };
     let edits = EditDelivery::parse(&edits).ok_or("instruction_settings_invalid")?;
+    let repeated = Repeated::parse(&repeated).ok_or("instruction_settings_invalid")?;
     Ok(Settings {
         mode,
         transcripts,
         edits,
+        repeated,
     })
 }
 
@@ -772,13 +792,14 @@ pub fn save(
 ) -> rusqlite::Result<()> {
     initialize(connection)?;
     let changed = connection.execute(
-        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits",
+        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits, repeated) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits, repeated=excluded.repeated",
         params![
             project.as_str(),
             settings.mode.as_str(),
             i64::from(settings.transcripts),
-            settings.edits.as_str()
+            settings.edits.as_str(),
+            settings.repeated.as_str()
         ],
     )?;
     assert_eq!(changed, 1);

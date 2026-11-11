@@ -342,10 +342,11 @@ test("Delivery is compact rows with dividers, each choice with its chosen option
   const note = (id, text) => new RegExp(`<span class="small muted pr-del-note" id="${id}">${escaped(html(text))}</span>`);
   for (const transcripts of [true, false]) {
     const markup = agentSettings(ok({ transcripts }));
-    assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 3, "three rows: instructions, edits, transcripts");
+    assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 4, "four rows: instructions, edits, repeated lines, transcripts");
     const at = (text) => markup.indexOf(text);
     assert.ok(at(">Instructions agents get<") >= 0 && at(">Instructions agents get<") < at(">When you edit instructions<"), "instructions first");
-    assert.ok(at(">When you edit instructions<") < at("<strong>Keep transcripts</strong>"), "edits before transcripts");
+    assert.ok(at(">When you edit instructions<") < at(">Lines the project file repeats<"), "edits before repeated lines");
+    assert.ok(at(">Lines the project file repeats<") < at("<strong>Keep transcripts</strong>"), "repeated lines before transcripts");
     assert.match(markup, /<div class="pr-del-row pr-del-toggle"><span class="pr-del-label"><strong>Keep transcripts<\/strong><span class="small muted">For headless Claude runs<\/span><\/span><span class="switch-label"><button id="agent-transcripts"/);
     assert.match(markup, new RegExp(`role="switch"[^>]*aria-checked="${transcripts}"`));
     assert.match(markup, /<span id="agent-transcripts-label" class="visually-hidden">Keep transcripts for headless Claude runs<\/span>/);
@@ -368,6 +369,35 @@ test("Delivery is compact rows with dividers, each choice with its chosen option
   assert.match(css, /\.pr-del-row \+ \.pr-del-row \{[^}]*border-top: 1px solid var\(--border\)/, "a divider between rows");
   assert.match(css, /\.pr-del-toggle \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/, "the switch sits right of its label");
   assert.match(css, /\.pr-del-toggle \.pr-del-note \{[^}]*grid-column: 1 \/ -1/, "what the switch keeps runs under the whole row");
+});
+
+test("lines the project file repeats are left out or kept, Leave out first, and the row says how many repeat", () => {
+  assert.deepEqual(client.REPEATED_LINES.map((choice) => [choice.value, choice.label]), [["leave_out", "Leave out"], ["keep", "Keep"]]);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/agent_home.rs", import.meta.url), "utf8");
+  for (const choice of client.REPEATED_LINES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
+  const shown = (settings, repeats) => agentSettings({ settings: { kind: "ok", value: { settings: { ...client.DEFAULT_INSTRUCTION_SETTINGS, ...settings }, version: 0, repeats } } });
+  const note = (text) => new RegExp(`<span class="small muted pr-del-note" id="agent-repeated-note">${escaped(html(text))}</span>`);
+  const markup = agentSettings();
+  assert.match(markup, /role="radiogroup" aria-label="Lines the project file repeats" aria-describedby="agent-repeated-note"/);
+  for (const choice of client.REPEATED_LINES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Leave out</, "an engine reply without the choice or the count shows the default");
+  assert.match(markup, note("No line of this project's file repeats the app instructions."));
+  assert.match(shown({ repeated: "leave_out" }, 3),
+    note("3 lines of this project's file repeat the app instructions and are left out for agents. Headings, code blocks, tables and rules always stay."));
+  assert.match(shown({ repeated: "leave_out" }, 1),
+    note("1 line of this project's file repeats the app instructions and is left out for agents. Headings, code blocks, tables and rules always stay."));
+  const kept = shown({ repeated: "keep" }, 2);
+  assert.match(kept, /role="radio" aria-checked="true"[^>]*>Keep</);
+  assert.match(kept, note("2 lines of this project's file repeat the app instructions, and agents get them twice."));
+  assert.match(shown({ repeated: "keep" }, 1), note("1 line of this project's file repeats the app instructions, and agents get it twice."));
+  for (const mode of ["project_only", "app_only"]) {
+    assert.match(shown({ mode, repeated: "leave_out" }, 0), note("Repeated lines only matter when agents get both the app and the project instructions."), mode);
+  }
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
+  for (const words of ["No line of this project's file repeats the app instructions.", "Repeated lines only matter when agents get both the app and the project instructions.",
+    "the app instructions, and agents get {them} twice.", "left out for agents. Headings, code blocks, tables and rules always stay."]) {
+    assert.ok(tui.includes(words), `the TUI says the same: ${words}`);
+  }
 });
 
 test("unreadable agent settings say why and show the defaults so a change replaces them", () => {
@@ -443,9 +473,15 @@ test("picking an instructions mode, the transcript switch or an edit choice save
     const first = await evaluate("Fixture.saves()");
     await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, edits: "badge" })})`);
     clicks.push(await evaluate(`Fixture.click("At next task")`));
-    return { clicks, saves: [...first, ...await evaluate("Fixture.saves()")] };
+    const second = await evaluate("Fixture.saves()");
+    await evaluate(`Fixture.mount(${JSON.stringify(client.DEFAULT_INSTRUCTION_SETTINGS)})`);
+    clicks.push(await evaluate(`Fixture.click("Keep")`));
+    const third = await evaluate("Fixture.saves()");
+    await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, repeated: "keep" })})`);
+    clicks.push(await evaluate(`Fixture.click("Leave out")`));
+    return { clicks, saves: [...first, ...second, ...third, ...await evaluate("Fixture.saves()")] };
   });
-  assert.deepEqual(seen.clicks, [true, true, true, true, true, true]);
+  assert.deepEqual(seen.clicks, [true, true, true, true, true, true, true, true]);
   assert.deepEqual(seen.saves, [
     { mode: "project_only", transcripts: true, edits: "next_message" },
     { mode: "app_only", transcripts: true, edits: "next_message" },
@@ -453,6 +489,8 @@ test("picking an instructions mode, the transcript switch or an edit choice save
     { mode: "both", transcripts: true, edits: "restart" },
     { mode: "both", transcripts: true, edits: "badge" },
     { mode: "both", transcripts: true, edits: "next_message" },
+    { mode: "both", transcripts: true, edits: "next_message", repeated: "keep" },
+    { mode: "both", transcripts: true, edits: "next_message", repeated: "leave_out" },
   ]);
 });
 

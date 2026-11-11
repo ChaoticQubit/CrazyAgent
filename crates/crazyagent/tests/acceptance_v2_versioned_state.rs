@@ -205,6 +205,7 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
         mode: Mode::ProjectOnly,
         transcripts: false,
         edits: EditDelivery::Badge,
+        ..Default::default()
     };
     let saved = desk
         .save_instruction_settings(project.clone(), quiet, Some(opened.version))
@@ -217,6 +218,7 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::Restart,
+        ..Default::default()
     };
     assert_eq!(
         tui.controller
