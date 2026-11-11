@@ -23,3 +23,20 @@ test("a control character is refused, so Enter and Tab go through key()", async 
   await assert.rejects(input({ send }).text("ls\n"), /type control characters with key\(\)/);
   assert.deepEqual(calls, []);
 });
+
+test("Enter goes in as a key press that carries its character, so an editor gets the new line, and with a modifier it carries none", async () => {
+  const { calls, send } = recorder();
+  const keys = input({ send });
+  await keys.key("Enter");
+  await keys.key("Enter", 4);
+  await keys.key("Escape");
+  const sent = (type, key, code, windowsVirtualKeyCode, modifiers, typed = {}) => ["Input.dispatchKeyEvent", { type, key, code, windowsVirtualKeyCode, modifiers, ...typed }];
+  assert.deepEqual(calls, [
+    sent("keyDown", "Enter", "Enter", 13, 0, { text: "\r", unmodifiedText: "\r" }),
+    sent("keyUp", "Enter", "Enter", 13, 0),
+    sent("rawKeyDown", "Enter", "Enter", 13, 4),
+    sent("keyUp", "Enter", "Enter", 13, 4),
+    sent("rawKeyDown", "Escape", "Escape", 27, 0),
+    sent("keyUp", "Escape", "Escape", 27, 0),
+  ]);
+});
