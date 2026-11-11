@@ -693,3 +693,27 @@ fn research_text_reaches_the_prompt_as_fenced_escaped_data() {
         );
     }
 }
+
+#[test]
+fn a_prompt_file_swapped_for_a_fifo_is_opened_without_waiting_and_is_no_regular_file() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let fifo = folder.path().join("brief.md");
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
+        .unwrap();
+    assert!(made.success());
+    let (sent, opened) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let regular = prompt::open_no_follow(&path)
+            .and_then(|file| file.metadata())
+            .map(|metadata| metadata.is_file());
+        let _ = sent.send(regular.ok());
+    });
+    let answer = opened.recv_timeout(std::time::Duration::from_secs(5));
+    let _writer = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(&fifo);
+    assert_eq!(answer, Ok(Some(false)), "the open waited on the FIFO");
+}

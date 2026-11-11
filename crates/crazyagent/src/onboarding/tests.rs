@@ -2091,3 +2091,30 @@ fn a_setup_saved_without_the_mappings_answers_offers_them_once_the_mapping_is_do
         .unwrap();
     assert_eq!(viewed(&mut database).proposed, None);
 }
+
+#[test]
+fn a_graph_mark_that_is_a_fifo_reads_as_no_mark_without_waiting_for_a_writer() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join(graph::KEPT_OUT_MARK), "keep-out v1 ab\n").unwrap();
+    assert_eq!(
+        graph::marked(folder.path()).as_deref(),
+        Some("keep-out v1 ab\n")
+    );
+    let out = folder.path().join("planted");
+    std::fs::create_dir(&out).unwrap();
+    let fifo = out.join(graph::KEPT_OUT_MARK);
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
+        .unwrap();
+    assert!(made.success());
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(graph::marked(&out));
+    });
+    let answer = read.recv_timeout(std::time::Duration::from_secs(5));
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(&fifo);
+    assert_eq!(answer, Ok(None), "a FIFO mark is refused without waiting");
+}

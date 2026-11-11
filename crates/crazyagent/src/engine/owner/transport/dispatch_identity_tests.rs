@@ -38,8 +38,9 @@ fn renumbered(identity: &LeaseIdentity) -> LeaseIdentity {
     }
 }
 
-#[test]
-fn dispatch_files_accepts_a_uniform_renumber_and_refuses_a_mixed_one() {
+/// A repository with one leased worktree on its own branch. Output: the folder that holds
+/// both, the lease's seal as pinned now and the worktree's git admin folder.
+fn lease() -> (tempfile::TempDir, DispatchLeaseSeal, PathBuf) {
     let temporary = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(temporary.path()).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -86,6 +87,82 @@ fn dispatch_files_accepts_a_uniform_renumber_and_refuses_a_mixed_one() {
         metadata: pinned(&admin),
         head: git(&target, &["rev-parse", "HEAD"]).trim().to_owned(),
     };
+    (temporary, seal, admin)
+}
+
+/// What `read` answered, or none when it was still waiting after five seconds; a reader
+/// stuck opening the FIFO at `path` is then let go by a writer. Inputs: the FIFO and the
+/// read. Output: the answer.
+fn within_five_seconds<T: Send + 'static>(
+    path: &Path,
+    read: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (sent, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(read());
+    });
+    let answer = ended.recv_timeout(Duration::from_secs(5)).ok();
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(OFlags::NONBLOCK.bits() as i32)
+        .open(path);
+    answer
+}
+
+fn fifo_at(path: &Path) {
+    let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
+    assert!(made.success());
+    assert!(
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+}
+
+#[test]
+fn dispatch_file_refuses_a_fifo_without_waiting_for_a_writer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let plain = temporary.path().join("plain");
+    std::fs::write(&plain, "gitdir: /somewhere\n").unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        dispatch_file(&plain, 4096).unwrap(),
+        b"gitdir: /somewhere\n"
+    );
+    let fifo = temporary.path().join(".git");
+    fifo_at(&fifo);
+    let read = fifo.clone();
+    let answer = within_five_seconds(&fifo, move || {
+        dispatch_file(&read, 4096).map_err(|error| error.0)
+    });
+    assert_eq!(
+        answer.expect("the open waited on the FIFO"),
+        Err("dispatch_file_untrusted_or_capacity".to_owned())
+    );
+}
+
+#[test]
+fn dispatch_files_refuses_a_fifo_as_the_worktree_git_pointer_without_waiting() {
+    let (_temporary, seal, admin) = lease();
+    assert_eq!(dispatch_files(&seal).unwrap(), admin);
+    let pointer = Path::new(&seal.path).join(".git");
+    std::fs::remove_file(&pointer).unwrap();
+    fifo_at(&pointer);
+    let checked = seal.clone();
+    let answer = within_five_seconds(&pointer, move || {
+        dispatch_files(&checked).map_err(|error| error.0)
+    });
+    assert_eq!(
+        answer.expect("the dispatch waited on the FIFO"),
+        Err("dispatch_file_untrusted_or_capacity".to_owned())
+    );
+}
+
+#[test]
+fn dispatch_files_accepts_a_uniform_renumber_and_refuses_a_mixed_one() {
+    let (_temporary, seal, admin) = lease();
     assert_eq!(dispatch_files(&seal).unwrap(), admin);
 
     let uniform = DispatchLeaseSeal {
