@@ -174,6 +174,21 @@ pub fn set_mode(db: &Connection, project: &ProjectId, mode: RunMode) -> Result<(
     Ok(())
 }
 
+/// Removes a removed project's Run setting, so a project added again under the same id
+/// starts on Type and run. Inputs: the removal's transaction and the project.
+/// Output: Ok once no row is left for the project, or `ide_unavailable`.
+pub(crate) fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let removed = db
+        .execute(
+            "DELETE FROM ide_run_settings WHERE project=?1",
+            params![project.as_str()],
+        )
+        .map_err(unavailable)?;
+    assert!(removed <= 1, "one project has at most one Run setting row");
+    Ok(())
+}
+
 /// Reads a project's Run setting from the running engine's database, off the async
 /// threads. Inputs: the owner runtime and the project. Output: the mode.
 pub(crate) async fn saved_mode(
