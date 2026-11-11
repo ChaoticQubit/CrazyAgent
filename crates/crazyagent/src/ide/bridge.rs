@@ -20,6 +20,7 @@ pub mod agents;
 pub mod memory;
 mod owner_edit;
 pub mod reveal;
+pub mod run_command;
 
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";

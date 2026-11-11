@@ -232,3 +232,11 @@ export function closeIde(projectId: string): Promise<Result<null>> {
 export function touchIde(projectId: string): Promise<Result<boolean>> {
   return call<boolean>("desktop_ide_touch", { projectId });
 }
+
+/** Types one confirmed command into a new terminal of the project's open IDE; the engine
+ * checks the single-command rule and the project's Run setting again. Inputs: the project and
+ * the command as the owner confirmed it. Output: done, or the refusal. */
+export async function runInProjectTerminal(projectId: string, command: string): Promise<Result<void>> {
+  const result = await call<null>("desktop_ide_run", { projectId, command });
+  return result.kind === "ok" ? { kind: "ok", value: undefined } : result;
+}
