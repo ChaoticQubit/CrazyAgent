@@ -11625,6 +11625,29 @@ fn an_ordinary_land_intent_is_stored_in_the_shape_an_older_engine_reads() {
     );
 }
 
+/// G24 r1 L1: a reset's stored copy of a set that was never regenerated keeps the shape an
+/// older engine reads after a rollback, and a regenerated set's copy still carries its fields.
+#[test]
+fn a_reset_copy_of_a_set_never_regenerated_is_stored_in_the_shape_an_older_engine_reads() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut record = store::load(&case.db, &id).unwrap();
+    assert_eq!(record.regenerated_head, None);
+    assert!(record.regenerated_files.is_empty());
+    let stored = serde_json::to_value(store::Earlier::of(&record)).unwrap();
+    assert!(stored.get("regenerated_head").is_none(), "{stored}");
+    assert!(stored.get("regenerated_files").is_none(), "{stored}");
+    record.regenerated_head = Some(record.head.clone());
+    record.regenerated_files = vec!["README".into()];
+    let regenerated = store::Earlier::of(&record);
+    let text = serde_json::to_string(&regenerated).unwrap();
+    assert_eq!(
+        serde_json::from_str::<store::Earlier>(&text).unwrap(),
+        regenerated
+    );
+}
+
 /// A set's proposed message names only the agent's own commits: owner commits the agent
 /// brought in by merging main are already on main, so they never become its subject or
 /// its list (T4 r2: an undo named the owner's commit).
