@@ -39,8 +39,8 @@ const LIMIT_NETWORK: &str = "--limit-network";
 const OPEN_SOCKETS: &str = "--open-sockets";
 const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
-/// The most ports one open-network agent is kept off: the owner's fixed ports, the kept
-/// local model ports and every model proxy port.
+/// The most ports one agent is kept off: the owner's fixed ports, the kept local model
+/// ports and every model proxy port.
 const KEEP_FREE_MAX: usize =
     OWNER_PORTS.len() + KEPT_PORTS_MAX + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize + 1;
 /// The socket family of SMC, whose listener holds a TCP port and takes plain TCP clients.
@@ -49,7 +49,7 @@ const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 const PICKED_PORTS_BYTES_MAX: u64 = 64;
 const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
      by itself (net.ipv4.ip_local_port_range), so it cannot keep the owner's ports free of an \
-     open-network agent";
+     agent";
 const _: () = {
     let mut index = 0;
     while index < OWNER_PORTS.len() {
@@ -121,8 +121,9 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// The rules the Landlock helper applies to itself before it starts the harness: read and
 /// execute beneath `read`, full access beneath `write`, and, when `limit_network` is set,
 /// outbound TCP only to the `connect` ports, no TCP listener and no socket but TCP, unless
-/// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). An open
-/// network names `keep_free` instead: the agent binds any TCP port but those. The engine
+/// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). Both
+/// networks name `keep_free`: the helper starts no agent while Linux could hand one of them
+/// out by itself, and an open-network agent binds any TCP port but those. The engine
 /// renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
@@ -183,9 +184,9 @@ pub enum HelperRequest {
 impl HelperRequest {
     /// Parses the helper arguments after its own name. Input: flags from
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
-    /// `--probe` with an optional `--limit-network` and `--open-sockets`, or with
-    /// `--keep-free` and a port. `--open-sockets` needs `--limit-network` and `--keep-free`
-    /// an open network. Output: the request, or the reason the arguments are refused.
+    /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
+    /// with a port. `--open-sockets` needs `--limit-network`. Output: the request, or the
+    /// reason the arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
@@ -236,13 +237,9 @@ fn open_needs_limit(policy: &LandlockPolicy) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuses kept ports that do not fit the policy: beside a limited network, which binds
-/// nothing as it is, or more of them than [`KEEP_FREE_MAX`]. Input: the parsed policy.
-/// Output: Ok, or the reason.
+/// Refuses more kept ports than [`KEEP_FREE_MAX`]. Input: the parsed policy. Output: Ok,
+/// or the reason.
 fn binds_fit(policy: &LandlockPolicy) -> Result<(), String> {
-    if policy.limit_network && !policy.keep_free.is_empty() {
-        return Err(format!("{KEEP_FREE} needs an open network"));
-    }
     if policy.keep_free.len() > KEEP_FREE_MAX {
         return Err("too many kept ports".into());
     }
@@ -288,12 +285,12 @@ fn read_picked_ports() -> Option<RangeInclusive<u16>> {
     picked_ports(&text)
 }
 
-/// Refuses an open network whose kept ports Linux could hand to the agent by itself.
-/// Landlock checks only the port a bind names: a bind to port 0, or a listen on a socket
-/// that was never bound, gets a port Linux picks from its range with no check, and no rule
-/// can refuse a listen. So every kept port must lie outside that range, or no open-network
-/// agent starts. Inputs: the kept ports and the range, none when it cannot be read.
-/// Output: Ok, or the plain reason naming the first kept port inside the range.
+/// Refuses kept ports Linux could hand to the agent by itself. Landlock checks only the
+/// port a bind names: a bind to port 0 on an open network, or a listen on a socket that was
+/// never bound on any network, gets a port Linux picks from its range with no check, and no
+/// rule can refuse a listen. So every kept port must lie outside that range, or no agent
+/// starts. Inputs: the kept ports and the range, none when it cannot be read. Output: Ok,
+/// or the plain reason naming the first kept port inside the range.
 fn kept_outside_picked(kept: &[u16], picked: Option<&RangeInclusive<u16>>) -> Result<(), String> {
     let Some(picked) = picked else {
         return Err(PICKED_PORTS_UNREADABLE.into());
@@ -304,8 +301,8 @@ fn kept_outside_picked(kept: &[u16], picked: Option<&RangeInclusive<u16>>) -> Re
     let (low, high) = (picked.start(), picked.end());
     Err(format!(
         "port {port} is kept free for the owner's apps, a local model or a model proxy, and this \
-         Linux hands out ports {low} to {high} by itself, so an agent with an open network \
-         could end up listening on it; move the local model to a port below {low}, or have an \
+         Linux hands out ports {low} to {high} by itself, so an agent could end up listening \
+         on it; move the local model to a port below {low}, or have an \
          administrator move net.ipv4.ip_local_port_range away from port {port}"
     ))
 }
@@ -539,8 +536,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
-    let keeps = !policy.limit_network && !policy.keep_free.is_empty();
-    if keeps
+    if !policy.keep_free.is_empty()
         && let Err(reason) = kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref())
     {
         eprintln!("crazyagent-landlock: {reason}");
@@ -724,23 +720,20 @@ impl LinuxSandbox {
 }
 
 /// Refuses a policy neither Linux backend starts: one confined to its own worktree, a
-/// limited network under [`LinuxSockets::Refuse`], or an open network with a kept port
-/// that Linux could hand to the agent by itself ([`kept_outside_picked`]). Input: the
-/// policy. Output: Ok, or the plain `Unavailable` reason.
+/// limited network under [`LinuxSockets::Refuse`], or any network with a kept port that
+/// Linux could hand to the agent by itself ([`kept_outside_picked`]). Input: the policy.
+/// Output: Ok, or the plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.checkout.is_some() || sandbox.clone.is_some() {
         return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
-    }
-    if matches!(sandbox.network(), SandboxNetwork::Open) {
-        kept_outside_picked(&kept_free(sandbox), read_picked_ports().as_ref())
-            .map_err(SandboxError::Unavailable)?;
     }
     if matches!(sandbox.network(), SandboxNetwork::Only(_))
         && sandbox.linux_sockets() == LinuxSockets::Refuse
     {
         return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
     }
-    Ok(())
+    kept_outside_picked(&kept_free(sandbox), read_picked_ports().as_ref())
+        .map_err(SandboxError::Unavailable)
 }
 
 impl Sandbox for LinuxSandbox {
@@ -917,16 +910,15 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
         connect.dedup();
     }
     let open_sockets = limit_network && sandbox.linux_sockets() == LinuxSockets::TcpPorts;
-    let keep_free = if limit_network {
-        Vec::new()
-    } else {
-        kept_free(sandbox)
-    };
+    let keep_free = kept_free(sandbox);
     assert!(
         read.len() + write.len() <= HELPER_PATHS_MAX,
         "the helper accepts every policy the engine writes"
     );
-    assert_eq!(limit_network, keep_free.is_empty());
+    assert!(
+        !keep_free.is_empty(),
+        "every agent is held to the ports Linux picks"
+    );
     LandlockPolicy {
         read,
         write,
@@ -937,9 +929,9 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
     }
 }
 
-/// The TCP ports an open-network agent never listens on: the owner's fixed ports, the kept
-/// local model ports and every model proxy port, as the macOS boundary keeps them. Input:
-/// the policy. Output: those ports, rising and each once.
+/// The TCP ports no agent listens on: the owner's fixed ports, the kept local model ports
+/// and every model proxy port, as the macOS boundary keeps them. Input: the policy. Output:
+/// those ports, rising and each once.
 fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     let mut ports: Vec<u16> = OWNER_PORTS
         .iter()
