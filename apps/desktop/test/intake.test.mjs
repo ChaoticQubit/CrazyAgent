@@ -273,10 +273,24 @@ test("a saved empty setup with a finished mapping offers the mapping's answers",
   assert.equal(intake.offerProposed(view({ finished: true })), false);
   assert.equal(intake.offerProposed(view({ finished: false, proposed: setup({ about: "A research reader." }) })), false);
   assert.equal(intake.offerProposed(view({ finished: true, proposed: setup({ about: "  ", tech_stack: [] }) })), false);
-  const used = intake.onboardingDraft(intake.withProposed(saved), stored());
+  const before = intake.onboardingDraft(saved, stored());
+  const used = intake.withProposed(before, saved);
   assert.equal(used.about, "A research reader.");
   assert.deepEqual(used.stack, ["Rust"]);
-  assert.equal(intake.withProposed(view()).draft.about, "A shop for plants.");
+  assert.equal(intake.withProposed(before, view()), before);
+});
+
+test("using the mapping's answers keeps the owner's unsaved name, research and pool", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"], platforms: ["website"] }) });
+  const edited = { ...intake.onboardingDraft(saved, stored()), name: "ScholarScope", research: ["market_research"], pool: "work", poolChosen: true };
+  const used = intake.withProposed(edited, saved);
+  assert.equal(used.name, "ScholarScope");
+  assert.deepEqual(used.research, ["market_research"]);
+  assert.equal(used.pool, "work");
+  assert.equal(used.poolChosen, true);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.deepEqual(used.platforms, ["website"]);
 });
 
 test("confirm waits for the mapping agent unless a step failed", () => {
