@@ -16,6 +16,8 @@ const CLAUDE_INTERRUPTED: &str = "[Request interrupted by user";
 const CONVERSATION_ID_BYTES_MAX: usize = 128;
 const EXCERPT_TAIL_BYTES_MAX: u64 = 4 * 1024 * 1024;
 const EXCERPT_MESSAGES_MAX: usize = 256;
+/// How much of a record `typed_past` reads at a time.
+const TYPED_CHUNK_BYTES: usize = 256 * 1024;
 const CLAUDE_NOTIFICATION: &str = "<task-notification>";
 const CLAUDE_NOTIFICATION_MODE: &str = "task-notification";
 const NOTIFIED_TASKS_MAX: usize = 16;
@@ -1063,55 +1065,87 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 
 /// Reads what was typed into a harness conversation after byte `offset` of its record,
 /// with where each typed line ends, so a caller can read on from one typed message to the
-/// next. Only lines the harness finished are read, from at most `EXCERPT_TAIL_BYTES_MAX`
-/// bytes past the offset, never following a link. A Claude Code line is typed only when it
-/// is a prompt that starts a turn (`claude_prompt`), so a compact summary, a line only the
-/// transcript shows or a sub-agent's line is never read as a turn's words. Takes the
-/// harness, the record and the
+/// next. It reads on to the record's end as it was when opened, `TYPED_CHUNK_BYTES` at a
+/// time and never following a link, so a turn that wrote any amount to the record hides no
+/// typed line behind it. Only lines the harness finished are read. A line longer than
+/// `LINE_BYTES_MAX`, which the turn reader refuses too, is passed over unread. A Claude
+/// Code line is typed only when it is a prompt that starts a turn (`claude_prompt`), so a
+/// compact summary, a line only the transcript shows or a sub-agent's line is never read
+/// as a turn's words. Reading stops early once `EXCERPT_MESSAGES_MAX` typed texts or more
+/// than `LINE_BYTES_MAX` bytes of them are held. Takes the harness, the record and the
 /// offset. Returns the typed texts oldest first, each with the byte offset just past its
-/// line, and the offset just past the last line read; none when the record cannot be read
-/// or is now shorter than the offset.
+/// line, and the offset just past the last line read, the record's last finished line
+/// when no typed text was found; none when the record cannot be read or is now shorter
+/// than the offset.
 pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
     let mut file = open_plain(record)?;
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
     }
-    let mut read = Vec::new();
     file.seek(SeekFrom::Start(offset)).ok()?;
-    file.take(EXCERPT_TAIL_BYTES_MAX)
-        .read_to_end(&mut read)
-        .ok()?;
-    let mut typed = Vec::new();
-    let mut end = offset;
-    for line in read.split_inclusive(|byte| *byte == b'\n') {
-        if line.last() != Some(&b'\n') {
+    let mut typed: Vec<(u64, String)> = Vec::new();
+    let mut held = 0;
+    let mut line: Vec<u8> = Vec::new();
+    let mut long = false;
+    let (mut at, mut end) = (offset, offset);
+    let mut chunk = vec![0; TYPED_CHUNK_BYTES];
+    'record: while at < length {
+        let left = usize::try_from(length - at).unwrap_or(usize::MAX);
+        let count = file.read(&mut chunk[..left.min(TYPED_CHUNK_BYTES)]).ok()?;
+        if count == 0 {
             break;
         }
-        end += u64::try_from(line.len()).ok()?;
-        let Ok(value) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        let said = match harness {
-            "codex" => codex_message(&value),
-            "claude-code"
-                if claude_prompt(&value, &content_texts(&value["message"]["content"])) =>
-            {
-                claude_message(&value)
+        for piece in chunk[..count].split_inclusive(|byte| *byte == b'\n') {
+            at += u64::try_from(piece.len()).ok()?;
+            if long || line.len() + piece.len() > LINE_BYTES_MAX {
+                long = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(piece);
             }
-            _ => None,
-        };
-        if let Some((Speaker::Input, text)) = said {
-            typed.push((end, text));
+            if piece.last() != Some(&b'\n') {
+                continue;
+            }
+            end = at;
+            let text = (!long).then(|| typed_line(harness, &line)).flatten();
+            long = false;
+            line.clear();
+            if let Some(text) = text {
+                held += text.len();
+                typed.push((end, text));
+                if typed.len() >= EXCERPT_MESSAGES_MAX || held > LINE_BYTES_MAX {
+                    break 'record;
+                }
+            }
         }
     }
-    let read_bytes = u64::try_from(read.len()).ok()?;
-    if end == offset && read_bytes == EXCERPT_TAIL_BYTES_MAX {
-        end = offset + read_bytes;
-    }
-    assert!(end >= offset);
-    assert!(end - offset <= EXCERPT_TAIL_BYTES_MAX);
+    assert!(offset <= end && end <= at && at <= length);
+    assert!(typed.len() <= EXCERPT_MESSAGES_MAX);
     Some((typed, end))
+}
+
+/// Reads one finished line of a harness record as a typed message, as `typed_past` counts
+/// one. A line without the word `"user"` cannot be typed and is not parsed, so the many
+/// long lines a turn writes cost one scan each. Takes the harness and the line. Returns
+/// the typed text, or none for any other line.
+fn typed_line(harness: &str, line: &[u8]) -> Option<String> {
+    const USER: &[u8] = b"\"user\"";
+    if !line.windows(USER.len()).any(|part| part == USER) {
+        return None;
+    }
+    let value = serde_json::from_slice::<Value>(line).ok()?;
+    let said = match harness {
+        "codex" => codex_message(&value),
+        "claude-code" if claude_prompt(&value, &content_texts(&value["message"]["content"])) => {
+            claude_message(&value)
+        }
+        _ => None,
+    };
+    match said {
+        Some((Speaker::Input, text)) => Some(text),
+        _ => None,
+    }
 }
 
 #[cfg(all(test, unix))]

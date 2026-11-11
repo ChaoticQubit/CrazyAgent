@@ -330,6 +330,10 @@ pub enum ResumePlan {
 }
 
 /// The note a resumed session shows when its harness conversation starts fresh.
+/// The first line of what a live master that continues its kept conversation reads of the
+/// session's turns that conversation does not hold.
+pub const RESUMED_HANDOFF: &str =
+    "This session has turns the conversation you continue does not hold. Newest first:";
 pub const FRESH_NOTE: &str = "This session continues in a new harness conversation, started with a summary of its earlier turns.";
 /// The note a resumed session shows when its earlier harness conversation can no longer be read.
 pub const LOST_NOTE: &str = "This session continues in a new harness conversation. Its earlier harness conversation could not be read, so only the session's state was passed on.";
@@ -1151,9 +1155,12 @@ pub(crate) fn list(
 
 /// What the Sessions list shows of a session's stored conversation, whatever master ran
 /// it: how many turns the owner or the engine opened, the first line the owner wrote and
-/// the newest line the owner or a master wrote, both clipped for the list. Takes the
-/// connection and session. Returns the three; 0 and no lines for a session with nothing
-/// stored or a database without the store.
+/// the newest line the owner or a master wrote, both clipped for the list. An owner line
+/// counts only where the engine saw the owner's words itself, in an engine-run turn or as
+/// what it typed for the owner: words read from a harness record are never shown as the
+/// owner's, since the list has no mark for them. Takes the connection and session. Returns
+/// the three; 0 and no lines for a session with nothing stored or a database without the
+/// store.
 fn listed_conversation(
     connection: &Connection,
     session: &SessionId,
@@ -1178,11 +1185,14 @@ fn listed_conversation(
     };
     let first = line(
         "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM session_messages
-         WHERE session=?1 AND speaker='owner' AND text IS NOT NULL ORDER BY seq LIMIT 1",
+         WHERE session=?1 AND speaker='owner' AND text IS NOT NULL
+           AND source NOT IN ('record','counter')
+         ORDER BY seq LIMIT 1",
     )?;
     let last = line(
         "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM session_messages
-         WHERE session=?1 AND speaker IN ('owner','master') AND text IS NOT NULL
+         WHERE session=?1 AND text IS NOT NULL
+           AND (speaker='master' OR (speaker='owner' AND source NOT IN ('record','counter')))
          ORDER BY seq DESC LIMIT 1",
     )?;
     let turns = u64::try_from(turns).map_err(error)?;
@@ -1733,6 +1743,19 @@ pub fn takeover_note(
     }
 }
 
+/// The divider a session's conversation shows where the live terminal of the harness that
+/// already ran it took it back from the one-turn master, yet the harness conversation it
+/// kept could not continue: a new harness conversation began with the earlier turns handed
+/// over, which is not the kept conversation continuing. Takes the live harness. Returns
+/// the line.
+pub fn restarted_note(harness: &str) -> String {
+    let to = harness_label(harness);
+    assert!(!to.is_empty());
+    format!(
+        "Continued in a new {to} conversation in the live terminal: the one this session kept could not be continued. {to} got this session's earlier turns, newest first, and the open tasks."
+    )
+}
+
 /// Builds the Carry over handoff the master that takes a conversation over reads first: a
 /// line naming the switch, then one part per kind of earlier conversation, what was said
 /// in the live terminal first and the turns the one-turn master ran second, each newest
@@ -1757,39 +1780,51 @@ pub fn handoff(
     handoff_text(connection, project, session, carried(&messages), headers)
 }
 
-/// Builds what a live master that continues its own kept harness conversation reads first
-/// when another master ran the session meanwhile: only that master's turns since the
-/// conversation was last handed over, newest first, then the open tasks. Its own turns are
-/// left out, since the conversation it resumes holds them. Takes the connection, project,
-/// session, the harness that resumes and the other master's display name. Returns the
-/// handoff.
+/// Builds what a live master reads first at every start that continues the harness
+/// conversation its session kept: the session's turns that conversation does not hold,
+/// newest first, then the open tasks. Those are the turns another master ran, in the other
+/// mode or on another harness, and what an earlier conversation of the same harness said,
+/// before the first turn bound to the kept record. They are handed over at every such
+/// start, not only the first one after they ran: launch instructions are all that carries
+/// them, the harness record never holds them, so a start without them would lose them
+/// again. Turns before a Start fresh switch stay left out. Takes the connection, project,
+/// session, the harness that resumes and the kept conversation's id. Returns the handoff,
+/// or None when the kept conversation holds every turn with words.
 pub fn handoff_resumed(
     connection: &Connection,
     project: &ProjectId,
     session: &SessionId,
     harness: &str,
-    from: &str,
-) -> Result<String, EngineError> {
+    kept: &str,
+) -> Result<Option<String>, EngineError> {
+    assert!(!kept.is_empty());
     let messages = conversation(connection, project, session)?;
     let next = Runner {
         mode: MasterMode::Live,
         harness,
     };
-    let missed: Vec<Stored> = unsettled(&messages)
+    let scope = carried(&messages);
+    let first = scope
         .iter()
-        .filter(|stored| said(stored) && foreign(stored, next))
-        .cloned()
+        .position(|stored| stored.record.as_deref() == Some(kept));
+    let missed: Vec<Stored> = scope
+        .iter()
+        .enumerate()
+        .filter(|(index, stored)| {
+            said(stored) && (foreign(stored, next) || first.is_none_or(|first| *index < first))
+        })
+        .map(|(_, stored)| stored.clone())
         .collect();
     assert!(missed.len() <= messages.len());
+    if !missed.iter().any(|stored| stored.message.text.is_some()) {
+        return Ok(None);
+    }
     let headers = (
-        format!(
-            "While your conversation was closed, {from} ran this session. Its turns, newest first:"
-        ),
-        format!(
-            "While your conversation was closed, {from} ran this session. Its turns could not be read."
-        ),
+        RESUMED_HANDOFF.to_owned(),
+        "This session has turns the conversation you continue does not hold. They could not be read."
+            .to_owned(),
     );
-    handoff_text(connection, project, session, &missed, headers)
+    handoff_text(connection, project, session, &missed, headers).map(Some)
 }
 
 /// Writes a handoff from the messages it carries: a header line, then one part per kind of
@@ -2241,6 +2276,7 @@ struct Stored {
     message: SessionMessage,
     source: String,
     key: String,
+    record: Option<String>,
 }
 
 /// A message about to be stored.
@@ -2306,11 +2342,12 @@ fn stored(connection: &Connection, session: &str) -> Result<Vec<Stored>, EngineE
     }
     let mut statement = connection
         .prepare(
-            "SELECT seq,speaker,mode,harness,text,at_ms,source,source_key FROM (
+            "SELECT seq,speaker,mode,harness,text,at_ms,source,source_key,record FROM (
                 SELECT seq,speaker,mode,
                        CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END AS harness,
                        CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END AS text,
-                       at_ms,source,source_key
+                       at_ms,source,source_key,
+                       CASE WHEN length(CAST(record AS BLOB))<=128 THEN record END AS record
                 FROM session_messages WHERE session=?1 ORDER BY seq DESC LIMIT ?2
              ) ORDER BY seq",
         )
@@ -2324,6 +2361,7 @@ fn stored(connection: &Connection, session: &str) -> Result<Vec<Stored>, EngineE
         i64,
         String,
         String,
+        Option<String>,
     );
     let rows = statement
         .query_map(
@@ -2338,6 +2376,7 @@ fn stored(connection: &Connection, session: &str) -> Result<Vec<Stored>, EngineE
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
@@ -2345,20 +2384,21 @@ fn stored(connection: &Connection, session: &str) -> Result<Vec<Stored>, EngineE
         .collect::<Result<Vec<Row>, _>>()
         .map_err(error)?;
     let mut messages = Vec::with_capacity(rows.len());
-    for (seq, speaker, mode, harness, text, at_ms, source, key) in rows {
-        let record = || error("session_message_record");
+    for (seq, speaker, mode, harness, text, at_ms, source, key, record) in rows {
+        let unknown = || error("session_message_record");
         messages.push(Stored {
             message: SessionMessage {
                 seq: u64::try_from(seq).map_err(error)?,
-                speaker: MessageSpeaker::named(&speaker).ok_or_else(record)?,
-                mode: MasterMode::named(&mode).ok_or_else(record)?,
+                speaker: MessageSpeaker::named(&speaker).ok_or_else(unknown)?,
+                mode: MasterMode::named(&mode).ok_or_else(unknown)?,
                 harness,
                 text,
                 at_ms: u64::try_from(at_ms).map_err(error)?,
-                source: MessageSource::named(&source).ok_or_else(record)?,
+                source: MessageSource::named(&source).ok_or_else(unknown)?,
             },
             source,
             key,
+            record,
         });
     }
     assert!(messages.len() <= MESSAGES_READ_MAX);
@@ -2532,27 +2572,36 @@ pub(crate) fn note_switch(
     harness: &str,
     carried: SwitchMode,
 ) -> Result<(), EngineError> {
-    divide(connection, project, session, mode, harness, carried, true)
+    let line = takeover_note(mode, harness, carried, true);
+    divide(connection, project, session, mode, harness, carried, &line)
 }
 
 /// Stores the divider where the live terminal of the harness that already ran a session
 /// took its conversation back from the one-turn master, which is no harness switch: the
-/// turns it had not seen were handed over. Takes the connection, project, session and the
-/// harness. Returns any SQLite failure.
+/// turns it had not seen were handed over, to the conversation it kept or, where that one
+/// could not continue, to a new one, and the divider says which. Takes the connection,
+/// project, session, the harness and whether the kept conversation continued. Returns any
+/// SQLite failure.
 pub(crate) fn note_continued(
     connection: &Connection,
     project: &str,
     session: &str,
     harness: &str,
+    resumed: bool,
 ) -> Result<(), EngineError> {
     let (mode, carried) = (MasterMode::Live, SwitchMode::Carry);
-    divide(connection, project, session, mode, harness, carried, false)
+    let line = if resumed {
+        takeover_note(mode, harness, carried, false)
+    } else {
+        restarted_note(harness)
+    };
+    divide(connection, project, session, mode, harness, carried, &line)
 }
 
-/// Stores the divider of a takeover, which settles what came before it, with the line
-/// `takeover_note` gives. Takes the connection, project, session, the mode and harness of
-/// the master that took over, whether its turns were carried and whether the harness
-/// itself changed. Returns any SQLite failure.
+/// Stores the divider of a takeover, which settles what came before it. Takes the
+/// connection, project, session, the mode and harness of the master that took over,
+/// whether its turns were carried and the line the divider shows. Returns any SQLite
+/// failure.
 fn divide(
     connection: &Connection,
     project: &str,
@@ -2560,9 +2609,9 @@ fn divide(
     mode: MasterMode,
     harness: &str,
     carried: SwitchMode,
-    changed: bool,
+    line: &str,
 ) -> Result<(), EngineError> {
-    assert!(changed || carried == SwitchMode::Carry);
+    assert!(!line.is_empty());
     connection.execute_batch(MESSAGES).map_err(error)?;
     let next: i64 = connection
         .query_row(
@@ -2580,7 +2629,7 @@ fn divide(
             speaker: MessageSpeaker::Switch,
             mode,
             harness: Some(harness),
-            text: Some(&takeover_note(mode, harness, carried, changed)),
+            text: Some(line),
             source: SWITCH,
             key: &format!("{}:{next}", carried.name()),
         },
@@ -2635,6 +2684,7 @@ pub(crate) fn one_turn_asked(
             SwitchMode::Carry
         };
         let mode = MasterMode::OneTurn;
+        let line = takeover_note(mode, backend, carried, taken.harness);
         divide(
             connection,
             project_name,
@@ -2642,7 +2692,7 @@ pub(crate) fn one_turn_asked(
             mode,
             backend,
             carried,
-            taken.harness,
+            &line,
         )?;
     }
     append_asked(
@@ -3075,9 +3125,11 @@ fn absorb_boundary(
 
 /// Stores the terminal conversation an older engine kept: a row without text for each
 /// counted turn the record no longer shows, the newest kept line when no record reads,
-/// then the record's messages, the last of them with how far the record was read, so a
-/// later live turn reads its typed words from there on. Takes the connection, project, session and what was kept.
-/// Returns any SQLite failure.
+/// then the record's messages. Where the record read, every such row names the kept
+/// conversation, so a later start that continues it knows the conversation holds them, and
+/// the last one keeps how far the record was read, so a later live turn reads its typed
+/// words from there on. Takes the connection, project, session and what was kept. Returns
+/// any SQLite failure.
 fn absorb_live(
     connection: &Connection,
     project: &str,
@@ -3119,6 +3171,14 @@ fn absorb_live(
         live(*speaker, Some(text.as_str()), RECORD, &index.to_string())?;
     }
     if let Some((record, length)) = old.read.as_ref().filter(|_| !old.spoken.is_empty()) {
+        connection
+            .execute(
+                "UPDATE session_messages SET record=?1
+                 WHERE session=?2 AND mode='live' AND record IS NULL
+                   AND source IN ('record','counter')",
+                params![record, session],
+            )
+            .map_err(error)?;
         let marked = connection
             .execute(
                 "UPDATE session_messages SET record=?1, record_at=?2
@@ -4014,6 +4074,7 @@ mod tests {
             },
             source: source.into(),
             key: seq.to_string(),
+            record: None,
         }
     }
 
@@ -4023,23 +4084,37 @@ mod tests {
         super::takeover(messages, next).map(|taken| taken.from)
     }
 
-    /// Appends one typed input, with no reply, to the record `old_record` keeps.
+    /// The id of the conversation `old_record` keeps.
     #[cfg(unix)]
-    fn record_typed(folder: &tempfile::TempDir, typed: &str) {
+    const KEPT_ID: &str = "4f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+
+    /// Appends one line to the record `old_record` keeps.
+    #[cfg(unix)]
+    fn record_line(folder: &tempfile::TempDir, line: &serde_json::Value) {
         use std::io::Write;
-        let record = folder
-            .path()
-            .join("4f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f.jsonl");
+        let record = folder.path().join(format!("{KEPT_ID}.jsonl"));
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(record)
             .unwrap();
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({"type": "user", "message": {"content": typed}})
-        )
-        .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    /// Appends one typed input, with no reply, to the record `old_record` keeps.
+    #[cfg(unix)]
+    fn record_typed(folder: &tempfile::TempDir, typed: &str) {
+        record_line(
+            folder,
+            &serde_json::json!({"type": "user", "message": {"content": typed}}),
+        );
+    }
+
+    /// One record line a turn writes for a tool's result, `bytes` long and more.
+    #[cfg(unix)]
+    fn tool_result(bytes: usize) -> serde_json::Value {
+        serde_json::json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "x".repeat(bytes)}
+        ]}})
     }
 
     /// Appends typed inputs and their replies to the record `old_record` keeps.
@@ -4914,6 +4989,108 @@ mod tests {
         );
     }
 
+    /// OB6R2-M1: a turn that writes more to the record than one read takes hides no typed
+    /// line behind it. The turns after a 5 MiB turn each get their own words, and a turn
+    /// with no typed line that wrote as much is bound to the record's end, so the turn
+    /// after it reads its own words too.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_that_writes_megabytes_to_the_record_shifts_no_later_words() {
+        const TURN_BYTES: usize = 5 * 1024 * 1024;
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        old_record(&folder, &connection, "s-big", &[]);
+        let start = || {
+            super::mark_owner_turn(&connection, &project, "s-big", "claude-code").unwrap();
+        };
+        let end = |reply: &str| {
+            super::mark_owner_reply(&connection, &project, "s-big", "claude-code", reply).unwrap();
+        };
+
+        record_typed(&folder, "First");
+        start();
+        record_line(&folder, &tool_result(TURN_BYTES));
+        end("One");
+        record_typed(&folder, "Second");
+        start();
+        end("Two");
+        record_typed(&folder, "Third");
+        start();
+        end("Three");
+        start();
+        record_line(&folder, &tool_result(TURN_BYTES));
+        end("Woke");
+        record_typed(&folder, "Fourth");
+        start();
+        end("Four");
+
+        assert_eq!(
+            shown(&connection, "s-big"),
+            [
+                "owner/live/record: First",
+                "master/live/terminal: One",
+                "owner/live/record: Second",
+                "master/live/terminal: Two",
+                "owner/live/record: Third",
+                "master/live/terminal: Three",
+                "owner/live/terminal: -",
+                "master/live/terminal: Woke",
+                "owner/live/record: Fourth",
+                "master/live/terminal: Four",
+            ]
+        );
+    }
+
+    /// OB6R2-F1 (rv-secreview): the Sessions list shows an owner line only where the
+    /// engine saw the owner's words itself. Words read from a harness record are never
+    /// the list's first or newest owner line; a master's reply and what the engine typed
+    /// for the owner are.
+    #[cfg(unix)]
+    #[test]
+    fn the_session_list_quotes_no_words_read_from_a_record_as_the_owner_s() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        old_session(&connection, "s-quoted", "claude");
+        old_record(&folder, &connection, "s-quoted", &[]);
+        let lines = || {
+            let listed = super::list(&connection, &project).unwrap();
+            (listed[0].first_line.clone(), listed[0].last_line.clone())
+        };
+
+        record_typed(&folder, "Typed in the terminal");
+        super::mark_owner_turn(&connection, &project, "s-quoted", "claude-code").unwrap();
+        let typed = lines();
+        super::mark_owner_reply(
+            &connection,
+            &project,
+            "s-quoted",
+            "claude-code",
+            "Reply one",
+        )
+        .unwrap();
+        let replied = lines();
+        record_typed(&folder, "[owner] Ship it");
+        let fed = super::Fed::Owner("Ship it".into());
+        super::mark_live_turn(&connection, &project, "s-quoted", "claude-code", Some(&fed))
+            .unwrap();
+        let sent = lines();
+
+        assert_eq!(
+            shown(&connection, "s-quoted"),
+            [
+                "owner/live/record: Typed in the terminal",
+                "master/live/terminal: Reply one",
+                "owner/live/terminal: Ship it",
+            ]
+        );
+        assert_eq!(typed, (None, None));
+        assert_eq!(replied, (None, Some("Reply one".to_owned())));
+        assert_eq!(
+            sent,
+            (Some("Ship it".to_owned()), Some("Ship it".to_owned()))
+        );
+    }
+
     /// OB6-F4: a turn the engine typed itself is stored with the engine's own text, as the
     /// owner's message when the owner wrote it in the app and as the engine's when the
     /// engine wrote it, and neither is marked as read from the record. A line the record
@@ -5275,16 +5452,22 @@ mod tests {
             .unwrap();
 
         let taken = super::taken_from(&connection, &project, &session, "claude-code").unwrap();
-        let text = super::handoff_resumed(
+        let read = || {
+            super::handoff_resumed(&connection, &project, &session, "claude-code", KEPT_ID)
+                .unwrap()
+                .unwrap()
+        };
+        let text = read();
+        super::note_continued(
             &connection,
-            &project,
-            &session,
+            "store-project",
+            "s-resume",
             "claude-code",
-            "the one-turn master (Claude)",
+            true,
         )
         .unwrap();
-        super::note_continued(&connection, "store-project", "s-resume", "claude-code").unwrap();
         let again = super::taken_from(&connection, &project, &session, "claude-code").unwrap();
+        let later = read();
         let switches: i64 = connection
             .query_row("SELECT COUNT(*) FROM team_session_switches", [], |row| {
                 row.get(0)
@@ -5298,18 +5481,17 @@ mod tests {
                 harness: false,
             })
         );
-        assert!(
-            text.starts_with(
-                "While your conversation was closed, the one-turn master (Claude) ran this session. Its turns, newest first:"
-            ),
-            "{text}"
-        );
+        assert!(text.starts_with(super::RESUMED_HANDOFF), "{text}");
         assert!(
             text.contains("Owner: Plan the course page\nYou: Planned it"),
             "{text}"
         );
         assert!(!text.contains("Fix the footer"), "{text}");
-        assert_eq!(again, None, "the turns are handed over once");
+        assert_eq!(again, None, "the takeover is seen once");
+        assert_eq!(
+            later, text,
+            "every later start of the kept conversation reads the turns again (OB6-R2-F2)"
+        );
         assert_eq!(switches, 0, "a change of mode records no harness switch");
         assert_eq!(
             shown(&connection, "s-resume").last().map(String::as_str),
@@ -5317,6 +5499,104 @@ mod tests {
                 "switch/live/switch: Continued in the live Claude Code terminal. Claude Code got the turns it had not seen, newest first, and the open tasks."
             )
         );
+    }
+
+    /// OB6-R2-F2: what a kept conversation reads at a start is everything of the session
+    /// it does not hold, at every start: the turns the one-turn master ran and what an
+    /// earlier conversation of the same harness said, but none of its own turns. A stored
+    /// divider changes nothing of it, since the harness record never holds those turns.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_conversation_reads_what_it_does_not_hold_at_every_start() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let session = SessionId::new("s-held").unwrap();
+        old_session(&connection, "s-held", "claude");
+        let read = || {
+            super::handoff_resumed(&connection, &project, &session, "claude-code", KEPT_ID).unwrap()
+        };
+        super::mark_owner_turn(&connection, &project, "s-held", "claude-code").unwrap();
+        super::mark_owner_reply(&connection, &project, "s-held", "claude-code", "Old reply")
+            .unwrap();
+        old_record(&folder, &connection, "s-held", &[]);
+        record_typed(&folder, "New ask");
+        super::mark_owner_turn(&connection, &project, "s-held", "claude-code").unwrap();
+        super::mark_owner_reply(&connection, &project, "s-held", "claude-code", "New reply")
+            .unwrap();
+        let own_only = read();
+        let rcli = crate::master_session::MasterBackend::Rcli;
+        let asked = super::Asked::Owner(Some("Plan it"));
+        super::one_turn_asked(&connection, &project, &session, rcli, "turn-1", &asked).unwrap();
+        super::one_turn_reply(&connection, &session, "turn-1", "Planned").unwrap();
+
+        let first = read().unwrap();
+        super::note_continued(&connection, "store-project", "s-held", "claude-code", true).unwrap();
+        let second = read().unwrap();
+
+        let earlier = own_only.unwrap();
+        assert!(earlier.contains("Old reply"), "{earlier}");
+        assert!(!earlier.contains("New reply"), "{earlier}");
+        assert!(first.starts_with(super::RESUMED_HANDOFF), "{first}");
+        assert!(first.contains("Owner: Plan it\nYou: Planned"), "{first}");
+        assert!(first.contains("Old reply"), "{first}");
+        assert!(!first.contains("New ask"), "{first}");
+        assert!(!first.contains("New reply"), "{first}");
+        assert_eq!(second, first);
+    }
+
+    /// OB6-R2-F2: a kept conversation that holds every turn of its session with words reads
+    /// nothing at a start.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_conversation_that_holds_every_turn_reads_nothing_at_a_start() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let session = SessionId::new("s-whole").unwrap();
+        old_session(&connection, "s-whole", "claude");
+        old_record(&folder, &connection, "s-whole", &[]);
+        record_typed(&folder, "Only ask");
+        super::mark_owner_turn(&connection, &project, "s-whole", "claude-code").unwrap();
+        super::mark_owner_reply(
+            &connection,
+            &project,
+            "s-whole",
+            "claude-code",
+            "Only reply",
+        )
+        .unwrap();
+
+        let read = super::handoff_resumed(&connection, &project, &session, "claude-code", KEPT_ID)
+            .unwrap();
+
+        assert_eq!(read, None);
+    }
+
+    /// OB6-R2-F3: where the live terminal takes a session back from the one-turn master of
+    /// the same harness and the conversation it kept cannot continue, the stored divider
+    /// says a new conversation began with the earlier turns, not that the kept one
+    /// continued. It settles the takeover like any other.
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_change_into_a_new_conversation_is_not_stored_as_the_kept_one_continuing() {
+        let (_folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let session = SessionId::new("s-anew").unwrap();
+        old_session(&connection, "s-anew", "claude");
+        let claude = crate::master_session::MasterBackend::Claude;
+        let asked = super::Asked::Owner(Some("Plan it"));
+        super::one_turn_asked(&connection, &project, &session, claude, "turn-1", &asked).unwrap();
+        super::one_turn_reply(&connection, &session, "turn-1", "Planned").unwrap();
+
+        super::note_continued(&connection, "store-project", "s-anew", "claude-code", false)
+            .unwrap();
+        let again = super::taken_from(&connection, &project, &session, "claude-code").unwrap();
+
+        let divider = shown(&connection, "s-anew").pop().unwrap();
+        assert_eq!(
+            divider,
+            "switch/live/switch: Continued in a new Claude Code conversation in the live terminal: the one this session kept could not be continued. Claude Code got this session's earlier turns, newest first, and the open tasks."
+        );
+        assert_eq!(again, None);
     }
 
     /// OB6-F2: the divider of an engine-run master says what that master really got. Under

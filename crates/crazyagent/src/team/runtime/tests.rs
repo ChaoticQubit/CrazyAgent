@@ -4842,6 +4842,8 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
 /// off is no harness switch for the same harness. The next live start resumes the kept
 /// harness conversation by its id and hands it only that turn, in its launch
 /// instructions, also with On harness switch set to Start fresh, and records no switch.
+/// OB6-R2-F2: a later start of the same conversation reads that turn again, since only
+/// launch instructions carry it, and stores no second divider.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries_the_turn() {
@@ -4901,9 +4903,7 @@ fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries
     );
     let briefed = codex_instructions(&fixture, master);
     assert!(
-        briefed.contains(
-            "While your conversation was closed, the one-turn master (Codex) ran this session."
-        ),
+        briefed.contains(crate::master_sessions::RESUMED_HANDOFF),
         "{briefed}"
     );
     assert!(
@@ -4922,7 +4922,123 @@ fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries
         })
         .unwrap();
     assert_eq!(switches, 0, "a change of mode records no harness switch");
+
+    stop_live(&fixture, &mut team);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the kept conversation starts a third time",
+        |f| launches(f, master).len() == 3 && live_agent(&f.connection).is_some(),
+    );
+
+    assert!(
+        launches(&fixture, master)[2].ends_with(&format!(" resume {first}")),
+        "{:?}",
+        launches(&fixture, master)
+    );
+    let again = codex_instructions(&fixture, master);
+    assert!(
+        again.contains(crate::master_sessions::RESUMED_HANDOFF),
+        "{again}"
+    );
+    assert!(
+        again.contains("Owner: Name the release\nYou: Call it Aurora"),
+        "a later start still reads the turn its record does not hold: {again}"
+    );
+    assert!(!again.contains("You: Done."), "{again}");
+    let dividers: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_messages WHERE session='s-one' AND speaker='switch'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dividers, 1, "the takeover is stored once");
     assert_eq!(masters(&fixture.connection), [master]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// OB6-R2-F3: a turn the one-turn master ran is handed to the live terminal of the same
+/// harness also when the conversation the session kept cannot continue, here because its
+/// record is gone. A new harness conversation starts with the earlier turns, and the team
+/// note and the stored divider say a new conversation began, not that the kept one
+/// continued.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mode_change_whose_kept_conversation_cannot_continue_says_a_new_conversation_began() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let (_, record) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    stop_live(&fixture, &mut team);
+    std::fs::remove_file(&record).unwrap();
+    let session = crate::protocol::SessionId::new("s-one").unwrap();
+    let asked = crate::master_sessions::Asked::Owner(Some("Name the release"));
+    crate::master_sessions::one_turn_asked(
+        &fixture.connection,
+        &project,
+        &session,
+        crate::master_session::MasterBackend::Codex,
+        "turn-1",
+        &asked,
+    )
+    .unwrap();
+    crate::master_sessions::one_turn_reply(
+        &fixture.connection,
+        &session,
+        "turn-1",
+        "Call it Aurora",
+    )
+    .unwrap();
+
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "a new conversation starts", |f| {
+        launches(f, master).len() == 2 && live_agent(&f.connection).is_some()
+    });
+
+    let said = crate::master_sessions::restarted_note("codex");
+    assert!(
+        !launches(&fixture, master)[1].contains("resume"),
+        "{:?}",
+        launches(&fixture, master)
+    );
+    let briefed = codex_instructions(&fixture, master);
+    assert!(
+        briefed.contains("Owner: Name the release\nYou: Call it Aurora"),
+        "{briefed}"
+    );
+    let notes: Vec<String> = fixture
+        .status()
+        .messages
+        .into_iter()
+        .filter(|message| message.state == MessageState::Note)
+        .map(|message| message.text)
+        .collect();
+    assert!(notes.contains(&said), "{notes:?}");
+    let divider: String = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM session_messages
+             WHERE session='s-one' AND speaker='switch' ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(divider, said);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
