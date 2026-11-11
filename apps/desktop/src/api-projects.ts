@@ -240,6 +240,8 @@ const copy: Record<string, string> = {
   roadmap_status_unavailable: "The roadmap status could not be read or saved. Try again.",
   roadmap_status_invalid: "That roadmap status request could not be read.",
   roadmap_status_request_invalid: "That roadmap status request could not be read.",
+  roadmap_status_request_bounds: "That roadmap status request was too large for the engine. Try again.",
+  roadmap_status_reply_bounds: "The roadmap status was too large to show. Try again.",
   roadmap_status_project_missing: "This project no longer exists.",
   roadmap_status_changed: "The roadmap status changed while it was being read. Try again.",
   roadmap_status_outcome_unknown: "The engine did not confirm that roadmap status request. Check the status and try again.",

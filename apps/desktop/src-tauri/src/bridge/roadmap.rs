@@ -22,10 +22,9 @@ pub fn roadmap_error(error: EngineError) -> BridgeError {
     )
 }
 
-/// Reads the refresh choice the window sent by its stored name. Input: the name. Output:
-/// the choice, or `roadmap_status_invalid` for a name the engine does not know.
+/// Reads the refresh choice the window sent by its stored name. Input: the name, any text.
+/// Output: the choice, or `roadmap_status_invalid` for a name the engine does not know.
 pub fn refresh_choice(name: &str) -> Result<Refresh, BridgeError> {
-    assert!(!name.contains('\0'));
     serde_json::from_value(serde_json::Value::String(name.to_owned()))
         .map_err(|_| failure("roadmap_status_invalid"))
 }
@@ -102,7 +101,17 @@ mod tests {
         ] {
             assert_eq!(refresh_choice(name).unwrap(), choice);
         }
-        for name in ["", "Off", "sometimes", "after_landing "] {
+        let long = "off".repeat(4096);
+        for name in [
+            "",
+            "Off",
+            "sometimes",
+            "after_landing ",
+            "\0",
+            "off\0",
+            "o\0ff",
+            long.as_str(),
+        ] {
             assert_eq!(
                 refresh_choice(name).unwrap_err().code,
                 "roadmap_status_invalid",

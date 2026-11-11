@@ -108,6 +108,19 @@ test("a reply that is not a roadmap status is refused before it is shown", () =>
   ]) assert.equal(api.isRoadmapStatus(broken), false, JSON.stringify(broken)?.slice(0, 80));
 });
 
+test("every roadmap status code the engine or the bridge can answer has its own sentence", () => {
+  const transport = read("../../crates/crazyagent/src/engine/owner/transport/roadmap.rs");
+  const list = transport.slice(transport.indexOf("pub const ROADMAP_CODES"));
+  const codes = (list.slice(0, list.indexOf("];")).match(/"roadmap_status_[a-z_]+"/g) ?? []).map((code) => code.slice(1, -1));
+  assert.ok(codes.length >= 8, String(codes.length));
+  for (const code of ["roadmap_status_reply_bounds", "roadmap_status_request_bounds"]) assert.ok(codes.includes(code), code);
+  const sentences = [...codes, "roadmap_status_invalid"].map((code) => [code, api.failureSentence(code)]);
+  for (const [code, sentence] of sentences) {
+    assert.equal(typeof sentence, "string", code);
+    assert.ok(!sentence.includes(code), code);
+  }
+});
+
 test("the three roadmap status calls go through the bridge with only the project id and the choice", () => {
   const source = read("src/api-projects.ts");
   assert.match(source, /call<RoadmapStatus>\("desktop_roadmap_status", \{ id \}\)/);
