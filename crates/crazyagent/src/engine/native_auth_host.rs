@@ -132,9 +132,11 @@ impl RegisteredNativeAuthHost {
     }
 
     /// Returns the captured path while the retained file and the file at that path still
-    /// have the identity hashed at capture. Every content write changes ctime, so equal
-    /// identity means the hashed bytes, without re-reading a harness of hundreds of MB.
-    /// Input: none. Output: the path, or `native_auth_host_executable_changed`.
+    /// have the identity hashed at capture. On macOS every content write moves ctime by the
+    /// fine clock, so equal identity means the hashed bytes without re-reading a harness of
+    /// hundreds of MB. Linux moves file times by the coarse clock tick, so a same-size write
+    /// in that tick keeps the identity, and there the retained file is hashed again. Input:
+    /// none. Output: the path, or `native_auth_host_executable_changed`.
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         let named = Self::open(&self.path)?;
         if ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
@@ -142,6 +144,10 @@ impl RegisteredNativeAuthHost {
             || ExecutableIdentity::of(&std::fs::symlink_metadata(&self.path).map_err(io_error)?)?
                 != self.identity
         {
+            return Err(EngineError("native_auth_host_executable_changed".into()));
+        }
+        #[cfg(not(target_os = "macos"))]
+        if Self::hash(&self.file, self.identity.length)? != self.digest {
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
         Ok(&self.path)
