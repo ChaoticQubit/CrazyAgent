@@ -139,11 +139,18 @@ pub struct RoadmapStatus {
     pub problem: Option<String>,
 }
 
+/// The identity of one claimed status run: `tick` hands it to `Runs::start` and the run
+/// hands it back to `finish`, so a run that was closed, or whose project is gone, ends
+/// nothing but itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Claim(i64);
+
 /// What `tick` starts a status run with. The real one runs the agent on its own thread and
 /// reports through `finish`; a test counts the starts.
 pub trait Runs {
-    /// Starts one status run for a project `tick` just claimed. Input: the project.
-    fn start(&mut self, project: &ProjectId);
+    /// Starts one status run for a project `tick` just claimed. Inputs: the project and
+    /// the claim the run ends with.
+    fn start(&mut self, project: &ProjectId, claim: Claim);
 }
 
 fn unavailable<E>(_: E) -> EngineError {
@@ -393,15 +400,16 @@ pub fn read(db: &Connection, project: &ProjectId) -> Result<RoadmapStatus, Engin
     read_at(db, project, crate::team::now_ms())
 }
 
-/// `read` at a given time: a run counts as running until `RUN_TIME` after it started.
-/// Inputs: the connection, the project and now. Output: as `read`.
+/// `read` at a given time: a run counts as running until `RUN_TIME` after it started. A
+/// stored body over `BODY_BYTES_MAX` bytes is `roadmap_status_unavailable`, never an empty
+/// status. Inputs: the connection, the project and now. Output: as `read`.
 fn read_at(
     db: &Connection,
     project: &ProjectId,
     now_ms: i64,
 ) -> Result<RoadmapStatus, EngineError> {
     type Row = (
-        String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<i64>,
@@ -411,8 +419,9 @@ fn read_at(
     let refresh = refresh_of(db, project)?;
     let row: Option<Row> = db
         .query_row(
-            "SELECT body,source,problem,checked_ms,stale,running_ms FROM roadmap_status
-             WHERE project=?1 AND length(body) <= ?2",
+            "SELECT CASE WHEN length(CAST(body AS BLOB)) <= ?2 THEN body END,
+               source,problem,checked_ms,stale,running_ms
+             FROM roadmap_status WHERE project=?1",
             params![project.as_str(), BODY_BYTES_MAX as i64],
             |row| {
                 Ok((
@@ -438,38 +447,73 @@ fn read_at(
             problem: None,
         });
     };
-    let items: Vec<ItemState> = serde_json::from_str(&body).map_err(unavailable)?;
-    assert!(
-        items.len() <= ITEMS_MAX,
-        "a stored status holds at most ITEMS_MAX items"
-    );
-    assert!(
-        items
-            .iter()
-            .all(|state| state.evidence.len() <= EVIDENCE_BYTES_MAX),
-        "stored evidence stays within its bound"
-    );
+    let items = stored_items(&body.ok_or_else(|| unavailable(()))?)?;
+    let note = |text: Option<String>| text.map(|text| cut(text, NOTE_BYTES_MAX));
     Ok(RoadmapStatus {
         items,
         checked_ms,
         running: running_ms.is_some_and(|started| now_ms.saturating_sub(started) < RUN_MS),
         stale,
         refresh,
-        source,
-        problem,
+        source: note(source),
+        problem: note(problem),
     })
 }
 
-/// Stores how a status run ended and frees the project for its next run: the item states
-/// and the roadmap file they came from, or the words saying why it failed, which keep the
-/// last good states. Inputs: the connection, the project, the outcome and now. Output:
-/// unit, or `roadmap_status_unavailable`.
+/// Cuts stored text to a byte bound at a character boundary. Inputs: the text and the most
+/// bytes. Output: the text, whole when it fits.
+fn cut(mut text: String, bytes_max: usize) -> String {
+    let mut end = text.len().min(bytes_max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    assert!(text.len() <= bytes_max);
+    text
+}
+
+/// The item states of a stored body, read as data another engine version may have written:
+/// an entry this version cannot read is left out, the first `ITEMS_MAX` are kept and every
+/// text is cut to its bound. Input: the body, within `BODY_BYTES_MAX`. Output: the states,
+/// or `roadmap_status_unavailable` when the body is not a list.
+fn stored_items(body: &str) -> Result<Vec<ItemState>, EngineError> {
+    assert!(body.len() <= BODY_BYTES_MAX);
+    let stored: Vec<serde_json::Value> = serde_json::from_str(body).map_err(unavailable)?;
+    let items: Vec<ItemState> = stored
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<ItemState>(entry).ok())
+        .take(ITEMS_MAX)
+        .map(|state| ItemState {
+            item: RoadmapItem {
+                section: cut(state.item.section, SECTION_BYTES_MAX),
+                text: cut(state.item.text, ITEM_BYTES_MAX),
+            },
+            status: state.status,
+            evidence: cut(state.evidence, EVIDENCE_BYTES_MAX),
+        })
+        .collect();
+    assert!(items.len() <= ITEMS_MAX);
+    assert!(
+        items
+            .iter()
+            .all(|state| state.evidence.len() <= EVIDENCE_BYTES_MAX)
+    );
+    Ok(items)
+}
+
+/// Stores how the run holding `claim` ended and frees the project for its next run: the
+/// item states and the roadmap file they came from, or the words saying why it failed,
+/// which keep the last good states. A run that was closed, replaced, or whose project was
+/// removed stores nothing. Inputs: the connection, the project, the claim, the outcome and
+/// now. Output: whether this run was the one in flight, or `roadmap_status_unavailable`.
 pub fn finish(
     db: &Connection,
     project: &ProjectId,
+    claim: Claim,
     outcome: Result<(&[ItemState], &str), &str>,
     now_ms: i64,
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
+    assert!(claim.0 >= 0);
     let stored = match outcome {
         Ok((states, source)) => {
             assert!(states.len() <= ITEMS_MAX);
@@ -482,23 +526,23 @@ pub fn finish(
             );
             let body = serde_json::to_string(states).map_err(unavailable)?;
             assert!(body.len() <= BODY_BYTES_MAX);
+            let source = line(source, NOTE_BYTES_MAX);
             db.execute(
-                "INSERT INTO roadmap_status(project,body,source,problem,checked_ms,running_ms)
-                 VALUES(?1,?2,?3,NULL,?4,NULL)
-                 ON CONFLICT(project) DO UPDATE SET body=excluded.body, source=excluded.source,
-                   problem=NULL, checked_ms=excluded.checked_ms, running_ms=NULL",
-                params![project.as_str(), body, line(source, NOTE_BYTES_MAX), now_ms],
+                "UPDATE roadmap_status SET body=?3, source=?4, problem=NULL, checked_ms=?5,
+                   running_ms=NULL
+                 WHERE project=?1 AND running_ms=?2",
+                params![project.as_str(), claim.0, body, source, now_ms],
             )
         }
         Err(words) => db.execute(
-            "INSERT INTO roadmap_status(project,problem,running_ms) VALUES(?1,?2,NULL)
-             ON CONFLICT(project) DO UPDATE SET problem=excluded.problem, running_ms=NULL",
-            params![project.as_str(), line(words, NOTE_BYTES_MAX)],
+            "UPDATE roadmap_status SET problem=?3, running_ms=NULL
+             WHERE project=?1 AND running_ms=?2",
+            params![project.as_str(), claim.0, line(words, NOTE_BYTES_MAX)],
         ),
     }
     .map_err(unavailable)?;
-    assert_eq!(stored, 1);
-    Ok(())
+    assert!(stored <= 1);
+    Ok(stored == 1)
 }
 
 /// The projects whose check is due: stale, past their quiet period, not switched off and
@@ -529,6 +573,25 @@ fn due(db: &Connection, now_ms: i64) -> Result<Vec<ProjectId>, EngineError> {
     Ok(projects)
 }
 
+/// Claims a due project for one run: no longer stale, running from now. The Off setting
+/// is checked in the same statement, so nothing starts after the owner said never. Inputs:
+/// the connection, the project and now. Output: the claim, or none when the project is no
+/// longer due.
+fn claim(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<Option<Claim>, EngineError> {
+    assert!(now_ms >= 0);
+    let claimed = db
+        .execute(
+            "UPDATE roadmap_status SET stale=0, running_ms=?2
+             WHERE project=?1 AND stale=1 AND running_ms IS NULL
+               AND NOT EXISTS (SELECT 1 FROM roadmap_status_settings AS settings
+                 WHERE settings.project=?1 AND settings.refresh='off')",
+            params![project.as_str(), now_ms],
+        )
+        .map_err(unavailable)?;
+    assert!(claimed <= 1);
+    Ok((claimed == 1).then_some(Claim(now_ms)))
+}
+
 /// Starts the status runs that are due: a run whose time is over is closed with
 /// `UNFINISHED`, then each due project is claimed (no longer stale, running from now) and
 /// handed to `runs`. A landing during a run marks the project stale again, so it is checked
@@ -544,15 +607,8 @@ pub fn tick(db: &Connection, runs: &mut dyn Runs, now_ms: i64) -> Result<usize, 
     .map_err(unavailable)?;
     let mut started = 0;
     for project in due(db, now_ms)? {
-        let claimed = db
-            .execute(
-                "UPDATE roadmap_status SET stale=0, running_ms=?2
-                 WHERE project=?1 AND stale=1 AND running_ms IS NULL",
-                params![project.as_str(), now_ms],
-            )
-            .map_err(unavailable)?;
-        if claimed == 1 {
-            runs.start(&project);
+        if let Some(claimed) = claim(db, &project, now_ms)? {
+            runs.start(&project, claimed);
             started += 1;
         }
     }

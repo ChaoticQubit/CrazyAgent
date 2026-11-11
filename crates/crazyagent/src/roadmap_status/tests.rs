@@ -12,17 +12,26 @@ fn alpha() -> ProjectId {
     ProjectId::new("alpha").unwrap()
 }
 
-/// Counts the status runs `tick` starts and for which projects.
+/// Counts the status runs `tick` starts, for which projects and under which claims.
 #[derive(Default)]
 struct FakeRuns {
     started: usize,
     projects: Vec<String>,
+    claims: Vec<Claim>,
 }
 
 impl Runs for FakeRuns {
-    fn start(&mut self, project: &ProjectId) {
+    fn start(&mut self, project: &ProjectId, claim: Claim) {
         self.started += 1;
         self.projects.push(project.as_str().to_owned());
+        self.claims.push(claim);
+    }
+}
+
+impl FakeRuns {
+    /// The claim of the run started last.
+    fn last(&self) -> Claim {
+        *self.claims.last().unwrap()
     }
 }
 
@@ -228,13 +237,14 @@ fn a_finished_run_stores_its_states_source_and_time_and_a_failed_one_keeps_them(
     assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
     let during = case.read(case.now + 1000);
     assert!(during.running && !during.stale);
-    finish(
+    let ended = finish(
         &case.db,
         &case.project,
+        runs.last(),
         Ok((states.as_slice(), "docs/plan-2026.md")),
         case.now + 2000,
-    )
-    .unwrap();
+    );
+    assert!(ended.unwrap());
     let after = case.read(case.now + 3000);
     assert_eq!(after.items, states);
     assert_eq!(after.checked_ms, Some(case.now + 2000));
@@ -243,13 +253,14 @@ fn a_finished_run_stores_its_states_source_and_time_and_a_failed_one_keeps_them(
 
     refresh(&case.db, &case.project).unwrap();
     assert_eq!(tick(&case.db, &mut runs, case.now + 4000).unwrap(), 1);
-    finish(
+    let ended = finish(
         &case.db,
         &case.project,
+        runs.last(),
         Err("No account in this project's pool can run the check"),
         case.now + 5000,
-    )
-    .unwrap();
+    );
+    assert!(ended.unwrap());
     let failed = case.read(case.now + 6000);
     assert_eq!(
         failed.items, states,
@@ -321,19 +332,21 @@ fn a_set_that_lands_during_a_run_is_checked_once_more_after_it() {
     assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
     mark_stale_at(&case.db, &case.project, case.now + 1000).unwrap();
     let later = case.now + 1000 + QUIET_MS;
+    assert_eq!(tick(&case.db, &mut runs, case.now + 2000).unwrap(), 0);
+    let ended = finish(
+        &case.db,
+        &case.project,
+        runs.last(),
+        Ok((&[][..], "roadmap.md")),
+        case.now + 3000,
+    );
+    assert!(ended.unwrap(), "the run ends inside its time");
+    assert!(case.read(later).stale);
     assert_eq!(
         tick(&case.db, &mut runs, later - 1).unwrap(),
         0,
-        "one run per project at a time"
+        "the landing's quiet period still holds after the run"
     );
-    finish(
-        &case.db,
-        &case.project,
-        Ok((&[][..], "roadmap.md")),
-        later - 1,
-    )
-    .unwrap();
-    assert!(case.read(later).stale);
     assert_eq!(tick(&case.db, &mut runs, later).unwrap(), 1);
     assert_eq!(runs.started, 2);
 }
@@ -393,4 +406,208 @@ fn one_tick_starts_a_bounded_number_of_runs_the_longest_waiting_first() {
     assert_eq!(tick(&db, &mut runs, NOW).unwrap(), 2);
     assert_eq!(tick(&db, &mut runs, NOW).unwrap(), 0);
     assert_eq!(runs.started, count);
+}
+
+fn rows(db: &Connection) -> i64 {
+    let count = "SELECT (SELECT COUNT(*) FROM roadmap_status)
+        + (SELECT COUNT(*) FROM roadmap_status_settings)";
+    db.query_row(count, [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn a_late_finish_of_a_closed_run_changes_nothing_and_the_newer_run_stays_the_only_one() {
+    let mut runs = FakeRuns::default();
+    let case = status_case(Refresh::AfterLanding);
+    let states = parse_reply("{\"items\":[]}", &items("## V1\n\n- Sign in\n")).unwrap();
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+    let first = runs.last();
+    refresh(&case.db, &case.project).unwrap();
+    let over = case.now + RUN_TIME.as_millis() as i64;
+    assert_eq!(
+        tick(&case.db, &mut runs, over).unwrap(),
+        1,
+        "the overdue run is closed and the waiting check starts"
+    );
+    let second = runs.last();
+    assert_ne!(first, second);
+
+    let late = finish(
+        &case.db,
+        &case.project,
+        first,
+        Ok((states.as_slice(), "old.md")),
+        over + 1000,
+    );
+    assert!(!late.unwrap(), "a closed run ends nothing");
+    let during = case.read(over + 2000);
+    assert!(during.running, "the newer run is still in flight");
+    assert!(during.items.is_empty() && during.checked_ms.is_none() && during.source.is_none());
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(
+        tick(&case.db, &mut runs, over + 3000).unwrap(),
+        0,
+        "one run per project at a time"
+    );
+
+    let ended = finish(
+        &case.db,
+        &case.project,
+        second,
+        Ok((states.as_slice(), "new.md")),
+        over + 4000,
+    );
+    assert!(ended.unwrap());
+    let after = case.read(over + 5000);
+    assert_eq!(after.source.as_deref(), Some("new.md"));
+    assert_eq!(after.checked_ms, Some(over + 4000));
+    let again = finish(&case.db, &case.project, second, Err("twice"), over + 6000);
+    assert!(!again.unwrap(), "a run ends once");
+    assert!(case.read(over + 7000).problem.is_none());
+}
+
+#[test]
+fn a_finish_after_the_project_was_removed_stores_nothing() {
+    for failed in [false, true] {
+        let mut runs = FakeRuns::default();
+        let case = status_case(Refresh::AfterLanding);
+        refresh(&case.db, &case.project).unwrap();
+        assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+        for table in ["roadmap_status", "roadmap_status_settings"] {
+            let removed = case
+                .db
+                .execute(&format!("DELETE FROM {table} WHERE project='alpha'"), [])
+                .unwrap();
+            assert_eq!(removed, 1, "{table}");
+        }
+        let outcome = if failed {
+            Err("The agent failed")
+        } else {
+            Ok((&[][..], "roadmap.md"))
+        };
+        let ended = finish(
+            &case.db,
+            &case.project,
+            runs.last(),
+            outcome,
+            case.now + 1000,
+        );
+        assert!(!ended.unwrap(), "failed={failed}");
+        assert_eq!(rows(&case.db), 0, "failed={failed}");
+    }
+}
+
+#[test]
+fn a_project_switched_off_after_it_was_listed_as_due_is_not_claimed() {
+    let case = status_case(Refresh::AfterLanding);
+    case.land_two_sets();
+    let listed = due(&case.db, case.now).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].as_str(), "alpha");
+    let set = |name: &str| {
+        let saved = case
+            .db
+            .execute("UPDATE roadmap_status_settings SET refresh=?1", [name])
+            .unwrap();
+        assert_eq!(saved, 1);
+    };
+    set("off");
+    assert_eq!(claim(&case.db, &case.project, case.now).unwrap(), None);
+    let off = case.read(case.now);
+    assert!(!off.running, "nothing runs after the owner said never");
+    set("after_landing");
+    assert!(claim(&case.db, &case.project, case.now).unwrap().is_some());
+    assert!(case.read(case.now).running);
+    assert_eq!(claim(&case.db, &case.project, case.now).unwrap(), None);
+}
+
+/// Stores a status row as a later engine could have, past what this version writes.
+fn store(db: &Connection, body: &str, source: &str) {
+    let stored = db
+        .execute(
+            "INSERT INTO roadmap_status(project,body,source,problem,checked_ms,running_ms)
+             VALUES('alpha',?1,?2,?2,?3,?3)",
+            params![body, source, NOW],
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
+}
+
+#[test]
+fn a_stored_status_past_this_versions_bounds_is_cut_when_read() {
+    let db = db();
+    let long = |bytes: usize| "x".repeat(bytes);
+    let mut stored: Vec<serde_json::Value> = (0..ITEMS_MAX + 5)
+        .map(|n| {
+            serde_json::json!({
+                "item": {
+                    "section": long(SECTION_BYTES_MAX + 30),
+                    "text": format!("{n:03}{}", long(ITEM_BYTES_MAX + 30)),
+                },
+                "status": "done",
+                "evidence": long(EVIDENCE_BYTES_MAX + 30),
+            })
+        })
+        .collect();
+    stored.insert(
+        1,
+        serde_json::json!({
+            "item": {"section": "V9", "text": "A later kind of item"},
+            "status": "blocked",
+            "evidence": "",
+        }),
+    );
+    let body = serde_json::to_string(&stored).unwrap();
+    assert!(body.len() <= BODY_BYTES_MAX);
+    store(&db, &body, &long(NOTE_BYTES_MAX + 30));
+
+    let status = read_at(&db, &alpha(), NOW).unwrap();
+    assert_eq!(status.items.len(), ITEMS_MAX);
+    assert!(status.items[0].item.text.starts_with("000"));
+    assert!(
+        status.items[1].item.text.starts_with("001"),
+        "an item in a status this version does not know is left out"
+    );
+    for state in &status.items {
+        assert_eq!(state.item.section.len(), SECTION_BYTES_MAX);
+        assert_eq!(state.item.text.len(), ITEM_BYTES_MAX);
+        assert_eq!(state.evidence.len(), EVIDENCE_BYTES_MAX);
+    }
+    assert_eq!(
+        status.source.map(|source| source.len()),
+        Some(NOTE_BYTES_MAX)
+    );
+    assert_eq!(
+        status.problem.map(|words| words.len()),
+        Some(NOTE_BYTES_MAX)
+    );
+    assert!(status.running && status.checked_ms == Some(NOW));
+}
+
+#[test]
+fn a_stored_body_over_the_byte_bound_is_an_error_and_never_reads_as_never_checked() {
+    let wide = "\u{e9}".repeat(BODY_BYTES_MAX / 2 + 1);
+    let bodies = [
+        format!("[{}]", " ".repeat(BODY_BYTES_MAX)),
+        serde_json::json!([{
+            "item": {"section": wide, "text": "Sign in"},
+            "status": "done",
+            "evidence": "",
+        }])
+        .to_string(),
+    ];
+    for body in bodies {
+        assert!(body.len() > BODY_BYTES_MAX);
+        let db = db();
+        store(&db, &body, "docs/plan.md");
+        let read = read_at(&db, &alpha(), NOW);
+        assert_eq!(
+            read.map(|status| (status.items.len(), status.running))
+                .unwrap_err()
+                .0,
+            "roadmap_status_unavailable",
+            "{} characters",
+            body.chars().count()
+        );
+    }
 }
