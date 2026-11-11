@@ -209,9 +209,6 @@ pub(crate) fn update(
     for root in &roots {
         sandbox = sandbox.allow_read(root)?;
     }
-    if let Some(link) = &link {
-        sandbox = sandbox.allow_read_link(link)?;
-    }
     sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
     for folder in hidden {
         sandbox = sandbox.hide(folder)?;
@@ -221,6 +218,11 @@ pub(crate) fn update(
             Ok(sandbox) => sandbox,
             Err(_) => return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED)),
         };
+    }
+    if let Some(link) = &link
+        && let Ok(linked) = sandbox.clone().allow_read_link(link)
+    {
+        sandbox = linked;
     }
     let profile = state.join("profiles").join(format!("{name}.sb"));
     sandbox.install(&profile)?;
