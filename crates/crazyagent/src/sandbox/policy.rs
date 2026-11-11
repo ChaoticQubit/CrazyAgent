@@ -371,14 +371,7 @@ impl AgentPolicy {
         PolicyView {
             access: self.access,
             network: self.network,
-            levels: AgentAccess::ALL
-                .into_iter()
-                .map(|access| LevelView {
-                    access,
-                    label: access.label().to_owned(),
-                    unavailable: access.unavailable().map(str::to_owned),
-                })
-                .collect(),
+            levels: LevelView::all(),
             networks: AgentNetwork::ALL
                 .into_iter()
                 .map(|network| NetworkView {
@@ -530,6 +523,24 @@ pub struct LevelView {
     pub access: AgentAccess,
     pub label: String,
     pub unavailable: Option<String>,
+}
+
+impl LevelView {
+    /// Every access level, from the most to the least confined, each with the reason it
+    /// cannot run agents on this computer. Takes nothing. Returns one view for each level,
+    /// as a project's policy and the New Project catalog both show them.
+    pub fn all() -> Vec<Self> {
+        let levels: Vec<Self> = AgentAccess::ALL
+            .into_iter()
+            .map(|access| Self {
+                access,
+                label: access.label().to_owned(),
+                unavailable: access.unavailable().map(str::to_owned),
+            })
+            .collect();
+        assert_eq!(levels.len(), AgentAccess::ALL.len());
+        levels
+    }
 }
 
 /// One toolchain family: whether the owner has it, the project uses it and agents may
