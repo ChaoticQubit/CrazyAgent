@@ -607,37 +607,6 @@ fn managed_capabilities(
     offered
 }
 
-#[cfg(test)]
-mod managed_capabilities_tests {
-    use super::*;
-
-    #[test]
-    fn both_subscription_harnesses_offer_a_browser_sign_in_and_a_check() {
-        let methods = |harness: &str| -> Vec<NativeAuthMethod> {
-            managed_capabilities(harness, &ProducerCapability::Available)
-                .into_iter()
-                .map(|entry| entry.method)
-                .collect()
-        };
-        assert_eq!(
-            methods("claude"),
-            [
-                NativeAuthMethod::ClaudeOfficial,
-                NativeAuthMethod::ClaudeExisting
-            ]
-        );
-        assert_eq!(
-            methods("codex"),
-            [
-                NativeAuthMethod::CodexBrowser,
-                NativeAuthMethod::CodexDeviceCode,
-                NativeAuthMethod::CodexExisting
-            ]
-        );
-        assert!(methods("rcli").is_empty());
-    }
-}
-
 fn public_code(error: EngineError) -> String {
     if error.0.len() <= 96
         && error
@@ -669,4 +638,35 @@ fn hex_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod managed_capabilities_tests {
+    use super::*;
+
+    #[test]
+    fn both_subscription_harnesses_offer_a_browser_sign_in_and_a_check() {
+        let methods = |harness: &str| -> Vec<NativeAuthMethod> {
+            managed_capabilities(harness, &ProducerCapability::Available)
+                .into_iter()
+                .map(|entry| entry.method)
+                .collect()
+        };
+        assert_eq!(
+            methods("claude"),
+            [
+                NativeAuthMethod::ClaudeOfficial,
+                NativeAuthMethod::ClaudeExisting
+            ]
+        );
+        assert_eq!(
+            methods("codex"),
+            [
+                NativeAuthMethod::CodexBrowser,
+                NativeAuthMethod::CodexDeviceCode,
+                NativeAuthMethod::CodexExisting
+            ]
+        );
+        assert!(methods("rcli").is_empty());
+    }
 }
