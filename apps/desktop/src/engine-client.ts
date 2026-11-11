@@ -1322,9 +1322,10 @@ export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
 /** One kind of research the project's own documents already hold, read from their text:
- * the kind and the files below the project folder that hold it. */
+ * the kind and the files below the project folder that hold it. A setup mapped by an engine
+ * up to 2.2.0 may hold a roadmap planning group, whose files are roadmap files. */
 export interface FoundResearch {
-  kind: ResearchKind;
+  kind: JobKind;
   files: string[];
 }
 

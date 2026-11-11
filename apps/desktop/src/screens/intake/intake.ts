@@ -499,22 +499,28 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
 }
 
 /** What the mapping read in the project's own documents: per research kind the files that already
- * hold it, and the other project documents, each path made safe to show. Input: the mapping facts.
- * Output: { research, documents }. */
+ * hold it, the roadmap files, and the other project documents, each path made safe to show. A
+ * roadmap planning group counts as roadmap files, each shown once, as the engine links it as the
+ * roadmap. Input: the mapping facts. Output: { research, documents, roadmap }. */
 export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[]; roadmap: string[] } {
   const research: Partial<Record<ResearchKind, string[]>> = {};
-  for (const found of facts.research ?? []) research[found.kind] = found.files.map(displayText);
-  return { research, documents: (facts.documents ?? []).map(displayText), roadmap: (facts.roadmap ?? []).map(displayText) };
+  const roadmap = [...(facts.roadmap ?? [])];
+  for (const found of facts.research ?? []) {
+    if (found.kind === "roadmap_planning") roadmap.push(...found.files.filter((path) => !roadmap.includes(path)));
+    else research[found.kind] = found.files.map(displayText);
+  }
+  return { research, documents: (facts.documents ?? []).map(displayText), roadmap: roadmap.map(displayText) };
 }
 
 /** The most repository files one project links, as the engine's links store bounds them. */
 export const LINKS_MAX = 32;
 
 /** The repository files a first confirm links, each with the group it was found under: the
- * mapping's roadmap files unless the owner turned "roadmap" off, then each research kind's
- * files unless the owner turned that kind off, each once per group and at most LINKS_MAX, as
- * the mapping wrote them. A file found under two groups goes only with the groups left on, so
- * the engine links it as nothing the owner turned off. Null once the setup is saved or when
+ * mapping's roadmap files unless the owner turned "roadmap" off, a roadmap planning group's
+ * files with them under their own kind, then each research kind's files unless the owner
+ * turned that kind off, each once per group and at most LINKS_MAX, as the mapping wrote them.
+ * A file found under two groups goes only with the groups left on, so the engine links it as
+ * nothing the owner turned off. Null once the setup is saved or when
  * the mapping found no file, so the engine leaves the links alone. Inputs: the onboarding view
  * and the turned-off keys ("roadmap" or a research kind). Output: the files or null. */
 export function confirmKept(view: OnboardingView, dropped: readonly string[]): KeptFile[] | null {
@@ -526,8 +532,12 @@ export function confirmKept(view: OnboardingView, dropped: readonly string[]): K
   };
   const found = [...(view.facts.roadmap ?? []), ...(view.facts.research ?? []).flatMap((item) => item.files)];
   if (view.finished || found.length === 0) return null;
-  if (!dropped.includes("roadmap")) keep(view.facts.roadmap ?? [], null);
-  for (const item of view.facts.research ?? []) if (!dropped.includes(item.kind)) keep(item.files, item.kind);
+  const groups = view.facts.research ?? [];
+  if (!dropped.includes("roadmap")) {
+    keep(view.facts.roadmap ?? [], null);
+    for (const item of groups) if (item.kind === "roadmap_planning") keep(item.files, item.kind);
+  }
+  for (const item of groups) if (item.kind !== "roadmap_planning" && !dropped.includes(item.kind)) keep(item.files, item.kind);
   return kept;
 }
 

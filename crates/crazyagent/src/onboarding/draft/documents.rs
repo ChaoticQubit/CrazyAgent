@@ -791,8 +791,9 @@ fn longest_run(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The research an answer's `research` value names: known kinds only, each once in kind
-/// order with at most eight files, still to be checked against the documents shown.
+/// The research an answer's `research` value names: only the five kinds the prompt offers,
+/// so a roadmap planning group or an unknown kind is left out, each once in kind order with
+/// at most eight files, still to be checked against the documents shown.
 /// Takes the JSON value. Returns the kinds and their files.
 pub(super) fn research(value: &serde_json::Value) -> Vec<FoundResearch> {
     let mut found: Vec<FoundResearch> = Vec::new();
@@ -801,7 +802,11 @@ pub(super) fn research(value: &serde_json::Value) -> Vec<FoundResearch> {
         let Some(kind) = item
             .get("kind")
             .and_then(serde_json::Value::as_str)
-            .and_then(|name| ResearchKind::parse(name.trim()))
+            .and_then(|name| {
+                ResearchKind::ALL
+                    .into_iter()
+                    .find(|kind| kind.name() == name.trim())
+            })
         else {
             continue;
         };
