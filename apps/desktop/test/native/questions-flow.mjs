@@ -47,13 +47,19 @@ const SLICES = {
   "QL-5": "feat/v2-questions-notify: macOS system notification",
   "RM-1": "feat/v2-roadmap-job: planning job, context/roadmap.md, context/release-process.md, open points",
   "RM-2": "feat/v2-roadmap-ui: roadmap toggle, Plan roadmap now, planning_busy (then regenerate routes)",
+  "OB-9": "fix/v221-ob9-questions-inline: the Questions show setting and the questions pop-up on project tabs",
 };
 const ASKS = {
   view: { question: "Which database should the plant shop use?", options: ["Postgres", "SQLite", "MySQL"], recommended: "Postgres", context: "The shop keeps orders and stock." },
   dismiss: { question: "Should the shop send a weekly newsletter?", options: ["Yes", "No"], recommended: "No" },
   chat: { question: "Which payment provider should checkout use?" },
   tui: { question: "Which hosting region should the shop use?", options: ["Europe", "North America"], recommended: "Europe" },
+  popup: { question: "Should the shop offer gift wrapping?", options: ["Yes", "No"], recommended: "Yes" },
+  every: { question: "Should the shop show how many plants are in stock?", options: ["Yes", "No"], recommended: "No" },
+  tabOnly: { question: "Should the shop ship plants abroad?", options: ["Yes", "No"], recommended: "No" },
 };
+const POPUP = "section.qp-popup";
+const POPUP_QUIET_MS = 12000;
 const CHAT_ANSWER = "Use Stripe for checkout.";
 const TUI_ANSWER = "Europe, close to the owner.";
 const RESTART_NOTE = "The engine restarted. Carry on.";
@@ -641,6 +647,92 @@ async function main() {
         if (back !== 0) throw new Refused("chat_answer_delivered_back", `${back} deliveries`);
         if (question(id).answer !== row.answer) throw new Refused("second_record_changed_the_answer");
         return `recorded from owner message ${message.id}; second record ${again.error ? "refused" : "answered"}: ${again.text.slice(0, 80)}`;
+      });
+
+      const popupText = () => page.evaluate(`document.querySelector(${JSON.stringify(POPUP)})?.innerText ?? ""`);
+      const projectTab = async (tab) => {
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(state.project)}/${tab}` });
+        await until(`project_tab_${tab}`, VIEW_MS, async () => (await page.evaluate("location.hash")).endsWith(`/${tab}`)
+          && await page.evaluate(`document.getElementById("pj-tab-panel")?.getAttribute("aria-labelledby") === ${JSON.stringify(`tab-${tab}`)}`));
+      };
+      const chooseShown = async (label) => {
+        const view = onPage();
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/profile` });
+        await view.click(label, `[role=radiogroup][aria-label="Questions show"] button`);
+        await until("questions_show_saved", VIEW_MS, async () => (await page.evaluate(`document.querySelector('[role=radiogroup][aria-label="Questions show"] button[aria-checked="true"]')?.textContent?.trim() ?? ""`)) === label);
+      };
+      const noneWaiting = () => {
+        const waiting = rows(database, "SELECT id, question FROM questions_log WHERE project = ? AND status = 'pending'", state.project);
+        if (waiting.length > 0) throw new Refused("other_questions_waiting", JSON.stringify(waiting));
+      };
+
+      await step("6b", "Questions show, Pop-up on Conversation (the default): a master question pops up on the Conversation tab, an answer there is the Questions tab's answer and the master gets it once", ["QL-1", "OB-9"], async () => {
+        const view = onPage();
+        noneWaiting();
+        await projectTab("conversation");
+        const field = await page.evaluate(`(() => { const field = document.querySelector("#pj-tab-panel .xterm-helper-textarea, #pj-tab-panel textarea"); field?.focus(); return field && document.activeElement === field ? field.className || field.tagName : null; })()`);
+        const id = await ask("popup");
+        await until("popup_shows_question", VIEW_MS, async () => (await popupText()).includes(ASKS.popup.question));
+        await view.capture("questions-popup-conversation");
+        if (field !== null) {
+          const kept = await page.evaluate(`document.activeElement?.closest("#pj-tab-panel") !== null && document.activeElement.matches(".xterm-helper-textarea, textarea")`);
+          if (!kept) throw new Refused("popup_took_the_keyboard", `${field} lost it to ${await page.evaluate("document.activeElement?.outerHTML?.slice(0, 120) ?? null")}`);
+        }
+        const over = await page.evaluate(`(() => { const card = document.querySelector(${JSON.stringify(POPUP)}).getBoundingClientRect(); const panel = document.getElementById("pj-tab-panel").getBoundingClientRect(); return card.bottom <= panel.top + 1 ? null : { card: card.bottom, panel: panel.top }; })()`);
+        if (over !== null) throw new Refused("popup_over_the_tab", JSON.stringify(over));
+        for (const word of ["A question for you", "Recommended", "Answer", "Dismiss", "Hide", "Questions tab"]) {
+          if (!(await popupText()).includes(word)) throw new Refused("popup_without", word);
+        }
+        await view.follow(`${POPUP} .qs-option input[type=radio]`);
+        await view.click("Answer", `${POPUP} button`);
+        await until("popup_answer_recorded", VIEW_MS, () => question(id)?.status === "answered");
+        if (question(id).answer !== "Yes") throw new Refused("popup_answer_mismatch", JSON.stringify(question(id)));
+        await until("popup_closes", VIEW_MS, async () => !(await popupText()).includes(ASKS.popup.question));
+        const typed = await deliveredOnce(id, "answered", "Yes");
+        await projectTab("questions");
+        const card = await until("answered_in_questions_tab", VIEW_MS, async () => {
+          const text = await page.evaluate(`[...document.querySelectorAll(".qs-card")].map((item) => item.innerText).find((text) => text.includes(${JSON.stringify(ASKS.popup.question)})) ?? ""`);
+          return text.includes("Answered") && !text.includes("Waiting for you") ? text : null;
+        });
+        await view.capture("questions-popup-answered-in-tab");
+        return `pop-up above the tab, ${field === null ? "no tab field held the keyboard" : `keyboard kept in ${field}`}; answered in the pop-up, ${card.includes("Answer: Yes") ? "shown answered" : "answered"} in the Questions tab; delivered once: ${typed.split("\n")[0].slice(0, 80)}`;
+      });
+
+      await step("6c", "Questions show, Pop-up on every tab: a master question pops up on Overview, and Dismiss there is the Questions tab's dismissal", ["QL-1", "OB-9"], async () => {
+        const view = onPage();
+        noneWaiting();
+        await chooseShown("Pop-up on every tab");
+        await projectTab("overview");
+        const id = await ask("every");
+        await until("popup_on_overview", VIEW_MS, async () => (await popupText()).includes(ASKS.every.question));
+        await view.capture("questions-popup-overview");
+        await view.click("Dismiss", `${POPUP} button`);
+        await view.waitFor("the dismiss confirmation", (text) => text.includes("Dismiss this question?"));
+        await view.click("Dismiss", "dialog button");
+        await until("popup_dismiss_recorded", VIEW_MS, () => question(id)?.status === "dismissed");
+        await until("popup_closes_after_dismiss", VIEW_MS, async () => !(await popupText()).includes(ASKS.every.question));
+        const typed = await deliveredOnce(id, "dismissed", "No answer comes.");
+        return `dismissed in the pop-up on Overview; told once: ${typed.split("\n")[0].slice(0, 80)}`;
+      });
+
+      await step("6d", "Questions show, Questions tab only: no pop-up on the Conversation tab, and the question waits in the Questions tab", ["QL-1", "OB-9"], async () => {
+        const view = onPage();
+        noneWaiting();
+        await chooseShown("Questions tab only");
+        await projectTab("conversation");
+        const id = await ask("tabOnly");
+        await until("listed_for_the_tab", VIEW_MS, async () => (await value("desktop_questions", { projectId: state.project, after: null })).items.some((item) => item.id === id && item.status === "pending"));
+        await pause(POPUP_QUIET_MS);
+        const dock = await page.evaluate(`document.querySelector(".qp-dock")?.outerHTML ?? null`);
+        if (dock !== null) throw new Refused("popup_with_questions_tab_only", dock.slice(0, 200));
+        await view.capture("questions-tab-only-conversation");
+        await projectTab("questions");
+        await until("waiting_in_questions_tab", VIEW_MS, async () => (await page.evaluate(`[...document.querySelectorAll(".qs-card")].some((item) => item.innerText.includes(${JSON.stringify(ASKS.tabOnly.question)}) && item.innerText.includes("Waiting for you"))`)));
+        await view.follow(".qs-card .qs-option input[type=radio]");
+        await view.click("Answer");
+        await until("tab_only_answer_recorded", VIEW_MS, () => question(id)?.status === "answered");
+        await chooseShown("Pop-up on Conversation");
+        return `no pop-up for ${POPUP_QUIET_MS} ms on Conversation; answered in the Questions tab`;
       });
     };
 

@@ -558,15 +558,15 @@ impl ResearchJobs {
         crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
     }
 
-    /// Reads the Claude Code terminal display the owner chose for a project's terminals
+    /// Reads the terminal display the owner chose for a project's terminals
     /// (N-D9), Classic when none is saved. Takes the project. Returns the display, or
     /// `coord_settings_invalid` for a stored row this build cannot read.
-    pub fn claude_display(
+    pub fn terminal_display(
         &self,
         project: &crate::protocol::ProjectId,
-    ) -> Result<crate::coord::settings::ClaudeDisplay, crate::engine::EngineError> {
+    ) -> Result<crate::coord::settings::TerminalDisplay, crate::engine::EngineError> {
         crate::coord::settings::read(&self.connection, project)
-            .map(|settings| settings.claude_display)
+            .map(|settings| settings.terminal_display)
     }
 
     /// Reads the agent policy the owner saved for a project, see

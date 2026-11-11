@@ -1,5 +1,5 @@
 use crate::agent_git::Layout;
-use crate::coord::settings::{ClaudeDisplay, RoleSkills, SkillRole};
+use crate::coord::settings::{RoleSkills, SkillRole, TerminalDisplay};
 use crate::harnesses::launch::{LaunchError, SecretInCommand};
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -160,8 +160,8 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// and the owner-approved memories, whether a headless Claude run keeps its transcript,
 /// whether a Claude Code lead runs its own agent team, the engine executable and mailbox
 /// of a team agent's message relay, the loopback port of the model proxy a team agent
-/// under the None network reaches its model through (S4b), the display its Claude Code
-/// terminal draws with (N-D9) and whether its team tools section tells it to merge
+/// under the None network reaches its model through (S4b), the display its terminal draws
+/// with (N-D9, DEC-141) and whether its team tools section tells it to merge
 /// `crazyagent/main` ("Catch up with main", OS-8).
 #[derive(Debug)]
 pub struct AgentContext {
@@ -174,7 +174,7 @@ pub struct AgentContext {
     native_threads: Option<u8>,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
-    claude_display: ClaudeDisplay,
+    terminal_display: TerminalDisplay,
     catch_up_main: bool,
 }
 
@@ -204,7 +204,7 @@ pub struct Installed {
     native: Option<NativeTeam>,
     native_threads: bool,
     model_proxy: Option<u16>,
-    claude_display: ClaudeDisplay,
+    terminal_display: TerminalDisplay,
     _lock: File,
 }
 
@@ -272,7 +272,7 @@ pub fn for_project(
         native_threads: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main,
     })
 }
@@ -745,11 +745,12 @@ impl AgentContext {
         self
     }
 
-    /// Gives this launch's Claude Code terminal the project's display (N-D9): Classic turns
-    /// Claude Code's alternate screen off, Fullscreen keeps Claude Code's own view. Other
-    /// harnesses and headless runs ignore it. Input: the display. Output: the context.
-    pub fn with_claude_display(mut self, display: ClaudeDisplay) -> Self {
-        self.claude_display = display;
+    /// Gives this launch's terminal the project's display (N-D9, DEC-141): Classic draws on
+    /// the normal screen, Fullscreen keeps the harness's own view. Each harness kind's launch
+    /// maps it to its own switches; headless runs ignore it. Input: the display. Output: the
+    /// context.
+    pub fn with_terminal_display(mut self, display: TerminalDisplay) -> Self {
+        self.terminal_display = display;
         self
     }
 
@@ -1026,7 +1027,7 @@ impl AgentContext {
             native: None,
             native_threads: false,
             model_proxy: self.model_proxy,
-            claude_display: self.claude_display,
+            terminal_display: self.terminal_display,
             _lock: lock,
         };
         remove(&state);
@@ -1298,9 +1299,9 @@ impl Installed {
         self.model_proxy
     }
 
-    /// Names the display this launch's Claude Code terminal draws with (N-D9).
-    pub fn claude_display(&self) -> ClaudeDisplay {
-        self.claude_display
+    /// Names the display this launch's terminal draws with (N-D9, DEC-141).
+    pub fn terminal_display(&self) -> TerminalDisplay {
+        self.terminal_display
     }
 
     /// Names where this launch wrote its files, for the record of a pane that may outlive
@@ -1326,7 +1327,7 @@ impl Installed {
             native: None,
             native_threads: false,
             model_proxy: None,
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             _lock: lock,
         })
     }
@@ -2148,7 +2149,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         native: None,
         native_threads: false,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         _lock: lock,
     })
 }

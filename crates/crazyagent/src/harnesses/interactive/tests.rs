@@ -298,6 +298,7 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
             built.cwd.display()
         ),
     ]));
+    argv.extend(strings(&["-c", "tui.alternate_screen=\"never\""]));
     assert_eq!(built.argv, argv);
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
@@ -521,25 +522,28 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
     .unwrap();
     assert_eq!(String::from_utf8(helper.stdout).unwrap(), KEY);
 
-    let output = crate::spawn_gate::output(
-        std::process::Command::new(&built.argv[0])
-            .args(&built.argv[1..])
-            .env_clear()
-            .envs(built.env.iter().map(|(name, value)| (name, value)))
-            .current_dir(&built.cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let seen = String::from_utf8(output.stdout).unwrap();
-    assert!(!seen.contains(KEY), "{seen}");
-    assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
-    assert!(
-        seen.lines()
-            .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new(&built.argv[0])
+                .args(&built.argv[1..])
+                .env_clear()
+                .envs(built.env.iter().map(|(name, value)| (name, value)))
+                .current_dir(&built.cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let seen = String::from_utf8(output.stdout).unwrap();
+        assert!(!seen.contains(KEY), "{seen}");
+        assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
+        assert!(
+            seen.lines()
+                .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
+        );
+    }
 
     let quoted = case.path().join("say \"hi\"");
     std::fs::create_dir(&quoted).unwrap();
@@ -1212,7 +1216,7 @@ fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
     let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
     let lead = project_context(&case, "lead")
         .with_native_team(&tmux, &case.path().join("work"))
-        .with_claude_display(crate::coord::settings::ClaudeDisplay::Classic)
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Classic)
         .install("claude-code", &case.home(), true)
         .unwrap();
     let built = command(&request, Some(&lead), &run(None)).unwrap();
@@ -1242,7 +1246,7 @@ fn a_fullscreen_claude_code_terminal_asks_for_the_fullscreen_renderer_at_three_r
         ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned()),
     ];
     let chosen = project_context(&case, "chosen")
-        .with_claude_display(crate::coord::settings::ClaudeDisplay::Fullscreen)
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Fullscreen)
         .install("claude-code", &case.home(), true)
         .unwrap();
     let built = command(&request, Some(&chosen), &run(None)).unwrap();
@@ -1252,7 +1256,7 @@ fn a_fullscreen_claude_code_terminal_asks_for_the_fullscreen_renderer_at_three_r
     let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
     let lead = project_context(&case, "lead")
         .with_native_team(&tmux, &case.path().join("work"))
-        .with_claude_display(crate::coord::settings::ClaudeDisplay::Fullscreen)
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Fullscreen)
         .install("claude-code", &case.home(), true)
         .unwrap();
     let built = command(&request, Some(&lead), &run(None)).unwrap();
@@ -1717,5 +1721,240 @@ fn a_codex_folder_decides_the_trust_setting_on_both_launch_shapes() {
             "{tools}: {:?}",
             built.argv
         );
+    }
+}
+
+/// The values of the `tui.alternate_screen` settings a built Codex command carries, in order.
+/// Input: the command. Output: the values as written, quotes included.
+fn codex_screen(built: &InteractiveCommand) -> Vec<String> {
+    built
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .filter_map(|pair| pair[1].strip_prefix("tui.alternate_screen="))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Builds a Codex command in a project whose owner chose `display`, for each launch shape.
+/// Inputs: the case, a name for the context's folder, the display, whether tools are on and
+/// whether the run resumes a conversation. Output: the command.
+fn codex_at(
+    case: &Case,
+    name: &str,
+    display: crate::coord::settings::TerminalDisplay,
+    tools: bool,
+    resume: bool,
+) -> InteractiveCommand {
+    let request = case.request("codex", case.subscription(), tools);
+    let installed = project_context(case, name)
+        .with_terminal_display(display)
+        .install("codex", &case.home(), tools)
+        .unwrap();
+    let run = Run {
+        session_id: SESSION,
+        key_file: None,
+        resume,
+    };
+    command(&request, Some(&installed), &run).unwrap()
+}
+
+/// DEC-141 parity: the one Terminal display setting has a mapping for every harness kind.
+/// Classic, the display where a plain drag selects text, holds for every kind. Two displays a
+/// kind can draw start it differently, and a display it cannot draw starts it as Classic does
+/// and is left out of the displays the settings list for it. A kind with a terminal app
+/// carries exactly its display's switches in its built command, on both launch shapes, and
+/// none of the other display's. A kind added without a mapping fails here.
+#[test]
+fn every_harness_kind_maps_every_terminal_display() {
+    use crate::coord::settings::{HarnessKind, TerminalDisplay};
+    assert_eq!(
+        TerminalDisplay::ALL,
+        [TerminalDisplay::Classic, TerminalDisplay::Fullscreen]
+    );
+    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Classic);
+    let starts = |switches: DisplaySwitches| (switches.variables, switches.arguments);
+    let case = Case::new();
+    let mut launched = 0;
+    for kind in HarnessKind::ALL {
+        let classic = display_switches(kind, TerminalDisplay::Classic);
+        assert!(classic.honoured, "{kind:?} has no Classic display");
+        for display in TerminalDisplay::ALL {
+            let switches = display_switches(kind, display);
+            assert_eq!(
+                displays(kind).contains(&display),
+                switches.honoured,
+                "{kind:?} {display:?}"
+            );
+            if display == TerminalDisplay::Classic {
+                continue;
+            }
+            assert_eq!(
+                switches.honoured,
+                starts(switches) != starts(classic),
+                "{kind:?} {display:?} is honoured only when it starts the kind differently"
+            );
+        }
+        if support(kind.as_str()) != Support::Terminal {
+            for display in TerminalDisplay::ALL {
+                let switches = display_switches(kind, display);
+                assert!(
+                    switches.variables.is_empty() && switches.arguments.is_empty(),
+                    "{kind:?} has no terminal app to switch"
+                );
+            }
+            continue;
+        }
+        for display in TerminalDisplay::ALL {
+            let switches = display_switches(kind, display);
+            assert!(switches.honoured, "{kind:?} {display:?}");
+            let others: Vec<DisplaySwitches> = TerminalDisplay::ALL
+                .into_iter()
+                .filter(|other| *other != display)
+                .map(|other| display_switches(kind, other))
+                .collect();
+            for tools in [false, true] {
+                launched += 1;
+                let request = case.request(kind.as_str(), case.subscription(), tools);
+                let installed = project_context(&case, &format!("parity-{launched}"))
+                    .with_terminal_display(display)
+                    .install(kind.as_str(), &case.home(), tools)
+                    .unwrap();
+                let built = command(&request, Some(&installed), &run(None)).unwrap();
+                let has_variable = |(name, value): &(&str, &str)| {
+                    built.env.iter().any(|(n, v)| n == name && v == value)
+                };
+                let has_arguments = |arguments: &[&str]| {
+                    !arguments.is_empty()
+                        && built
+                            .argv
+                            .windows(arguments.len())
+                            .any(|window| window == arguments)
+                };
+                assert!(
+                    switches.variables.iter().all(has_variable),
+                    "{kind:?} {display:?} tools {tools}: {:?}",
+                    built.env
+                );
+                assert!(
+                    switches.arguments.is_empty() || has_arguments(switches.arguments),
+                    "{kind:?} {display:?} tools {tools}: {:?}",
+                    built.argv
+                );
+                for other in &others {
+                    assert!(
+                        !other.variables.iter().any(has_variable)
+                            && !has_arguments(other.arguments),
+                        "{kind:?} {display:?} tools {tools} carries another display's switches"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        launched, 8,
+        "Claude Code and Codex, two displays, two launch shapes"
+    );
+}
+
+/// The displays the settings list for each kind (DEC-141): Claude Code and Codex draw both,
+/// RCLI, a one-turn master with no view of its own, only Classic.
+#[test]
+fn the_displays_of_each_harness_kind_are_named_for_the_settings() {
+    use crate::coord::settings::{HarnessKind, TerminalDisplay};
+    let both = TerminalDisplay::ALL.to_vec();
+    assert_eq!(displays(HarnessKind::ClaudeCode), both);
+    assert_eq!(displays(HarnessKind::Codex), both);
+    assert_eq!(displays(HarnessKind::Rcli), [TerminalDisplay::Classic]);
+}
+
+/// OB-8: a Codex terminal at the Classic display, the default and the display of a launch
+/// without a project context, starts with `tui.alternate_screen="never"`, so Codex draws on
+/// the normal screen with no mouse reporting and a plain drag in the app's terminal view
+/// selects text. The setting is a `-c` setting among the others, ahead of `resume`, because
+/// the bridge script hands the same arguments to `codex app-server`, which takes `-c` and
+/// exits on `--no-alt-screen`.
+#[test]
+fn a_classic_codex_terminal_draws_on_the_normal_screen_on_both_launch_shapes() {
+    use crate::coord::settings::TerminalDisplay;
+    let case = Case::new();
+    let never = ["\"never\"".to_owned()];
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let bare = command(&request, None, &run(None)).unwrap();
+        assert_eq!(codex_screen(&bare), never, "{tools}: {:?}", bare.argv);
+        for resume in [false, true] {
+            let name = format!("classic-{tools}-{resume}");
+            let built = codex_at(&case, &name, TerminalDisplay::Classic, tools, resume);
+            assert_eq!(codex_screen(&built), never, "{name}: {:?}", built.argv);
+            assert!(
+                !built
+                    .argv
+                    .iter()
+                    .any(|argument| argument == "--no-alt-screen"),
+                "{name}: {:?}",
+                built.argv
+            );
+            let at = |word: &str| built.argv.iter().position(|argument| argument == word);
+            let setting = at("tui.alternate_screen=\"never\"").unwrap();
+            assert_eq!(built.argv[setting - 1], "-c", "{name}");
+            if tools {
+                let script = at(CODEX_BRIDGE_SCRIPT).unwrap();
+                assert!(
+                    setting > script + 3,
+                    "{name}: after the program and the resume word"
+                );
+                assert_eq!(built.argv[script + 3] == SESSION, resume, "{name}");
+            } else if resume {
+                assert!(setting < at("resume").unwrap(), "{name}: {:?}", built.argv);
+            }
+        }
+    }
+}
+
+/// A Codex terminal at the Fullscreen display starts with `tui.alternate_screen="always"`,
+/// Codex's own view on the alternate screen, which takes the mouse, whatever the account's
+/// own Codex settings say, on both launch shapes, and never also asks for the normal screen.
+#[test]
+fn a_fullscreen_codex_terminal_keeps_codex_own_view_on_both_launch_shapes() {
+    use crate::coord::settings::TerminalDisplay;
+    let case = Case::new();
+    for tools in [false, true] {
+        for resume in [false, true] {
+            let name = format!("fullscreen-{tools}-{resume}");
+            let built = codex_at(&case, &name, TerminalDisplay::Fullscreen, tools, resume);
+            assert_eq!(
+                codex_screen(&built),
+                ["\"always\"".to_owned()],
+                "{name}: {:?}",
+                built.argv
+            );
+            assert!(
+                !built
+                    .argv
+                    .iter()
+                    .any(|argument| argument == "--no-alt-screen"),
+                "{name}: {:?}",
+                built.argv
+            );
+        }
+    }
+}
+
+/// Every display switch Codex gets is a `-c` setting and no variable: the bridge script hands
+/// a tools-on launch's arguments to `codex app-server` too, which exits on any TUI-only flag
+/// and would leave the agent without its native bridge, and the Codex launch adds no display
+/// variables. Claude Code's are variables only, as its launch adds no display arguments.
+#[test]
+fn each_kind_s_display_switches_are_of_the_shape_its_launch_carries() {
+    use crate::coord::settings::{HarnessKind, TerminalDisplay};
+    for display in TerminalDisplay::ALL {
+        let codex = display_switches(HarnessKind::Codex, display);
+        assert!(codex.variables.is_empty(), "{display:?}");
+        assert_eq!(codex.arguments.len(), 2, "{display:?}");
+        assert_eq!(codex.arguments[0], "-c", "{display:?}");
+        let claude = display_switches(HarnessKind::ClaudeCode, display);
+        assert!(claude.arguments.is_empty(), "{display:?}");
+        assert!(!claude.variables.is_empty(), "{display:?}");
     }
 }

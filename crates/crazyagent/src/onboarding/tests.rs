@@ -1152,7 +1152,9 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
 /// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the
 /// environment's Python is a link into a version link (`cpython-3.12`) that leads to the
 /// real installation (`cpython-3.12.16`), and `pyvenv.cfg` names the version link. The
-/// stand-in writes an empty graph. Takes the folder. Returns the graphify file.
+/// installation's `python3.12` leads to `/bin/bash`, since macOS 26 kills a copy of a system
+/// shell started outside the system volume. The stand-in writes an empty graph. Takes the
+/// folder. Returns the graphify file.
 #[cfg(target_os = "macos")]
 fn graphify_behind_a_version_link(root: &Path) -> std::path::PathBuf {
     let real = root.join("python/cpython-3.12.16/bin");
@@ -1160,7 +1162,8 @@ fn graphify_behind_a_version_link(root: &Path) -> std::path::PathBuf {
     for folder in [&real, &bin] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    crate::spawn_gate::guarded(|| std::fs::copy("/bin/bash", real.join("python3.12"))).unwrap();
+    symlink("/bin/bash", real.join("python3.12")).unwrap();
+    assert!(real.join("python3.12").is_file());
     symlink(
         root.join("python/cpython-3.12.16"),
         root.join("python/cpython-3.12"),
@@ -1283,8 +1286,7 @@ fn a_python_folder_reached_through_a_link_ends_the_graph_build_without_an_error(
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_leaves_out_the_engine_files_in_the_project() {
-    let graphify = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let graphify = test_graphify();
     let dir = tempfile::Builder::new()
         .prefix("ca-graph-")
         .tempdir_in("/tmp")
@@ -1350,12 +1352,22 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
     assert!(secret.join("vault.py").is_file());
 }
 
+/// The graphify the graph rows run: the file `CRAZYAGENT_GRAPHIFY` names, as CI installs
+/// it pinned in its own state, else the one this machine has. Output: the canonical file,
+/// or a panic naming what is missing.
+#[cfg(target_os = "macos")]
+fn test_graphify() -> std::path::PathBuf {
+    std::env::var_os("CRAZYAGENT_GRAPHIFY")
+        .map(|named| std::fs::canonicalize(named).expect("CRAZYAGENT_GRAPHIFY names a file"))
+        .or_else(service::installed_graphify)
+        .expect("BLOCKED: graphify not installed (CRAZYAGENT_GRAPHIFY, ~/.local/bin or Homebrew)")
+}
+
 /// Builds the code graph of `repo` with the installed graphify and no hidden folders, in a
 /// fresh engine state folder. Takes the project folder. Returns how the build ended.
 #[cfg(target_os = "macos")]
 fn build_graph(repo: &Path) -> graph::GraphEnding {
-    let graphify = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let graphify = test_graphify();
     run_graph(repo, &graphify, &[])
 }
 
@@ -1663,8 +1675,7 @@ fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_the_keep_out_is
     let (_dir, repo, hidden) = graphed_then_hidden();
     write_file(&repo, ".gitignore", "it's/\n");
     write_file(&repo, "it's/cache.py", "def cached():\n    return 1\n");
-    let graphify = service::installed_graphify()
-        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let graphify = test_graphify();
     assert_eq!(
         run_graph(&repo, &graphify, &hidden),
         graph::GraphEnding::Failed(graph::GRAPH_KEEP_OUT_REFUSED)

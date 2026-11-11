@@ -408,7 +408,12 @@ fn a_saved_trusted_line_plus_the_entry_starts_nothing_from_a_subfolder_terminal(
         assert!(said.contains(REPLY), "{tools}: {said:?}");
         std::thread::sleep(MARKER_GRACE);
         assert!(!marker.exists(), "{tools}: the repository's command ran");
-        assert!(session.stop().is_ok());
+        let stopped = session.stop();
+        assert!(stopped.is_ok(), "{tools}: {stopped:?}");
+        assert!(
+            !marker.exists(),
+            "{tools}: the repository's command ran before the stop"
+        );
     }
 }
 

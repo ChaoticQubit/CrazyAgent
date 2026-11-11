@@ -11,7 +11,7 @@ test("only the Conversation tab makes the project page a fixed screen, with ever
   assert.match(index, /<div className=\{`pj pj-project\$\{active === "conversation" \? " pj-fixed" : ""\}`\} ref=\{root\}>/u);
   assert.equal(index.match(/pj-fixed/gu)?.length, 1, "no other tab sets the fixed screen");
   assert.match(index, /\}\)\)\} \/>\s*<div className="pj-banners">\s*<RecoveryBanner /u, "the box opens right after the head");
-  assert.match(index, /<InstructionImportPrompt [^\n]*\/>\s*<\/div>\s*<div className="pj-tab-panel"/u);
+  assert.match(index, /<InstructionImportPrompt [^\n]*\/>\s*\{questionsShown !== "tab" && <QuestionPopup [^\n]*\/>\}\s*<\/div>\s*<div className="pj-tab-panel"/u, "the questions pop-up is the last thing in the box, above the tab panel (OB-9)");
 });
 
 test("the fixed screen never scrolls: the main region hides its overflow and the page is the window's height", () => {

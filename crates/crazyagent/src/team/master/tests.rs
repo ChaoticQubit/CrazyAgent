@@ -698,6 +698,27 @@ fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothi
 }
 
 #[test]
+fn only_a_views_focus_and_mouse_reports_are_not_pressed_keys() {
+    assert!(!pressed(b""));
+    assert!(!pressed(b"\x1b[I"));
+    assert!(!pressed(b"\x1b[O\x1b[I"));
+    assert!(!pressed(b"\x1b[<65;10;5M\x1b[<0;3;4m"));
+    assert!(!pressed(b"\x1b[M`!!"));
+    assert!(pressed(b"\x1b[A"), "an arrow key is the owner's");
+    assert!(pressed(b"\x1bOB"));
+    assert!(pressed(b"\x1b[Ix"), "a key beside a report counts");
+    assert!(pressed(b"\x1b[<65;10;5"), "a cut report is not one");
+    assert!(pressed(b"\x1b[M`"), "a cut X10 report is not one");
+    assert!(
+        pressed(b"\x1b[Mab\r"),
+        "an X10 report holds no control byte, so Enter after ESC [ M a b counts"
+    );
+    assert!(pressed(b"\x1b[M\r\r\r"));
+    assert!(pressed(b"\r"));
+    assert!(pressed(b"\x1b"));
+}
+
+#[test]
 fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() {
     let mut fixture = Fixture::new();
     let host = fixture.host();
@@ -756,6 +777,72 @@ fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() 
     );
     let seen = typed_until(&typed, b"hello\x1b[201~\r");
     assert!(seen.ends_with(b"hello\x1b[201~\r"), "{seen:?}");
+}
+
+/// OB-10: the owner answers in the Questions tab and goes back to the master's terminal,
+/// whose view reports focus and the mouse by itself. The answer waiting for the idle live
+/// master is typed at once, not held back as if the owner were typing; a key the owner
+/// presses after it still holds the next input.
+#[test]
+fn a_views_focus_and_mouse_reports_never_hold_an_answer_back() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
+        .unwrap();
+    reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
+    fixture.live(Some(MASTER));
+    let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
+    let input = |text: &str, now: i64| {
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            Some(&typing),
+            &project,
+            text,
+            now,
+        )
+    };
+
+    typing.record(MASTER, b"\x1b[O", NOW - 3_000);
+    typing.record(MASTER, b"\x1b[I", NOW - 2);
+    typing.record(MASTER, b"\x1b[<65;10;5M\x1b[<64;10;5M", NOW - 1);
+    owner_typed(&fixture.connection, MASTER, b"\x1b[I", NOW - 1).unwrap();
+    assert_eq!(
+        input("The owner answered your question 7", NOW),
+        Ok(()),
+        "the view's own reports are not the owner typing"
+    );
+    let pasted = b"The owner answered your question 7\x1b[201~\r";
+    let seen = typed_until(&typed, pasted);
+    assert!(seen.ends_with(pasted), "{seen:?}");
+    assert_eq!(
+        fixture.draft(),
+        (None, false),
+        "no report reached the store"
+    );
+
+    let later = NOW + INPUT_SETTLE_MS;
+    typing.record(MASTER, b"\x1b[A", later - 1);
+    assert_eq!(
+        input("next", later),
+        Err(InputRefused::OwnerTyping),
+        "an arrow key the owner presses still holds engine input"
+    );
 }
 
 #[test]

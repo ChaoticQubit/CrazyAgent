@@ -401,7 +401,7 @@ test("a stopped or failed master turn offers its own message to send again", () 
     assert.equal(research.minutesOfCause(cause), null, `${cause} names no time limit`);
   }
   const late = { ...turn(1, "failed"), reason: "time_limit", cause: "codex_host_deadline" };
-  assert.equal(research.turnLine(late), "The master stopped: it reached its time limit. (codex_host_deadline)", "a clock that ended a turn with no minutes named claims no 10 minutes (OB-5c)");
+  assert.equal(research.turnLine(late), "The master stopped: it ran as long as one turn may run. Change this in Settings, Master. (codex_host_deadline)", "a clock that ended a turn with no minutes named claims no 10 minutes (OB-5c)");
   const large = { ...turn(1, "failed"), reason: "output_limit", cause: "claude_host_stdout_limit" };
   assert.equal(research.turnLine(large), "The master stopped: this turn's output was too large to keep. (claude_host_stdout_limit)", "a turn with more output than the app keeps says so plainly (OB-5c)");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");

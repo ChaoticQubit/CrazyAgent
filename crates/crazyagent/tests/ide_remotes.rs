@@ -385,8 +385,10 @@ fn agent_sandbox_cannot_reach_owner_git_credentials() {
         OsStr::new("SSH_AUTH_SOCK"),
         socket.as_os_str()
     ));
-    let owner = PathBuf::from(std::env::var_os("HOME").unwrap());
-    let owner = owner.canonicalize().unwrap_or(owner);
+    let owner = crazyagent::sandbox::toolchains::ToolHomes::owner()
+        .unwrap()
+        .home()
+        .to_path_buf();
     for (network, name) in [
         (SandboxNetwork::Open, "open.sb"),
         (SandboxNetwork::Only(Vec::new()), "closed.sb"),

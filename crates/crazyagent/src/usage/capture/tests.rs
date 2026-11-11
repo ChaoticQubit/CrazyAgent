@@ -360,6 +360,115 @@ fn codex_totals_count_their_growth_with_cached_input_apart_and_limits_are_kept()
 }
 
 #[test]
+fn a_record_rewritten_in_place_with_another_start_starts_over() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s3.jsonl");
+    append(&record, &claude_assistant("a1", 5, 5, 0, 0, "end_turn"));
+    let who = attribution(RunKind::Agent, None);
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        5
+    );
+    let identity = file_identity(&std::fs::metadata(&record).unwrap());
+    let rewritten = [
+        claude_assistant("b1", 8, 1, 0, 0, "end_turn"),
+        claude_assistant("b2", 2, 1, 0, 0, "end_turn"),
+    ]
+    .concat();
+    std::fs::write(&record, rewritten).unwrap();
+    assert_eq!(
+        file_identity(&std::fs::metadata(&record).unwrap()),
+        identity,
+        "the rewrite keeps the inode, as a file made right after a removal does on Linux"
+    );
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        10,
+        "both lines of the new record count, not only the one past the old offset"
+    );
+    append(&record, &claude_assistant("b3", 4, 1, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        4,
+        "a record that keeps its start reads on from its offset"
+    );
+}
+
+#[test]
+fn progress_stored_without_a_start_hash_reads_on_and_then_gains_one() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s4.jsonl");
+    append(&record, &claude_assistant("a1", 5, 5, 0, 0, "end_turn"));
+    let who = attribution(RunKind::Agent, None);
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        5
+    );
+    let stored = |db: &Connection| -> Value {
+        let text: String = db
+            .query_row("SELECT progress FROM usage_files", [], |row| row.get(0))
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    let mut older = stored(&db);
+    let first_line = std::fs::metadata(&record).unwrap().len();
+    assert_eq!(older["head_bytes"].as_u64(), Some(first_line));
+    let fields = older.as_object_mut().unwrap();
+    fields.remove("head_bytes").unwrap();
+    fields.remove("head_hash").unwrap();
+    assert_eq!(
+        db.execute("UPDATE usage_files SET progress=?1", [older.to_string()])
+            .unwrap(),
+        1
+    );
+    append(&record, &claude_assistant("a2", 3, 1, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        3,
+        "progress an older build stored still reads on from its offset"
+    );
+    let newer = stored(&db);
+    let read_to = std::fs::metadata(&record).unwrap().len();
+    assert!(read_to < HEAD_BYTES_MAX);
+    assert_eq!(newer["head_bytes"].as_u64(), Some(read_to));
+    assert_ne!(newer["head_hash"].as_u64(), Some(0));
+}
+
+#[test]
+fn a_recount_stops_at_a_record_rewritten_in_place_since_its_last_chunk() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s5.jsonl");
+    append(&record, &claude_assistant("a1", 5, 5, 0, 0, "end_turn"));
+    let listed = file_identity(&std::fs::metadata(&record).unwrap());
+    let first = recount_read(&db, &record, Format::Claude, "", listed, NOW);
+    assert_eq!(first.usages.len(), 1);
+    let rewritten = [
+        claude_assistant("b1", 8, 1, 0, 0, "end_turn"),
+        claude_assistant("b2", 2, 1, 0, 0, "end_turn"),
+    ]
+    .concat();
+    std::fs::write(&record, rewritten).unwrap();
+    let next = recount_read(&db, &record, Format::Claude, &first.progress, listed, NOW);
+    assert!(next.usages.is_empty(), "no line of another record counts");
+    assert!(next.done);
+    assert!(!next.complete);
+    assert_eq!(next.progress, first.progress);
+}
+
+#[test]
 fn a_replaced_or_shortened_record_starts_over_and_an_overlong_line_is_skipped() {
     let (_root, db) = store();
     let home = tempfile::tempdir().unwrap();

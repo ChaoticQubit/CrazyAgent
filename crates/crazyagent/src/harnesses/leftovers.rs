@@ -528,7 +528,8 @@ impl Lineage {
     }
 
     /// Adds, after the group is killed, every process whose environment holds the launch's
-    /// token, from one listing, then waits up to `SETTLE` for every process found to end.
+    /// token, from one listing, then waits up to `SETTLE` for every process found to end,
+    /// and no longer while a held-up listing is still in flight, since no other can start.
     /// Input: the lineage. Output: Ok once a listing shows none running, else the
     /// [`Leftovers`] still running at the deadline or, once a listing failed, unchecked.
     #[cfg(unix)]
@@ -553,10 +554,11 @@ impl Lineage {
         let until = Instant::now() + SETTLE;
         loop {
             self.unchecked |= self.refresh().is_err();
+            assert!(self.pending.is_none() || self.unchecked);
             if self.known.is_empty() && !self.unchecked {
                 return Ok(());
             }
-            if self.known.is_empty() || Instant::now() >= until {
+            if self.known.is_empty() || self.pending.is_some() || Instant::now() >= until {
                 return Err(Unstopped::Left(Leftovers(Box::new(self))));
             }
             std::thread::sleep(SETTLE_POLL);
@@ -1231,6 +1233,44 @@ pub(crate) mod tests {
             missed: false,
         }))
         .plain();
+    }
+
+    #[test]
+    fn a_settle_ends_at_once_while_a_held_up_listing_is_still_in_flight() {
+        let (_listing, held_up) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+        let lineage = Lineage {
+            leader: 2,
+            known: vec![Process {
+                pid: 2,
+                started: "Wed Oct 28 03:10:00 2026".into(),
+                program: "sleep".into(),
+            }],
+            table: PS_TABLE,
+            unchecked: true,
+            pending: Some(held_up),
+            sandboxed: false,
+            token: None,
+            leader_started: None,
+            applied: Instant::now(),
+            missed: false,
+        };
+        let started = Instant::now();
+        let settled = lineage.settle();
+        let took = started.elapsed();
+        assert!(
+            took < SETTLE / 2,
+            "a settle waited {took:?} behind a listing no other can start after"
+        );
+        match settled {
+            Err(Unstopped::Left(left)) => {
+                assert_eq!(left.code(), LEFT);
+                assert_eq!(
+                    left.names(),
+                    "2 sleep. More of them may run: the process list could not be read"
+                );
+            }
+            other => panic!("a settle behind a held-up listing was reported {other:?}"),
+        }
     }
 
     #[test]

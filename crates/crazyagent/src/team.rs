@@ -837,7 +837,10 @@ pub enum TeamAction {
 }
 
 /// One harness kind's coordination choices as the team settings show them: how its sub-agents
-/// start, how messages reach its agents, and whether it has native teammates at all.
+/// start, how messages reach its agents, whether it has native teammates at all, and the
+/// terminal displays its terminals can draw, so the one Terminal display setting names a kind
+/// that stays as it is (DEC-141). An engine from before DEC-141 sends no displays, which
+/// reads as an empty list: nothing known, so no kind is named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessCoordination {
@@ -845,6 +848,8 @@ pub struct HarnessCoordination {
     pub mode: crate::coord::settings::SubagentMode,
     pub delivery: crate::coord::settings::Delivery,
     pub native: bool,
+    #[serde(default)]
+    pub displays: Vec<crate::coord::settings::TerminalDisplay>,
 }
 
 /// A project's coordination settings (DEC-104) with every harness kind's mode and delivery.
@@ -870,6 +875,7 @@ pub fn coordination(
             mode: settings::mode(connection, project, harness)?,
             delivery: settings::delivery(connection, project, harness)?,
             native: settings::native_supported(harness),
+            displays: crate::harnesses::interactive::displays(harness),
         });
     }
     let view = CoordinationView {

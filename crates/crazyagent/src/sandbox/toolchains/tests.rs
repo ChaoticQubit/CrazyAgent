@@ -2,8 +2,29 @@ use super::*;
 
 #[test]
 fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_plain() {
+    let system = Path::new("/usr/bin/git");
+    assert!(xcrun_shim(system, true), "a Mac has the xcrun shim there");
+    assert!(
+        !xcrun_shim(system, false),
+        "on Linux /usr/bin/git is the real git, so agents get their own git that runs it"
+    );
+    for real in [
+        "/opt/homebrew/bin/git",
+        "/usr/bin/git2",
+        "/usr/local/bin/git",
+    ] {
+        assert!(!xcrun_shim(Path::new(real), true), "{real}");
+        assert!(!xcrun_shim(Path::new(real), false), "{real}");
+    }
+    for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
+        let script = git_script(system, copy, true);
+        assert_eq!(script.is_none(), cfg!(target_os = "macos"), "{copy:?}");
+        assert!(
+            script.is_none_or(|script| script.starts_with("#!/bin/sh\ngit='/usr/bin/git'\n")),
+            "{copy:?}"
+        );
+    }
     for git in [
-        "/usr/bin/git",
         "usr/bin/git",
         "/opt/it's/git",
         "/opt/a\"b/git",

@@ -734,7 +734,7 @@ async fn a_claude_master_whose_harness_it_can_never_reap_still_ends_and_releases
         let mut fixture = MasterFixture::new("claude");
         let mut claude = stand_in_master(
             &mut fixture,
-            "#!/bin/sh\necho $$ > leader.pid\nexec /bin/sleep 30\n",
+            "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
         )
         .await;
         if !reap_before_the_host(&fixture.project) {
@@ -871,10 +871,10 @@ async fn closing_a_claude_master_is_not_failed_by_the_exit_its_closed_input_caus
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(
         &mut fixture,
-        "#!/bin/sh\necho $$ > leader.pid\n/bin/cat > /dev/null\nexit 1\n",
+        "#!/bin/sh\necho $$ > run/leader.pid\n/bin/cat > /dev/null\nexit 1\n",
     )
     .await;
-    let ready = fixture.project.join("leader.pid");
+    let ready = fixture.project.join("run/leader.pid");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !ready.exists() {
         assert!(
@@ -1208,7 +1208,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in(
         "claude",
-        "#!/bin/sh\nprintf 'shell=%s\\n' \"$(/usr/bin/printenv SHELL)\" > shell.txt\n/bin/cat > /dev/null\nexit 1\n",
+        "#!/bin/sh\nprintf 'shell=%s\\n' \"$(/usr/bin/printenv SHELL)\" > run/shell.txt\n/bin/cat > /dev/null\nexit 1\n",
     );
     let engine = fixture.root.path().join("crazyagent");
     let drop = home.join(crate::team::tool::DROP_FILE);
@@ -1244,7 +1244,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
     )
     .await
     .unwrap();
-    let seen = fixture.project.join("shell.txt");
+    let seen = fixture.project.join("run/shell.txt");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while fs::read_to_string(&seen).map_or(true, |text| !text.ends_with('\n')) {
         assert!(
@@ -1535,7 +1535,7 @@ ran=$( {
   printf '%s\n' "$frame" >&2
   printf '%s\n' "$frame" 2>/dev/null >/dev/tty
   /bin/mkdir -p "$kept" 2>/dev/null && printf '%s\n' "$frame" >> "$kept/native-session.jsonl"
-  printf '%s\n' "$frame" >> native-session.jsonl
+  printf '%s\n' "$frame" >> run/native-session.jsonl
 } </dev/null 2>&1 )
 printf '%s\n' '{"type":"user","uuid":"step-2","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ran"}]}}'
 printf '%s\n' '{"type":"assistant","uuid":"step-3","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
@@ -1569,7 +1569,7 @@ async fn a_rate_limit_frame_a_master_tool_writes_never_reaches_the_turn_but_the_
     let mut fixture = MasterFixture::new("claude");
     let (kinds, error) =
         tool_step_turn(&mut fixture, "claude-forged", 1, true, FORGING_TOOL_HARNESS).await;
-    let written = fs::read_to_string(fixture.project.join("native-session.jsonl")).unwrap();
+    let written = fs::read_to_string(fixture.project.join("run/native-session.jsonl")).unwrap();
     assert!(written.contains("\"error\":\"rate_limit\""), "the tool ran");
     assert_eq!(error, None, "{kinds:?}");
     assert!(
@@ -1619,7 +1619,7 @@ for step in 1 2 3 4 5 6 7 8 9 10 11 12 13; do long=$long$long; done
 printf '%s\n' "$long"
 printf '%s' '{"type":"system","subtype":"task_'
 /bin/cat > /dev/null
-printf 'closed' > input-closed
+printf 'closed' > run/input-closed
 exit 0
 "#;
 
@@ -1684,7 +1684,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
-        fixture.project.join("input-closed").exists() && claude.diagnostic().is_some(),
+        fixture.project.join("run/input-closed").exists() && claude.diagnostic().is_some(),
         "the host closes the harness input at the turn's result and the harness ends by itself"
     );
     let closed = claude.close().await.map_err(|error| error.0);

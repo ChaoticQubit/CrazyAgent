@@ -2309,7 +2309,7 @@ fn append(
         .text
         .filter(|text| !text.is_empty())
         .map(|text| marked(text, MESSAGE_BYTES_MAX));
-    let harness = draft.harness.filter(|harness| bounded(*harness, 64));
+    let harness = draft.harness.filter(|harness| bounded(harness, 64));
     let added = connection
         .execute(
             "INSERT INTO session_messages(session,seq,project,speaker,mode,harness,text,at_ms,source,source_key)

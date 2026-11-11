@@ -5,6 +5,7 @@ import "./load-source.mjs";
 import { bundle, withPage } from "./browser.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
+const coord = await import("../src/screens/team/coordination.tsx");
 
 const key = (extra = {}) => ({ type: "keydown", key: "c", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, ...extra });
 
@@ -197,12 +198,12 @@ test("Copy output in the terminal menu puts the whole output on the clipboard an
   assert.deepEqual([seen.closed.open, seen.closed.focus, seen.closed.notes], [false, "terminal", ["Copied the output."]]);
 });
 
-async function drag(send, from, to) {
-  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: from.x, y: from.y, button: "left", buttons: 1, clickCount: 1 });
+async function drag(send, from, to, modifiers = 0) {
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: from.x, y: from.y, button: "left", buttons: 1, clickCount: 1, modifiers });
   for (const part of [0.25, 0.5, 0.75, 1]) {
-    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(from.x + (to.x - from.x) * part), y: from.y, button: "left", buttons: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(from.x + (to.x - from.x) * part), y: from.y, button: "left", buttons: 1, modifiers });
   }
-  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: to.x, y: to.y, button: "left", buttons: 0, clickCount: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: to.x, y: to.y, button: "left", buttons: 0, clickCount: 1, modifiers });
 }
 
 test("the panel's xterm never lets a right-click replace the selection with the word under the pointer (N-D9)", async () => {
@@ -248,5 +249,106 @@ test("a drag then a right-click where the button was let go keeps the dragged te
     assert.deepEqual(run.copy, { disabled: false }, `${run.where}: Copy is enabled for the dragged text`);
     assert.equal(run.clipboard, run.dragged, `${run.where}: the clipboard holds exactly the dragged text, not the word under the pointer`);
     assert.equal(run.note, "Copied the selection.", `${run.where}: the terminal says the copy worked`);
+  }
+});
+
+test("the key that forces a drag to select is Option on a Mac and Shift elsewhere, and the terminal's note names it", () => {
+  assert.equal(typeof io.dragKey, "function");
+  assert.equal(io.dragKey(true), "Option");
+  assert.equal(io.dragKey(false), "Shift");
+  assert.equal(io.selectNote(true), "Hold Option and drag to select text; the app in this terminal reads the mouse.");
+  assert.equal(io.selectNote(false), "Hold Shift and drag to select text; the app in this terminal reads the mouse.");
+});
+
+/** What each harness kind's own app writes to its terminal as it starts at each Terminal
+ * display, the stand-in for the real app in the copy proof below. Codex's are the modes
+ * codex-cli 0.167.1 set in a pty with `tui.alternate_screen` at `never` and at `always`
+ * (OB-8): Fullscreen is the alternate screen with mouse reporting on. Claude Code's
+ * Fullscreen is its own alternate-screen view with mouse reporting on, its Classic neither.
+ * RCLI prints plain lines whatever the display, as it has no view of its own. */
+const APP_STARTS = {
+  "claude-code": { classic: "\x1b[?2004h", fullscreen: "\x1b[?2004h\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h" },
+  codex: { classic: "\x1b[?2004h\x1b[?1004h", fullscreen: "\x1b[?2004h\x1b[?1004h\x1b[?1049h\x1b[?1007l\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h" },
+  rcli: { classic: "", fullscreen: "" },
+};
+
+const NOTHING_COPIED = "nothing copied";
+const MOUSE_REPORT = /\x1b\[<\d+;\d+;\d+[Mm]/;
+const READS_MOUSE = /\x1b\[\?100[023]h/;
+
+const harnessPanel = await bundle(new URL("./fixtures/terminal-harnesses.mjs", import.meta.url).pathname);
+
+test("copy works in the master and agent terminal of every harness kind at every Terminal display: a plain drag selects on the normal screen, the forced drag selects while the app reads the mouse and its selection outlives the pointer moving on and a right-click, and the copy key and the menu's Copy put it on the clipboard (OB-8, DEC-141)", async () => {
+  const displays = coord.DISPLAY_OPTIONS.map((option) => option.value);
+  assert.deepEqual(Object.keys(APP_STARTS), coord.COORD_HARNESSES, "every harness kind has a stand-in, so a new kind cannot skip the copy proof");
+  for (const harness of coord.COORD_HARNESSES) assert.deepEqual(Object.keys(APP_STARTS[harness]), displays, `${harness} has a stand-in for every display`);
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
+    await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate(harnessPanel);
+    const mac = (await evaluate("navigator.platform")).startsWith("Mac");
+    const forced = mac ? 1 : 8;
+    const copyKeys = mac ? 4 : 2;
+    const runs = [];
+    for (const role of ["master", "sub"]) {
+      for (const harness of coord.COORD_HARNESSES) {
+        for (const display of displays) {
+          const name = `${role} ${harness} ${display}`;
+          await evaluate(`Fixture.open(${JSON.stringify(role)}, ${JSON.stringify(harness)})`);
+          assert.equal(await evaluate("Fixture.until(() => Fixture.view().live)"), true, `${name}: the terminal went live`);
+          await evaluate(`Fixture.output(${JSON.stringify(`${APP_STARTS[harness][display]}first line of output\r\nsecond line`)})`);
+          assert.equal(await evaluate('Fixture.until(() => Fixture.view().text.includes("second line"))'), true, `${name}: the app's output drew`);
+          await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+          const at = await evaluate("Fixture.view()");
+          const y = Math.round(at.screen.top + at.rowHeight / 2);
+          const from = { x: Math.round(at.screen.left + 2), y };
+          const to = { x: Math.round(at.screen.left + 140), y };
+          const wander = async () => {
+            for (const step of [10, 25, 40]) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: to.x + step, y: y + step });
+            await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: to.x, y });
+          };
+          const copied = async (modifiers) => {
+            await evaluate(`navigator.clipboard.writeText(${JSON.stringify(NOTHING_COPIED)})`);
+            await drag(send, from, to, modifiers);
+            await wander();
+            await keyPress(send, copyKeys);
+            return evaluate("navigator.clipboard.readText()");
+          };
+          const plain = await copied(0);
+          const reports = (await evaluate("Fixture.view()")).typed.filter((chunk) => MOUSE_REPORT.test(chunk)).length;
+          const withKey = await copied(forced);
+          await drag(send, from, to, forced);
+          await wander();
+          await evaluate(`navigator.clipboard.writeText(${JSON.stringify(NOTHING_COPIED)})`);
+          await mouse(send, to.x, y, "right");
+          assert.equal(await evaluate("Fixture.until(() => Fixture.view().menu.length > 0)"), true, `${name}: the right-click opened the terminal menu`);
+          const copy = (await evaluate("Fixture.view()")).menu.find((item) => item.text === "Copy");
+          if (copy && !copy.disabled) await mouse(send, Math.round((copy.left + copy.right) / 2), Math.round((copy.top + copy.bottom) / 2), "left");
+          else await press(send, "Escape", 27);
+          await evaluate("Fixture.until(() => Fixture.view().menu.length === 0)");
+          runs.push({ name, harness, display, note: at.note, plain, reports, withKey, menuCopy: copy ? !copy.disabled : null, fromMenu: await evaluate("navigator.clipboard.readText()") });
+        }
+      }
+    }
+    return { mac, runs };
+  }).finally(() => server?.close());
+  assert.equal(seen.runs.length, 2 * coord.COORD_HARNESSES.length * displays.length);
+  const reading = seen.runs.filter((run) => READS_MOUSE.test(APP_STARTS[run.harness][run.display]));
+  assert.deepEqual(reading.map((run) => run.name), ["master claude-code fullscreen", "master codex fullscreen", "sub claude-code fullscreen", "sub codex fullscreen"], "the full-screen stand-ins read the mouse, as the real apps do");
+  for (const run of seen.runs) {
+    const dragged = (text) => text !== NOTHING_COPIED && text.trimEnd().length >= 5 && "first line of output".startsWith(text.trimEnd());
+    if (reading.includes(run)) {
+      assert.equal(run.plain, NOTHING_COPIED, `${run.name}: a plain drag selects nothing while the app reads the mouse, the cause of OB-8`);
+      assert.ok(run.reports > 0, `${run.name}: the plain drag went to the app as mouse reports`);
+      assert.ok(run.note.endsWith(io.selectNote(seen.mac)), `${run.name}: the status line says how to select, got ${run.note}`);
+    } else {
+      assert.ok(dragged(run.plain), `${run.name}: a plain drag selected the start of the first row and the copy key copied it, got ${JSON.stringify(run.plain)}`);
+      assert.equal(run.reports, 0, `${run.name}: no drag reaches the app on the normal screen`);
+      assert.doesNotMatch(run.note, /drag to select/, `${run.name}: nothing to explain when a plain drag selects`);
+    }
+    assert.ok(dragged(run.withKey), `${run.name}: the forced drag selected the start of the first row, the selection outlived the pointer moving on, and the copy key copied it, got ${JSON.stringify(run.withKey)}`);
+    assert.equal(run.menuCopy, true, `${run.name}: the menu's Copy is enabled for the dragged text`);
+    assert.equal(run.fromMenu, run.withKey, `${run.name}: the menu's Copy put the same dragged text on the clipboard`);
   }
 });

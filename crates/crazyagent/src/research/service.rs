@@ -207,7 +207,7 @@ where
 #[cfg(unix)]
 #[derive(Debug)]
 enum Picked {
-    Account(PathBuf, ResearchAccount),
+    Account(PathBuf, Box<ResearchAccount>),
     Paused(i64),
     Nothing,
 }
@@ -220,7 +220,7 @@ fn picked(resolved: impl Iterator<Item = Option<(PathBuf, AccountPick)>>) -> Pic
     let mut paused: Option<i64> = None;
     for (root, pick) in resolved.flatten() {
         match pick {
-            AccountPick::Account { account, .. } => return Picked::Account(root, *account),
+            AccountPick::Account { account, .. } => return Picked::Account(root, account),
             AccountPick::Paused { until_ms } => {
                 paused = Some(paused.map_or(until_ms, |earliest| earliest.min(until_ms)));
             }
@@ -628,7 +628,10 @@ mod tests {
             Some((root.clone(), account())),
         ];
         match picked(resolved.into_iter()) {
-            Picked::Account(folder, ResearchAccount::Endpoint { model, .. }) => {
+            Picked::Account(folder, account) => {
+                let ResearchAccount::Endpoint { model, .. } = *account else {
+                    panic!("expected the endpoint account, got {account:?}");
+                };
                 assert_eq!((folder, model.as_str()), (root, "local"));
             }
             other => panic!("expected an account, got {other:?}"),

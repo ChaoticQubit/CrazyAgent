@@ -24,12 +24,19 @@ env:
   CLAUDE_CODE_VERSION: "2.1.309"
   CODEX_VERSION: "0.164.0"
   UV_VERSION: "0.13.5"
+  BUN_DARWIN_ARM64_SHA256: 80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
+  NODE_DARWIN_ARM64_SHA256: 1901d539912c02afa10d1cc126943a8855a7eedebe830119463470db5e6c59e8
+  RUSTC_DARWIN_ARM64_SHA256: 738e3f60114b20550fcf4f8a57c9cea0544239f214709f45594ff3fde327f577
+  CARGO_DARWIN_ARM64_SHA256: de51d4fade4f31ad8ec405261cc96bedc000d905f98980027610d6e288dbe21b
+  RUST_STD_DARWIN_ARM64_SHA256: 2de831ef563ce772519a4d18ba2659f0f7428d497ef66dad24b5a35e8f8cd177
+  CLIPPY_DARWIN_ARM64_SHA256: 1ad080040ff0f4f8af0751bd7fa1fb1901212f8d164cecaa3c47b0654e0916f2
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
     e2e_tui research_engine team_engine onboarding research_runner research_service tui_v1_e2e codex_app_server_live launch_context_live codex_bridge_live agents_live
     qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network harness_catalog_bundled_rcli acceptance_v2_rcli_usage
-  DESKTOP_TESTS_EXCLUDE: picker_windows
+    accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
+  DESKTOP_TESTS_EXCLUDE: picker_windows accounts_bridge/desktop_accounts_commands_reach_the_real_engine
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
 
@@ -46,10 +53,24 @@ jobs:
       PLATFORM_TESTS_EXCLUDE: >-
         credential_platforms windows_terminal agent_secret_walls setup team_project_root
         harness_launch launch_context project_sandbox sandbox_everywhere terminal_session
+        terminal_tmux/a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hold
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Free disk on the GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+            echo "::error::this step removes preinstalled toolsets and runs only on a GitHub-hosted runner"
+            exit 1
+          fi
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -66,6 +87,7 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
       - name: Install Linux build packages
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           command -v dpkg >/dev/null || { echo "::error::this job needs a Debian or Ubuntu runner with dpkg"; exit 1; }
@@ -82,8 +104,38 @@ jobs:
             echo "::error::missing packages: ${missing[*]}. This runner has no passwordless sudo; provision it with: sudo apt-get install -y --no-install-recommends ${missing[*]}"
             exit 1
           fi
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          ubuntu_hosts=(azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com)
+          unresolved() {
+            local host
+            for host in "${ubuntu_hosts[@]}"; do
+              getent hosts "$host" >/dev/null || printf '%s ' "$host"
+            done
+          }
+          lost=$(unresolved)
+          if [ -n "$lost" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::the runner DNS does not resolve ${lost}and CI changes no DNS setting on a self-hosted runner; fix the runner's DNS"
+              exit 1
+            fi
+            link=$(ip route show default | awk '{print $5; exit}')
+            [ -n "$link" ] || { echo "::error::the runner DNS does not resolve ${lost}and the runner has no default route"; exit 1; }
+            echo "::warning::the runner DNS does not resolve ${lost% }; asking 1.1.1.1 and 8.8.8.8 on $link instead"
+            sudo resolvectl dns "$link" 1.1.1.1 8.8.8.8
+            sudo resolvectl flush-caches
+            lost=$(unresolved)
+            [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
+          fi
+          if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
+              exit 1
+            fi
+            echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
+            printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            sudo apt-get "${apt_options[@]}" update --error-on=any
+          fi
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends "${missing[@]}"
       - name: Install tmux
         run: |
           set -euo pipefail
@@ -139,6 +191,30 @@ jobs:
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CLAUDE=$work/bin/claude" >> "$GITHUB_ENV"
+      - name: Install Codex
+        env:
+          CODEX_PACKAGE: codex-package-x86_64-unknown-linux-musl.tar.gz
+          CODEX_SHA256: 3ec55053109608d5038f7e50750f7d25f768dfd740fef071aa710e2559b63aac
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/codex/$CODEX_VERSION/x64"
+          work="$RUNNER_TEMP/codex"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          if [ -f "$prefix/codex.tgz" ]; then
+            cp "$prefix/codex.tgz" "$work/codex.tgz"
+          fi
+          if ! echo "$CODEX_SHA256  $work/codex.tgz" | sha256sum -c --status - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/codex.tgz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_PACKAGE"
+            echo "$CODEX_SHA256  $work/codex.tgz" | sha256sum -c -
+            cp "$work/codex.tgz" "$prefix/codex.tgz.$$"
+            mv "$prefix/codex.tgz.$$" "$prefix/codex.tgz"
+          fi
+          tar -xzf "$work/codex.tgz" -C "$work"
+          test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CODEX=$work/bin/codex" >> "$GITHUB_ENV"
       - name: Install uv
         env:
           UV_TARGET: x86_64-unknown-linux-gnu
@@ -216,13 +292,48 @@ jobs:
             printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null
             make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
           '
+      - name: Show the free disk and the Rust target size
+        if: always()
+        run: |
+          set -euo pipefail
+          df -h /
+          target="${CARGO_TARGET_DIR:-target}"
+          if [ -d "$target" ]; then
+            du -sh "$target"
+          fi
 
   macos:
     name: macOS lint and tests
-    runs-on: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
-    timeout-minutes: 150
+    runs-on: macos-15
+    timeout-minutes: 300
     env:
-      PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
+      PLATFORM_TESTS_EXCLUDE: >-
+        credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
+        harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
+        harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file
+        harness_launch/live_tools_on_turn_completes_inside_the_project_sandbox
+        project_sandbox/an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run
+        github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
+        onboarding::tests::the_graph_step_runs_the_graphify_setup_installed_for_this_engine
+        sandbox_toolchains/a_missing_toolchain_is_never_installed_by_an_agent
+        sandbox_toolchains/an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain
+        sandbox_toolchains/an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error
+        acceptance_b18_tui/b18_the_owner_changes_agent_access_and_toolchains_in_settings
+        project_setup::engine_tests::owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies
+        team::runtime::tests::a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt
+        team::runtime::tests::a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_them
+        team::runtime::tests::a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets
+        team::runtime::tests::an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_them
+        team::runtime::tests::an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit
+        team::runtime::tests::lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined
+        team::runtime::tests::turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_goes_without_it
+        landing::tests::a_lockfile_only_clash_is_rewritten_by_its_tool_as_an_engine_commit_on_top_of_the_set
+        landing::tests::a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands
+        landing::tests::a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools
+        landing::tests::a_regeneration_stopped_inside_its_reset_is_put_back_once_the_agent_committed
+        landing::tests::an_agent_that_ignores_the_note_keeps_the_regenerated_lockfile_at_its_next_turn_end
+        context_mode::tests::npm_starts_under_the_install_sandbox_profile
+        context_mode::tests::no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_against_the_pin
     steps:
       - name: Refuse to run under Rosetta
         run: |
@@ -232,6 +343,43 @@ jobs:
             exit 1
           fi
           echo "native $(uname -m)"
+      - name: Use line tables only for debug info on the GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: |
+          set -euo pipefail
+          df -h /
+          {
+            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+            echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
+          } >> "$GITHUB_ENV"
+      - name: Keep CI state out of the runner user's home
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          case "$RUNNER_TOOL_CACHE" in /?*) ;; *) echo "::error::RUNNER_TOOL_CACHE is not an absolute path; nothing set up"; exit 1 ;; esac
+          state="$RUNNER_TOOL_CACHE/crazyagent-ci"
+          home="$RUNNER_TEMP/home"
+          target="$state/target-line-tables"
+          rm -rf "$state"
+          mkdir -p "$state"
+          free_kib="$(df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print $4 }')"
+          echo "runner tool cache volume: $(( free_kib / 1024 / 1024 )) GiB free before the build"
+          if (( free_kib < 10 * 1024 * 1024 )); then
+            echo "::error::badal has $(( free_kib / 1024 / 1024 )) GiB free on the runner tool cache volume and this job needs 10 GiB; free disk on badal, then run the job again"
+            exit 1
+          fi
+          rm -rf "$home"
+          mkdir -p "$home" "$RUNNER_TEMP/tmp" "$target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
+          {
+            echo "HOME=$home"
+            echo "TMPDIR=$RUNNER_TEMP/tmp"
+            echo "CARGO_HOME=$state/cargo-home"
+            echo "CARGO_TARGET_DIR=$target"
+            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+            echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
+            echo "npm_config_cache=$state/npm-cache"
+            echo "BUN_INSTALL_CACHE_DIR=$state/bun-cache"
+          } >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -241,16 +389,66 @@ jobs:
           ref: ${{ env.RCLI_SOURCE_REVISION }}
           path: .local-state/tools/rcli-source
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      - if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - id: bun
+        if: runner.environment == 'github-hosted'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      - name: Install pinned Node on the owner's runner
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the CI runner on badal must be native macOS arm64"; exit 1; }
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-ci/node/$NODE_VERSION/arm64"
+          work="$RUNNER_TEMP/node-arm64"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          if [ -f "$prefix/node.tar.gz" ]; then
+            cp "$prefix/node.tar.gz" "$work/node.tar.gz"
+          fi
+          if ! echo "$NODE_DARWIN_ARM64_SHA256  $work/node.tar.gz" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/node.tar.gz" "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-darwin-arm64.tar.gz"
+            echo "$NODE_DARWIN_ARM64_SHA256  $work/node.tar.gz" | shasum -a 256 -c -
+            cp "$work/node.tar.gz" "$prefix/node.tar.gz.$$"
+            mv "$prefix/node.tar.gz.$$" "$prefix/node.tar.gz"
+          fi
+          tar -xzf "$work/node.tar.gz" -C "$work" --strip-components 1
+          test "$("$work/bin/node" --version)" = "v$NODE_VERSION"
+          test "$("$work/bin/node" -p process.arch)" = arm64
+          echo "$work/bin" >> "$GITHUB_PATH"
+      - id: bun-arm64
+        name: Install pinned arm64 bun on the owner's runner
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the CI runner on badal must be native macOS arm64"; exit 1; }
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-ci/bun/$BUN_VERSION/arm64"
+          work="$RUNNER_TEMP/bun-arm64"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/bun.zip" ]; then
+            cp "$prefix/bun.zip" "$work/bun.zip"
+          fi
+          if ! echo "$BUN_DARWIN_ARM64_SHA256  $work/bun.zip" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-darwin-aarch64.zip"
+            echo "$BUN_DARWIN_ARM64_SHA256  $work/bun.zip" | shasum -a 256 -c -
+            cp "$work/bun.zip" "$prefix/bun.zip.$$"
+            mv "$prefix/bun.zip.$$" "$prefix/bun.zip"
+          fi
+          unzip -q "$work/bun.zip" -d "$work"
+          install -m 0755 "$work/bun-darwin-aarch64/bun" "$work/bin/bun"
+          test "$("$work/bin/bun" --version)" = "$BUN_VERSION"
+          test "$("$work/bin/bun" -e 'console.log(process.arch)')" = arm64
+          echo "bun-path=$work/bin/bun" >> "$GITHUB_OUTPUT"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - name: Install Rust toolchain
+        if: runner.environment == 'github-hosted'
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null && [ -x "$HOME/.cargo/bin/rustup" ]; then
@@ -260,6 +458,55 @@ jobs:
           command -v rustup >/dev/null || { echo "::error::rustup is not installed for the runner user; install it from https://rustup.rs and restart the runner service"; exit 1; }
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install pinned Rust on the owner's runner
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the CI runner on badal must be native macOS arm64"; exit 1; }
+          dir="$(dirname "$GITHUB_WORKSPACE")"
+          while :; do
+            for config in "$dir/.cargo/config.toml" "$dir/.cargo/config"; do
+              if [ -e "$config" ]; then
+                echo "::error::Cargo reads $config from outside the checkout; remove it from the runner, CI never builds with settings left on the runner"
+                exit 1
+              fi
+            done
+            if [ "$dir" = / ]; then break; fi
+            dir="$(dirname "$dir")"
+          done
+          for config in "$CARGO_HOME/config.toml" "$CARGO_HOME/config"; do
+            [ ! -e "$config" ] || { echo "::error::Cargo reads $config from the Cargo home CI made for this job; CI never builds with Cargo settings a step left on the runner"; exit 1; }
+          done
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-ci/rust/$RUST_TOOLCHAIN"
+          work="$RUNNER_TEMP/rust"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          components=("rustc aarch64-apple-darwin $RUSTC_DARWIN_ARM64_SHA256" "cargo aarch64-apple-darwin $CARGO_DARWIN_ARM64_SHA256" "rust-std aarch64-apple-darwin $RUST_STD_DARWIN_ARM64_SHA256" "clippy aarch64-apple-darwin $CLIPPY_DARWIN_ARM64_SHA256")
+          for component in "${components[@]}"; do
+            read -r name triple sha <<< "$component"
+            archive="$name-$RUST_TOOLCHAIN-$triple.tar.xz"
+            if [ -f "$prefix/$archive" ]; then
+              cp "$prefix/$archive" "$work/$archive"
+            fi
+            if ! echo "$sha  $work/$archive" | shasum -a 256 -s -c - 2>/dev/null; then
+              curl -fsSL --proto '=https' --tlsv1.2 -o "$work/$archive" "https://static.rust-lang.org/dist/$archive"
+              echo "$sha  $work/$archive" | shasum -a 256 -c -
+              cp "$work/$archive" "$prefix/$archive.$$"
+              mv "$prefix/$archive.$$" "$prefix/$archive"
+            fi
+            tar -xJf "$work/$archive" -C "$work"
+            "$work/$name-$RUST_TOOLCHAIN-$triple/install.sh" --prefix="$work" --disable-ldconfig > /dev/null
+          done
+          export PATH="$work/bin:$PATH"
+          test "$(command -v rustc)" = "$work/bin/rustc"
+          test "$(command -v cargo)" = "$work/bin/cargo"
+          test "$(command -v cargo-clippy)" = "$work/bin/cargo-clippy"
+          clippy="0.1.$(echo "$RUST_TOOLCHAIN" | cut -d. -f2)"
+          case "$(rustc --version)" in "rustc $RUST_TOOLCHAIN "*) ;; *) echo "::error::the pinned rustc reports $(rustc --version)"; exit 1 ;; esac
+          case "$(cargo --version)" in "cargo $RUST_TOOLCHAIN "*) ;; *) echo "::error::the pinned cargo reports $(cargo --version)"; exit 1 ;; esac
+          case "$(cargo clippy --version)" in "clippy $clippy "*) ;; *) echo "::error::the pinned clippy reports $(cargo clippy --version)"; exit 1 ;; esac
+          test -d "$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/lib"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - name: Install tmux
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -305,6 +552,7 @@ jobs:
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CLAUDE=$work/bin/claude" >> "$GITHUB_ENV"
       - name: Install Codex
         env:
           CODEX_PACKAGE: codex-package-aarch64-apple-darwin.tar.gz
@@ -327,24 +575,12 @@ jobs:
           tar -xzf "$work/codex.tgz" -C "$work"
           test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+          echo "CRAZYAGENT_CODEX=$work/bin/codex" >> "$GITHUB_ENV"
       - if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           prefix-key: ci-macos
           cache-on-failure: true
-      - name: Keep the Rust build cache under 20 GiB
-        if: runner.environment != 'github-hosted'
-        run: |
-          set -euo pipefail
-          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target"
-          mkdir -p "$target"
-          size_kib="$(du -sk "$target" | cut -f1)"
-          if (( size_kib > 20 * 1024 * 1024 )); then
-            echo "pruning $target: ${size_kib} KiB"
-            rm -rf "$target"
-            mkdir -p "$target"
-          fi
-          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -408,19 +644,102 @@ jobs:
           tar -xzf "$work/vscodium.tgz" -C "$build"
           test -f "$build/out/server-main.js"
           find "$RUNNER_TOOL_CACHE/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "$IDE_VERSION" -exec rm -rf {} +
+      - name: Install pinned graphify for the graph rows
+        env:
+          UV_TARGET: aarch64-apple-darwin
+          UV_SHA256: 743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/uv/$UV_VERSION/arm64"
+          work="$RUNNER_TEMP/uv"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/uv.tar.gz" ]; then
+            cp "$prefix/uv.tar.gz" "$work/uv.tar.gz"
+          fi
+          if ! echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+            echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -c -
+            cp "$work/uv.tar.gz" "$prefix/uv.tar.gz.$$"
+            mv "$prefix/uv.tar.gz.$$" "$prefix/uv.tar.gz"
+          fi
+          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+          venv="$RUNNER_TEMP/graphify"
+          rm -rf "$venv"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
+          "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
+          "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
+          "$venv/bin/graphify" --help > /dev/null
+          echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
+      - name: Install the pinned context-mode for the shared-install rows
+        run: |
+          set -euo pipefail
+          read -r version integrity < <(node -e '
+            const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+            const entry = text.split("[[entries]]").find((block) => /^id = "context-mode"$/m.test(block));
+            const version = entry?.match(/^install = ".*\bcontext-mode@([0-9]+\.[0-9]+\.[0-9]+) /m)?.[1];
+            const integrity = entry?.match(/^integrity = "(sha512-[A-Za-z0-9+\/]+=*)"$/m)?.[1];
+            if (!version || !integrity) throw new Error("the default pack does not pin an exact context-mode");
+            console.log(version, integrity);
+          ' crates/crazyagent/src/setup/pack.toml)
+          test -n "$version" && test -n "$integrity"
+          install="$RUNNER_TEMP/context-mode"
+          rm -rf "$install"
+          mkdir -p "$install"
+          cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json "$install/"
+          locked="$(node -p 'const entry = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"]; `${entry.version} ${entry.integrity}`' "$install/package-lock.json")"
+          test "$locked" = "$version $integrity"
+          npm ci --prefix "$install" --ignore-scripts --no-audit --no-fund --no-update-notifier --loglevel=error
+          recorded="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"].integrity' "$install/node_modules/.package-lock.json")"
+          test "$recorded" = "$integrity"
+          npm_config_build_from_source=true npm_config_nodedir="$(dirname "$(dirname "$(command -v node)")")" \
+            npm rebuild better-sqlite3 --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
+          test -f "$install/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          test "$(node -p 'require(process.argv[1]).version' "$install/node_modules/context-mode/package.json")" = "$version"
+          echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=$install" >> "$GITHUB_ENV"
       - name: Test engine and desktop crates
         run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
       - name: Test Node suites
         env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
+          BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}
         run: make test-node BUN="$BUN" NODE_TESTS_EXCLUDE="$NODE_TESTS_EXCLUDE"
       - name: Test Bun suites
         env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
+          BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}
         run: make test-bun BUN="$BUN" BUN_TESTS_EXCLUDE="$BUN_TESTS_EXCLUDE"
+      - name: Delete every CI file this job made on the owner's runner
+        if: always() && runner.environment != 'github-hosted'
+        run: |
+          set -uo pipefail
+          for folder in "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"; do
+            case "$folder" in /?*) ;; *) echo "::error::the runner folder $folder is not an absolute path; nothing deleted"; exit 1 ;; esac
+          done
+          case "$GITHUB_WORKSPACE" in "$(dirname "$RUNNER_TEMP")"/?*) ;; *) echo "::error::the checkout $GITHUB_WORKSPACE is not inside the runner's work folder; nothing deleted"; exit 1 ;; esac
+          free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
+          echo "runner tool cache volume: $(free_gib) GiB free after the tests"
+          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target-line-tables"
+          if [ -d "$target" ]; then
+            du -sk "$target" | awk '{ printf "Rust target: %.1f GiB\n", $1 / 1048576 }'
+          fi
+          tools=(crazyagent-ci claude-code codex uv vscodium-reh-web)
+          temp=(home tmp node-arm64 bun-arm64 rust claude-code codex vscodium-reh-web uv uv-cache uv-python uv-python-bin graphify context-mode)
+          made=()
+          for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
+          for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done
+          while IFS= read -r -d '' entry; do made+=("$entry"); done < <(find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -print0)
+          left=()
+          for path in "${made[@]}"; do
+            rm -rf "$path" 2>/dev/null || { chmod -R u+w "$path" 2>/dev/null; rm -rf "$path"; }
+            if [ -e "$path" ] || [ -L "$path" ]; then left+=("$path"); fi
+          done
+          echo "runner tool cache volume: $(free_gib) GiB free after the cleanup"
+          if [ "${#left[@]}" -gt 0 ]; then echo "::error::still on the runner: ${left[*]}"; exit 1; fi
 
   windows:
-    name: Windows lint and tests (informational until v2.2.1)
+    name: Windows lint and tests (off until v2.2.1)
+    if: ${{ false }}
     runs-on: windows-2022
     continue-on-error: true
     timeout-minutes: 120
