@@ -30,7 +30,7 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -915,10 +915,12 @@ impl ResearchRunner {
             .allow_tools(&Toolchains::grant(&homes, &granted.toolchains))?
             .allow_scratch(scratch.path())?
             .allow_extra_reads(&extra)?;
-        for folder in read_folders(executable, &context, job.tools)? {
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
+        for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
-        sandbox = sandbox.allow_exec(&executable.canonicalize()?)?;
+        sandbox = sandbox.allow_exec(&program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
@@ -949,7 +951,7 @@ impl ResearchRunner {
             let (binding, model) = pane_account(account, &home);
             let request = LaunchRequest {
                 harness: harness.id().to_owned(),
-                executable: executable.to_path_buf(),
+                executable: program.clone(),
                 working_dir: worktree.clone(),
                 account: binding,
                 model,
@@ -1008,7 +1010,7 @@ impl ResearchRunner {
             drop(lease);
             return Ok((ending?, group, output));
         }
-        let mut launch = Command::new(executable);
+        let mut launch = Command::new(&program);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
@@ -1516,7 +1518,8 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(run.account)?]),
         )?
         .allow_read(&folder)?;
-        let program = executable.canonicalize()?;
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
         if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
@@ -1536,7 +1539,7 @@ impl ResearchRunner {
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, executable);
+        let mut command = sandbox.command(&profile, &program);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
@@ -2273,12 +2276,7 @@ pub(crate) fn add_worktree_at(
     setup_step(&mut add, "worktree_add_failed")?;
     crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
         .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
-    let mut listing = worktree_git(sandbox, profile);
-    listing
-        .arg("-C")
-        .arg(worktree)
-        .args(["config", "--list", "--name-only", "-z"]);
-    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -2329,12 +2327,7 @@ pub(crate) fn add_teammate_worktree_at(
         None => add.arg(worktree).arg(branch),
     };
     setup_step(&mut add, "worktree_add_failed")?;
-    let mut listing = worktree_git(sandbox, profile);
-    listing
-        .arg("-C")
-        .arg(worktree)
-        .args(["config", "--list", "--name-only", "-z"]);
-    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -2516,9 +2509,26 @@ pub(crate) fn agent_git(
         .envs(variables.iter().copied())
         .arg("-C")
         .arg(folder)
-        .args(arguments)
-        .stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command)?;
+        .args(arguments);
+    let (status, stdout, overflow) = git_output(&mut command, limit)?;
+    Ok(AgentGit {
+        code: status.and_then(|status| status.code()),
+        stdout,
+        overflow,
+    })
+}
+
+/// Runs one setup git command within the setup time limit, reading its output while it
+/// runs, so output larger than a pipe holds never stalls it. Takes the command, ready but
+/// for its output pipe, and the most output bytes kept. Returns its exit status, none when
+/// it was stopped at the limit, its output up to the bound and whether it printed more.
+#[cfg(unix)]
+fn git_output(
+    command: &mut Command,
+    limit: usize,
+) -> Result<(Option<ExitStatus>, Vec<u8>, bool), RunError> {
+    command.stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(command)?;
     let stdout = child
         .stdout
         .take()
@@ -2534,9 +2544,9 @@ pub(crate) fn agent_git(
         read.map(|_| kept)
     });
     let started = Instant::now();
-    let code = loop {
+    let status = loop {
         if let Some(status) = child.try_wait()? {
-            break status.code();
+            break Some(status);
         }
         if started.elapsed() >= SETUP_TIMEOUT {
             stop_timed_out(&mut child);
@@ -2550,11 +2560,7 @@ pub(crate) fn agent_git(
     let overflow = stdout.len() > limit;
     stdout.truncate(limit);
     assert!(stdout.len() <= limit);
-    Ok(AgentGit {
-        code,
-        stdout,
-        overflow,
-    })
+    Ok((status, stdout, overflow))
 }
 
 #[cfg(unix)]
@@ -2575,38 +2581,73 @@ fn setup_debug_stderr() -> Stdio {
     Stdio::null()
 }
 
-/// Runs a setup git command whose output fits in [`GIT_CONFIG_LISTING_BYTES_MAX`] within
-/// the setup time limit. Takes the command. Returns what it printed, or `Invalid` when it
-/// fails, runs past the limit or prints more.
+/// The git arguments that list, NUL-separated, the filter keys of every config file git
+/// reads, the only keys [`filter_overrides`] uses, so the listing grows with a repository's
+/// filter drivers and never with its branches or remotes. The `-c` adds one key of the
+/// engine's own, which git reads last: a listing that ends with it ([`FILTER_KEYS_END`])
+/// is whole, and git always has a key to print, so no exit status stands for "no filter".
 #[cfg(unix)]
-fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
+pub(crate) const FILTER_KEYS: [&str; 7] = [
+    "-c",
+    "filter.crazyagent-listing-end.required=false",
+    "config",
+    "--name-only",
+    "-z",
+    "--get-regexp",
+    "^filter\\.",
+];
+
+/// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
+/// whole listing.
+#[cfg(unix)]
+const FILTER_KEYS_END: &[u8] = b"filter.crazyagent-listing-end.required\0";
+
+/// The repository's own filter keys in what a [`FILTER_KEYS`] listing printed. Takes git's
+/// whole output. Returns the NUL-separated keys before the engine's closing key, or none
+/// for a listing that does not end with that key on its own, which is cut short or not a
+/// listing at all.
+#[cfg(unix)]
+pub(crate) fn listed_filter_keys(listing: &[u8]) -> Option<&[u8]> {
+    let keys = listing.strip_suffix(FILTER_KEYS_END)?;
+    (keys.is_empty() || keys.ends_with(&[0])).then_some(keys)
+}
+
+/// Lists the filter keys a new worktree's effective config names, with git run under the
+/// agent's installed profile within the setup time limit and its output read while it runs.
+/// Takes the sandbox, its installed profile and the worktree. Returns the NUL-separated
+/// keys for [`filter_overrides`], `Setup` with `worktree_config_failed` or `setup_timed_out`
+/// for a git that fails or runs past the limit, or `Invalid` for a listing that is not
+/// whole or is longer than [`GIT_CONFIG_LISTING_BYTES_MAX`].
+#[cfg(unix)]
+fn filter_keys(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+) -> Result<Vec<u8>, RunError> {
     let refused = || RunError::Invalid("git could not list the worktree's config".into());
-    command.stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(command)?;
-    let stdout = child.stdout.take().ok_or_else(refused)?;
-    match wait_bounded(child, SETUP_TIMEOUT)? {
-        Ended::Succeeded => {}
-        Ended::Failed => {
-            return Err(RunError::Setup(step_failure(
-                "worktree_config_failed",
-                Path::new(TOOLS_ROOT),
-            )));
-        }
-        Ended::TimedOut => return Err(RunError::Setup(SETUP_TIMED_OUT)),
+    let mut listing = worktree_git(sandbox, profile);
+    listing.arg("-C").arg(worktree).args(FILTER_KEYS);
+    let (status, printed, overflow) = git_output(&mut listing, GIT_CONFIG_LISTING_BYTES_MAX)?;
+    let Some(status) = status else {
+        return Err(RunError::Setup(SETUP_TIMED_OUT));
+    };
+    if !status.success() {
+        return Err(RunError::Setup(step_failure(
+            "worktree_config_failed",
+            Path::new(TOOLS_ROOT),
+        )));
     }
-    let mut bytes = Vec::new();
-    stdout
-        .take(GIT_CONFIG_LISTING_BYTES_MAX as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > GIT_CONFIG_LISTING_BYTES_MAX {
+    if overflow {
         return Err(refused());
     }
-    Ok(bytes)
+    let keys = listed_filter_keys(&printed).ok_or_else(refused)?;
+    assert!(keys.len() < printed.len());
+    Ok(keys.to_vec())
 }
 
 /// The `-c` arguments that switch off every filter driver a config listing names: empty
 /// smudge, clean and process commands and `required=false`, so a checkout runs none of them
-/// and still succeeds. Takes the NUL-separated keys of `git config --list --name-only -z`.
+/// and still succeeds. Takes NUL-separated config keys, as [`listed_filter_keys`] gives them.
 /// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
 #[cfg(unix)]
 pub(crate) fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
@@ -4572,6 +4613,50 @@ mod tests {
         assert!(!worktree.join(".git").exists());
     }
 
+    /// A project whose config names a thousand stale branches lists more keys than a pipe
+    /// holds (ScholarScope, v2.2.1 item 8): its agent worktree is still added, at once,
+    /// since the setup step asks only for the filter keys it reads.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_worktree_is_added_when_the_project_config_lists_more_than_64_kib_of_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("home");
+        let tmp = base.join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let sections: String = (0..1000)
+            .map(|number| {
+                format!(
+                    "[branch \"stale-branch-number-{number}\"]\n\tremote = origin\n\tmerge = refs/heads/stale-branch-number-{number}\n"
+                )
+            })
+            .collect();
+        let mut config = OpenOptions::new()
+            .append(true)
+            .open(project.join(".git").join("config"))
+            .unwrap();
+        config.write_all(sections.as_bytes()).unwrap();
+        drop(config);
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = base.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = crate::projects_home::state_folder(&project)
+            .join("worktrees")
+            .join("agent-1");
+        let started = Instant::now();
+
+        let added = add_worktree(&sandbox, &profile, &worktree);
+
+        assert!(added.is_ok(), "{added:?}");
+        assert!(worktree.join(".git").is_file());
+        assert!(started.elapsed() < SETUP_TIMEOUT);
+    }
+
     #[cfg(target_os = "macos")]
     fn repository_git(project: &Path, arguments: &[&str]) {
         let status = crate::spawn_gate::status(
@@ -4590,6 +4675,34 @@ mod tests {
         )
         .unwrap();
         assert!(status.success(), "git {arguments:?}");
+    }
+
+    /// A filter listing is taken only whole: it must end with the engine's own closing key
+    /// standing alone, and the keys before it are the repository's.
+    #[test]
+    fn a_filter_listing_is_whole_only_when_it_ends_with_the_engines_closing_key() {
+        let end = FILTER_KEYS_END;
+        assert!(FILTER_KEYS[1].as_bytes().starts_with(&end[..end.len() - 1]));
+        assert_eq!(listed_filter_keys(end), Some(&b""[..]));
+        let whole = [&b"filter.lfs.smudge\0filter.lfs.clean\0"[..], end].concat();
+        assert_eq!(
+            listed_filter_keys(&whole),
+            Some(&b"filter.lfs.smudge\0filter.lfs.clean\0"[..])
+        );
+        let cut: [Vec<u8>; 5] = [
+            Vec::new(),
+            b"filter.lfs.smudge\0".to_vec(),
+            end[..end.len() - 1].to_vec(),
+            [&b"filter.lfs.smudge"[..], end].concat(),
+            [end, &b"filter.late.smudge\0"[..]].concat(),
+        ];
+        for listing in &cut {
+            assert_eq!(listed_filter_keys(listing), None, "{listing:?}");
+        }
+        assert_eq!(
+            filter_overrides(listed_filter_keys(end).unwrap()).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

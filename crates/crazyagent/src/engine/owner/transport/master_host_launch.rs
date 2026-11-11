@@ -1284,6 +1284,23 @@ mod tests {
         root
     }
 
+    /// Writes the owner's engine database into the owner root `base`, with the Linux sockets
+    /// setting at TCP ports only. A Linux master reads that setting before it makes its
+    /// boundary, and this one starts any harness, so these tests judge the file and port
+    /// boundary alone; other systems never read it. Input: the owner root folder.
+    fn settings_db(base: &Path) {
+        let connection = rusqlite::Connection::open(base.join("engine.db")).unwrap();
+        crate::sandbox_settings::initialize(&connection).unwrap();
+        crate::sandbox_settings::save(
+            &connection,
+            &crate::sandbox_settings::SandboxSettings {
+                linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+            },
+        )
+        .unwrap();
+        assert!(base.join("engine.db").is_file());
+    }
+
     #[test]
     fn master_command_records_its_folders_untrusted_and_the_policy_requires_that() {
         let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
@@ -1556,6 +1573,7 @@ mod tests {
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
         let root = Root::open(&base).unwrap();
+        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1626,6 +1644,7 @@ mod tests {
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
         let root = Root::open(&base).unwrap();
+        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1669,12 +1688,15 @@ mod tests {
         }
     }
 
+    /// The live master is confined under Sandboxed and Own branch, and a level this system
+    /// cannot run (Own branch on Linux) is refused as `agent_access_unavailable`.
     #[test]
     fn the_live_master_sandbox_is_confined_under_sandboxed_and_own_branch() {
         use crate::sandbox::policy::AgentPolicy;
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
         let root = Root::open(&base).unwrap();
+        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -1692,6 +1714,25 @@ mod tests {
                 access,
                 ..AgentPolicy::default()
             };
+            if access.unavailable().is_some() {
+                let refused = master_sandbox(
+                    &root,
+                    &runtime_ref,
+                    &repository,
+                    &worktree,
+                    &home,
+                    &executable,
+                    &native,
+                    &policy,
+                    &[],
+                )
+                .err()
+                .map(|error| error.0);
+                assert_eq!(refused.as_deref(), Some("agent_access_unavailable"));
+                drop(capture);
+                drop(MasterRuntimeFolder::new(&root, &runtime_ref));
+                continue;
+            }
             let sandbox = master_sandbox(
                 &root,
                 &runtime_ref,
@@ -1710,6 +1751,10 @@ mod tests {
         }
     }
 
+    /// A real child of the master boundary writes only in the project worktree and its own
+    /// folders, wrapped by `sandbox-exec` with the master profile. Runs on macOS only: it checks
+    /// the Seatbelt wrap, and `tests/linux_sandbox.rs` covers the Linux boundary.
+    #[cfg(target_os = "macos")]
     #[test]
     fn master_sandbox_lets_a_real_child_write_only_in_the_project_worktree_and_its_own_dirs() {
         use std::process::{Command, Stdio};
@@ -2002,7 +2047,9 @@ mod tests {
 
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
-    /// while a plain file elsewhere in the repository stays readable.
+    /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:
+    /// hiding a folder needs Seatbelt, and Linux refuses it (next test).
+    #[cfg(target_os = "macos")]
     #[test]
     fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
         use std::process::{Command, Stdio};
@@ -2060,6 +2107,52 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(hidden.join("key.txt")).unwrap(),
             "owner secret\n"
+        );
+    }
+
+    /// Off macOS a master asked to hide a folder is refused as `master_sandbox_unavailable`,
+    /// since only Seatbelt can hide one, while the same master with nothing hidden starts.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn master_sandbox_refuses_a_listed_folder_off_macos() {
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        settings_db(&base);
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let hidden = repository.join("secret");
+        for directory in [&repository, &worktree, &home, &install, &hidden] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = |listed: &[PathBuf]| {
+            let (runtime_ref, _, capture) = allocate_master_capture(&root).unwrap();
+            let started = master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                listed,
+            )
+            .map(drop)
+            .map_err(|error| error.0);
+            drop(capture);
+            drop(MasterRuntimeFolder::new(&root, &runtime_ref));
+            started
+        };
+        assert_eq!(start(&[]), Ok(()));
+        assert_eq!(
+            start(std::slice::from_ref(&hidden)),
+            Err("master_sandbox_unavailable".to_owned())
         );
     }
 
@@ -2127,6 +2220,7 @@ mod tests {
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
         let root = Root::open(&base).unwrap();
+        settings_db(&base);
         let repository = base.join("repository");
         let leases = base.join("worktrees");
         let home = base.join("profile-home");
@@ -2299,6 +2393,7 @@ mod tests {
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
         let root = Root::open(&base).unwrap();
+        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");
@@ -2360,6 +2455,7 @@ mod tests {
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
         let root = Root::open(&base).unwrap();
+        settings_db(&base);
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");
         let home = base.join("profile-home");

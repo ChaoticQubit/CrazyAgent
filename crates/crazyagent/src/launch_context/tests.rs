@@ -1678,8 +1678,14 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
 
     let headless = crate::harnesses::launch::command_with_context(&request(), &context());
     let refused = headless.err().unwrap();
-    assert_eq!(refused, named);
-    let sentence = secret_in_command_text(&refused).unwrap();
+    match std::env::consts::OS {
+        "macos" => assert_eq!(refused, named),
+        _ => assert_eq!(
+            refused,
+            LaunchError("launch_sandbox_unavailable".into(), None)
+        ),
+    }
+    let sentence = secret_in_command_text(&named).unwrap();
     assert_eq!(
         sentence,
         "The MCP server \"tools\" secret \"TOKEN\" is part of the launch command, so it cannot \

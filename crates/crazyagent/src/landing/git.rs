@@ -211,11 +211,11 @@ impl Repo {
             confinement: Vec::new(),
         };
         repo.check_version()?;
-        let listing = repo.capture(
-            &["config", "--list", "--name-only", "-z"],
-            LISTING_BYTES_MAX,
-        )?;
-        repo.overrides = crate::research::runner::filter_overrides(&listing)
+        let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
+        let keys = crate::research::runner::listed_filter_keys(&listing)
+            .ok_or_else(|| failure("changes_git_failed"))?;
+        assert!(keys.len() < listing.len());
+        repo.overrides = crate::research::runner::filter_overrides(keys)
             .map_err(|_| failure("changes_git_unsupported"))?;
         assert!(repo.overrides.len().is_multiple_of(8));
         Ok(repo)
@@ -247,6 +247,14 @@ impl Repo {
             index: None,
             confinement: Vec::new(),
         }
+    }
+
+    /// The `-c` arguments that switch off the filter drivers this repository's config
+    /// names, as every git call here carries them, for a test to read. Output: the
+    /// arguments, eight for each driver.
+    #[cfg(test)]
+    pub(super) fn overrides(&self) -> &[String] {
+        &self.overrides
     }
 
     /// Points every later git call at a private index file the engine owns, so reading a

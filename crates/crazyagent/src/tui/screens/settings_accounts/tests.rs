@@ -812,7 +812,11 @@ mod lost_engine {
         until(shell, connection, settled).await;
     }
 
+    /// A check against a stopped engine shows the lost connection, and once the engine is back
+    /// the same check of a local account connects. It is a live row: the check reaches Ollama
+    /// at 127.0.0.1:11434 serving qwen2.5:0.5b, which hosted CI runners do not have.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
     async fn a_check_against_a_stopped_engine_shows_the_lost_connection_and_recovers() {
         let root = tempfile::Builder::new()
             .prefix("ca-tacc-lost-")

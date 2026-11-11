@@ -947,7 +947,9 @@ fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
 }
 
 /// One scan that sees limit windows in two Codex records keeps the reading of the most
-/// recently changed one, not that of the older record read after it.
+/// recently changed one, not that of the older record read after it. Linux moves change
+/// times by the coarse clock tick, so the newer record is dated again until its change time
+/// is later.
 #[test]
 fn one_scan_keeps_the_limits_of_the_most_recently_changed_codex_record() {
     let (_root, db) = store();
@@ -971,13 +973,33 @@ fn one_scan_keeps_the_limits_of_the_most_recently_changed_codex_record() {
         .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-new.jsonl");
     append(&older, &window(90.0));
     append(&newer, &window(10.0));
-    for (path, secs) in [(&older, 1_793_000_000), (&newer, 1_793_000_600)] {
+    let date = |path: &Path, secs: u64| {
         std::fs::File::options()
             .write(true)
             .open(path)
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
             .unwrap();
+    };
+    date(&older, 1_793_000_000);
+    date(&newer, 1_793_000_600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let changed = |path: &Path| {
+            let metadata = std::fs::metadata(path).unwrap();
+            (metadata.ctime(), metadata.ctime_nsec())
+        };
+        let mut tries = 0;
+        while changed(&newer) <= changed(&older) {
+            assert!(
+                tries < 500,
+                "the newer record's change time never passed the older one's"
+            );
+            tries += 1;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            date(&newer, 1_793_000_600);
+        }
     }
     let mut who = attribution(RunKind::Research, None);
     who.account = Some(CredentialRef::new("codex-a").unwrap());
