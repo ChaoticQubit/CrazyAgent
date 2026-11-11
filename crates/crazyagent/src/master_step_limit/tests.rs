@@ -54,7 +54,7 @@ fn each_option_is_saved_and_read_back_with_its_steps_and_its_cause() {
         assert_eq!(load(&reader).unwrap(), settings);
     }
     let rows: i64 = connection
-        .query_row("SELECT count(*) FROM master_step_settings", [], |row| {
+        .query_row("SELECT count(*) FROM configured_master_steps", [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -83,7 +83,7 @@ fn a_stored_value_this_engine_does_not_know_fails_closed() {
     assert!(
         connection
             .execute(
-                "INSERT INTO master_step_settings(singleton,step_limit) VALUES(1,'steps24')",
+                "INSERT INTO configured_master_steps(singleton,step_limit) VALUES(1,'steps24')",
                 [],
             )
             .is_err(),
@@ -91,7 +91,7 @@ fn a_stored_value_this_engine_does_not_know_fails_closed() {
     );
     connection
         .execute_batch(
-            "DROP TABLE master_step_settings; CREATE TABLE master_step_settings (singleton INTEGER PRIMARY KEY, step_limit TEXT NOT NULL); INSERT INTO master_step_settings VALUES(1,'steps24');",
+            "DROP TABLE configured_master_steps; CREATE TABLE configured_master_steps (singleton INTEGER PRIMARY KEY, step_limit TEXT NOT NULL); INSERT INTO configured_master_steps VALUES(1,'steps24');",
         )
         .unwrap();
     assert_eq!(
