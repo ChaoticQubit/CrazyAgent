@@ -70,9 +70,15 @@ test("Off turns Refresh off and says where to turn it on; Refresh only keeps the
   assert.doesNotMatch(only, /Roadmap status is off/);
 });
 
-test("a landing since the last check and a failed check are both said in plain words", () => {
+test("a check that is due and a failed check are both said in plain words", () => {
   const stale = shown(status({ stale: true }));
-  assert.match(stale, /A change set landed since this check\. The next check runs about 10 minutes after the last landing\./);
+  assert.match(stale, />A new check is waiting to run\. After a landed change set it starts about 10 minutes after the last one\.</);
+  const asked = shown(status({ stale: true, refresh: "refresh_only" }));
+  assert.match(asked, />A new check is waiting to run\.</);
+  assert.doesNotMatch(asked, /landed/);
+  for (const quiet of [status(), status({ stale: true, running: true }), status({ stale: true, refresh: "off" })]) {
+    assert.doesNotMatch(shown(quiet), /A new check is waiting to run/);
+  }
   const failed = shown(status({ problem: "No account in this project's pool can run the check" }));
   assert.match(failed, /role="alert"[^>]*>The last check failed: No account in this project&#x27;s pool can run the check\.?</);
   const refused = shown(status(), { problem: "Roadmap status is off in Project settings." });

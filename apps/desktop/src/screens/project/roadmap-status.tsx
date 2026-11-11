@@ -33,6 +33,8 @@ export const DEFAULT_REFRESH: RoadmapRefresh = "after_landing";
 
 /** What the view says while the project's setting is Off. */
 export const OFF_LINE = "Roadmap status is off in Project settings.";
+export const DUE_LINE = "A new check is waiting to run.";
+export const LANDING_WAIT_LINE = "After a landed change set it starts about 10 minutes after the last one.";
 
 const POLL_MS = 15_000;
 
@@ -80,7 +82,7 @@ export function RoadmapStatusView({ status, now, busy, problem = "", onRefresh }
     </p>
     {off && <p className="pj-small pj-secondary">{OFF_LINE}</p>}
     {status.stale && !status.running && !off
-      && <p className="pj-small pj-secondary">A change set landed since this check. The next check runs about 10 minutes after the last landing.</p>}
+      && <p className="pj-small pj-secondary">{DUE_LINE}{status.refresh === "after_landing" ? ` ${LANDING_WAIT_LINE}` : ""}</p>}
     {(problem || failed) && <p className="pj-error" role="alert">{displayText(problem || failed)}</p>}
     {sections(status.items).map((group, at) => <div className="pj-stack-s" key={`${at}:${group.section}`}>
       {group.section && <h4>{displayText(group.section)}</h4>}

@@ -1028,7 +1028,7 @@ fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn a_status_run_leaves_no_folder_and_no_profile_in_the_research_state() {
+fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
     use crate::research::runner::{
         ReadOnlyRun, ResearchAccount, ResearchLimits, ResearchRunner, RunError,
     };
@@ -1076,27 +1076,35 @@ fn a_status_run_leaves_no_folder_and_no_profile_in_the_research_state() {
     };
 
     let name = run::run_name(&project, NOW);
-    let ending = ask(&name);
+    let (ending, left) = ask(&name);
     assert!(
         matches!(ending, Err(RunError::Invalid(_))),
         "this state has no harness to run: {ending:?}"
     );
+    let left = left.expect("a run that made its own folder names it for removal");
+    assert!(!left.due(), "the usage upkeep has not had its time yet");
     let agents = state.join("agents");
+    let profile = state.join("profiles").join(format!("{name}.sb"));
+    std::fs::create_dir_all(agents.join(&name).join("home")).unwrap();
+    std::fs::create_dir_all(state.join("profiles")).unwrap();
+    std::fs::write(&profile, "(version 1)").unwrap();
+    left.remove();
     assert!(
         std::fs::symlink_metadata(agents.join(&name)).is_err(),
         "the run's folder is gone"
     );
-    let profile = state.join("profiles").join(format!("{name}.sb"));
     assert!(std::fs::symlink_metadata(profile).is_err());
 
     let taken = run::run_name(&project, NOW + 1);
     std::fs::create_dir_all(agents.join(&taken)).unwrap();
     std::fs::write(agents.join(&taken).join("kept"), "another run's").unwrap();
-    assert!(matches!(ask(&taken), Err(RunError::Invalid(_))));
+    let (ending, left) = ask(&taken);
+    assert!(matches!(ending, Err(RunError::Invalid(_))));
     assert!(
-        agents.join(&taken).join("kept").is_file(),
-        "a folder this run did not make stays"
+        left.is_none(),
+        "a folder this run did not make is not named"
     );
+    assert!(agents.join(&taken).join("kept").is_file());
 }
 
 /// S4-2 r1 M1: Delete everything records the project's roadmap status runs as engine files

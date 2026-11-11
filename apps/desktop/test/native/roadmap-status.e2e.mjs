@@ -21,7 +21,8 @@ const AGENT = "agent-planner";
 const AGENT_LABEL = "Pat (@planner) · Codex";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const ROADMAP = "# Roadmap\n\n## V1\n\n- Sign in\n- Search\n";
-const STALE_LINE = "A change set landed since this check. The next check runs about 10 minutes after the last landing.";
+const DUE_LINE = "A new check is waiting to run.";
+const STALE_LINE = `${DUE_LINE} After a landed change set it starts about 10 minutes after the last one.`;
 const OFF_LINE = "Roadmap status is off in Project settings.";
 const FAILED = "The last check failed:";
 
@@ -196,7 +197,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await pause(CHECK_MS / 4);
         assert.equal(stored(runtime, project).stale, 0, "under Refresh only a landing asks for no check");
         await open("overview");
-        await me.waitFor("the roadmap status under Refresh only", (text) => text.includes("Roadmap status") && !text.includes(STALE_LINE));
+        await me.waitFor("the roadmap status under Refresh only", (text) => text.includes("Roadmap status") && !text.includes(DUE_LINE));
         const before = log.trail.filter((call) => call.cmd === "desktop_refresh_roadmap_status").length;
         await me.click("Refresh", "section[aria-labelledby=pj-roadmap-status] button");
         for (const deadline = Date.now() + STEP_MS; log.trail.filter((call) => call.cmd === "desktop_refresh_roadmap_status").length === before; await pause(POLL_MS)) {

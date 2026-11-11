@@ -25,6 +25,10 @@ const ENGINE_TICK: Duration = Duration::from_secs(1);
 const STATUS_EVERY_TICKS: u32 = 5;
 #[cfg(unix)]
 const CHECKS_MAX: usize = 8;
+/// The most finished status runs whose folders wait for the usage upkeep at once; past it
+/// the oldest is removed at once.
+#[cfg(unix)]
+const LEFT_MAX: usize = 64;
 #[cfg(unix)]
 const STATUS_HARNESSES: [ResearchHarness; 2] =
     [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
@@ -227,12 +231,13 @@ fn picked(resolved: impl Iterator<Item = Option<(PathBuf, AccountPick)>>) -> Pic
 }
 
 /// The roadmap status upkeep of the research loop: its own engine connection, the checks
-/// running now and the loop passes counted, so the status store is asked for due checks
-/// every `STATUS_EVERY_TICKS` passes.
+/// running now, what finished checks left for later removal and the loop passes counted,
+/// so the status store is asked for due checks every `STATUS_EVERY_TICKS` passes.
 #[cfg(unix)]
 struct StatusUpkeep {
     db: Option<rusqlite::Connection>,
-    checks: Vec<JoinHandle<()>>,
+    checks: Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
+    left: Vec<crate::roadmap_status::run::RunLeft>,
     passes: u32,
     failed: bool,
 }
@@ -257,9 +262,37 @@ impl StatusUpkeep {
         Self {
             db,
             checks: Vec::new(),
+            left: Vec::new(),
             passes: 0,
             failed: false,
         }
+    }
+
+    /// Takes what every finished check left in the research state and removes each run's
+    /// folder and profile once the usage upkeep has had time to count the run; past
+    /// `LEFT_MAX` the oldest goes at once. What still waits when the engine stops stays, is
+    /// counted after the next start and goes with Delete everything.
+    fn reap(&mut self) {
+        let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut self.checks)
+            .into_iter()
+            .partition(|check| check.is_finished());
+        self.checks = running;
+        self.left.extend(
+            ended
+                .into_iter()
+                .filter_map(|check| check.join().ok().flatten()),
+        );
+        let over = self.left.len().saturating_sub(LEFT_MAX);
+        let mut waiting = Vec::new();
+        for (index, left) in std::mem::take(&mut self.left).into_iter().enumerate() {
+            if index < over || left.due() {
+                left.remove();
+            } else {
+                waiting.push(left);
+            }
+        }
+        self.left = waiting;
+        assert!(self.left.len() <= LEFT_MAX);
     }
 
     /// Counts one loop pass and, on every `STATUS_EVERY_TICKS`th with room for more checks,
@@ -269,7 +302,7 @@ impl StatusUpkeep {
     where
         F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
     {
-        self.checks.retain(|check| !check.is_finished());
+        self.reap();
         self.passes = self.passes.wrapping_add(1);
         let Some(db) = &self.db else {
             return;
@@ -330,7 +363,7 @@ where
             Picked::Account(root, account) => {
                 let (runner, project) = (self.runner.clone(), project.clone());
                 self.checks.push(std::thread::spawn(move || {
-                    crate::roadmap_status::run::check(&runner, &project, claim, &root, &account);
+                    crate::roadmap_status::run::check(&runner, &project, claim, &root, &account)
                 }));
                 Ok(true)
             }
@@ -435,6 +468,71 @@ pub fn start_for_engine(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finished_status_runs_folder_stays_until_usage_had_time_to_count_it() {
+        use crate::roadmap_status::run::{RUN_KEPT, RunLeft};
+        use std::time::Instant;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(state.join("profiles")).unwrap();
+        let made = |name: &str, ended: Instant| {
+            let folder = state.join("agents").join(name);
+            std::fs::create_dir_all(folder.join("home")).unwrap();
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            std::fs::write(&profile, "(version 1)").unwrap();
+            (
+                folder.clone(),
+                profile.clone(),
+                RunLeft::at(folder, profile, ended),
+            )
+        };
+        let now = Instant::now();
+        let long_ago = now.checked_sub(RUN_KEPT).unwrap();
+        let (new_folder, new_profile, new_left) = made("roadmap-status-demo-2", now);
+        let (old_folder, old_profile, old_left) = made("roadmap-status-demo-1", long_ago);
+        assert!(!new_left.due() && old_left.due());
+        let mut upkeep = StatusUpkeep {
+            db: None,
+            checks: vec![
+                std::thread::spawn(move || Some(old_left)),
+                std::thread::spawn(move || Some(new_left)),
+                std::thread::spawn(|| None),
+            ],
+            left: Vec::new(),
+            passes: 0,
+            failed: false,
+        };
+        for _ in 0..500 {
+            if upkeep.checks.iter().all(|check| check.is_finished()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        upkeep.reap();
+        assert!(upkeep.checks.is_empty());
+        assert_eq!(upkeep.left.len(), 1, "only the run that just ended waits");
+        assert!(new_folder.join("home").is_dir() && new_profile.is_file());
+        assert!(std::fs::symlink_metadata(&old_folder).is_err());
+        assert!(std::fs::symlink_metadata(&old_profile).is_err());
+
+        let crowd: Vec<_> = (0..=LEFT_MAX)
+            .map(|index| made(&format!("roadmap-status-crowd-{index}"), now))
+            .collect();
+        upkeep.left = Vec::new();
+        let mut folders = Vec::new();
+        for (folder, _, left) in crowd {
+            folders.push(folder);
+            upkeep.left.push(left);
+        }
+        upkeep.reap();
+        assert_eq!(upkeep.left.len(), LEFT_MAX);
+        assert!(
+            std::fs::symlink_metadata(&folders[0]).is_err(),
+            "the oldest went"
+        );
+        assert!(folders[1..].iter().all(|folder| folder.is_dir()));
+    }
 
     fn account() -> AccountPick {
         AccountPick::Account {
