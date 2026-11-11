@@ -6,7 +6,7 @@ import { USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./co
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
 const RELOAD_MS = 10_000;
-const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Share of tokens"];
+const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Last used", "Share of tokens"];
 
 /** Reads what a Metrics page shows: the range line, the Tokens figure and each tile's lines,
  * the project filter's value and choices, and the By project breakdown's header and rows.
