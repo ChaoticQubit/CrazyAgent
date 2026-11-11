@@ -111,6 +111,9 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
+/// The most single paths one sandbox makes readable by name beside its roots: the folder
+/// links its process is started through.
+const REVEALED_MAX: usize = 4;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
 /// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
@@ -1262,6 +1265,33 @@ impl ProjectSandbox {
         }
         granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets the agent follow one folder link that leads to a read root it already has, such
+    /// as the version link uv keeps beside a managed Python, which Seatbelt refuses to walk
+    /// through otherwise: the link's own text becomes readable and nothing behind it is
+    /// added. Input: a clean absolute path that is a link whose target is one of the read
+    /// roots, clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid`.
+    pub fn allow_read_link(mut self, link: &Path) -> Result<Self, SandboxError> {
+        if self.revealed.len() >= REVEALED_MAX {
+            return Err(invalid("too many links to read roots"));
+        }
+        clear_of_secrets(link, &self.secret_paths())?;
+        let is_link =
+            std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if !clean_absolute(link) || !is_link {
+            return Err(invalid(
+                "a link to a read root must be a clean absolute link",
+            ));
+        }
+        let target = canonical(link)?;
+        assert!(target.is_absolute());
+        if !self.read_roots.contains(&target) {
+            return Err(invalid("a link must lead to a read root already granted"));
+        }
+        self.revealed.push(link.to_path_buf());
+        assert!(self.revealed.len() <= REVEALED_MAX);
         Ok(self)
     }
 

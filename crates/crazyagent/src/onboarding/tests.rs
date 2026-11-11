@@ -1126,6 +1126,68 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     assert_eq!(found.canonicalize().unwrap(), system);
 }
 
+/// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the
+/// environment's Python is a link into a version link (`cpython-3.12`) that leads to the
+/// real installation (`cpython-3.12.16`), and `pyvenv.cfg` names the version link. The
+/// stand-in writes an empty graph. Takes the folder. Returns the graphify file.
+#[cfg(target_os = "macos")]
+fn graphify_behind_a_version_link(root: &Path) -> std::path::PathBuf {
+    let real = root.join("python/cpython-3.12.16/bin");
+    let bin = root.join("tool/bin");
+    for folder in [&real, &bin] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    crate::spawn_gate::guarded(|| std::fs::copy("/bin/bash", real.join("python3.12"))).unwrap();
+    symlink(
+        root.join("python/cpython-3.12.16"),
+        root.join("python/cpython-3.12"),
+    )
+    .unwrap();
+    let home = root.join("python/cpython-3.12/bin");
+    symlink(home.join("python3.12"), bin.join("python")).unwrap();
+    std::fs::write(
+        root.join("tool/pyvenv.cfg"),
+        format!("home = {}\nimplementation = CPython\n", home.display()),
+    )
+    .unwrap();
+    let graphify = bin.join("graphify");
+    let script = format!(
+        "#!{}\nprintf '{{}}' > graphify-out/graph.json\n",
+        bin.join("python").display()
+    );
+    crate::spawn_gate::guarded(|| std::fs::write(&graphify, script)).unwrap();
+    std::fs::set_permissions(
+        &graphify,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    graphify
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_graph_is_built_by_a_graphify_whose_python_sits_behind_a_version_link() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let repo = root.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    let graphify = graphify_behind_a_version_link(&root.join("uv"));
+    assert_eq!(run_graph(&repo, &graphify, &[]), graph::GraphEnding::Built);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap(),
+        "{}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_leaves_out_the_engine_files_in_the_project() {
