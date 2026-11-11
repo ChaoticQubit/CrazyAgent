@@ -48,6 +48,27 @@ test("a catalog skill name reads as a tag only as a whole name, longest first, a
   assert.deepEqual(client.skillSegments("", SKILLS), []);
 });
 
+test("a skill named with an engine namespace is one tag for the bare skill, and the pieces join back", () => {
+  const text = "Run `crazyagent:tdd`, then superpowers:tdd and software-practices:code-review. Try crazyagent:tdd-strict.";
+  const segments = client.skillSegments(text, SKILLS);
+  assert.equal(segments.map((segment) => segment.kind === "text" ? segment.text : segment.name).join(""), text);
+  assert.deepEqual(segments.filter((segment) => segment.kind === "skill"), [
+    { kind: "skill", id: "skill-000000000000000000000001", name: "crazyagent:tdd", description: "Write the failing test first." },
+    { kind: "skill", id: "skill-000000000000000000000001", name: "superpowers:tdd", description: "Write the failing test first." },
+    { kind: "skill", id: "skill-000000000000000000000003", name: "software-practices:code-review", description: "Review a diff for bugs." },
+    { kind: "skill", id: "skill-000000000000000000000002", name: "crazyagent:tdd-strict", description: "Red, green, refactor, no exceptions." },
+  ]);
+  assert.deepEqual(client.skillSegments("other:tdd", SKILLS), [{ kind: "text", text: "other:tdd" }]);
+  assert.deepEqual(client.skillSegments("crazyagent:tddx crazyagent:", SKILLS), [{ kind: "text", text: "crazyagent:tddx crazyagent:" }]);
+  assert.deepEqual(client.skillSegments("my-crazyagent:tdd x.superpowers:tdd", SKILLS).filter((segment) => segment.kind === "skill"), []);
+  const own = [...SKILLS, { id: "skill-000000000000000000000005", name: "crazyagent:tdd", description: "A catalog name that holds a colon." }];
+  assert.deepEqual(client.skillSegments("crazyagent:tdd", own), [
+    { kind: "skill", id: "skill-000000000000000000000005", name: "crazyagent:tdd", description: "A catalog name that holds a colon." },
+  ]);
+  const markup = renderToStaticMarkup(createElement(view.TaggedText, { text: "Use crazyagent:code-review now.", skills: SKILLS }));
+  assert.match(markup, /<a class="skill-tag" href="#\/settings\/plugins\?skill=skill-000000000000000000000003" title="Review a diff for bugs\." aria-label="Skill crazyagent:code-review: Review a diff for bugs\.">crazyagent:code-review<\/a>/);
+});
+
 test("a tag shows its one-line description on hover and opens that skill's detail by id", () => {
   assert.equal(client.skillHref("skill-000000000000000000000003"), "#/settings/plugins?skill=skill-000000000000000000000003");
   const markup = renderToStaticMarkup(createElement(view.TaggedText, { text: "Use code-review now.", skills: SKILLS }));

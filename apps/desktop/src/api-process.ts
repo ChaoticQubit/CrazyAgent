@@ -12,6 +12,10 @@ const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const NAME_CHARACTER = /[A-Za-z0-9_.:-]/u;
 const WORD_CHARACTER = /[A-Za-z0-9_]/u;
 
+/** The plugin names the engine accepts before a skill name (`launch_context.rs:1514-1517`):
+ * `crazyagent:tdd` names the same skill as `tdd`. */
+const SKILL_NAMESPACES = ["crazyagent:", "superpowers:", "software-practices:"] as const;
+
 /** Tells whether a name that matched up to `end` stops there: the next character is not part
  * of a name, or is punctuation such as a sentence's full stop that no letter follows.
  * Inputs: the text and the index after the name. Output: true when the name is whole. */
@@ -197,8 +201,23 @@ export interface SkillEntry {
 /** One piece of instructions text: plain text, or a skill name that matches the catalog. */
 export type ProcessSegment = { kind: "text"; text: string } | { kind: "skill"; id: string; name: string; description: string };
 
-/** Splits instructions text into plain text and skill tags: a whole skill name, not part of
- * a longer name, that matches the catalog. Longer names win over names they contain.
+/** Finds a catalog name written with an engine namespace at `at`, such as `crazyagent:tdd`.
+ * Inputs: the text, the position, catalog names by first character, longest first.
+ * Output: the qualified text and the bare name, or undefined when none starts there. */
+function qualifiedAt(text: string, at: number, byFirst: Map<string, string[]>): { written: string; bare: string } | undefined {
+  const namespace = SKILL_NAMESPACES.find((prefix) => text.startsWith(prefix, at));
+  if (namespace === undefined) return undefined;
+  const start = at + namespace.length;
+  const bare = byFirst.get(text[start] ?? "")?.find((candidate) => text.startsWith(candidate, start) && endsAt(text, start + candidate.length));
+  if (bare === undefined) return undefined;
+  const written = namespace + bare;
+  if (!text.startsWith(written, at)) throw new Error("A qualified skill name is not the text it was read from.");
+  return { written, bare };
+}
+
+/** Splits instructions text into plain text and skill tags: a whole skill name, bare or after
+ * an engine namespace (`crazyagent:`, `superpowers:`, `software-practices:`), not part of a
+ * longer name, that matches the catalog. Longer names win over names they contain.
  * Inputs: the text and the skill catalog. Output: the pieces, which join back to the text. */
 export function skillSegments(text: string, skills: readonly SkillEntry[]): ProcessSegment[] {
   const known = new Map<string, SkillEntry>();
@@ -214,19 +233,23 @@ export function skillSegments(text: string, skills: readonly SkillEntry[]): Proc
   let at = 0;
   while (at < text.length) {
     const before = at === 0 ? "" : text[at - 1];
-    const name = NAME_CHARACTER.test(before) ? undefined
+    const inName = NAME_CHARACTER.test(before);
+    const plainName = inName ? undefined
       : byFirst.get(text[at])?.find((candidate) => text.startsWith(candidate, at) && endsAt(text, at + candidate.length));
-    if (name === undefined) {
+    const match = plainName !== undefined ? { written: plainName, bare: plainName }
+      : inName ? undefined : qualifiedAt(text, at, byFirst);
+    if (match === undefined) {
       plain += text[at];
       at += 1;
       continue;
     }
     if (plain) segments.push({ kind: "text", text: plain });
     plain = "";
-    const skill = known.get(name);
+    const skill = known.get(match.bare);
     if (skill === undefined) throw new Error("A matched skill name is missing from the catalog.");
-    segments.push({ kind: "skill", id: skill.id, name, description: skill.description });
-    at += name.length;
+    if (match.written.length < match.bare.length) throw new Error("A written skill name is shorter than its catalog name.");
+    segments.push({ kind: "skill", id: skill.id, name: match.written, description: skill.description });
+    at += match.written.length;
   }
   if (plain) segments.push({ kind: "text", text: plain });
   return segments;
