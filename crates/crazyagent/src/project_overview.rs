@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 #[cfg(test)]
 mod tests;
@@ -29,17 +30,32 @@ pub const TAB_TOO_LARGE: &str = "overview_tab_too_large";
 pub const TAB_EMPTY: &str = "overview_tab_empty";
 /// The tab has no proposal to accept.
 pub const NO_PROPOSAL: &str = "overview_no_proposal";
+/// The project has no `.crazyagent` folder to hold tab files: it was made before the
+/// projects home and has to move into it first.
+pub const NEEDS_HOME: &str = "overview_needs_project_home";
 /// A refresh was asked for while the project's Overview tabs are off.
 pub const OFF: &str = "overview_off";
 /// The engine's store could not be read or written.
 pub const UNAVAILABLE: &str = "overview_unavailable";
+
+/// Why a tab's file is not read: it holds nothing but blank space.
+pub const BLOCKED_BLANK: &str = "blank";
+/// Why a tab's file is not read: it is longer than one tab holds.
+pub const BLOCKED_TOO_LARGE: &str = "too_large";
+/// Why a tab's file is not read: it is not valid UTF-8 text.
+pub const BLOCKED_NOT_UTF8: &str = "not_utf8";
+/// Why a tab's file is not read: a link, a folder or another special entry sits there.
+pub const BLOCKED_NOT_A_FILE: &str = "not_a_file";
+/// Why no tab is read: the tab folder's place holds something that is not a real folder.
+pub const BLOCKED_NOT_A_FOLDER: &str = "not_a_folder";
 
 const LAYOUT: &str = ".crazyagent";
 const TEMP_RANDOM_BYTES: usize = 8;
 
 const _: () = assert!(TAB_BYTES_MAX <= 64 * 1024);
 const _: () = assert!(TAB_BYTES_MAX as u64 <= README_BYTES_MAX);
-const _: () = assert!(FAILURE_BYTES_MAX > 0 && TEMP_RANDOM_BYTES >= 8);
+const _: () = assert!(FAILURE_BYTES_MAX == 200 && TAB_BYTES_MAX == 65536);
+const _: () = assert!(TEMP_RANDOM_BYTES >= 8);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS project_overview(
@@ -50,13 +66,13 @@ CREATE TABLE IF NOT EXISTS project_overview(
   due_ms INTEGER NOT NULL DEFAULT 0,
   running_ms INTEGER,
   checked_ms INTEGER,
-  failure TEXT
+  failure TEXT CHECK(failure IS NULL OR length(CAST(failure AS BLOB)) <= 200)
 );
 CREATE TABLE IF NOT EXISTS project_overview_tabs(
   project TEXT NOT NULL,
   tab TEXT NOT NULL CHECK(tab IN ('quick_info','features','competitors','install_and_use')),
   seal TEXT,
-  proposal TEXT,
+  proposal TEXT CHECK(proposal IS NULL OR length(CAST(proposal AS BLOB)) <= 65536),
   PRIMARY KEY(project, tab)
 );
 ";
@@ -137,7 +153,9 @@ impl Apply {
 }
 
 /// One tab as the owner sees it: the file's text, the version an edit or an accept must
-/// name, whether the owner changed it since the engine last wrote it, and a waiting proposal.
+/// name, whether the owner changed it since the engine last wrote it, a waiting proposal,
+/// and for a file the engine does not read the reason code (`blank`, `too_large`,
+/// `not_utf8`, `not_a_file`, `not_a_folder`), `None` for a readable or missing file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabState {
     pub tab: Tab,
@@ -145,6 +163,7 @@ pub struct TabState {
     pub version: String,
     pub edited: bool,
     pub proposal: Option<String>,
+    pub blocked: Option<String>,
 }
 
 /// The repository's README as the Overview shows it: its path in the project, its text and
@@ -167,7 +186,8 @@ pub enum Competitors {
 }
 
 /// A project's Overview: the README, the four tabs in [`Tab::ALL`] order, the competitor
-/// state, where the writing run stands and the project's two Overview settings.
+/// state, where the writing run stands, the project's two Overview settings and whether
+/// the project has to move into the projects home before it can hold tab files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overview {
     pub readme: Option<Readme>,
@@ -179,6 +199,7 @@ pub struct Overview {
     pub failure: Option<String>,
     pub refresh: Refresh,
     pub apply: Apply,
+    pub needs_home: bool,
 }
 
 /// What an offered text became: the tab file, a proposal waiting for the owner, or nothing
@@ -202,11 +223,61 @@ struct State {
 }
 
 /// What sits where a tab file goes: nothing, a tab file's text, or something the engine
-/// neither reads nor replaces (a link, a folder, an empty, oversized or non-text file).
+/// neither reads nor replaces (a link, a folder, an empty, oversized or non-text file),
+/// with its reason code.
 enum Found {
     Missing,
     Text(String),
-    Blocked,
+    Blocked(&'static str),
+}
+
+/// Where a project's tab folder stands: opened, not made yet, taken by something that is
+/// not a real folder, or impossible because the project has no `.crazyagent` folder.
+enum Place {
+    Open(Folder),
+    Missing,
+    NotAFolder,
+    NoLayout,
+}
+
+/// One write of a tab file at a time in this engine: the read of the file, the version
+/// check, the rename and the record of the seal run under it, so a refresh and an owner's
+/// save cannot interleave.
+static WRITING: Mutex<()> = Mutex::new(());
+
+/// Takes the one-writer lock, also after a writer panicked: the files are whole either
+/// way, since each write is one rename. Output: the guard.
+fn writing() -> MutexGuard<'static, ()> {
+    WRITING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The longest prefix of `text` within `max` bytes that ends on a character boundary.
+/// Inputs: the text and the bound. Output: the text itself when it fits.
+fn clipped(text: String, max: usize) -> String {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    assert!(end <= max);
+    text[..end].to_owned()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test runs on its own thread between a write's checks and its rename, to stand
+    /// in for another writer arriving at that moment.
+    static BEFORE_REPLACE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether the project has no `.crazyagent` folder of its own, as a project made before the
+/// projects home: it holds no tab files until it moves into the home. Input: the project
+/// folder. Output: the answer.
+pub fn needs_home(folder: &Path) -> bool {
+    crate::projects_home::state_folder(folder).as_path() == folder
 }
 
 fn unavailable<E>(_: E) -> EngineError {
@@ -239,35 +310,59 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
 
 /// Opens the project's tab folder beneath its `.crazyagent` folder, each opened once and
 /// never through a link, making the tab folder first with `create`. Inputs: the project
-/// folder and whether to create. Output: the folder, or `None` when it is not a real folder.
+/// folder and whether to create. Output: where the tab folder stands.
 #[cfg(unix)]
-fn tabs_folder(project: &Path, create: bool) -> Option<Folder> {
+fn tabs_folder(project: &Path, create: bool) -> Place {
     use rustix::fs::{Mode, OFlags};
-    let layout = draft::open_folder(&project.join(LAYOUT))?;
+    let Some(layout) = draft::open_folder(&project.join(LAYOUT)) else {
+        return Place::NoLayout;
+    };
     if create {
         match rustix::fs::mkdirat(&layout, TABS_FOLDER, Mode::from_raw_mode(0o700)) {
             Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return None,
+            Err(_) => return Place::NotAFolder,
         }
     }
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    rustix::fs::openat(&layout, TABS_FOLDER, flags, Mode::empty()).ok()
+    match rustix::fs::openat(&layout, TABS_FOLDER, flags, Mode::empty()) {
+        Ok(folder) => Place::Open(folder),
+        Err(_) if exists(&layout, TABS_FOLDER) => Place::NotAFolder,
+        Err(_) => Place::Missing,
+    }
 }
 
 /// Checks the project's `.crazyagent` folder and its tab folder are real folders, making
 /// the tab folder first with `create`: the path-based Windows form described on
-/// [`Folder`]. Inputs: the project folder and whether to create. Output: the folder or `None`.
+/// [`Folder`]. Inputs: the project folder and whether to create. Output: where the tab
+/// folder stands.
 #[cfg(windows)]
-fn tabs_folder(project: &Path, create: bool) -> Option<Folder> {
-    let tabs = draft::open_folder(&project.join(LAYOUT))?.join(TABS_FOLDER);
+fn tabs_folder(project: &Path, create: bool) -> Place {
+    let Some(layout) = draft::open_folder(&project.join(LAYOUT)) else {
+        return Place::NoLayout;
+    };
     if create {
-        match std::fs::DirBuilder::new().create(&tabs) {
+        match std::fs::DirBuilder::new().create(layout.join(TABS_FOLDER)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return None,
+            Err(_) => return Place::NotAFolder,
         }
     }
-    draft::open_folder(&tabs)
+    match draft::open_folder(&layout.join(TABS_FOLDER)) {
+        Some(folder) => Place::Open(folder),
+        None if exists(&layout, TABS_FOLDER) => Place::NotAFolder,
+        None => Place::Missing,
+    }
+}
+
+/// Opens the project's tab folder for a write, making it when absent. Input: the project
+/// folder. Output: the folder, `overview_needs_project_home` for a project with no
+/// `.crazyagent` folder, or `overview_tab_blocked` when the tab folder's place is taken.
+fn place(project: &Path) -> Result<Folder, EngineError> {
+    match tabs_folder(project, true) {
+        Place::Open(folder) => Ok(folder),
+        Place::NoLayout => Err(failure(NEEDS_HOME)),
+        Place::Missing | Place::NotAFolder => Err(failure(TAB_BLOCKED)),
+    }
 }
 
 /// Whether any entry, a link included, is named `name` in `folder`. Inputs: the open
@@ -286,23 +381,24 @@ fn exists(folder: &Folder, name: &str) -> bool {
 
 /// Reads an opened entry as a tab file: a regular file of valid text, not blank and not
 /// over [`TAB_BYTES_MAX`]. The text is exact, never trimmed or cut. Input: the open file.
-/// Output: the text, or `Blocked` for anything else.
+/// Output: the text, or `Blocked` with its reason for anything else.
 fn read_file(file: std::fs::File) -> Found {
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
-        return Found::Blocked;
+        return Found::Blocked(BLOCKED_NOT_A_FILE);
     }
     let bound = TAB_BYTES_MAX as u64 + 1;
     let mut bytes = Vec::new();
     if file.take(bound).read_to_end(&mut bytes).is_err() {
-        return Found::Blocked;
+        return Found::Blocked(BLOCKED_NOT_A_FILE);
     }
     assert!(bytes.len() as u64 <= bound);
     if bytes.len() > TAB_BYTES_MAX {
-        return Found::Blocked;
+        return Found::Blocked(BLOCKED_TOO_LARGE);
     }
     match String::from_utf8(bytes) {
-        Ok(text) if !text.trim().is_empty() => Found::Text(text),
-        _ => Found::Blocked,
+        Ok(text) if text.trim().is_empty() => Found::Blocked(BLOCKED_BLANK),
+        Ok(text) => Found::Text(text),
+        Err(_) => Found::Blocked(BLOCKED_NOT_UTF8),
     }
 }
 
@@ -312,17 +408,8 @@ fn found_in(folder: &Folder, tab: Tab) -> Found {
     let name = tab.file();
     match draft::open_in(folder, &name) {
         Some(file) => read_file(file),
-        None if exists(folder, &name) => Found::Blocked,
+        None if exists(folder, &name) => Found::Blocked(BLOCKED_NOT_A_FILE),
         None => Found::Missing,
-    }
-}
-
-/// The text of the project's tab file. Inputs: the project folder and the tab. Output:
-/// the exact text, or `None` while there is no tab file or something else sits there.
-fn tab_text(folder: &Path, tab: Tab) -> Option<String> {
-    match found_in(&tabs_folder(folder, false)?, tab) {
-        Found::Text(text) => Some(text),
-        Found::Missing | Found::Blocked => None,
     }
 }
 
@@ -341,11 +428,13 @@ fn temp_name(name: &str) -> std::io::Result<String> {
 
 /// Writes `bytes` to `name` in the opened folder through a fresh partial file and a rename
 /// inside that same folder, so nothing is ever written through a link and a reader sees the
-/// old text or the new, never a part. Inputs: the open folder, the file name and the bytes.
-/// Output: any I/O failure; the partial file is removed on one.
+/// old text or the new, never a part. With `fresh` the rename never replaces an entry, so
+/// a file made there meanwhile is kept. Inputs: the open folder, the file name, the bytes
+/// and whether no file was there. Output: any I/O failure (`AlreadyExists` for a fresh
+/// write that found an entry); the partial file is removed on one.
 #[cfg(unix)]
-fn replace(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<()> {
-    use rustix::fs::{AtFlags, Mode, OFlags};
+fn replace(folder: &Folder, name: &str, bytes: &[u8], fresh: bool) -> std::io::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
     let temp = temp_name(name)?;
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut file = std::fs::File::from(rustix::fs::openat(
@@ -358,7 +447,18 @@ fn replace(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<()> {
         .write_all(bytes)
         .and_then(|()| file.sync_all())
         .and_then(|()| {
-            rustix::fs::renameat(folder, temp.as_str(), folder, name).map_err(std::io::Error::from)
+            let renamed = if fresh {
+                rustix::fs::renameat_with(
+                    folder,
+                    temp.as_str(),
+                    folder,
+                    name,
+                    RenameFlags::NOREPLACE,
+                )
+            } else {
+                rustix::fs::renameat(folder, temp.as_str(), folder, name)
+            };
+            renamed.map_err(std::io::Error::from)
         });
     if written.is_err() {
         let _ = rustix::fs::unlinkat(folder, temp.as_str(), AtFlags::empty());
@@ -368,18 +468,26 @@ fn replace(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Writes `bytes` to `name` in the folder through a fresh partial file, created as the
 /// reparse point itself, and a rename: the path-based Windows form described on
-/// [`Folder`]. Inputs: the folder, the file name and the bytes. Output: any I/O failure.
+/// [`Folder`]. With `fresh` an entry found there just before the rename is kept. Inputs:
+/// the folder, the file name, the bytes and whether no file was there. Output: any I/O
+/// failure.
 #[cfg(windows)]
-fn replace(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+fn replace(folder: &Folder, name: &str, bytes: &[u8], fresh: bool) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     let temp = folder.join(temp_name(name)?);
+    let target = folder.join(name);
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
         .open(&temp)
         .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
-        .and_then(|()| std::fs::rename(&temp, folder.join(name)));
+        .and_then(|()| {
+            if fresh && std::fs::symlink_metadata(&target).is_ok() {
+                return Err(std::io::ErrorKind::AlreadyExists.into());
+            }
+            std::fs::rename(&temp, &target)
+        });
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
@@ -398,13 +506,26 @@ fn checked(text: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Writes the tab's file in the opened tab folder and reads it back. Inputs: the open tab
-/// folder, the tab and a checked text. Output: unit, `overview_tab_blocked` when the file
-/// cannot be written, or `overview_tab_changed` when another writer replaced it at once.
-fn write_tab(folder: &Folder, tab: Tab, text: &str) -> Result<(), EngineError> {
+/// Writes the tab's file in the opened tab folder and reads it back. The caller holds the
+/// one-writer lock. Inputs: the open tab folder, the tab, a checked text and whether no
+/// file was there. Output: unit, `overview_tab_blocked` when the file cannot be written,
+/// or `overview_tab_changed` when another writer made or replaced the file meanwhile.
+fn write_tab(folder: &Folder, tab: Tab, text: &str, fresh: bool) -> Result<(), EngineError> {
     assert!(text.len() <= TAB_BYTES_MAX);
     assert!(!text.trim().is_empty());
-    replace(folder, &tab.file(), text.as_bytes()).map_err(|_| failure(TAB_BLOCKED))?;
+    #[cfg(test)]
+    BEFORE_REPLACE.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
+    replace(folder, &tab.file(), text.as_bytes(), fresh).map_err(|error| {
+        if fresh && error.kind() == std::io::ErrorKind::AlreadyExists {
+            failure(TAB_CHANGED)
+        } else {
+            failure(TAB_BLOCKED)
+        }
+    })?;
     match found_in(folder, tab) {
         Found::Text(back) if back == text => Ok(()),
         _ => Err(failure(TAB_CHANGED)),
@@ -418,7 +539,7 @@ fn version_of(found: &Found) -> Result<String, EngineError> {
     match found {
         Found::Missing => Ok(String::new()),
         Found::Text(text) => Ok(overview_seal(text)),
-        Found::Blocked => Err(failure(TAB_BLOCKED)),
+        Found::Blocked(_) => Err(failure(TAB_BLOCKED)),
     }
 }
 
@@ -511,9 +632,10 @@ pub fn offer(
     text: &str,
 ) -> Result<Offered, EngineError> {
     checked(text)?;
-    let place = tabs_folder(folder, true).ok_or_else(|| failure(TAB_BLOCKED))?;
+    let _writing = writing();
+    let place = place(folder)?;
     let now = match found_in(&place, tab) {
-        Found::Blocked => return Err(failure(TAB_BLOCKED)),
+        Found::Blocked(_) => return Err(failure(TAB_BLOCKED)),
         Found::Missing => None,
         Found::Text(now) => Some(now),
     };
@@ -530,7 +652,7 @@ pub fn offer(
         }
     };
     if replaces {
-        write_tab(&place, tab, text)?;
+        write_tab(&place, tab, text, now.is_none())?;
         wrote(db, project, tab, text)?;
         return Ok(Offered::Written);
     }
@@ -545,10 +667,11 @@ pub fn offer(
     Ok(Offered::Proposed)
 }
 
-/// Saves the owner's edit of a tab as its file, only at the version the owner saw. The
-/// stored seal is kept, so the tab shows as edited; a proposal equal to the saved text is
-/// dropped. Inputs: the connection, the project, its folder, the tab, the text and the
-/// version. Output: unit, or the refusal (`overview_tab_changed` at another version).
+/// Saves the owner's edit of a tab as its file, only at the version the owner saw, checked
+/// under the one-writer lock. The stored seal is kept, so the tab shows as edited; a
+/// proposal equal to the saved text is dropped. Inputs: the connection, the project, its
+/// folder, the tab, the text and the version. Output: unit, or the refusal
+/// (`overview_tab_changed` at another version).
 pub fn save(
     db: &Connection,
     project: &ProjectId,
@@ -558,11 +681,13 @@ pub fn save(
     version: &str,
 ) -> Result<(), EngineError> {
     checked(text)?;
-    let place = tabs_folder(folder, true).ok_or_else(|| failure(TAB_BLOCKED))?;
-    if version_of(&found_in(&place, tab))? != version {
+    let _writing = writing();
+    let place = place(folder)?;
+    let found = found_in(&place, tab);
+    if version_of(&found)? != version {
         return Err(failure(TAB_CHANGED));
     }
-    write_tab(&place, tab, text)?;
+    write_tab(&place, tab, text, matches!(found, Found::Missing))?;
     db.execute(
         "UPDATE project_overview_tabs SET proposal=NULL
          WHERE project=?1 AND tab=?2 AND proposal=?3",
@@ -572,10 +697,10 @@ pub fn save(
     Ok(())
 }
 
-/// Writes a tab's proposal as its file, only at the version the diff was made from, then
-/// stores its seal and drops the proposal. Inputs: the connection, the project, its
-/// folder, the tab and the version. Output: unit, `overview_no_proposal`,
-/// `overview_tab_changed` or another refusal.
+/// Writes a tab's proposal as its file, only at the version the diff was made from, checked
+/// under the one-writer lock, then stores its seal and drops the proposal. Inputs: the
+/// connection, the project, its folder, the tab and the version. Output: unit,
+/// `overview_no_proposal`, `overview_tab_changed` or another refusal.
 pub fn accept(
     db: &Connection,
     project: &ProjectId,
@@ -583,14 +708,16 @@ pub fn accept(
     tab: Tab,
     version: &str,
 ) -> Result<(), EngineError> {
+    let _writing = writing();
     let (_, proposal) = tab_row(db, project, tab)?;
     let proposal = proposal.ok_or_else(|| failure(NO_PROPOSAL))?;
     checked(&proposal)?;
-    let place = tabs_folder(folder, true).ok_or_else(|| failure(TAB_BLOCKED))?;
-    if version_of(&found_in(&place, tab))? != version {
+    let place = place(folder)?;
+    let found = found_in(&place, tab);
+    if version_of(&found)? != version {
         return Err(failure(TAB_CHANGED));
     }
-    write_tab(&place, tab, &proposal)?;
+    write_tab(&place, tab, &proposal, matches!(found, Found::Missing))?;
     wrote(db, project, tab, &proposal)
 }
 
@@ -681,9 +808,11 @@ pub fn set_apply(db: &Connection, project: &ProjectId, apply: Apply) -> Result<(
 }
 
 /// Reads the project's Overview. The first read of a project makes its row stale and due
-/// at once, which asks for the first writing run. The README and the competitor state are
-/// not filled here. Inputs: the connection, the project, its folder and the time. Output:
-/// the Overview with the four tabs in order, or `overview_unavailable`.
+/// at once, which asks for the first writing run; a project with no `.crazyagent` folder
+/// gets no row and `needs_home` instead, so no run is asked for it. The README and the
+/// competitor state are not filled here. Inputs: the connection, the project, its folder
+/// and the time. Output: the Overview with the four tabs in order, or
+/// `overview_unavailable`.
 pub fn read(
     db: &Connection,
     project: &ProjectId,
@@ -691,16 +820,29 @@ pub fn read(
     now_ms: i64,
 ) -> Result<Overview, EngineError> {
     assert!(now_ms >= 0);
-    db.execute(
-        "INSERT OR IGNORE INTO project_overview(project,stale,due_ms) VALUES(?1,1,0)",
-        [project.as_str()],
-    )
-    .map_err(unavailable)?;
+    let place = tabs_folder(folder, false);
+    let needs_home = matches!(place, Place::NoLayout);
+    if !needs_home {
+        db.execute(
+            "INSERT OR IGNORE INTO project_overview(project,stale,due_ms) VALUES(?1,1,0)",
+            [project.as_str()],
+        )
+        .map_err(unavailable)?;
+    }
     let state = state(db, project)?;
     let mut tabs = Vec::with_capacity(Tab::ALL.len());
     for tab in Tab::ALL {
         let (seal, proposal) = tab_row(db, project, tab)?;
-        let text = tab_text(folder, tab);
+        let found = match &place {
+            Place::Open(folder) => found_in(folder, tab),
+            Place::NotAFolder => Found::Blocked(BLOCKED_NOT_A_FOLDER),
+            Place::Missing | Place::NoLayout => Found::Missing,
+        };
+        let (text, blocked) = match found {
+            Found::Text(text) => (Some(text), None),
+            Found::Blocked(why) => (None, Some(why.to_owned())),
+            Found::Missing => (None, None),
+        };
         let version = text.as_deref().map(overview_seal).unwrap_or_default();
         let edited = text.is_some() && seal.as_deref() != Some(version.as_str());
         tabs.push(TabState {
@@ -709,12 +851,15 @@ pub fn read(
             version,
             edited,
             proposal,
+            blocked,
         });
     }
     assert_eq!(tabs.len(), Tab::ALL.len());
+    let failure = state
+        .failure
+        .map(|failure| clipped(failure, FAILURE_BYTES_MAX));
     assert!(
-        state
-            .failure
+        failure
             .as_ref()
             .is_none_or(|failure| failure.len() <= FAILURE_BYTES_MAX)
     );
@@ -725,8 +870,9 @@ pub fn read(
         running: state.running_ms.is_some(),
         stale: state.stale,
         checked_ms: state.checked_ms,
-        failure: state.failure,
+        failure,
         refresh: state.refresh,
         apply: state.apply,
+        needs_home,
     })
 }
