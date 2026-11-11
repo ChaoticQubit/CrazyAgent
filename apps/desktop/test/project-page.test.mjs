@@ -312,6 +312,8 @@ test("a stopped or failed master turn offers its own message to send again", () 
   const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
   assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
   assert.equal(research.turnLine(crashed), "The master stopped: its reply was cut off. (capture_incomplete)", "the line names what happened");
+  const silent = { ...turn(1, "failed"), reason: "no_reply", cause: "master_empty_reply" };
+  assert.equal(research.turnLine(silent), "The master stopped: it ended its turn without writing a reply. (master_empty_reply)", "a turn that ended with no reply text is not called cut off (OB-5)");
   assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });

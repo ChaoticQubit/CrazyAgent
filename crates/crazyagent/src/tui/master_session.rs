@@ -3028,6 +3028,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::ApprovalRequired => "Needs your approval",
         MasterReason::RuntimeUnavailable => "Model runtime unavailable",
         MasterReason::CaptureIncomplete => "Reply was incomplete",
+        MasterReason::NoReply => "Ended without a reply",
         MasterReason::OutputLimit => "Reply was too long",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
         MasterReason::RepositoryMissing => "This project has no repository yet",

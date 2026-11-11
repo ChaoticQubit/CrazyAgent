@@ -45,6 +45,9 @@ pub(super) const CHANGES_NOT_KEPT: &str =
     "The edits from this turn could not be kept for review and stay only in the master's worktree.";
 /// The most conflicting files a note under a master turn names.
 const NOTE_FILES_MAX: usize = 10;
+/// The cause of a master turn its harness ended as a success with no reply text, as when its
+/// last step was a tool call: the stream was read whole, so nothing was cut off (OB-5).
+const EMPTY_REPLY: &str = "master_empty_reply";
 
 /// Lands the change set a master turn made when the project lets the master merge into main
 /// itself (DEC-117 Q2), and says what happened in the note under the turn; None when the set
@@ -1200,8 +1203,11 @@ impl OwnerRuntimeHandle {
                     ..
                 } => {
                     let text = std::mem::take(&mut reply).finish();
-                    if text.trim().is_empty() || active.runtime.native_session_id.is_none() {
+                    if active.runtime.native_session_id.is_none() {
                         return Err(failure("master_capture_incomplete"));
+                    }
+                    if text.trim().is_empty() {
+                        return Err(failure(EMPTY_REPLY));
                     }
                     active.capture.finish()?;
                     return Ok(MasterRuntimeObservation::Response {
@@ -1399,6 +1405,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit" => MasterReason::OutputLimit,
+        EMPTY_REPLY => MasterReason::NoReply,
         "codex_host_capture_incomplete"
         | "master_capture_incomplete"
         | "master_capture_identity"
@@ -1877,6 +1884,8 @@ mod tests {
             ("gateway_cooldown", MasterReason::CooldownActive),
             ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
             ("codex_host_output_limit", MasterReason::OutputLimit),
+            ("master_empty_reply", MasterReason::NoReply),
+            ("master_capture_incomplete", MasterReason::CaptureIncomplete),
             (
                 "codex_host_capture_incomplete",
                 MasterReason::CaptureIncomplete,

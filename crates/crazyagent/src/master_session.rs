@@ -183,6 +183,7 @@ pub enum MasterReason {
     ApprovalRequired,
     RuntimeUnavailable,
     CaptureIncomplete,
+    NoReply,
     OutputLimit,
     UnsupportedCapability,
     RepositoryMissing,

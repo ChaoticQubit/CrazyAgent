@@ -944,9 +944,11 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "{\"disableAllHooks\":true}",
             "--disable-slash-commands",
             "--no-session-persistence",
-            "--max-turns",
-            "24",
         ]
+    );
+    assert!(
+        !args.iter().any(|arg| arg == "--max-turns"),
+        "a tools-on master names no step count, so a working turn is not ended at one (OB-5)"
     );
     let environment: Vec<(&str, &str)> = command
         .get_envs()
@@ -1056,10 +1058,11 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         "extra": {"type": "stdio", "command": "/bin/sh", "args": []},
     }})
     .to_string();
-    let steps = arguments(&on).len() - 1;
+    let mut capped = changed(&on, 0, "--print");
+    capped.args(["--max-turns", "24"]);
     for refused in [
         changed(&on, 12, &widened),
-        changed(&on, steps, "99"),
+        capped,
         changed(&on, 9, "default"),
         changed(&off, 7, "default"),
     ] {

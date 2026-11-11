@@ -2464,14 +2464,16 @@ async fn call_waits(mailbox: &Path) {
     }
 }
 
-/// A real Claude host on the memory-turn stand-in for a case's prepared console turn, with
-/// the team server's drop record and mailbox in the stand-in's private tmp (OP-22).
-/// Inputs: the case, its prepared turn and the host's wall time in milliseconds. Outputs:
-/// the stand-in fixture, which owns the folders, the active master, the record and mailbox.
+/// A real Claude host on a stand-in harness for a case's prepared console turn, with the
+/// team server's drop record and mailbox in the stand-in's private tmp (OP-22). Inputs: the
+/// case, its prepared turn, the host's wall time in milliseconds and the stand-in's script.
+/// Outputs: the stand-in fixture, which owns the folders, the active master, the record and
+/// mailbox.
 async fn console_claude_master(
     case: &Fixture,
     prepared: &PreparedMasterTurn,
     wall_time_ms: u64,
+    script: &str,
 ) -> (
     crate::engine::master_host_fixture::MasterFixture,
     ActiveMaster,
@@ -2481,7 +2483,7 @@ async fn console_claude_master(
     let mut fixture = crate::engine::master_host_fixture::MasterFixture::new("claude");
     let lease = fixture.lease("console-memory-turn", 1).unwrap();
     let home = lease.profile_path().unwrap();
-    let harness = fixture.stand_in("claude", MEMORY_TURN_HARNESS);
+    let harness = fixture.stand_in("claude", script);
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
     let tmp = fixture.root.path().join("agent-tmp");
     let record = tmp.join(crate::team::tool::DROP_FILE);
@@ -2580,7 +2582,8 @@ async fn a_console_master_turn_reads_its_harness_while_each_inspection_outlasts_
         .acquire_master_profile(&prepared, &case.turn.id)
         .await
         .unwrap();
-    let (fixture, mut active, _, mailbox) = console_claude_master(&case, &prepared, 150_000).await;
+    let (fixture, mut active, _, mailbox) =
+        console_claude_master(&case, &prepared, 150_000, MEMORY_TURN_HARNESS).await;
     fs::write(fixture.project.join("memory-answered"), b"").unwrap();
     let engine = Arc::clone(&case.runtime().engine);
     let barrier = tokio::spawn(async move {
@@ -2643,7 +2646,7 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
         .await
         .unwrap();
     let (fixture, mut active, record, mailbox) =
-        console_claude_master(&case, &prepared, 150_000).await;
+        console_claude_master(&case, &prepared, 150_000, MEMORY_TURN_HARNESS).await;
     let server = remember_server(
         &record,
         &mailbox,
@@ -2737,6 +2740,125 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
             }
         )]
     );
+}
+
+/// A stand-in Claude Code for a tools-on console master turn that takes 30 tool steps and
+/// then replies DONE. Like Claude Code, it ends the turn with `error_max_turns` once it has
+/// taken as many steps as a `--max-turns` argument allows.
+const THIRTY_STEP_HARNESS: &str = r#"#!/bin/sh
+cap=0
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--max-turns" ]; then cap=$2; fi
+  shift
+done
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i+1))
+  if [ "$cap" -gt 0 ] && [ "$i" -gt "$cap" ]; then
+    printf '%s\n' '{"type":"result","subtype":"error_max_turns","uuid":"result-1","session_id":"native-session","is_error":true}'
+    /bin/cat > /dev/null
+    exit 1
+  fi
+  printf '{"type":"assistant","uuid":"call-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-%s","name":"Read","input":{"file_path":"note.txt"}}]}}\n' "$i" "$i" "$i"
+  printf '{"type":"user","uuid":"answer-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-%s","content":"read"}]}}\n' "$i" "$i"
+done
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A stand-in Claude Code for a tools-on console master turn that says what it will do,
+/// takes one tool step and ends the turn as a success without writing anything after it.
+const SILENT_END_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"I will write the note."}]}}'
+printf '%s\n' '{"type":"assistant","uuid":"call-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-1","name":"Write","input":{"file_path":"note.txt"}}]}}'
+printf '%s\n' '{"type":"user","uuid":"answer-1","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"written"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":""}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Collects one tools-on console master turn on a real Claude host running a stand-in
+/// script, built by the engine's own tools-on command. Inputs: the stand-in's script.
+/// Outputs: how the turn ended, as `turn_end` names it, and the turn as stored after a
+/// failed end was observed with the reason its error maps to.
+async fn tools_turn_on(script: &str) -> (String, Option<MasterTurnView>) {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (_fixture, mut active, _, mailbox) =
+        console_claude_master(&case, &prepared, 150_000, script).await;
+    let observed = tokio::time::timeout(
+        Duration::from_secs(60),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
+    )
+    .await;
+    let _ = active.host.close().await;
+    let ended = turn_end(&observed);
+    let stored = match &observed {
+        Ok(Err(error)) => Some(
+            case.runtime()
+                .observe_master_turn(
+                    &prepared,
+                    &case.turn.id,
+                    MasterRuntimeObservation::Failed {
+                        reason: reason_for_error(error),
+                        cause: error.0.clone(),
+                    },
+                )
+                .await
+                .unwrap(),
+        ),
+        _ => None,
+    };
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+    (ended, stored)
+}
+
+/// A tools-on Claude master turn that needs 30 tool steps ends with its reply (OB-5): the
+/// engine's command names no step count, so a harness that honours `--max-turns` as Claude
+/// Code does is not stopped at step 24 with `error_max_turns`, which the owner saw as "its
+/// reply was cut off" 92 s into a working turn.
+#[tokio::test]
+async fn a_tools_on_master_turn_of_thirty_tool_steps_ends_with_its_reply() {
+    let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS).await;
+    assert_eq!(ended, "reply DONE", "the turn ran past 24 tool steps");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// A tools-on master turn its harness ends as a success with no text after its last tool
+/// step fails as a turn without a reply, not as a cut-off capture (OB-5): the cause is
+/// master_empty_reply and the stored reason is no_reply.
+#[tokio::test]
+async fn a_tools_on_master_turn_that_ends_without_reply_text_says_so_and_is_not_cut_off() {
+    let (ended, stored) = tools_turn_on(SILENT_END_HARNESS).await;
+    assert_eq!(ended, "error master_empty_reply");
+    let stored = stored.expect("the failed end was stored");
+    assert_eq!(stored.phase, MasterTurnPhase::Failed);
+    assert_eq!(stored.reason, Some(MasterReason::NoReply));
+    assert_eq!(stored.cause.as_deref(), Some("master_empty_reply"));
+    assert!(stored.reply.is_none());
 }
 
 /// ServeMemory answers a console master's mailbox only while its own turn runs with tools on

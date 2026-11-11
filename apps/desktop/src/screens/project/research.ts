@@ -581,6 +581,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["scope_revoked", "it no longer has access to this project"],
   ["runtime_unavailable", "it could not start. Check it in Settings, Harnesses"],
   ["capture_incomplete", "its reply was cut off"],
+  ["no_reply", "it ended its turn without writing a reply"],
   ["output_limit", "its reply was longer than the limit"],
   ["unsupported_capability", "it cannot lead a project yet"],
   ["instructions_too_large", "the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again"],

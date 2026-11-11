@@ -73,8 +73,8 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         "rcli_master_output_limit" | "rcli_master_stderr_limit" | "codex_host_output_limit" => {
             MasterReason::OutputLimit
         }
+        "rcli_master_empty_reply" => MasterReason::NoReply,
         "rcli_master_capture_incomplete"
-        | "rcli_master_empty_reply"
         | "rcli_master_message_order"
         | "rcli_master_turn_scope"
         | "rcli_master_truncated_event"
@@ -360,8 +360,11 @@ impl OwnerRuntimeHandle {
                     let text = completion
                         .reply
                         .ok_or_else(|| failure("rcli_master_empty_reply"))?;
-                    if text.trim().is_empty() || text.contains('\0') {
+                    if text.contains('\0') {
                         return Err(failure("rcli_master_capture_incomplete"));
+                    }
+                    if text.trim().is_empty() {
+                        return Err(failure("rcli_master_empty_reply"));
                     }
                     assert!(active.capture.sequence() > 0);
                     return Ok(MasterRuntimeObservation::Response {

@@ -218,6 +218,7 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
             "it could not start. Check it in Settings, Harnesses."
         }
         Some(MasterReason::CaptureIncomplete) => "its reply was cut off.",
+        Some(MasterReason::NoReply) => "it ended its turn without writing a reply.",
         Some(MasterReason::OutputLimit) => "its reply was longer than the limit.",
         Some(MasterReason::UnsupportedCapability) => "it cannot lead a project yet.",
         Some(MasterReason::RepositoryMissing) => "this project has no repository yet.",
@@ -583,6 +584,7 @@ mod tests {
             (MasterReason::ProfileBusy, "profile_busy"),
             (MasterReason::RuntimeUnavailable, "runtime_unavailable"),
             (MasterReason::CaptureIncomplete, "capture_incomplete"),
+            (MasterReason::NoReply, "no_reply"),
             (MasterReason::OutputLimit, "output_limit"),
             (
                 MasterReason::UnsupportedCapability,
@@ -625,6 +627,18 @@ mod tests {
             assert!(last.contains(&format!(" ({code}) Press r")), "{last}");
             assert!(!last.contains("unknown"), "{last}");
         }
+    }
+
+    #[test]
+    fn a_turn_that_ended_without_reply_text_is_not_called_cut_off() {
+        let turns = [turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::NoReply))];
+        let transcript = build(Some(MasterSessionPhase::Configured), &turns, &[entry(3, "Go.")]);
+        let last = &transcript.messages.last().unwrap().text;
+        assert!(
+            last.contains("stopped: it ended its turn without writing a reply. (no_reply)"),
+            "{last}"
+        );
+        assert!(!last.contains("cut off"), "{last}");
     }
 
     #[test]

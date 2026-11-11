@@ -46,8 +46,6 @@ const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 pub(crate) const INSTRUCTIONS_BYTES_MAX: u64 =
     64 * 1024 + crate::instruction_files::SECTION_BYTES_MAX as u64;
 #[cfg(unix)]
-const TOOL_STEPS_MAX: &str = "24";
-#[cfg(unix)]
 const TOOLS_SHELL: &str = "/bin/zsh";
 /// Turns off Claude Code's background Bash commands and background agents for a tools-on
 /// master. In Claude Code 2.1.309 `claude -p` keeps running after a turn's result while a
@@ -180,9 +178,10 @@ pub(in crate::engine) fn launch_command(
 }
 
 /// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
-/// agents' tool flags, a bounded number of steps, hooks and setting sources still off, and only the
-/// engine's team MCP server. Input: as `launch_command`, plus the engine executable, drop file,
-/// mailbox and tools switched off. Output: the command, or a plain refusal for an unsafe input.
+/// agents' tool flags, hooks and setting sources off, only the engine's team MCP server, and
+/// no step count, since the host's run time, event and output limits bound the turn (OB-5).
+/// Input: as `launch_command`, plus the engine executable, drop file, mailbox and tools
+/// switched off. Output: the command, or a plain refusal for an unsafe input.
 #[cfg(unix)]
 pub(in crate::engine) fn tools_launch_command(
     executable: &Path,
@@ -303,9 +302,10 @@ fn command_for(
         "{\"disableAllHooks\":true}",
         "--disable-slash-commands",
         "--no-session-persistence",
-        "--max-turns",
-        if tools.is_some() { TOOL_STEPS_MAX } else { "1" },
     ]);
+    if tools.is_none() {
+        command.args(["--max-turns", "1"]);
+    }
     if let Some(file) = instructions {
         command.arg(INSTRUCTIONS_FLAG).arg(file);
     }

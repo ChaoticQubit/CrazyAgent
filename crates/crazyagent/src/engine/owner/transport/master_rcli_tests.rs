@@ -122,7 +122,7 @@ fn rcli_failures_keep_capture_budget_and_approval_reasons() {
             "rcli_master_capture_incomplete",
             MasterReason::CaptureIncomplete,
         ),
-        ("rcli_master_empty_reply", MasterReason::CaptureIncomplete),
+        ("rcli_master_empty_reply", MasterReason::NoReply),
         ("rcli_master_message_order", MasterReason::CaptureIncomplete),
         ("rcli_master_turn_scope", MasterReason::CaptureIncomplete),
         (
