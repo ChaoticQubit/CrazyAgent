@@ -39,7 +39,7 @@ defaults:
 jobs:
   linux:
     name: Linux format, typecheck, lint and tests
-    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: >-
