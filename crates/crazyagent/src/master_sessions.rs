@@ -41,6 +41,33 @@ const MESSAGES: &str = "CREATE TABLE IF NOT EXISTS session_messages (
     UNIQUE(session,source,source_key)
 )";
 const _: () = assert!(MESSAGE_BYTES_MAX == 8192);
+/// The most stored messages a summary, a handoff or a history reads: the newest ones.
+const MESSAGES_READ_MAX: usize = 2048;
+/// The most sessions one engine start moves into the store.
+#[cfg(unix)]
+const BACKFILL_SESSIONS_MAX: usize = 4096;
+/// The most terminal turns an older engine only counted that the store keeps as rows.
+const COUNTED_TURNS_MAX: u64 = 1024;
+/// The `source` of a divider the backfill placed where a live conversation began after
+/// one-turn turns that no handoff carried over: it settles nothing.
+const BACKFILL: &str = "backfill";
+/// The `source` of a divider written when a master took a conversation over.
+const SWITCH: &str = "switch";
+/// The `source` of the rows of an engine-run turn.
+const TURN: &str = "turn";
+/// The `source` of rows read once from a harness record an older engine kept.
+const RECORD: &str = "record";
+/// The `source` of rows that stand for terminal turns an older engine only counted.
+const COUNTER: &str = "counter";
+/// What a typed message holds when the engine itself typed it to carry a conversation
+/// over, so it is never stored as something the owner said.
+const SEED_MARKS: [&str; 5] = [
+    "switched this conversation's master from",
+    "Summary of this session's conversation so far",
+    "Summary of the newest turns of this session's conversation",
+    "Your earlier harness conversation in this session",
+    "The newest part of your earlier harness conversation in this session",
+];
 const _: () = assert!(MESSAGES_PAGE_BYTES_MAX < crate::protocol::FRAME_BYTES_MAX);
 /// The most agent names one listed session carries.
 pub const LISTED_AGENTS_MAX: usize = 6;
@@ -251,7 +278,8 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     initialize_owner_turns(connection)?;
-    connection.execute_batch(MESSAGES).map_err(error)
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    backfill(connection)
 }
 
 /// Creates the marks table and the table of sessions with an owner turn as older engines
@@ -1621,6 +1649,624 @@ fn cut_to_fit(page: &mut SessionMessagePage) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// The master about to run a session's next turn: its mode, and the catalog id of its
+/// harness when live or its backend name when one-turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Runner<'a> {
+    pub mode: MasterMode,
+    pub harness: &'a str,
+}
+
+/// A stored message with the kind of writer it came from.
+struct Stored {
+    message: SessionMessage,
+    source: String,
+}
+
+/// A message about to be stored.
+struct Draft<'a> {
+    speaker: MessageSpeaker,
+    mode: MasterMode,
+    harness: Option<&'a str>,
+    text: Option<&'a str>,
+    source: &'a str,
+    key: &'a str,
+}
+
+/// Appends one message to a session's conversation, after its newest row. A message whose
+/// source and key the session already holds is left as it is, so every writer may repeat
+/// itself. A database a bare fixture made gains the table on first use. Takes the
+/// connection, project, session and message. Returns whether a row was added; a session,
+/// project or key outside the stored bounds adds none.
+fn append(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+    draft: &Draft<'_>,
+) -> Result<bool, EngineError> {
+    let bounded = |text: &str, max: usize| !text.is_empty() && text.len() <= max;
+    if !bounded(session, 128) || !bounded(project, 128) || !bounded(draft.key, 192) {
+        return Ok(false);
+    }
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    let text = draft
+        .text
+        .filter(|text| !text.is_empty())
+        .map(|text| marked(text, MESSAGE_BYTES_MAX));
+    let harness = draft.harness.filter(|harness| bounded(*harness, 64));
+    let added = connection
+        .execute(
+            "INSERT INTO session_messages(session,seq,project,speaker,mode,harness,text,at_ms,source,source_key)
+             SELECT ?1,COALESCE(MAX(seq),0)+1,?2,?3,?4,?5,?6,?7,?8,?9 FROM session_messages WHERE session=?1
+             ON CONFLICT(session,source,source_key) DO NOTHING",
+            params![
+                session,
+                project,
+                draft.speaker.name(),
+                draft.mode.name(),
+                harness,
+                text,
+                crate::team::now_ms().max(0),
+                draft.source,
+                draft.key
+            ],
+        )
+        .map_err(error)?;
+    assert!(added <= 1);
+    Ok(added == 1)
+}
+
+/// Reads a session's newest stored messages, oldest first, at most `MESSAGES_READ_MAX`.
+/// Takes the connection and session. Returns them, or `session_message_record` for a row
+/// no writer of this engine makes.
+fn stored(connection: &Connection, session: &str) -> Result<Vec<Stored>, EngineError> {
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT seq,speaker,mode,harness,text,at_ms,source FROM (
+                SELECT seq,speaker,mode,
+                       CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END AS harness,
+                       CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END AS text,
+                       at_ms,source
+                FROM session_messages WHERE session=?1 ORDER BY seq DESC LIMIT ?2
+             ) ORDER BY seq",
+        )
+        .map_err(error)?;
+    type Row = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+    );
+    let rows = statement
+        .query_map(
+            params![session, i64::try_from(MESSAGES_READ_MAX).map_err(error)?],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(error)?;
+    let mut messages = Vec::with_capacity(rows.len());
+    for (seq, speaker, mode, harness, text, at_ms, source) in rows {
+        let record = || error("session_message_record");
+        messages.push(Stored {
+            message: SessionMessage {
+                seq: u64::try_from(seq).map_err(error)?,
+                speaker: MessageSpeaker::named(&speaker).ok_or_else(record)?,
+                mode: MasterMode::named(&mode).ok_or_else(record)?,
+                harness,
+                text,
+                at_ms: u64::try_from(at_ms).map_err(error)?,
+            },
+            source,
+        });
+    }
+    assert!(messages.len() <= MESSAGES_READ_MAX);
+    assert!(
+        messages
+            .windows(2)
+            .all(|pair| pair[0].message.seq < pair[1].message.seq)
+    );
+    Ok(messages)
+}
+
+/// Tells whether a message is part of the conversation itself, not a divider.
+fn said(stored: &Stored) -> bool {
+    stored.message.speaker != MessageSpeaker::Switch
+}
+
+/// Tells whether a typed message is one the engine typed to carry a conversation over.
+fn seeded(text: &str) -> bool {
+    SEED_MARKS.iter().any(|mark| text.contains(mark))
+}
+
+/// The name of the master a row belongs to, as a handoff and a divider say it: a live
+/// master's harness as stored, or the one-turn master with its backend. Takes the mode and
+/// the stored harness. Returns the name; `harness_label` leaves a one-turn name as it is.
+fn ran_on(mode: MasterMode, harness: Option<&str>) -> String {
+    match (mode, harness) {
+        (MasterMode::Live, Some(harness)) => harness.to_owned(),
+        (MasterMode::Live, None) => "the live terminal".to_owned(),
+        (MasterMode::OneTurn, Some("rcli")) => "the one-turn master (RCLI)".to_owned(),
+        (MasterMode::OneTurn, Some("codex")) => "the one-turn master (Codex)".to_owned(),
+        (MasterMode::OneTurn, Some("claude")) => "the one-turn master (Claude)".to_owned(),
+        (MasterMode::OneTurn, _) => "the one-turn master".to_owned(),
+    }
+}
+
+/// Decides from a session's stored messages whether the master about to run its next turn
+/// takes the conversation over from another one, whatever harness or mode either is. The
+/// newest divider a switch wrote settles what came before it; a divider the backfill
+/// placed settles nothing. Messages after the settled point that another master ran are
+/// owed to `next`, and so is a settled switch to another master that ran no turn since.
+/// Takes the messages, oldest first, and the next master. Returns the name of the master
+/// the conversation comes from, as `ran_on` gives it, or None when `next` continues its own.
+fn owed(messages: &[Stored], next: Runner<'_>) -> Option<String> {
+    let foreign = |stored: &Stored| {
+        stored.message.mode != next.mode
+            || stored
+                .message
+                .harness
+                .as_deref()
+                .is_some_and(|harness| !crate::harnesses::same(harness, next.harness))
+    };
+    let from = |stored: &Stored| ran_on(stored.message.mode, stored.message.harness.as_deref());
+    let settled = messages
+        .iter()
+        .rposition(|stored| !said(stored) && stored.source != BACKFILL);
+    let open = &messages[settled.map_or(0, |index| index + 1)..];
+    if let Some(newest) = open
+        .iter()
+        .rev()
+        .find(|stored| said(stored) && foreign(stored))
+    {
+        return Some(from(newest));
+    }
+    let switch = &messages[settled?];
+    assert!(!said(switch));
+    (foreign(switch) && messages.iter().any(said)).then(|| from(switch))
+}
+
+/// What an engine-run turn asked its master: the owner's message, absent once it is no
+/// longer kept, or the line of a request the engine made itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asked<'a> {
+    Owner(Option<&'a str>),
+    Engine(&'a str),
+}
+
+/// Stores what an engine-run turn asked. Takes the connection, project, session, backend
+/// name, turn id and what was asked. Returns whether the row is new.
+fn append_asked(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+    backend: Option<&str>,
+    turn: &str,
+    asked: &Asked<'_>,
+) -> Result<bool, EngineError> {
+    let (speaker, text) = match asked {
+        Asked::Owner(text) => (MessageSpeaker::Owner, *text),
+        Asked::Engine(line) => (MessageSpeaker::Engine, Some(*line)),
+    };
+    append(
+        connection,
+        project,
+        session,
+        &Draft {
+            speaker,
+            mode: MasterMode::OneTurn,
+            harness: backend,
+            text,
+            source: TURN,
+            key: turn,
+        },
+    )
+}
+
+/// Stores the reply of an engine-run turn. Takes the connection, project, session, backend
+/// name, turn id and reply. Returns whether the row is new.
+fn append_reply(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+    backend: Option<&str>,
+    turn: &str,
+    reply: &str,
+) -> Result<bool, EngineError> {
+    append(
+        connection,
+        project,
+        session,
+        &Draft {
+            speaker: MessageSpeaker::Master,
+            mode: MasterMode::OneTurn,
+            harness: backend,
+            text: Some(reply),
+            source: TURN,
+            key: &format!("{turn}/reply"),
+        },
+    )
+}
+
+/// Stores the divider where a master took a session's conversation over, which settles
+/// what came before it: handed over under Carry over, or left behind as Start fresh asks.
+/// Takes the connection, project, session, the mode and harness of the master that took
+/// over and the owner's setting. Returns any SQLite failure.
+pub(crate) fn note_switch(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+    mode: MasterMode,
+    harness: &str,
+    carried: SwitchMode,
+) -> Result<(), EngineError> {
+    connection.execute_batch(MESSAGES).map_err(error)?;
+    let next: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM session_messages WHERE session=?1",
+            [session],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    assert!(next > 0);
+    let to = ran_on(mode, Some(harness));
+    append(
+        connection,
+        project,
+        session,
+        &Draft {
+            speaker: MessageSpeaker::Switch,
+            mode,
+            harness: Some(harness),
+            text: Some(&switched_note(harness_label(&to), carried)),
+            source: SWITCH,
+            key: &format!("{}:{next}", carried.name()),
+        },
+    )?;
+    Ok(())
+}
+
+/// The backend a one-turn master of a session runs on, as its session row names it. Takes
+/// the connection and session. Returns the name, or None without a session row.
+fn session_backend(connection: &Connection, session: &str) -> Result<Option<String>, EngineError> {
+    if !table_exists(connection, "master_sessions")? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(body AS BLOB))<=16384 AND json_valid(body)
+                         THEN json_extract(body,'$.selection.backend') END
+             FROM master_sessions WHERE id=?1",
+            [session],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|backend| backend.flatten().filter(|backend| backend.len() <= 64))
+        .map_err(error)
+}
+
+/// What an older engine kept of a session's live terminal conversation: the harness and
+/// the messages of the record it kept, the terminal turns it only counted with the newest
+/// line it kept of them, and the switch it recorded.
+struct OldLive {
+    harness: Option<String>,
+    spoken: Vec<(MessageSpeaker, String)>,
+    counted: u64,
+    line: Option<String>,
+    switch: Option<(String, SwitchMode)>,
+}
+
+/// Reads what an older engine kept of a session's live terminal conversation. Messages the
+/// engine typed to carry a conversation over are left out. Takes the connection, project
+/// and session. Returns it; a record that cannot be read gives no messages.
+fn old_live(connection: &Connection, project: &str, session: &str) -> Result<OldLive, EngineError> {
+    use crate::harnesses::transcript::{Speaker, conversation_messages};
+    let kept = if table_exists(connection, "team_master_conversations")? {
+        let project = ProjectId::new(project).map_err(error)?;
+        crate::team::master::session_conversation(connection, &project, session)?
+    } else {
+        None
+    };
+    let spoken = kept
+        .as_ref()
+        .filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
+        .map(|kept| conversation_messages(&kept.harness, &kept.resume.record))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(speaker, text)| match speaker {
+            Speaker::Input if seeded(&text) => None,
+            Speaker::Input => Some((MessageSpeaker::Owner, text)),
+            Speaker::Agent => Some((MessageSpeaker::Master, text)),
+        })
+        .collect();
+    let (counted, line) = counted_turns(connection, session)?;
+    Ok(OldLive {
+        harness: kept.map(|kept| kept.harness),
+        spoken,
+        counted,
+        line,
+        switch: recorded_switch(connection, project, session)?,
+    })
+}
+
+/// The terminal turns an older engine counted for a session and the newest line it kept
+/// of them. Takes the connection and session. Returns 0 and None without such a row.
+fn counted_turns(
+    connection: &Connection,
+    session: &str,
+) -> Result<(u64, Option<String>), EngineError> {
+    if !table_exists(connection, "session_owner_turns")? {
+        return Ok((0, None));
+    }
+    let row: Option<(i64, Option<String>)> = connection
+        .query_row(
+            "SELECT turns,CASE WHEN length(CAST(last_line AS BLOB))<=1024 THEN last_line END
+             FROM session_owner_turns WHERE session=?1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let (turns, line) = row.unwrap_or((0, None));
+    Ok((u64::try_from(turns).map_err(error)?, line))
+}
+
+/// The switch an older engine recorded for a session: the harness that took over and the
+/// owner's mode. Takes the connection, project and session. Returns None without one.
+fn recorded_switch(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+) -> Result<Option<(String, SwitchMode)>, EngineError> {
+    if !table_exists(connection, "team_session_switches")? {
+        return Ok(None);
+    }
+    let row: Option<(Option<String>, String)> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB)) BETWEEN 1 AND 64 THEN harness END,mode
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session, project],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(row.and_then(|(harness, mode)| Some((harness?, SwitchMode::named(&mode)?))))
+}
+
+/// Moves what older engines kept of one session into the store, each kind once: its
+/// engine-run turns when the store holds none, then its terminal conversation when the
+/// store holds none. Where a terminal conversation follows engine-run turns the store gets
+/// a divider, and a recorded switch no divider stands for is stored after the
+/// conversation. Old tables are only read. Takes the connection, project and session.
+/// Returns any SQLite failure.
+fn absorb(connection: &Connection, project: &str, session: &str) -> Result<(), EngineError> {
+    let before = stored(connection, session)?;
+    let holds = |mode: MasterMode| {
+        before
+            .iter()
+            .any(|stored| said(stored) && stored.message.mode == mode)
+    };
+    let divided = before.iter().any(|stored| !said(stored));
+    let turns = holds(MasterMode::OneTurn) || absorb_turns(connection, project, session)?;
+    if holds(MasterMode::Live) {
+        return Ok(());
+    }
+    let old = old_live(connection, project, session)?;
+    let live = !old.spoken.is_empty() || old.counted > 0;
+    let mut placed = divided;
+    if live && turns && !divided {
+        placed = absorb_boundary(connection, project, session, &old)?;
+    }
+    absorb_live(connection, project, session, &old)?;
+    if let Some((to, mode)) = old.switch.filter(|_| !placed && (turns || live)) {
+        note_switch(connection, project, session, MasterMode::Live, &to, mode)?;
+    }
+    Ok(())
+}
+
+/// Moves a session's engine-run turns into the store, oldest first: what was asked, the
+/// owner's message or the engine's line, then the reply when one came. Takes the
+/// connection, project and session. Returns whether the session has such turns.
+fn absorb_turns(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+) -> Result<bool, EngineError> {
+    if !table_exists(connection, "master_turns")?
+        || !table_exists(connection, "conversation_entries")?
+    {
+        return Ok(false);
+    }
+    let backend = session_backend(connection, session)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT CASE WHEN length(CAST(t.id AS BLOB))<=128 THEN t.id END,
+                    CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END,
+                    CASE WHEN length(CAST(t.body AS BLOB))<=16384 AND json_valid(t.body) THEN json_extract(t.body,'$.engine_request.line') END,
+                    CASE WHEN length(CAST(t.body AS BLOB))<=16384 AND json_valid(t.body) THEN json_extract(t.body,'$.reply.text') END
+             FROM master_turns t LEFT JOIN conversation_entries c
+                  ON c.event_cursor=t.input AND c.kind='message' AND c.project=?2
+             WHERE t.session=?1 ORDER BY t.ordinal LIMIT 1024",
+        )
+        .map_err(error)?;
+    type Row = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let turns = statement
+        .query_map(params![session, project], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(error)?;
+    assert!(turns.len() <= 1024);
+    for (id, owner, line, reply) in &turns {
+        let Some(id) = id else {
+            continue;
+        };
+        let asked = match line {
+            Some(line) => Asked::Engine(line),
+            None => Asked::Owner(owner.as_deref()),
+        };
+        append_asked(connection, project, session, backend.as_deref(), id, &asked)?;
+        if let Some(reply) = reply {
+            append_reply(connection, project, session, backend.as_deref(), id, reply)?;
+        }
+    }
+    Ok(!turns.is_empty())
+}
+
+/// Stores the divider between a session's engine-run turns and the terminal conversation
+/// an older engine kept after them: the session's recorded switch when it names that
+/// conversation's harness, else a divider that settles nothing, so the next live start
+/// still hands the earlier turns over. Takes the connection, project, session and what was
+/// kept. Returns whether the recorded switch was stored.
+fn absorb_boundary(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+    old: &OldLive,
+) -> Result<bool, EngineError> {
+    let harness = old.harness.as_deref();
+    let settled = old
+        .switch
+        .as_ref()
+        .filter(|(to, _)| harness.is_none_or(|harness| crate::harnesses::same(to, harness)));
+    if let Some((to, mode)) = settled {
+        note_switch(connection, project, session, MasterMode::Live, to, *mode)?;
+        return Ok(true);
+    }
+    let label = harness.map_or("the live terminal", harness_label);
+    let added = append(
+        connection,
+        project,
+        session,
+        &Draft {
+            speaker: MessageSpeaker::Switch,
+            mode: MasterMode::Live,
+            harness,
+            text: Some(&format!(
+                "Switched to {label}. The earlier turns were not handed over to it."
+            )),
+            source: BACKFILL,
+            key: "boundary",
+        },
+    )?;
+    assert!(added);
+    Ok(false)
+}
+
+/// Stores the terminal conversation an older engine kept: a row without text for each
+/// counted turn the record no longer shows, the newest kept line when no record reads,
+/// then the record's messages. Takes the connection, project, session and what was kept.
+/// Returns any SQLite failure.
+fn absorb_live(
+    connection: &Connection,
+    project: &str,
+    session: &str,
+    old: &OldLive,
+) -> Result<(), EngineError> {
+    let harness = old.harness.as_deref();
+    let live = |speaker: MessageSpeaker, text: Option<&str>, source: &str, key: &str| {
+        append(
+            connection,
+            project,
+            session,
+            &Draft {
+                speaker,
+                mode: MasterMode::Live,
+                harness,
+                text,
+                source,
+                key,
+            },
+        )
+    };
+    let typed = old
+        .spoken
+        .iter()
+        .filter(|(speaker, _)| *speaker == MessageSpeaker::Owner)
+        .count();
+    let unread = old
+        .counted
+        .saturating_sub(u64::try_from(typed).map_err(error)?)
+        .min(COUNTED_TURNS_MAX);
+    for turn in 1..=unread {
+        live(MessageSpeaker::Owner, None, COUNTER, &turn.to_string())?;
+    }
+    if old.spoken.is_empty() && old.counted > 0 && old.line.is_some() {
+        live(MessageSpeaker::Master, old.line.as_deref(), COUNTER, "line")?;
+    }
+    for (index, (speaker, text)) in old.spoken.iter().enumerate() {
+        live(*speaker, Some(text.as_str()), RECORD, &index.to_string())?;
+    }
+    Ok(())
+}
+
+/// Moves every session older engines wrote into the store when the engine database opens,
+/// each all or nothing. A session the store already holds rows of is skipped, so the work
+/// is done once; one with nothing to move is looked at again at the next start, which
+/// costs a few reads. A session that cannot be moved is left for the next start and named
+/// on standard error, so one bad row never stops the engine. Takes the engine connection.
+/// Returns a failure to list the sessions.
+#[cfg(unix)]
+fn backfill(connection: &Connection) -> Result<(), EngineError> {
+    if !table_exists(connection, "master_sessions")? {
+        return Ok(());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT CASE WHEN length(CAST(s.id AS BLOB))<=128 THEN s.id END,
+                    CASE WHEN length(CAST(s.project AS BLOB))<=128 THEN s.project END
+             FROM master_sessions s
+             WHERE NOT EXISTS(SELECT 1 FROM session_messages m WHERE m.session=s.id)
+             ORDER BY s.created LIMIT ?1",
+        )
+        .map_err(error)?;
+    type Row = (Option<String>, Option<String>);
+    let sessions = statement
+        .query_map(
+            [i64::try_from(BACKFILL_SESSIONS_MAX).map_err(error)?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(error)?;
+    assert!(sessions.len() <= BACKFILL_SESSIONS_MAX);
+    for (session, project) in sessions {
+        let (Some(session), Some(project)) = (session, project) else {
+            continue;
+        };
+        if ProjectId::new(project.as_str()).is_err() {
+            continue;
+        }
+        let moved = owner_turns_change(connection, |connection| {
+            absorb(connection, &project, &session)
+        });
+        if let Err(cause) = moved {
+            eprintln!("session_messages_not_backfilled cause={}", cause.0);
+        }
+    }
+    Ok(())
+}
+
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
@@ -2319,5 +2965,594 @@ mod tests {
         assert_eq!(foreign.count, 0);
         assert!(unstored.messages.is_empty());
         assert_eq!(unstored.next, None);
+    }
+    /// An engine database with every schema, in a folder that also holds harness records.
+    #[cfg(unix)]
+    fn store_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        (folder, connection)
+    }
+
+    /// Stores a session row of project `store-project` the way an older engine did, with
+    /// the backend its one-turn master ran on.
+    #[cfg(unix)]
+    fn old_session(connection: &rusqlite::Connection, session: &str, backend: &str) {
+        let body = serde_json::json!({"selection": {"backend": backend}});
+        connection
+            .execute(
+                "INSERT INTO master_sessions(id,project,created,version,phase,body)
+                 VALUES (?1,'store-project',1,1,'configured',?2)",
+                rusqlite::params![session, body.to_string()],
+            )
+            .unwrap();
+    }
+
+    /// Stores one engine-run turn the way an older engine did: its turn row with the given
+    /// body, and the owner's message, when one is given, in the owner conversation.
+    #[cfg(unix)]
+    fn old_turn(
+        connection: &rusqlite::Connection,
+        session: &str,
+        ordinal: i64,
+        owner: Option<&str>,
+        body: serde_json::Value,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO master_turns(session,ordinal,id,input,phase,body)
+                 VALUES (?1,?2,?3,?4,'succeeded',?5)",
+                rusqlite::params![
+                    session,
+                    ordinal,
+                    format!("turn-{ordinal}"),
+                    1000 + ordinal,
+                    body.to_string()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversation_entries SELECT 'store-project',?1,'message',0,?2 WHERE ?2 IS NOT NULL",
+                rusqlite::params![1000 + ordinal, owner],
+            )
+            .unwrap();
+    }
+
+    /// Keeps a Claude Code conversation for a session the way an older engine did, with a
+    /// record of the given typed inputs and replies.
+    #[cfg(unix)]
+    fn old_record(
+        folder: &tempfile::TempDir,
+        connection: &rusqlite::Connection,
+        session: &str,
+        exchanges: &[(&str, &str)],
+    ) {
+        let id = "4f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        let lines: String = exchanges
+            .iter()
+            .map(|(typed, reply)| {
+                format!(
+                    "{}\n{}\n",
+                    serde_json::json!({"type": "user", "message": {"content": typed}}),
+                    serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}], "stop_reason": "end_turn"}})
+                )
+            })
+            .collect();
+        std::fs::write(&record, lines).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+        let project = ProjectId::new("store-project").unwrap();
+        keep_conversation(connection, &project, session, &kept).unwrap();
+    }
+
+    /// A session's stored messages as lines: speaker, mode, the kind of writer, the text.
+    fn shown(connection: &rusqlite::Connection, session: &str) -> Vec<String> {
+        super::stored(connection, session)
+            .unwrap()
+            .into_iter()
+            .map(|stored| {
+                format!(
+                    "{}/{}/{}: {}",
+                    stored.message.speaker.name(),
+                    stored.message.mode.name(),
+                    stored.source,
+                    stored.message.text.as_deref().unwrap_or("-")
+                )
+            })
+            .collect()
+    }
+
+    /// One stored message for the switch rule: who said it, the master it belongs to and
+    /// the kind of writer.
+    fn message(
+        seq: u64,
+        speaker: super::MessageSpeaker,
+        mode: super::MasterMode,
+        harness: &str,
+        source: &str,
+    ) -> super::Stored {
+        super::Stored {
+            message: super::SessionMessage {
+                seq,
+                speaker,
+                mode,
+                harness: Some(harness.into()),
+                text: Some("text".into()),
+                at_ms: 1,
+            },
+            source: source.into(),
+        }
+    }
+
+    /// OB-6: turns the one-turn master ran on RCLI are owed to a Claude Code terminal that
+    /// starts next, and the handoff names where they come from. No harness has its own
+    /// rule: the same messages are owed to a Codex terminal.
+    #[test]
+    fn one_turn_rcli_turns_are_owed_to_the_live_harness_that_starts_next() {
+        use super::{MasterMode, MessageSpeaker, Runner};
+        let messages = [
+            message(
+                1,
+                MessageSpeaker::Owner,
+                MasterMode::OneTurn,
+                "rcli",
+                "turn",
+            ),
+            message(
+                2,
+                MessageSpeaker::Master,
+                MasterMode::OneTurn,
+                "rcli",
+                "turn",
+            ),
+        ];
+        let live = |harness| Runner {
+            mode: MasterMode::Live,
+            harness,
+        };
+
+        assert_eq!(
+            super::owed(&messages, live("claude-code")).as_deref(),
+            Some("the one-turn master (RCLI)")
+        );
+        assert_eq!(
+            super::owed(&messages, live("codex")).as_deref(),
+            Some("the one-turn master (RCLI)")
+        );
+    }
+
+    /// OB-6, the other direction: what was said in a Claude Code terminal is owed to the
+    /// one-turn master on RCLI that runs the next turn, and a Codex terminal's conversation
+    /// to a one-turn master on Claude.
+    #[test]
+    fn a_live_conversation_is_owed_to_the_one_turn_master_that_runs_next() {
+        use super::{MasterMode, MessageSpeaker, Runner};
+        let claude_code = [
+            message(
+                1,
+                MessageSpeaker::Owner,
+                MasterMode::Live,
+                "claude-code",
+                "terminal",
+            ),
+            message(
+                2,
+                MessageSpeaker::Master,
+                MasterMode::Live,
+                "claude-code",
+                "terminal",
+            ),
+        ];
+        let codex = [message(
+            1,
+            MessageSpeaker::Owner,
+            MasterMode::Live,
+            "codex",
+            "terminal",
+        )];
+        let one_turn = |harness| Runner {
+            mode: MasterMode::OneTurn,
+            harness,
+        };
+
+        assert_eq!(
+            super::owed(&claude_code, one_turn("rcli")).as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            super::owed(&codex, one_turn("claude")).as_deref(),
+            Some("codex")
+        );
+    }
+
+    /// A master that continues its own conversation owes nothing: the same one-turn
+    /// backend, the same live harness under either of its names, or a session with no
+    /// message yet.
+    #[test]
+    fn a_master_that_continues_its_own_conversation_is_no_switch() {
+        use super::{MasterMode, MessageSpeaker, Runner};
+        let one_turn = [message(
+            1,
+            MessageSpeaker::Owner,
+            MasterMode::OneTurn,
+            "rcli",
+            "turn",
+        )];
+        let live = [message(
+            1,
+            MessageSpeaker::Owner,
+            MasterMode::Live,
+            "claude-code",
+            "terminal",
+        )];
+
+        assert_eq!(
+            super::owed(
+                &one_turn,
+                Runner {
+                    mode: MasterMode::OneTurn,
+                    harness: "rcli"
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            super::owed(
+                &live,
+                Runner {
+                    mode: MasterMode::Live,
+                    harness: "claude"
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            super::owed(
+                &[],
+                Runner {
+                    mode: MasterMode::Live,
+                    harness: "codex"
+                }
+            ),
+            None
+        );
+    }
+
+    /// A switch is settled once: after the divider a switch wrote, the master it names owes
+    /// nothing, turns it ran since are owed to whichever other master comes next, and going
+    /// back before it ran a turn is a switch from it too.
+    #[test]
+    fn a_stored_switch_settles_what_came_before_it() {
+        use super::{MasterMode, MessageSpeaker, Runner};
+        let mut messages = vec![
+            message(
+                1,
+                MessageSpeaker::Owner,
+                MasterMode::OneTurn,
+                "rcli",
+                "turn",
+            ),
+            message(
+                2,
+                MessageSpeaker::Switch,
+                MasterMode::Live,
+                "claude-code",
+                "switch",
+            ),
+        ];
+        let live = Runner {
+            mode: MasterMode::Live,
+            harness: "claude-code",
+        };
+        let one_turn = Runner {
+            mode: MasterMode::OneTurn,
+            harness: "rcli",
+        };
+
+        assert_eq!(super::owed(&messages, live), None);
+        assert_eq!(
+            super::owed(&messages, one_turn).as_deref(),
+            Some("claude-code")
+        );
+        messages.push(message(
+            3,
+            MessageSpeaker::Owner,
+            MasterMode::Live,
+            "claude-code",
+            "terminal",
+        ));
+        assert_eq!(super::owed(&messages, live), None);
+        assert_eq!(
+            super::owed(&messages, one_turn).as_deref(),
+            Some("claude-code")
+        );
+    }
+
+    /// A message stored twice under the same turn keeps one row, rows keep the order they
+    /// were first stored in, and text past the row bound is cut and marked as cut.
+    #[test]
+    fn a_message_stored_twice_keeps_one_row_and_long_text_is_cut() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let long = "a".repeat(super::MESSAGE_BYTES_MAX + 1);
+        let asked = super::Asked::Owner(Some("Plan it"));
+
+        let first = super::append_asked(&connection, "p", "s", Some("rcli"), "turn-1", &asked);
+        let again = super::append_asked(&connection, "p", "s", Some("rcli"), "turn-1", &asked);
+        super::append_reply(&connection, "p", "s", Some("rcli"), "turn-1", &long).unwrap();
+        super::append_reply(&connection, "p", "s", Some("rcli"), "turn-1", "late").unwrap();
+
+        assert_eq!((first.unwrap(), again.unwrap()), (true, false));
+        let stored = super::stored(&connection, "s").unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].message.text.as_deref(), Some("Plan it"));
+        assert_eq!(stored[1].message.seq, 2);
+        let reply = stored[1].message.text.as_deref().unwrap();
+        assert_eq!(reply.len(), super::MESSAGE_BYTES_MAX);
+        assert!(reply.ends_with("a..."), "{}", &reply[reply.len() - 8..]);
+    }
+
+    /// OB-6, the owner's session: one-turn turns, then a Claude Code terminal conversation
+    /// that began with no handoff. The engine start moves both into the one store, with the
+    /// owner's words, the engine's own request and a turn without a reply, and puts a
+    /// divider between them that settles nothing, so the next Claude Code start still owes
+    /// the one-turn turns to it.
+    #[cfg(unix)]
+    #[test]
+    fn a_live_conversation_begun_after_one_turn_turns_without_a_handoff_still_owes_them() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-oneday", "claude");
+        old_turn(
+            &connection,
+            "s-oneday",
+            1,
+            Some("Plan the course page"),
+            serde_json::json!({"reply": {"text": "Planned it"}}),
+        );
+        old_turn(
+            &connection,
+            "s-oneday",
+            2,
+            None,
+            serde_json::json!({"engine_request": {"line": "Agent 3 finished"}, "reply": {"text": "Noted"}}),
+        );
+        old_turn(
+            &connection,
+            "s-oneday",
+            3,
+            Some("Add the pricing table"),
+            serde_json::json!({}),
+        );
+        old_record(
+            &folder,
+            &connection,
+            "s-oneday",
+            &[("Fix the footer", "Footer fixed")],
+        );
+
+        super::initialize(&connection).unwrap();
+
+        assert_eq!(
+            shown(&connection, "s-oneday"),
+            [
+                "owner/one_turn/turn: Plan the course page",
+                "master/one_turn/turn: Planned it",
+                "engine/one_turn/turn: Agent 3 finished",
+                "master/one_turn/turn: Noted",
+                "owner/one_turn/turn: Add the pricing table",
+                "switch/live/backfill: Switched to Claude Code. The earlier turns were not handed over to it.",
+                "owner/live/record: Fix the footer",
+                "master/live/record: Footer fixed",
+            ]
+        );
+        let messages = super::stored(&connection, "s-oneday").unwrap();
+        assert_eq!(
+            super::owed(
+                &messages,
+                super::Runner {
+                    mode: super::MasterMode::Live,
+                    harness: "claude-code"
+                }
+            )
+            .as_deref(),
+            Some("the one-turn master (Claude)")
+        );
+    }
+
+    /// The move into the store is done once: a second engine start, and a second look at
+    /// the same session, add no row and change none.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_engine_start_stores_no_message_twice() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-twice", "codex");
+        old_turn(
+            &connection,
+            "s-twice",
+            1,
+            Some("Ship it"),
+            serde_json::json!({"reply": {"text": "Shipped"}}),
+        );
+        old_record(
+            &folder,
+            &connection,
+            "s-twice",
+            &[("Check the logs", "Logs are clean")],
+        );
+        super::initialize(&connection).unwrap();
+        let first = shown(&connection, "s-twice");
+
+        super::initialize(&connection).unwrap();
+        super::absorb(&connection, "store-project", "s-twice").unwrap();
+
+        assert_eq!(first.len(), 5);
+        assert_eq!(shown(&connection, "s-twice"), first);
+    }
+
+    /// A switch an older engine recorded for the harness of the kept conversation is the
+    /// divider between the engine-run turns and that conversation, and it settles them: the
+    /// harness owes nothing more, while the one-turn master that runs next is owed the
+    /// terminal conversation.
+    #[cfg(unix)]
+    #[test]
+    fn a_recorded_switch_becomes_the_divider_and_settles_the_earlier_turns() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-settled", "rcli");
+        old_turn(
+            &connection,
+            "s-settled",
+            1,
+            Some("Draft the email"),
+            serde_json::json!({"reply": {"text": "Drafted"}}),
+        );
+        old_record(&folder, &connection, "s-settled", &[("Send it", "Sent")]);
+        connection
+            .execute(
+                "INSERT INTO team_session_switches(session,project,harness,mode,created_ms)
+                 VALUES ('s-settled','store-project','claude','carry',1)",
+                [],
+            )
+            .unwrap();
+
+        super::initialize(&connection).unwrap();
+
+        let divider = format!(
+            "switch/live/switch: {}",
+            super::switched_note("Claude Code", crate::team::SwitchMode::Carry)
+        );
+        assert_eq!(
+            shown(&connection, "s-settled"),
+            [
+                "owner/one_turn/turn: Draft the email",
+                "master/one_turn/turn: Drafted",
+                divider.as_str(),
+                "owner/live/record: Send it",
+                "master/live/record: Sent",
+            ]
+        );
+        let messages = super::stored(&connection, "s-settled").unwrap();
+        let next = |mode, harness| super::owed(&messages, super::Runner { mode, harness });
+        assert_eq!(next(super::MasterMode::Live, "claude-code"), None);
+        assert_eq!(
+            next(super::MasterMode::OneTurn, "rcli").as_deref(),
+            Some("claude-code")
+        );
+    }
+
+    /// A kept record that can no longer be read loses no turn from the session's count: the
+    /// terminal turns an older engine counted are stored as owner rows without text, with
+    /// the newest line it kept as the master's.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_keeps_the_counted_turns_as_rows_without_text() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-lost", "claude");
+        old_record(&folder, &connection, "s-lost", &[("Deploy", "Deployed")]);
+        std::fs::remove_file(
+            folder
+                .path()
+                .join("4f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f.jsonl"),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_owner_turns(session,project,turns,last_line)
+                 VALUES ('s-lost','store-project',3,'Deployed')",
+                [],
+            )
+            .unwrap();
+
+        super::initialize(&connection).unwrap();
+
+        assert_eq!(
+            shown(&connection, "s-lost"),
+            [
+                "owner/live/counter: -",
+                "owner/live/counter: -",
+                "owner/live/counter: -",
+                "master/live/counter: Deployed",
+            ]
+        );
+    }
+
+    /// A record shows only its newest part, so turns an older engine counted beyond it are
+    /// kept as owner rows without text before the record's messages, and the session's
+    /// count of turns does not drop.
+    #[cfg(unix)]
+    #[test]
+    fn turns_counted_beyond_the_record_are_kept_as_rows_without_text() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-counted", "claude");
+        old_record(
+            &folder,
+            &connection,
+            "s-counted",
+            &[("Rename it", "Renamed")],
+        );
+        connection
+            .execute(
+                "INSERT INTO session_owner_turns(session,project,turns,last_line)
+                 VALUES ('s-counted','store-project',3,'Renamed')",
+                [],
+            )
+            .unwrap();
+
+        super::initialize(&connection).unwrap();
+
+        assert_eq!(
+            shown(&connection, "s-counted"),
+            [
+                "owner/live/counter: -",
+                "owner/live/counter: -",
+                "owner/live/record: Rename it",
+                "master/live/record: Renamed",
+            ]
+        );
+    }
+
+    /// A handoff the engine typed into a terminal to carry a conversation over is not
+    /// stored as something the owner said; the master's answer to it and the owner's own
+    /// messages are.
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_the_engine_typed_is_not_stored_as_the_owner_s_words() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-seeded", "claude");
+        old_record(
+            &folder,
+            &connection,
+            "s-seeded",
+            &[
+                (
+                    "The owner switched this conversation's master from Codex to you. Its earlier turns, newest first:\n\nOwner: hello",
+                    "Understood",
+                ),
+                ("Carry on", "Carrying on"),
+            ],
+        );
+
+        super::initialize(&connection).unwrap();
+
+        assert_eq!(
+            shown(&connection, "s-seeded"),
+            [
+                "master/live/record: Understood",
+                "owner/live/record: Carry on",
+                "master/live/record: Carrying on",
+            ]
+        );
     }
 }
