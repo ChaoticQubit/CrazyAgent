@@ -358,6 +358,10 @@ async fn a_test_engine_dropped_without_a_stop_leaves_no_tmux_server() {
     );
 }
 
+/// A secret typed at a hidden prompt and a typed command line never reach the engine
+/// database. The row waits for the shell's next prompt before it types the visible line: a
+/// shell without line editing of its own (dash, `/bin/sh` on Ubuntu) shows typed keys only
+/// through the terminal's echo, which is off until the hidden prompt's command list ends.
 #[tokio::test(flavor = "multi_thread")]
 async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
     let mut sub = SubAgent::start().await;
@@ -372,11 +376,13 @@ async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
         .unwrap();
     let mut seen = Vec::new();
     assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    seen.clear();
     control
         .input(b"stty -echo; read secret; stty echo\r".to_vec())
         .await
         .unwrap();
     control.input(b"hunter2-hidden\r".to_vec()).await.unwrap();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
     control
         .input(b"echo typed-line-shown\r".to_vec())
         .await

@@ -134,8 +134,11 @@ fn about() -> Wizard {
     wizard
 }
 
-/// Draws each wizard step at both reviewed sizes. The review step shows the level a new
-/// project starts at, set here, since Linux preselects another one. Output: frames by id.
+/// Draws every wizard frame the design reviews. Takes nothing. Returns the frames by id. The
+/// review frames show the access level the wizard preselects by itself, and the row checks
+/// that level first. Where the design's level cannot run yet, as on Linux, the wizard
+/// preselects the default level instead: the row checks that too and only then sets the
+/// design's level, so one reviewed frame serves every system.
 fn wizard_frames() -> Vec<(String, String)> {
     let look = Look::plain();
     let mut drawn = Vec::new();
@@ -170,7 +173,12 @@ fn wizard_frames() -> Vec<(String, String)> {
     draw("wiz-team-80", &wizard, 80, 24);
     wizard.done[Step::Team.index()] = true;
     wizard.go(Step::Review);
-    wizard.access = AgentAccess::NEW_PROJECT;
+    if AgentAccess::NEW_PROJECT.unavailable().is_none() {
+        assert_eq!(wizard.access, AgentAccess::NEW_PROJECT);
+    } else {
+        assert_eq!(wizard.access, AgentAccess::default());
+        wizard.access = AgentAccess::NEW_PROJECT;
+    }
     draw("wiz-review-120", &wizard, 120, 36);
     draw("wiz-review-80", &wizard, 80, 24);
     drawn

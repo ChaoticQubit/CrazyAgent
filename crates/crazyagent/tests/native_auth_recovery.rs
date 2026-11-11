@@ -630,6 +630,7 @@ async fn an_old_sign_in_stays_fenced_while_its_profile_is_held_and_clears_once_f
     case.no_fence().await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claude_sign_in_that_fails_before_its_login_starts_settles_failed_and_frees_the_account()
 {

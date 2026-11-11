@@ -845,6 +845,12 @@ fallback_allowed = false
             .expect("real master paging setup or readback failed");
     }
 
+    /// Sends one more owner message than a page holds, stopping each turn before the next,
+    /// then reads the turns back in two pages and checks a cursor from before a later turn is
+    /// refused. In this fixture every turn also ends by itself, blocked for a missing
+    /// profile, and a blocked turn can no longer be cancelled: a cancel that loses that race
+    /// is refused, and the turn then reads Blocked, not Cancelled. Input: the engine's owner
+    /// root. Output: Ok, or the setup or readback step that failed.
     async fn real_turn_pages_flow(root: &Path) -> Result<(), String> {
         let mut observer =
             OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
@@ -899,6 +905,7 @@ fallback_allowed = false
         let session_id = session.session_id.as_str();
         let count = u64::from(PAGE_SIZE) + 1;
         let mut ids = Vec::new();
+        let mut phases = Vec::new();
         for round in 0..count {
             let sent = bridge
                 .submit_master(
@@ -919,9 +926,21 @@ fallback_allowed = false
                 )
                 .await
                 .map_err(|error| error.code)?;
-            assert_eq!(stopped.outcome, ActionOutcome::Applied);
+            phases.push(match stopped.outcome {
+                ActionOutcome::Applied => MasterTurnPhase::Cancelled,
+                ActionOutcome::Rejected => {
+                    assert_eq!(
+                        stopped.rejection.as_deref(),
+                        Some("master_turn_not_current"),
+                        "turn {round}"
+                    );
+                    MasterTurnPhase::Blocked
+                }
+                other => panic!("stopping turn {round} ended {other:?}"),
+            });
             ids.push(sent.intent.operation_id);
         }
+        assert_eq!(phases.len(), ids.len());
         let first = bridge
             .master_turns(&ticket, session_id, None)
             .await
@@ -946,9 +965,9 @@ fallback_allowed = false
             all.iter().map(|turn| turn.id.as_str()).collect::<Vec<_>>(),
             ids.iter().map(String::as_str).collect::<Vec<_>>()
         );
-        assert!(
-            all.iter()
-                .all(|turn| turn.phase == MasterTurnPhase::Cancelled)
+        assert_eq!(
+            all.iter().map(|turn| turn.phase).collect::<Vec<_>>(),
+            phases
         );
         let later = bridge
             .submit_master(

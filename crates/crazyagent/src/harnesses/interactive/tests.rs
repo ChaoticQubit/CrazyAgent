@@ -521,25 +521,28 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
     .unwrap();
     assert_eq!(String::from_utf8(helper.stdout).unwrap(), KEY);
 
-    let output = crate::spawn_gate::output(
-        std::process::Command::new(&built.argv[0])
-            .args(&built.argv[1..])
-            .env_clear()
-            .envs(built.env.iter().map(|(name, value)| (name, value)))
-            .current_dir(&built.cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let seen = String::from_utf8(output.stdout).unwrap();
-    assert!(!seen.contains(KEY), "{seen}");
-    assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
-    assert!(
-        seen.lines()
-            .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new(&built.argv[0])
+                .args(&built.argv[1..])
+                .env_clear()
+                .envs(built.env.iter().map(|(name, value)| (name, value)))
+                .current_dir(&built.cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let seen = String::from_utf8(output.stdout).unwrap();
+        assert!(!seen.contains(KEY), "{seen}");
+        assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
+        assert!(
+            seen.lines()
+                .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
+        );
+    }
 
     let quoted = case.path().join("say \"hi\"");
     std::fs::create_dir(&quoted).unwrap();

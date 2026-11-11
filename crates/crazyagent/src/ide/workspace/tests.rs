@@ -8,7 +8,9 @@ use std::process::{Command, Stdio};
 const PROJECT: &str = "alpha";
 
 /// Records a project with a stored setup whose folder is `folder`, the rows a project
-/// created through setup has, the project row through the engine's own create path.
+/// created through setup has, the project row through the engine's own create path. The
+/// write takes the write lock at its start, so beside an engine still writing it waits its
+/// turn; a lock taken only at the first write fails at once when another writer got in first.
 /// Inputs: the engine database, the project id and its folder.
 pub(crate) fn add_project(db: &Connection, project: &str, folder: &Path) {
     let setup = StoredSetup {
@@ -35,7 +37,8 @@ pub(crate) fn add_project(db: &Connection, project: &str, folder: &Path) {
         name: setup.name.clone(),
         repositories: vec![],
     };
-    let tx = db.unchecked_transaction().unwrap();
+    let tx =
+        rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate).unwrap();
     assert_eq!(
         crate::storage::create_project(&tx, &setup.project_id, &spec).unwrap(),
         Outcome::Applied
