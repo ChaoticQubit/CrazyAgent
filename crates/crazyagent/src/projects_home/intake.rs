@@ -6,7 +6,7 @@ use std::fs;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 /// How many entries and folder levels a copy, its check or a size read goes through
 /// before it stops with `home_copy_too_large`.
@@ -29,6 +29,11 @@ pub const FORCED_COPY_BOUNDS: CopyBounds = CopyBounds {
 const ENTRIES_MAX: u64 = COPY_BOUNDS.entries;
 const DEPTH_MAX: usize = COPY_BOUNDS.depth;
 const CHUNK_BYTES: usize = 64 * 1024;
+/// How long before a move's check a source entry may have been modified for its stamp to
+/// count as unproven: longer than a coarse clock tick (up to 10 ms on Linux) and than the
+/// 2 second modify times of FAT volumes, within which a later same-size write keeps the
+/// stamp (DEC-137 G2).
+const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
 
@@ -187,15 +192,17 @@ pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError
 fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
     let verified = copy_into(source, destination, Copying::Exact, bounds)?;
     make_writable(source).map_err(|_| source_left(1))?;
-    remove_verified(source, &verified, bounds)
+    remove_verified(source, destination, &verified, bounds)
 }
 
 /// The source files and links a move's check found equal in the copy, each under a hash of
-/// its path with the stamp it had when checked. The move deletes only entries still carrying
-/// that stamp, so a file iCloud syncs in or changes after the check stays. Two paths sharing
-/// a hash keep one stamp, so the other entry stays too.
+/// its path with the stamp it had when checked and whether that stamp is unproven, its
+/// modify time being within [`STAMP_SETTLE`] of the check. The move deletes only entries
+/// still carrying that stamp, so a file iCloud syncs in or changes after the check stays;
+/// an entry with an unproven stamp must also still equal its landed copy. Two paths
+/// sharing a hash keep one stamp, so the other entry stays too.
 #[derive(Debug, Default)]
-struct Verified(HashMap<u64, Stamp>);
+struct Verified(HashMap<u64, (Stamp, bool)>);
 
 impl Verified {
     fn key(path: &Path) -> u64 {
@@ -205,23 +212,56 @@ impl Verified {
     fn record(&mut self, path: &Path, metadata: &fs::Metadata) {
         assert!(!metadata.is_dir() || metadata.file_type().is_symlink());
         if let Some(checked) = stamp(metadata) {
-            self.0.insert(Self::key(path), checked);
+            let unproven = checked.modified_since(SystemTime::now(), STAMP_SETTLE);
+            self.0.insert(Self::key(path), (checked, unproven));
         }
     }
 
-    fn holds(&self, path: &Path, metadata: &fs::Metadata) -> bool {
+    /// Tells whether a source entry may be deleted: it still carries the stamp the check
+    /// saw, and when that stamp is unproven its bytes, or its target for a link, still
+    /// equal the landed copy's, read now. Inputs: the entry, its own metadata with links
+    /// not followed, the source folder and the landed folder. Output: the answer; false
+    /// when anything cannot be read.
+    fn removable(
+        &self,
+        path: &Path,
+        metadata: &fs::Metadata,
+        source: &Path,
+        landed: &Path,
+    ) -> bool {
         assert!(!metadata.is_dir() || metadata.file_type().is_symlink());
-        stamp(metadata).is_some_and(|now| self.0.get(&Self::key(path)) == Some(&now))
+        assert!(source.is_absolute());
+        let Some((checked, unproven)) = self.0.get(&Self::key(path)) else {
+            return false;
+        };
+        if stamp(metadata) != Some(*checked) {
+            return false;
+        }
+        if !unproven {
+            return true;
+        }
+        let Ok(below) = path.strip_prefix(source) else {
+            return false;
+        };
+        let copy = landed.join(below);
+        if metadata.file_type().is_symlink() {
+            return fs::read_link(path)
+                .is_ok_and(|target| fs::read_link(&copy).is_ok_and(|kept| kept == target));
+        }
+        fs::symlink_metadata(&copy).is_ok_and(|kept| kept.is_file())
+            && same_bytes(path, &copy).unwrap_or(false)
     }
 }
 
-/// Deletes the files and links of a moved source that still carry the stamp its check saw,
-/// then each folder left empty, deepest first. An entry the check never saw or that changed
-/// since, such as a file iCloud synced in, stays with its folders.
-/// Inputs: the source, what the check matched and the bounds. Output: Ok once the source is
-/// gone, else `home_move_source_left`, logged with the count of entries kept.
+/// Deletes the files and links of a moved source that still carry the stamp its check saw
+/// ([`Verified::removable`]), then each folder left empty, deepest first. An entry the
+/// check never saw or that changed since, such as a file iCloud synced in or one rewritten
+/// within the same clock tick, stays with its folders. Inputs: the source, the landed copy,
+/// what the check matched and the bounds. Output: Ok once the source is gone, else
+/// `home_move_source_left`, logged with the count of entries kept.
 fn remove_verified(
     source: &Path,
+    landed: &Path,
     verified: &Verified,
     bounds: CopyBounds,
 ) -> Result<(), EngineError> {
@@ -252,7 +292,9 @@ fn remove_verified(
             if inner && !super::icloud::dataless(&metadata) && depth < bounds.depth {
                 folders.push(path.clone());
                 stack.push((path, depth + 1));
-            } else if inner || !verified.holds(&path, &metadata) || fs::remove_file(&path).is_err()
+            } else if inner
+                || !verified.removable(&path, &metadata, source, landed)
+                || fs::remove_file(&path).is_err()
             {
                 kept += 1;
             }
