@@ -328,3 +328,30 @@ fn a_heading_mark_naming_a_hidden_folder_path_or_a_secret_like_file_never_reache
     assert!(!prompt.contains("credentials"), "{prompt}");
     assert!(!prompt.contains("client-x"), "{prompt}");
 }
+
+/// A mapping answer that names all six setup kinds with files keeps the five research kinds
+/// the prompt offers and no roadmap planning group, so the onboarding thread goes on.
+#[test]
+fn an_answer_naming_all_six_setup_kinds_keeps_the_five_research_kinds_and_no_planning_group() {
+    let named = |kind: &ResearchKind| serde_json::json!({"kind": kind.name(), "files": [format!("docs/{}.md", kind.name())]});
+    let items: Vec<serde_json::Value> = ResearchKind::CHOICES.iter().map(named).collect();
+    assert_eq!(items.len(), 6);
+    let found = research(&serde_json::Value::Array(items));
+    let kinds: Vec<ResearchKind> = found.iter().map(|known| known.kind).collect();
+    assert_eq!(kinds, ResearchKind::ALL);
+    for known in &found {
+        assert_eq!(known.files, [format!("docs/{}.md", known.kind.name())]);
+    }
+    let planning = serde_json::json!([{"kind": "roadmap_planning", "files": ["docs/next.md"]}]);
+    assert!(research(&planning).is_empty());
+    let twice = serde_json::json!([
+        {"kind": " market_research ", "files": ["docs/a.md"]},
+        {"kind": "roadmap_planning", "files": ["docs/next.md"]},
+        {"kind": "market_research", "files": ["docs/b.md"]},
+        {"kind": "made_up", "files": ["docs/c.md"]}
+    ]);
+    let merged = research(&twice);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].kind, ResearchKind::MarketResearch);
+    assert_eq!(merged[0].files, ["docs/a.md", "docs/b.md"]);
+}

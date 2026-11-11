@@ -476,6 +476,7 @@ pub(super) fn shown(reports: &[Report]) -> Vec<String> {
             Report::Ended { problem } => format!("Ended problem={problem:?}"),
             Report::LeftRunning => "LeftRunning".to_owned(),
             Report::Turn { end, text } => format!("Turn end={end:?} text={:?}", cut(text)),
+            Report::NoTurn => "NoTurn".to_owned(),
             Report::Own { end, text } => format!("Own end={end:?} text={:?}", cut(text)),
             Report::Conversation(_) => "Conversation".to_owned(),
             Report::ResumeRefused => "ResumeRefused".to_owned(),

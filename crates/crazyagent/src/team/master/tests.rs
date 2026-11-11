@@ -297,6 +297,110 @@ fn typed_until(file: &Path, wanted: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Starts the fixture's live master as an app that reads keys, shows `screen` and writes
+/// what it is typed to a file, then drops an open turn of its as none. Takes the fixture,
+/// its host and the screen as a `printf` format. Returns the file.
+fn dropped_turn_on(fixture: &Fixture, host: &dyn Host, screen: &str) -> PathBuf {
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004h{screen}'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let master = AgentId::team(MASTER).unwrap();
+    host.spawn(&master, &command).unwrap();
+    reads_keys(host, &master);
+    fixture.live(Some(MASTER));
+    fixture.set("turn_open=1");
+    turn_dropped(&fixture.connection, MASTER).unwrap();
+    typed
+}
+
+/// The agents whose engine input a dropped turn still holds. Takes the fixture. Returns
+/// how many.
+fn input_holds(fixture: &Fixture) -> i64 {
+    fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_master_input_holds", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// OB1R2-F1: a dropped turn closes for status whatever the screen shows, and holds engine
+/// input on a screen that is no idle prompt, so nothing is typed into what may be a dialog.
+/// A turn that starts in the pane, as when the owner types, ends the hold.
+#[test]
+fn a_dropped_turn_on_an_unknown_screen_is_no_running_turn_and_holds_engine_input() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = dropped_turn_on(&fixture, host.as_ref(), " Press Enter to continue\\r\\n");
+    let input = |now: i64| {
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            "hello",
+            now,
+        )
+    };
+
+    assert!(!turn_running(&fixture.connection, &project).unwrap());
+    assert_eq!(input_holds(&fixture), 1);
+    assert_eq!(input(NOW), Err(InputRefused::Busy));
+    assert_eq!(input(NOW + 3_600_000), Err(InputRefused::Busy));
+    assert_eq!(input_holds(&fixture), 1, "the hold lasts on such a screen");
+    assert_eq!(std::fs::read(&typed).unwrap_or_default(), b"");
+
+    turn_started(&fixture.connection, MASTER).unwrap();
+    assert_eq!(input_holds(&fixture), 0, "a turn that starts ends the hold");
+    fixture.set("turn_open=0");
+    assert_eq!(input(NOW), Ok(()));
+    let pasted = b"\x1b[200~hello\x1b[201~\r";
+    assert_eq!(typed_until(&typed, pasted), pasted);
+}
+
+/// OB1R2-F1: on a screen that shows the app's idle prompt, the hold a dropped turn left
+/// ends with the first engine input, which is typed.
+#[test]
+fn a_dropped_turn_on_an_idle_prompt_releases_engine_input() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = dropped_turn_on(
+        &fixture,
+        host.as_ref(),
+        "\u{203a} Ask Codex to do anything\\r\\n",
+    );
+
+    assert!(!turn_running(&fixture.connection, &project).unwrap());
+    assert_eq!(input_holds(&fixture), 1);
+    assert_eq!(
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            "hello",
+            NOW
+        ),
+        Ok(())
+    );
+    assert_eq!(input_holds(&fixture), 0);
+    let pasted = b"\x1b[200~hello\x1b[201~\r";
+    assert_eq!(typed_until(&typed, pasted), pasted);
+}
+
 #[test]
 fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing() {
     let mut fixture = Fixture::new();
