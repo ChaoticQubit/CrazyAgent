@@ -53,6 +53,12 @@ const DRAFT_BYTES_MAX: u64 = 64 * 1024;
 const LAYOUT_SETUP: &str = "setup";
 const DRAFT_FILE: &str = "draft.json";
 const OVERVIEW_FILE: &str = "overview.md";
+/// The most roadmap files one mapping answer links.
+#[cfg(unix)]
+const ROADMAP_FILES_MAX: usize = 4;
+/// The context every question the setup mapping raises carries for the owner.
+#[cfg(unix)]
+pub(crate) const SETUP_QUESTION_CONTEXT: &str = "Raised by the setup mapping when the project was added. Your answer goes to the project's master once.";
 
 /// The draft onboarding keeps for one project: the proposed name, the setup
 /// the owner confirms and the facts that have no setup field. It is also
@@ -66,8 +72,8 @@ pub(crate) struct Drafted {
     pub facts: MappingFacts,
 }
 
-/// The research and documents the mapping found, as the onboarding row's `mapping_found`
-/// column keeps them beside the draft.
+/// The research, documents and roadmap files the mapping found, as the onboarding row's
+/// `mapping_found` column keeps them beside the draft.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MappingFound {
@@ -75,6 +81,8 @@ struct MappingFound {
     research: Vec<FoundResearch>,
     #[serde(default)]
     documents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roadmap: Vec<String>,
 }
 
 /// Writes a draft's facts as engines up to 18.14 read them, the four lists only: their
@@ -95,25 +103,27 @@ fn facts_on_1814<S: serde::Serializer>(
     .serialize(serializer)
 }
 
-/// The onboarding row's `mapping_found` column for a draft: the research and documents its
-/// facts name, as JSON, or `None` when they name neither, so the row keeps what an earlier
-/// mapping found, as [`merge`] keeps an earlier map. Takes the draft. Returns the column.
+/// The onboarding row's `mapping_found` column for a draft: the research, documents and
+/// roadmap files its facts name, as JSON, or `None` when they name none, so the row keeps
+/// what an earlier mapping found, as [`merge`] keeps an earlier map. Takes the draft.
+/// Returns the column.
 pub(crate) fn found_column(drafted: &Drafted) -> Option<String> {
     let facts = &drafted.facts;
-    if facts.research.is_empty() && facts.documents.is_empty() {
+    if facts.research.is_empty() && facts.documents.is_empty() && facts.roadmap.is_empty() {
         return None;
     }
     serde_json::to_string(&MappingFound {
         research: facts.research.clone(),
         documents: facts.documents.clone(),
+        roadmap: facts.roadmap.clone(),
     })
     .ok()
 }
 
-/// Puts the research and documents from an onboarding row's `mapping_found` column back
-/// into a draft's facts read from the row. Takes the facts and the column, none when the
-/// mapping found nothing yet. Returns the decoding error for a column the engine did not
-/// write.
+/// Puts the research, documents and roadmap files from an onboarding row's `mapping_found`
+/// column back into a draft's facts read from the row. Takes the facts and the column, none
+/// when the mapping found nothing yet. Returns the decoding error for a column the engine
+/// did not write.
 pub(crate) fn restore_found(
     facts: &mut MappingFacts,
     column: Option<&str>,
@@ -122,6 +132,7 @@ pub(crate) fn restore_found(
         let found: MappingFound = serde_json::from_str(column)?;
         facts.research = found.research;
         facts.documents = found.documents;
+        facts.roadmap = found.roadmap;
     }
     Ok(())
 }
@@ -184,19 +195,32 @@ pub(crate) struct Evidence {
     pub ignores_unknown: bool,
 }
 
+/// What the local heading scan took a document for before any model read it: a roadmap
+/// planning versions, milestones or phases, research, or anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FoundKind {
+    Roadmap,
+    Research,
+    Other,
+}
+
 /// One of the project's own documents as the mapping reads it: its path below the
-/// folder with `/` between names, its size in bytes, the start of its text and whether
-/// that text was cut at its bound.
+/// folder with `/` between names, its size in bytes, the start of its text, whether
+/// that text was cut at its bound, what the local heading scan took it for and, for a
+/// roadmap, the milestone headings it found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Document {
     pub path: String,
     pub size: u64,
     pub text: String,
     pub cut: bool,
+    pub kind: FoundKind,
+    pub marks: Vec<String>,
 }
 
-/// What the agent's answer held: its overview text and the draft fields it
-/// proposed. Every field is empty when the answer had no readable JSON block.
+/// What the agent's answer held: its overview text, the draft fields it proposed, the
+/// questions it left for the owner and whether it gave its roadmap files as a list, an empty
+/// list included. Every field is empty or false when the answer had no readable JSON block.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Answer {
     pub overview: String,
@@ -204,6 +228,8 @@ pub(crate) struct Answer {
     pub tech_stack: Vec<String>,
     pub platforms: Vec<Platform>,
     pub facts: MappingFacts,
+    pub questions: Vec<crate::questions::Ask>,
+    pub roadmap_answered: bool,
 }
 
 #[cfg(unix)]
@@ -219,6 +245,8 @@ struct Reply {
     entry_points: Vec<String>,
     research: serde_json::Value,
     documents: serde_json::Value,
+    roadmap: serde_json::Value,
+    questions: serde_json::Value,
 }
 
 /// Reads up to `max` bytes of the regular file at `path` as text, never
@@ -494,13 +522,20 @@ fn push_unique(list: &mut Vec<String>, value: &str) {
 
 /// The languages, build and test commands and entry points the manifests
 /// prove without any model, plus the tech stack entries they imply, with the
-/// documents the prompt shows as the only paths an answer may name. Takes the
-/// evidence and the project folder for a few existence checks.
+/// documents the prompt shows as the only paths an answer may name and those the local
+/// heading scan took for a roadmap. Takes the evidence and the project folder for a few
+/// existence checks.
 pub(crate) fn found_facts(evidence: &Evidence, repo: &Path) -> (MappingFacts, Vec<String>) {
     let mut facts = MappingFacts {
         shown: evidence
             .documents
             .iter()
+            .map(|document| document.path.clone())
+            .collect(),
+        shown_roadmap: evidence
+            .documents
+            .iter()
+            .filter(|document| document.kind == FoundKind::Roadmap)
             .map(|document| document.path.clone())
             .collect(),
         ..MappingFacts::default()
@@ -631,14 +666,20 @@ pub(crate) fn prompt(evidence: &Evidence, found: &MappingFacts) -> String {
         "{\"about\": \"one or two plain sentences on what the project is\", ",
         "\"tech_stack\": [], \"platforms\": [], \"languages\": [], ",
         "\"build_commands\": [], \"test_commands\": [], \"entry_points\": [], ",
-        "\"research\": [{\"kind\": \"competitor_research\", \"files\": []}], \"documents\": []}\n",
+        "\"research\": [{\"kind\": \"competitor_research\", \"files\": []}], \"documents\": [], ",
+        "\"roadmap\": [], \"questions\": []}\n",
         "```\n",
         "For platforms use only: website, mobile_app, desktop_app, cli, api_backend, other.\n",
         "Read the text of every project document below and decide from what it says, never ",
         "from its file name, what it covers; use the documents for about, tech_stack and ",
         "platforms too. Under research list each kind of research the documents already hold ",
         "with the files that hold it. Under documents list the other project documents, such ",
-        "as specs, plans and requirements. Name only files shown below with their text, ",
+        "as specs, plans and requirements. Under roadmap list the files that plan the ",
+        "project's versions, milestones or phases, whatever their name. Under questions list ",
+        "what you could not decide from the files as questions for the owner, each ",
+        "{\"question\", \"kind\": \"single\"|\"multi\"|\"text\", \"options\", \"recommended\"}: ",
+        "single or multi with 2 to 6 options and one recommended unless the answer is ",
+        "genuinely free text. Name only files shown below with their text, ",
         "exactly as their headings give them.\n",
     ));
     let kinds: Vec<&str> = crate::project_setup::ResearchKind::ALL
@@ -801,8 +842,14 @@ pub(crate) fn parse_answer(text: &str) -> Answer {
             entry_points: clean(&reply.entry_points),
             research: documents::research(&reply.research),
             documents: documents::paths(&reply.documents, crate::project_setup::DOCUMENTS_MAX),
-            shown: Vec::new(),
+            roadmap: documents::paths(&reply.roadmap, ROADMAP_FILES_MAX),
+            ..MappingFacts::default()
         },
+        questions: crate::questions::asks_from_json(
+            &serde_json::json!({ "questions": reply.questions }),
+            SETUP_QUESTION_CONTEXT,
+        ),
+        roadmap_answered: reply.roadmap.is_array(),
     }
 }
 
@@ -823,13 +870,14 @@ fn union(sources: &[&[String]], max: usize, bytes: usize) -> Vec<String> {
     merged
 }
 
-/// Fills only the gaps of `base` from the manifest facts and the agent's
-/// answer: a field the owner or an earlier onboarding already filled stays.
-/// The research and documents the answer names count only for files the prompt
-/// showed with their text; when any remain they replace the earlier map, else
-/// the earlier map stays. Takes the current draft, the answer, the found facts
-/// and stack. Returns a draft whose setup passes `ProjectSetup::validate`,
-/// research still off.
+/// Fills only the gaps of `base` from the manifest facts and the agent's answer: a field the
+/// owner or an earlier onboarding already filled stays. The research and documents the answer
+/// names count only for files the prompt showed with their text; when any remain they replace
+/// the earlier map, else the earlier map stays. The roadmap is the shown files of the answer's
+/// roadmap list, an empty list meaning none; only an answer without that list takes the first
+/// document the heading scan took for a roadmap, else keeps the earlier roadmap. Takes the
+/// current draft, the answer, the found facts and stack. Returns a draft whose setup passes
+/// `ProjectSetup::validate`, research still off.
 pub(crate) fn merge(
     base: &Drafted,
     answer: &Answer,
@@ -897,6 +945,18 @@ pub(crate) fn merge(
         merged.facts.research = research;
         merged.facts.documents = documents;
     }
+    let roadmap: Vec<String> = answer
+        .facts
+        .roadmap
+        .iter()
+        .filter(|path| found.shown.contains(path))
+        .cloned()
+        .collect();
+    merged.facts.roadmap = match (answer.roadmap_answered, found.shown_roadmap.first()) {
+        (true, _) => roadmap,
+        (false, Some(scanned)) => vec![scanned.clone()],
+        (false, None) => base.facts.roadmap.clone(),
+    };
     assert!(merged.facts.shown.is_empty());
     assert!(merged.draft.validate().is_ok());
     assert_eq!(merged.draft.research, base.draft.research);

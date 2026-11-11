@@ -505,6 +505,7 @@ impl GeneralEdit {
         }
         Some(SetupAction::Update {
             project_id: setup.project_id.clone(),
+            kept: None,
             expected_revision: self.revision,
             name: (name != setup.name).then(|| name.to_owned()),
             setup: ProjectSetup {

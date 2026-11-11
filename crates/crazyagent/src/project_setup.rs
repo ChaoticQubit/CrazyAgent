@@ -810,6 +810,8 @@ pub enum SetupAction {
         expected_revision: u64,
         name: Option<String>,
         setup: ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<String>>,
     },
     Remove {
         project_id: ProjectId,
@@ -906,7 +908,9 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetAgentPolicy { policy, .. } => policy.validate().map_err(failure),
-            Self::Update { name, setup, .. } => {
+            Self::Update {
+                name, setup, kept, ..
+            } => {
                 let renamed = name.as_ref().map(|name| ProjectSpec {
                     name: name.clone(),
                     repositories: Vec::new(),
@@ -915,6 +919,14 @@ impl SetupAction {
                     return Err(failure("project_spec_bounds"));
                 }
                 if !setup.documents.is_empty() {
+                    return Err(failure("project_setup_bounds"));
+                }
+                if kept.as_ref().is_some_and(|kept| {
+                    kept.len() > links::LINKS_MAX
+                        || kept
+                            .iter()
+                            .any(|path| path.len() > links::LINK_PATH_BYTES_MAX)
+                }) {
                     return Err(failure("project_setup_bounds"));
                 }
                 setup.validate()
@@ -1907,6 +1919,7 @@ pub(crate) fn execute(
             expected_revision,
             name,
             setup,
+            kept,
         } => update(
             tx,
             config,
@@ -1914,6 +1927,7 @@ pub(crate) fn execute(
             *expected_revision,
             name.as_deref(),
             setup,
+            kept.as_deref(),
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
@@ -2086,9 +2100,12 @@ fn rejected(code: &str) -> Outcome {
 }
 
 /// Changes an existing project's name, description, stack, platforms, research, pool and team.
+/// With `kept`, the files the setup mapping found that the owner kept become the project's
+/// links, replacing earlier ones, and no research job is queued for a kind they cover.
 /// Takes the transaction, configuration, project, the setup revision the owner edited, an
-/// optional new name and the new setup; documents keep their own add and delete actions.
-/// Returns Applied, or a plain rejection such as `stale_revision` after a concurrent change.
+/// optional new name, the new setup and the kept paths, none to leave the links alone;
+/// documents keep their own add and delete actions. Returns Applied, or a plain rejection
+/// such as `stale_revision` after a concurrent change.
 fn update(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2096,6 +2113,7 @@ fn update(
     expected_revision: u64,
     name: Option<&str>,
     setup: &ProjectSetup,
+    kept: Option<&[String]>,
 ) -> Result<Outcome, EngineError> {
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
@@ -2132,6 +2150,16 @@ fn update(
         .collect();
     stored.platforms = setup.platforms.clone();
     stored.research = setup.research.clone();
+    if let Some(kept) = kept {
+        let linked = crate::onboarding::found_links(tx, project_id, kept)?;
+        links::set(tx, project_id, &linked)?;
+        stored.research.retain(|kind| {
+            !linked.iter().any(|link| match link.kind {
+                links::LinkKind::Roadmap => *kind == ResearchKind::RoadmapPlanning,
+                links::LinkKind::Research(found) => found == *kind,
+            })
+        });
+    }
     stored.pool = setup.pool.clone();
     if let Some(team) = &setup.team {
         stored.team = team.clone();

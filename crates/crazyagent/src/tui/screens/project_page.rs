@@ -1179,6 +1179,7 @@ impl ProjectPage {
         }
         let action = SetupAction::Update {
             project_id: setup.project_id.clone(),
+            kept: None,
             expected_revision: setup.revision,
             name: None,
             setup: ProjectSetup {

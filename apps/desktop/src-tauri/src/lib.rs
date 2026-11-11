@@ -1926,11 +1926,12 @@ async fn desktop_update_project_setup(
     name: Option<String>,
     revision: Option<u64>,
     generation: u64,
+    kept: Option<Vec<String>>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .update_project_setup(&id, setup, name, revision, generation)
+        .update_project_setup(&id, setup, name, revision, kept, generation)
         .await
 }
 

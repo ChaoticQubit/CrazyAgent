@@ -28,6 +28,8 @@ const ABOUT_CHARS_MAX: usize = 2_000;
 const STACK_CHARS_MAX: usize = 1_000;
 const STACK_ITEMS_MAX: usize = 32;
 const PLATFORMS_PER_ROW: usize = 3;
+const LINKED_LABEL: &str = "Use these files";
+const LINKED_NOTE: &str = "CrazyAgent reads them from your repo; edits go to those files.";
 const GRAPH_OFF: &str = "Graphify is off in Setup, so no code graph is built.";
 const GRAPH_MISSING: &str =
     "Graphify isn't installed, so no code graph is built. Install it in Setup.";
@@ -39,16 +41,18 @@ enum Focus {
     Stack,
     Platforms,
     Roadmap,
+    Linked,
     Confirm,
 }
 
 impl Focus {
-    const ORDER: [Focus; 6] = [
+    const ORDER: [Focus; 7] = [
         Self::Name,
         Self::About,
         Self::Stack,
         Self::Platforms,
         Self::Roadmap,
+        Self::Linked,
         Self::Confirm,
     ];
 
@@ -76,6 +80,7 @@ struct Review {
     platforms: Vec<Platform>,
     platform: usize,
     roadmap: bool,
+    linked: bool,
     focus: Focus,
     revision: Load<u64>,
     move_left: bool,
@@ -90,7 +95,7 @@ impl Review {
         let mut stack = TextField::new("Tech stack", STACK_CHARS_MAX).note("Separate with commas.");
         stack.set(&onboarding.draft.tech_stack.join(", "));
         let platforms = onboarding.draft.platforms.clone();
-        let roadmap = !onboarding.finished
+        let roadmap = (!onboarding.finished && onboarding.facts.roadmap.is_empty())
             || onboarding
                 .draft
                 .research
@@ -103,21 +108,45 @@ impl Review {
             platforms,
             platform: 0,
             roadmap,
+            linked: true,
             focus: Focus::Name,
             revision: Load::Idle,
             move_left: false,
         }
     }
 
-    /// Moves the focus on, past the roadmap toggle once the setup is saved, since planning
-    /// after research belongs to the first setup. Takes the direction. Returns the focus.
+    /// Moves the focus on, past the roadmap and linked files toggles once the setup is
+    /// saved, since planning after research and linking belong to the first setup, and past
+    /// the linked files toggle when the mapping found no file. Takes the direction. Returns
+    /// the focus.
     fn step(&self, forward: bool) -> Focus {
-        let next = self.focus.step(forward);
-        if next == Focus::Roadmap && self.onboarding.finished {
-            next.step(forward)
-        } else {
-            next
+        let mut next = self.focus.step(forward);
+        while self.skipped(next) {
+            next = next.step(forward);
         }
+        next
+    }
+
+    fn skipped(&self, focus: Focus) -> bool {
+        match focus {
+            Focus::Roadmap => self.onboarding.finished,
+            Focus::Linked => self.onboarding.finished || self.found().is_empty(),
+            _ => false,
+        }
+    }
+
+    /// The repository files the mapping found to link, its roadmap files first, each once
+    /// and at most [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX). Returns the paths.
+    fn found(&self) -> Vec<String> {
+        let facts = &self.onboarding.facts;
+        let research = facts.research.iter().flat_map(|found| found.files.iter());
+        let mut found: Vec<String> = Vec::new();
+        for path in facts.roadmap.iter().chain(research) {
+            if found.len() < crate::project_setup::links::LINKS_MAX && !found.contains(path) {
+                found.push(path.clone());
+            }
+        }
+        found
     }
 
     fn stack(&self) -> Vec<String> {
@@ -175,11 +204,15 @@ impl Review {
         if self.roadmap {
             setup.research.push(ResearchKind::RoadmapPlanning);
         }
+        let found = self.found();
+        let kept = (!self.onboarding.finished && !found.is_empty())
+            .then(|| if self.linked { found } else { Vec::new() });
         SetupAction::Update {
             project_id: self.onboarding.project_id.clone(),
             expected_revision: revision,
             name: (name != self.onboarding.name).then_some(name),
             setup,
+            kept,
         }
     }
 }
@@ -799,16 +832,42 @@ impl OnboardingPage {
                     .map(|line| styled(line, Role::Muted, theme)),
             );
         }
+        let linking = !review.onboarding.finished && review.linked;
+        let mut found_lines = Vec::new();
+        if !facts.roadmap.is_empty() {
+            found_lines.push(format!(
+                "Roadmap found: {}",
+                sanitize(&facts.roadmap.join(", "))
+            ));
+        }
         for found in &facts.research {
             let files = sanitize(&found.files.join(", "));
+            let held = if linking {
+                "Linked"
+            } else {
+                "Already in the repo"
+            };
+            found_lines.push(format!("{} - {held}: {files}", found.kind.label()));
+        }
+        for text in found_lines {
             lines.extend(
-                wrap(
-                    &format!("{} - Already in the repo: {files}", found.kind.label()),
-                    limit,
-                )
-                .into_iter()
-                .map(|line| styled(line, Role::Muted, theme)),
+                wrap(&text, limit)
+                    .into_iter()
+                    .map(|line| styled(line, Role::Muted, theme)),
             );
+        }
+        if !review.onboarding.finished && !review.found().is_empty() {
+            lines.extend(
+                wrap(LINKED_NOTE, limit)
+                    .into_iter()
+                    .map(|line| styled(line, Role::Muted, theme)),
+            );
+            let text = checkbox(review.linked, LINKED_LABEL);
+            lines.push(Line::from(if editing && review.focus == Focus::Linked {
+                Span::styled(text, theme.selection)
+            } else {
+                Span::raw(text)
+            }));
         }
         if !facts.documents.is_empty() {
             lines.push(Line::default());
@@ -863,7 +922,7 @@ impl Screen for OnboardingPage {
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
                 ],
-                Focus::Roadmap => vec![
+                Focus::Roadmap | Focus::Linked => vec![
                     hint("Space", "Turn on or off"),
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
@@ -962,6 +1021,7 @@ impl Screen for OnboardingPage {
                     (_, Key::Tab | Key::Enter) => review.focus = review.step(true),
                     (_, Key::BackTab) => review.focus = review.step(false),
                     (Focus::Roadmap, Key::Char(' ')) => review.roadmap = !review.roadmap,
+                    (Focus::Linked, Key::Char(' ')) => review.linked = !review.linked,
                     (Focus::Platforms, Key::Left) => {
                         review.platform = review.platform.saturating_sub(1);
                     }

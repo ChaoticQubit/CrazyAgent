@@ -1084,3 +1084,137 @@ fn only_a_linked_item_carries_the_linked_field_on_the_wire() {
     assert!(wire.ends_with(r#","linked":true}"#), "{wire}");
     assert_eq!(serde_json::from_str::<ContextItem>(&wire).unwrap(), linked);
 }
+
+#[test]
+fn confirming_a_draft_links_the_found_roadmap_and_research_and_queues_no_job_for_them() {
+    const ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
+    const RIVALS: &str = "docs/research-competitors.md";
+    let root = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir_all(folder.join(".crazyagent/context")).unwrap();
+    let mut connection = database(&base);
+    crate::onboarding::initialize(&connection).unwrap();
+    let project = ProjectId::new("found-project").unwrap();
+    let found = serde_json::json!({
+        "research": [
+            {"kind": "competitor_research", "files": [RIVALS, ".crazyagent/context/brief.md"]},
+            {"kind": "market_research", "files": ["docs/market.md"]}
+        ],
+        "documents": [],
+        "roadmap": [ROADMAP]
+    });
+    connection
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,
+                created_ms,updated_ms,mapping_found)
+             VALUES (?1,?2,'pool-managed','done','done','{}',1,1,?3)",
+            params![
+                project.as_str(),
+                folder.to_str().unwrap(),
+                found.to_string()
+            ],
+        )
+        .unwrap();
+    let stored = StoredSetup {
+        project_id: project.clone(),
+        name: "found".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 2,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups(project,body) VALUES (?1,?2)",
+            params![project.as_str(), serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    let confirm = |revision: u64, kept: Option<Vec<String>>| SetupAction::Update {
+        project_id: project.clone(),
+        expected_revision: revision,
+        name: None,
+        setup: ProjectSetup {
+            about: "Finds papers.".into(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![
+                ResearchKind::CompetitorResearch,
+                ResearchKind::MarketResearch,
+                ResearchKind::RoadmapPlanning,
+            ],
+            pool: None,
+            team: None,
+            documents: vec![],
+        },
+        kept,
+    };
+    let kept = vec![
+        ROADMAP.to_owned(),
+        RIVALS.to_owned(),
+        ".crazyagent/context/brief.md".to_owned(),
+    ];
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &config(), &confirm(2, Some(kept)), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        links::list(&tx, &project).unwrap(),
+        vec![
+            links::DocLink {
+                path: RIVALS.into(),
+                kind: links::LinkKind::Research(ResearchKind::CompetitorResearch),
+            },
+            links::DocLink {
+                path: ROADMAP.into(),
+                kind: links::LinkKind::Roadmap,
+            },
+        ]
+    );
+    let stored = load_setup(&tx, &project).unwrap().unwrap();
+    assert_eq!(stored.research, [ResearchKind::MarketResearch]);
+    let queued: Vec<ResearchKind> = list_jobs(&tx, &config(), &project)
+        .unwrap()
+        .iter()
+        .map(|job| job.kind)
+        .collect();
+    assert!(
+        !queued.contains(&ResearchKind::CompetitorResearch),
+        "{queued:?}"
+    );
+    assert!(queued.contains(&ResearchKind::MarketResearch), "{queued:?}");
+
+    assert_eq!(
+        execute(&tx, &config(), &confirm(3, None), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(links::list(&tx, &project).unwrap().len(), 2);
+    assert_eq!(
+        execute(&tx, &config(), &confirm(4, Some(Vec::new())), 1).unwrap(),
+        Outcome::Applied
+    );
+    assert!(links::list(&tx, &project).unwrap().is_empty());
+    assert_eq!(
+        load_setup(&tx, &project).unwrap().unwrap().research,
+        [
+            ResearchKind::CompetitorResearch,
+            ResearchKind::MarketResearch,
+            ResearchKind::RoadmapPlanning,
+        ]
+    );
+    let too_many = confirm(5, Some(vec!["docs/a.md".to_owned(); links::LINKS_MAX + 1]));
+    assert_eq!(too_many.validate().unwrap_err().0, "project_setup_bounds");
+}

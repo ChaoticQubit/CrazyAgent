@@ -141,6 +141,7 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                     expected_revision,
                     name,
                     setup,
+                    ..
                 } => {
                     controller
                         .update_project_setup(
@@ -1784,6 +1785,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
 
     let update_at = |expected_revision: u64| SetupAction::Update {
         project_id: project.clone(),
+        kept: None,
         expected_revision,
         name: Some("Notes Pro".into()),
         setup: ProjectSetup {
@@ -3747,6 +3749,7 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         SetupQuery::Change {
             action: SetupAction::Update {
                 project_id: project.clone(),
+                kept: None,
                 expected_revision,
                 name: None,
                 setup: edited,

@@ -1326,12 +1326,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 name: Option<String>,
                 revision: Option<u64>,
                 generation: u64,
+                kept: Option<Vec<String>>,
             }
-            let Args { id, setup, name, revision, generation } = match parse(args) {
+            let Args { id, setup, name, revision, generation, kept } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .update_project_setup(&id, setup, name, revision, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .update_project_setup(&id, setup, name, revision, kept, generation) .await }.await;
             routed(result)
         }
         "desktop_move_project_home" => {

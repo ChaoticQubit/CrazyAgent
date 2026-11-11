@@ -149,11 +149,15 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
     write_file(root, "docs/spec.pdf", "%PDF-1.7 PDF_BYTES_3390");
     write_file(root, "private/salaries.md", "PRIVATE_TEXT_6602");
     write_file(root, "docs/Private/board.md", "PRIVATE_TEXT_6602");
-    write_file(root, ".notes/hidden.md", "HIDDEN_TEXT_1207");
+    write_file(root, ".notes/hidden.md", "HIDDEN_FOLDER_TEXT_4471");
     write_file(root, "docs/.draft.md", "HIDDEN_TEXT_1207");
     write_file(root, "node_modules/pkg/README.md", "VENDOR_TEXT_7781");
-    write_file(root, "docs/a/b/c/deep.md", "DEPTH_FOUR_TEXT_2290");
-    write_file(root, "docs/a/b/c/d/deeper.md", "DEPTH_FIVE_TEXT_8121");
+    write_file(root, "docs/a/b/c/d/e/f/g/deep.md", "DEPTH_EIGHT_TEXT_2290");
+    write_file(
+        root,
+        "docs/a/b/c/d/e/f/g/h/deeper.md",
+        "DEPTH_NINE_TEXT_8121",
+    );
     std::fs::write(root.join("docs/huge.md"), "x".repeat(1024 * 1024 + 1)).unwrap();
     symlink(outside.path().join("token"), root.join("notes/linked.md")).unwrap();
     symlink(outside.path(), root.join("docs/linked-folder")).unwrap();
@@ -165,7 +169,8 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
         "COMPETITOR_TEXT_5521",
         "MARKET_TEXT_8830",
         "PLAN_TEXT_4410",
-        "DEPTH_FOUR_TEXT_2290",
+        "DEPTH_EIGHT_TEXT_2290",
+        "HIDDEN_FOLDER_TEXT_4471",
         "### research/landscape-2026.md (",
         "docs/spec.pdf (",
         "\"research\"",
@@ -177,7 +182,7 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
         "PRIVATE_TEXT_6602",
         "HIDDEN_TEXT_1207",
         "VENDOR_TEXT_7781",
-        "DEPTH_FIVE_TEXT_8121",
+        "DEPTH_NINE_TEXT_8121",
         "PDF_BYTES_3390",
         "docs/huge.md",
         "salaries",
@@ -337,7 +342,7 @@ fn mapping_prompt(root: &Path) -> String {
 }
 
 #[test]
-fn git_ignored_documents_are_neither_read_nor_listed() {
+fn git_ignored_markdown_is_read_as_tracked_and_other_ignored_documents_are_not() {
     let dir = rust_repo();
     let root = dir.path();
     git_init(root);
@@ -346,7 +351,11 @@ fn git_ignored_documents_are_neither_read_nor_listed() {
         ".gitignore",
         "notes/private-*.md\n!notes/private-ok.md\ndocs/scratch/\n*.log.md\n",
     );
-    write_file(root, ".git/info/exclude", "docs/excluded.md\n");
+    write_file(
+        root,
+        ".git/info/exclude",
+        "docs/excluded.md\ndocs/excluded.txt\n",
+    );
     write_file(
         root,
         "docs/plan.md",
@@ -363,12 +372,19 @@ fn git_ignored_documents_are_neither_read_nor_listed() {
         "Kept by a rule. NEGATED_TEXT_1414\n",
     );
     write_file(root, "docs/spec.pdf", "%PDF-1.7");
-    let ignored = [
+    let ignored_markdown = [
         "notes/private-plan.md",
         "docs/scratch/idea.md",
-        "docs/scratch/spec.pdf",
         "docs/run.log.md",
         "docs/excluded.md",
+    ];
+    for path in ignored_markdown {
+        write_file(root, path, &format!("IGNORED_MARKDOWN_3141 {path}\n"));
+    }
+    let ignored = [
+        "docs/scratch/spec.pdf",
+        "docs/scratch/notes.txt",
+        "docs/excluded.txt",
     ];
     for path in ignored {
         write_file(root, path, "IGNORED_TEXT_3141 api_key=sk-test-0000\n");
@@ -382,6 +398,12 @@ fn git_ignored_documents_are_neither_read_nor_listed() {
         "docs/spec.pdf (",
     ] {
         assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    for path in ignored_markdown {
+        assert!(
+            prompt.contains(&format!("IGNORED_MARKDOWN_3141 {path}")),
+            "the git-ignored Markdown {path} was not read"
+        );
     }
     assert!(
         !prompt.contains("IGNORED_TEXT_3141"),
@@ -454,7 +476,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
     let dir = rust_repo();
     let root = dir.path();
     git_init(root);
-    write_file(root, ".gitignore", "private/\nlocal-notes.md\n");
+    write_file(root, ".gitignore", "private/\nlocal-notes.txt\n");
     write_file(
         root,
         "notes/api-keys.md",
@@ -465,9 +487,9 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         "notes/ui-direction.md",
         "Dark theme first. UI_TEXT_2718\nThe keys for it sit in notes/api-keys.md.\n",
     );
-    write_file(root, "private/plan.md", "PRIVATE_TEXT_1618\n");
+    write_file(root, "private/plan.txt", "PRIVATE_TEXT_1618\n");
     write_file(root, "secrets.txt", "SECRET_TEXT_9001\n");
-    write_file(root, "local-notes.md", "PRIVATE_TEXT_1618\n");
+    write_file(root, "local-notes.txt", "PRIVATE_TEXT_1618\n");
     write_file(
         root,
         "README.md",
@@ -475,7 +497,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
             "# Demo\n\nA small greeting tool. README_KEPT_1111\n",
             "See notes/ui-direction.md for the look.\n",
             "The keys sit in `notes/api-keys.md`.\n",
-            "Drafts go to [the plan](private/plan.md).\n",
+            "Drafts go to [the plan](private/plan.txt).\n",
         ),
     );
     write_file(
@@ -488,7 +510,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         "graphify-out/GRAPH_REPORT.md",
         concat!(
             "# Graph Report\n\n## God Nodes\n",
-            "- api-keys.md\n- notes/api-keys.md\n- private/plan.md\n- ApiKeys\n",
+            "- api-keys.md\n- notes/api-keys.md\n- private/plan.txt\n- ApiKeys\n",
             "- ui-direction.md GRAPH_KEPT_4242\n",
         ),
     );
@@ -513,7 +535,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
             "the entry {entry} is missing"
         );
     }
-    for entry in ["secrets.txt", "local-notes.md", "private/"] {
+    for entry in ["secrets.txt", "local-notes.txt", "private/"] {
         assert!(
             !evidence.entries.contains(&entry.to_owned()),
             "the entry {entry} is listed"
@@ -535,11 +557,11 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         "api-keys",
         "apikeys",
         "secret_text_9001",
-        "private/plan.md",
+        "private/plan.txt",
         "private_text_1618",
         "secrets.txt",
         "secrets.toml",
-        "local-notes.md",
+        "local-notes.txt",
     ] {
         assert!(!lower.contains(name), "{name} reached the mapping prompt");
     }
@@ -883,7 +905,8 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
     assert_eq!(draft::reused(&layout), Some(kept));
 
     let prose = "## Structure\n\nOne binary that greets people.\n\n```json\n{}\n```\n";
-    let (step, _, wrote) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
+    let (step, _, wrote, _) =
+        service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
     assert_eq!(step, Step::Done);
     assert_eq!(wrote, draft::overview(&layout));
     assert!(
@@ -892,7 +915,7 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
             .contains("One binary that greets people.")
     );
 
-    let (step, _, wrote) =
+    let (step, _, wrote, _) =
         service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
     assert_eq!(wrote, None);
     assert_eq!(
@@ -949,7 +972,7 @@ fn a_secret_like_path_the_agent_writes_is_neither_stored_nor_written() {
         ..MappingFacts::default()
     };
     let base = Drafted::new("demo".into(), &pool());
-    let (step, kept, wrote) = service::answered(&layout, &base, text, &found, &[]);
+    let (step, kept, wrote, _) = service::answered(&layout, &base, text, &found, &[]);
     assert_eq!(step, Step::Done);
     let stored = [
         format!("{answer:?}"),
@@ -2152,4 +2175,143 @@ fn a_setup_saved_without_the_mappings_answers_offers_them_once_the_mapping_is_do
         )
         .unwrap();
     assert_eq!(viewed(&mut database).proposed, None);
+}
+
+fn mapped(reply: &str, shown: &[(&str, draft::FoundKind)]) -> (Drafted, draft::Answer) {
+    let dir = tempfile::tempdir().unwrap();
+    let evidence = draft::Evidence {
+        documents: shown
+            .iter()
+            .map(|(path, kind)| draft::Document {
+                path: (*path).into(),
+                size: 1,
+                text: "x".into(),
+                cut: false,
+                kind: *kind,
+                marks: Vec::new(),
+            })
+            .collect(),
+        ..draft::Evidence::default()
+    };
+    let (found, stack) = draft::found_facts(&evidence, dir.path());
+    let answer = draft::parse_answer(&format!(
+        "## Structure\n\nA reader.\n\n```json\n{reply}\n```\n"
+    ));
+    let base = Drafted::new("demo".into(), &pool());
+    (draft::merge(&base, &answer, &found, &stack), answer)
+}
+
+const SS_ROADMAP: &str = "research/docs/ss-phase1-revision/report.md";
+
+#[test]
+fn the_mapping_answer_keeps_a_roadmap_it_was_shown_and_drops_one_it_was_not() {
+    let reply = r#"{"about":"x","roadmap":["research/docs/ss-phase1-revision/report.md","docs/elsewhere.md"]}"#;
+    let (merged, _) = mapped(reply, &[(SS_ROADMAP, draft::FoundKind::Other)]);
+    assert_eq!(merged.facts.roadmap, vec![SS_ROADMAP.to_owned()]);
+}
+
+#[test]
+fn a_mapping_answer_without_a_roadmap_list_takes_the_local_scans_roadmap() {
+    let shown = [
+        ("docs/notes.md", draft::FoundKind::Other),
+        (SS_ROADMAP, draft::FoundKind::Roadmap),
+        ("docs/later-plan.md", draft::FoundKind::Roadmap),
+    ];
+    for reply in [
+        r#"{"about":"x"}"#,
+        r#"{"about":"x","roadmap":"none"}"#,
+        "not json",
+    ] {
+        let (merged, answer) = mapped(reply, &shown);
+        assert!(!answer.roadmap_answered, "{reply}");
+        assert_eq!(merged.facts.roadmap, vec![SS_ROADMAP.to_owned()], "{reply}");
+    }
+    let (none, _) = mapped(
+        r#"{"about":"x"}"#,
+        &[("docs/notes.md", draft::FoundKind::Other)],
+    );
+    assert!(none.facts.roadmap.is_empty());
+}
+
+#[test]
+fn a_changelog_the_scan_took_for_a_roadmap_is_not_linked_when_the_answer_names_none() {
+    let (merged, answer) = mapped(
+        r#"{"about":"x","roadmap":[]}"#,
+        &[("CHANGELOG.md", draft::FoundKind::Roadmap)],
+    );
+    assert!(answer.roadmap_answered);
+    assert!(
+        merged.facts.roadmap.is_empty(),
+        "{:?}",
+        merged.facts.roadmap
+    );
+}
+
+#[test]
+fn a_found_roadmap_survives_the_onboarding_row() {
+    let (merged, _) = mapped(
+        r#"{"about":"x"}"#,
+        &[(SS_ROADMAP, draft::FoundKind::Roadmap)],
+    );
+    let column = draft::found_column(&merged).unwrap();
+    let mut facts = MappingFacts::default();
+    draft::restore_found(&mut facts, Some(&column)).unwrap();
+    assert_eq!(facts.roadmap, vec![SS_ROADMAP.to_owned()]);
+    let saved: Drafted = serde_json::from_str(&serde_json::to_string(&merged).unwrap()).unwrap();
+    assert!(saved.facts.roadmap.is_empty());
+}
+
+#[test]
+fn the_mapping_questions_become_setup_questions() {
+    let reply = r#"{"about":"x","questions":[{"question":"Is the desktop app still planned?","kind":"single","options":["Yes","No"],"recommended":"Yes"},{"question":"","kind":"single","options":[]}]}"#;
+    let (_, answer) = mapped(reply, &[]);
+    assert_eq!(answer.questions.len(), 1);
+    assert_eq!(
+        answer.questions[0].kind,
+        crate::questions::QuestionKind::Single
+    );
+    assert_eq!(
+        answer.questions[0].context.as_deref(),
+        Some(draft::SETUP_QUESTION_CONTEXT)
+    );
+    let prompt = draft::prompt(&draft::Evidence::default(), &MappingFacts::default());
+    assert!(prompt.contains("\"roadmap\": []"), "{prompt}");
+    assert!(prompt.contains("\"questions\": []"), "{prompt}");
+    assert!(prompt.contains("Under roadmap list"), "{prompt}");
+}
+
+#[test]
+fn a_finished_mappings_questions_are_raised_as_its_own_and_a_refusal_stops_quietly() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-onboarding-questions-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (root, folder) = (base.join("engine"), base.join("project"));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir_all(folder.join(CRAZYAGENT_DIRECTORY)).unwrap();
+    let db = crate::questions::open(&root).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::team::initialize(&db).unwrap();
+    crate::ide::workspace::tests::add_project(&db, "demo", &folder);
+    let reply = r#"{"questions":[{"question":"Is the desktop app still planned?","kind":"single","options":["Yes","No"],"recommended":"Yes"},{"question":"Which market first?","kind":"text","options":[],"recommended":"Researchers"}]}"#;
+    let (_, answer) = mapped(reply, &[]);
+    assert_eq!(answer.questions.len(), 2);
+
+    service::raise_setup_questions(&db, "demo", &answer.questions);
+    let raised = crate::questions::pending(&db, &ProjectId::new("demo").unwrap()).unwrap();
+    assert_eq!(raised.len(), 2);
+    assert!(
+        raised
+            .iter()
+            .all(|question| question.asker == "engine:mapping")
+    );
+    service::raise_setup_questions(&db, "demo", &answer.questions);
+    assert_eq!(
+        crate::questions::pending(&db, &ProjectId::new("demo").unwrap())
+            .unwrap()
+            .len(),
+        2
+    );
+    service::raise_setup_questions(&db, "missing", &answer.questions);
 }
