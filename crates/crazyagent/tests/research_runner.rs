@@ -115,6 +115,7 @@ fn endpoint(port: u16) -> ResearchAccount {
     ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     }
 }
 
@@ -172,6 +173,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
     let account = ResearchAccount::Endpoint {
         base_url: OLLAMA.into(),
         model: OLLAMA_MODEL.into(),
+        key: None,
     };
     let started = Instant::now();
     let run = runner
@@ -499,6 +501,7 @@ fn research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports() {
             Some(ResearchAccount::Endpoint {
                 base_url: OLLAMA.into(),
                 model: OLLAMA_MODEL.into(),
+                key: None,
             }),
         ))
         .unwrap()
@@ -603,6 +606,7 @@ fn queued_research_runs_claude_code_in_the_project_sandbox_on_an_anthropic_endpo
     let account = ResearchAccount::AnthropicEndpoint {
         base_url: OLLAMA_ANTHROPIC.into(),
         model: OLLAMA_MODEL.into(),
+        key: None,
     };
     let started = Instant::now();
     let run = runner
@@ -670,6 +674,7 @@ fn a_job_waits_for_a_pool_when_the_account_does_not_fit_its_harness() {
     let anthropic = ResearchAccount::AnthropicEndpoint {
         base_url: "http://127.0.0.1:9".into(),
         model: "m".into(),
+        key: None,
     };
     let run = runner
         .run_once(&ResearchProject {
@@ -695,6 +700,7 @@ fn a_claude_job_without_claude_installed_fails_plainly() {
     let account = ResearchAccount::AnthropicEndpoint {
         base_url: "http://127.0.0.1:9".into(),
         model: "m".into(),
+        key: None,
     };
     let run = runner(&case, limits(Duration::from_secs(5)))
         .run_once(&project(&case, Some(account)))
@@ -880,6 +886,7 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
                     account: Some(ResearchAccount::AnthropicEndpoint {
                         base_url: format!("http://127.0.0.1:{port}"),
                         model: "hanging-model".into(),
+                        key: None,
                     }),
                 })
                 .unwrap()
@@ -1274,6 +1281,7 @@ fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
     let account = ResearchAccount::Endpoint {
         base_url: "https://models.crazyagent.test/v1".into(),
         model: "proxied-model".into(),
+        key: None,
     };
     ResearchRunner::new(
         &case.database,

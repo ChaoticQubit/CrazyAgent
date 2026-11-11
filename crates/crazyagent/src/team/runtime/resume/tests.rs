@@ -1244,6 +1244,7 @@ mod live {
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
             proxy: plan.proxy.clone(),
+            relay: plan.relay.clone(),
             terminal_display: plan.terminal_display,
             task_start: plan.task_start.clone(),
         }
