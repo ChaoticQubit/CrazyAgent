@@ -612,7 +612,7 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
 }
 
 #[test]
-fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_strictly_first() {
+fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_clearly_before() {
     let project = ProjectId::new("team-held").unwrap();
     let Accounts::Usable(accounts) = eligible_accounts(
         &access("team-held", &["local-a", "local-b"]),
@@ -651,7 +651,30 @@ fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_stric
     assert_eq!(
         pick(&behind, &paused, Some(&held)).as_deref(),
         Some("local-a"),
-        "an account the schedule puts strictly first wins over the held one"
+        "an account a Use last pin puts clearly before the held one wins"
+    );
+    let mut ranked = crate::scheduling::Choice {
+        strategy: crate::scheduling::Strategy::ManualRank,
+        ..crate::scheduling::Choice::default()
+    };
+    ranked.schedule.accounts.push(crate::scheduling::AccountEntry {
+        connection: reference("local-a"),
+        plan: crate::scheduling::AccountPlan {
+            rank: Some(1),
+            ..crate::scheduling::AccountPlan::default()
+        },
+    });
+    assert_eq!(
+        pick(&ranked, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "an account the owner ranked first wins over an unranked held one"
+    );
+    let busy = |connection: &CredentialRef| usize::from(connection == &held) * 3;
+    assert_eq!(
+        pick_account_held(&accounts, &busy, &paused, &tie, Some(&held))
+            .map(|account| account.connection.as_str()),
+        Some("local-b"),
+        "more live agents on the held account never move running work"
     );
     paused.insert(held.clone());
     assert_eq!(

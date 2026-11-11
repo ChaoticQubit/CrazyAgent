@@ -681,16 +681,55 @@ pub(crate) fn input_open(
     if turn_open || input_ms.is_some_and(|at| now - at < INPUT_SETTLE_MS) {
         return Err(InputRefused::Busy);
     }
-    let (typed_ms, draft) = match typing.and_then(|typing| typing.get(agent)) {
-        Some(held) if typed_ms.is_none_or(|at| at <= held.at_ms) => {
-            (Some(held.at_ms), held.draft.unwrap_or(draft))
-        }
-        _ => (typed_ms, draft),
-    };
+    let (typed_ms, draft) = owner_signal(typing, agent, typed_ms, draft);
     if owner_holds(typed_ms, draft, now) {
         return Err(InputRefused::OwnerTyping);
     }
     Ok(agent)
+}
+
+/// The owner's last key into a live master's terminal and whether it left an unsent line:
+/// the in-memory signal when it is at least as new as the stored one, else the stored one.
+/// Takes the signal, the master's agent id and the stored time and line. Returns both.
+fn owner_signal(
+    typing: Option<&OwnerTyping>,
+    agent: i64,
+    typed_ms: Option<i64>,
+    draft: bool,
+) -> (Option<i64>, bool) {
+    match typing.and_then(|typing| typing.get(agent)) {
+        Some(held) if typed_ms.is_none_or(|at| at <= held.at_ms) => {
+            (Some(held.at_ms), held.draft.unwrap_or(draft))
+        }
+        _ => (typed_ms, draft),
+    }
+}
+
+/// Whether the owner holds an unsent line in a project's live master terminal, however old
+/// it is. A stop the owner did not ask for waits for it, since the terminal that starts
+/// next has an empty line and the text would be gone (LMA r1 L2). Takes the engine
+/// database, the owner typing signal and the project. Returns the answer: no line with no
+/// master row, a held line when the read fails.
+pub(crate) fn unsent_line(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+) -> bool {
+    type Row = (Option<i64>, Option<i64>, bool);
+    let row: rusqlite::Result<Option<Row>> = connection
+        .query_row(
+            "SELECT agent,typed_ms,draft FROM team_live_masters WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional();
+    let Ok(row) = row else {
+        return true;
+    };
+    row.is_some_and(|(agent, typed_ms, draft)| match agent {
+        Some(agent) => owner_signal(typing, agent, typed_ms, draft).1,
+        None => draft,
+    })
 }
 
 /// Records keys the owner typed into a team agent's terminal, the owner typing signal that

@@ -57,6 +57,14 @@ impl Strategy {
     }
 }
 
+/// How much less weekly use, in tenths of a percent, a Balanced pool's top account needs
+/// before work that already runs on another account moves to it. Readings closer than
+/// this pass each other with every turn, so they move nothing.
+pub const MOVE_MARGIN_PERMILLE: i64 = 50;
+
+/// The least time, in seconds, between two moves of one project's live master.
+pub const MOVE_DWELL_SECS: u64 = 15 * 60;
+
 /// What a live master does once its pool's account order puts another account ahead of
 /// the one it started on (DEC-139): keep that account until its next start, or move to
 /// the top account at its next idle point.
@@ -84,9 +92,12 @@ impl LiveMasterAccount {
     pub fn detail(self) -> &'static str {
         match self {
             Self::Keep => "A live master stays on the account it started on until it restarts.",
-            Self::MoveWhenIdle => {
-                "An idle live master moves to its pool's top account and starts again there."
-            }
+            Self::MoveWhenIdle => concat!(
+                "An idle live master moves to its pool's top account once that account is ",
+                "clearly first (under Balanced: at least 5 points less weekly use), at most ",
+                "once every 15 minutes. The conversation carries over, as a summary unless ",
+                "both accounts are subscriptions."
+            ),
         }
     }
 
@@ -983,6 +994,30 @@ impl Choice {
             candidate.load,
             index,
         )
+    }
+
+    /// Tells whether `top` is clearly ahead of `held`, the account work already runs on, so
+    /// that work may move to it: the held account is left out; a Use last pin or a reached
+    /// limit puts it behind; the strategy's own order does, which under Balanced needs a
+    /// weekly reading for both and weekly use lower by `MOVE_MARGIN_PERMILLE`, never the
+    /// 5-hour use alone; or the owner's rank does once the strategy sees them level. Fewer
+    /// live agents and pool order never count. Takes the two candidates. Returns the answer.
+    pub fn clearly_before(&self, top: &Candidate, held: &Candidate) -> bool {
+        if self.exclusion(held).is_some() {
+            return true;
+        }
+        let (top, held) = (self.key(top, 0), self.key(held, 0));
+        if (top.0, top.1) != (held.0, held.1) {
+            return (top.0, top.1) < (held.0, held.1);
+        }
+        let ((top_unknown, top_use, _), (held_unknown, held_use, _)) = (top.2, held.2);
+        match self.strategy {
+            Strategy::Balanced if (top_unknown, top_use) != (held_unknown, held_use) => {
+                !top_unknown && !held_unknown && held_use - top_use >= MOVE_MARGIN_PERMILLE
+            }
+            Strategy::UseItOrLoseIt if top.2 != held.2 => top.2 < held.2,
+            _ => top.3 < held.3,
+        }
     }
 }
 

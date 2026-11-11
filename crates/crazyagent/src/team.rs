@@ -1248,11 +1248,13 @@ pub fn pick_account<'a>(
 }
 
 /// Picks the usable account as `pick_account` does, for work that may already run on one
-/// of them: the held account wins every tie, so another account is picked only when the
-/// schedule puts it strictly first or the held one cannot take work. Takes the usable
-/// accounts in pool order, live agents per connection, paused connections, the scheduling
-/// choice and the held connection, none for new work. Returns the chosen account, or none
-/// when every account is paused or left out by the schedule.
+/// of them: the held account keeps the work unless it cannot take work or the schedule puts
+/// the top account clearly before it (`Choice::clearly_before`: a pin, a limit, the
+/// strategy's order with its margin under Balanced, or a rank), so near-equal usage
+/// readings never move running work back and forth. Takes the usable accounts in pool
+/// order, live agents per connection, paused connections, the scheduling choice and the
+/// held connection, none for new work. Returns the chosen account, or none when every
+/// account is paused or left out by the schedule.
 pub fn pick_account_held<'a>(
     accounts: &'a [TeamAccount],
     load: &dyn Fn(&CredentialRef) -> usize,
@@ -1272,11 +1274,14 @@ pub fn pick_account_held<'a>(
             current: held == Some(&account.connection),
         })
         .collect();
-    choice
-        .order(&candidates)
-        .ready
-        .first()
-        .map(|index| open[*index])
+    let ready = choice.order(&candidates).ready;
+    let top = *ready.first()?;
+    let stays = ready
+        .iter()
+        .copied()
+        .find(|index| candidates[*index].current)
+        .filter(|kept| !choice.clearly_before(&candidates[top], &candidates[*kept]));
+    Some(open[stays.unwrap_or(top)])
 }
 
 /// Tells whether a master conversation kept while the master ran on `kept` may resume on the

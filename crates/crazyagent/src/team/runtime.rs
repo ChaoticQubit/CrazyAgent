@@ -76,6 +76,9 @@ const INSTRUCTION_CHECK_EVERY: Duration = Duration::from_secs(2);
 /// How often an idle live master's account is compared with its pool's top account under
 /// the Live master account choice Move when idle (DEC-139).
 const MOVE_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// The least time between two moves of one project's live master, so accounts that keep
+/// passing each other cost at most one restart in that time (LMA r1 F1).
+const MOVE_DWELL: Duration = Duration::from_secs(crate::scheduling::MOVE_DWELL_SECS);
 /// The one team note a live master's move to its pool's top account leaves (DEC-139). It is
 /// written after any note of the start itself, so it is the newest engine note, which the
 /// desktop master area shows.
@@ -2957,9 +2960,10 @@ impl TeamRuntime {
     /// Picks the pool account as `account_for` does, for a new agent or for one that
     /// already runs. A running agent is not counted against any account and does not make
     /// its own account used, and its account wins every tie, so the answer differs from the
-    /// account it holds only when the owner's schedule puts another strictly first or its
-    /// own can no longer take work. Takes the live access, the project, the harness, the
-    /// paused accounts and the running agent, none for a new one. Returns as `account_for`.
+    /// account it holds only when the owner's schedule puts another clearly before it
+    /// (`Choice::clearly_before`) or its own can no longer take work. Takes the live
+    /// access, the project, the harness, the paused accounts and the running agent, none
+    /// for a new one. Returns as `account_for`.
     fn account_as(
         &self,
         access: &ModelAccess,
@@ -3723,12 +3727,15 @@ impl TeamRuntime {
 
     /// Moves a project's running live master to its pool's top usable account under the
     /// owner's Live master account choice Move when idle (DEC-139). It moves only at an idle
-    /// point: no turn of its own, quiet, no work of the project in flight and no harness
-    /// change waiting for its next start. The account it holds wins every tie, so it moves
-    /// only when the schedule puts another account strictly first or its own can no longer
-    /// take work. It then stops for a planned restart that `keep_live` starts on the top
-    /// account, with one team note. Under Keep start account nothing moves. Takes the setup,
-    /// the access, the paused accounts and the master's id. Returns any SQLite failure.
+    /// point: no turn of its own, quiet, no unsent owner line however old, no work of the
+    /// project in flight and no harness change waiting for its next start. The account it
+    /// holds keeps it unless the schedule puts another account clearly before it
+    /// (`pick_account_held`) or its own can no longer take work, and a project's master
+    /// moves at most once per `MOVE_DWELL`. It then stops for a planned restart that
+    /// `keep_live` starts on the top account, with one team note. Under Keep start account
+    /// nothing moves, and the stored choice is read only once per `MOVE_CHECK_EVERY`. Takes
+    /// the setup, the access, the paused accounts and the master's id. Returns any SQLite
+    /// failure.
     fn move_when_idle(
         &mut self,
         stored: &StoredSetup,
@@ -3745,8 +3752,6 @@ impl TeamRuntime {
             || worker.stopping
             || !idle
             || launch_harness(&worker.harness) != launch_harness(&stored.team.master)
-            || crate::scheduling::live_master(&self.connection)?
-                != crate::scheduling::LiveMasterAccount::MoveWhenIdle
         {
             return Ok(());
         }
@@ -3756,12 +3761,14 @@ impl TeamRuntime {
         }
         self.moves_next
             .insert(project.clone(), now + MOVE_CHECK_EVERY);
-        let quiet = super::master::quiet(
-            &self.connection,
-            self.agents.as_deref().map(Agents::typing),
-            project,
-            now_ms(),
-        );
+        if crate::scheduling::live_master(&self.connection)?
+            != crate::scheduling::LiveMasterAccount::MoveWhenIdle
+        {
+            return Ok(());
+        }
+        let typing = self.agents.as_deref().map(Agents::typing);
+        let quiet = super::master::quiet(&self.connection, typing, project, now_ms())
+            && !super::master::unsent_line(&self.connection, typing, project);
         if !quiet || self.work_in_flight(project)? {
             return Ok(());
         }
@@ -3778,6 +3785,7 @@ impl TeamRuntime {
         let _ = worker.orders.send(Order::Stop);
         self.master_restarts.insert(project.clone());
         self.master_moves.insert(project.clone(), left);
+        self.moves_next.insert(project.clone(), now + MOVE_DWELL);
         Ok(())
     }
 
