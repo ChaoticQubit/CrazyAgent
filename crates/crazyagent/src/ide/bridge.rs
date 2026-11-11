@@ -1186,8 +1186,7 @@ pub(crate) fn carry_index(private: &Path, engine: &Path, project: &Path, slot: &
 }
 
 /// The first argument of the shim's index call.
-#[cfg(unix)]
-pub(super) const INDEX_VERB: &str = remote_git::index::VERB;
+pub(super) const INDEX_VERB: &str = "crazyagent-index";
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
 /// show-all switch first when given. Inputs: the owner runtime, project and switch.

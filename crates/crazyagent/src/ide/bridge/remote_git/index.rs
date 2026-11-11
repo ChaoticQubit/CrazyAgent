@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// The first argument of the one `ide.git` call that is no network command: the engine's
 /// shim sends it to carry the staged changes of one git command into the project's index.
-pub(crate) const VERB: &str = "crazyagent-index";
+pub(crate) const VERB: &str = crate::ide::bridge::INDEX_VERB;
 
 const SLOT_DIGITS_MAX: usize = 10;
 const INDEX_BYTES_MAX: u64 = 256 * 1024 * 1024;
