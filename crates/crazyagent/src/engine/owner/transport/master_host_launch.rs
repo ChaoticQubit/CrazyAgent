@@ -1244,6 +1244,28 @@ fn verify_master_capture(runtime: &Root, name: &str, capture: &File) -> Result<(
     Ok(())
 }
 
+/// The tool caches a master turn writes beside its worktree, home and temp folder under the
+/// default policy (T8, IMP-V21TOOLS-2): on macOS the Shared cache of its level and the
+/// worktree shape, in the project's folder under the engine runtime; elsewhere none.
+/// Inputs: the engine runtime folder and the repository. Output: the cache roots, each one
+/// already made by the launch.
+#[cfg(all(test, unix))]
+fn default_master_tool_caches(runtime: &Path, repository: &Path) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let project = std::fs::canonicalize(repository).unwrap();
+        let cache = crate::sandbox::tool_cache::project_folder(runtime, project.to_str().unwrap())
+            .join("sandboxed-worktree");
+        assert!(cache.is_dir(), "{}", cache.display());
+        vec![cache]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(runtime.is_dir() && repository.is_dir());
+        Vec::new()
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::super::Root;
@@ -1728,6 +1750,7 @@ mod tests {
             std::fs::symlink_metadata(&tmp).unwrap().mode() & 0o7777,
             0o700
         );
+        let caches = default_master_tool_caches(&root.path, &repository);
         assert_eq!(
             sandbox
                 .sandbox()
@@ -1735,6 +1758,9 @@ mod tests {
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>(),
             [worktree.as_path(), home.as_path(), tmp.as_path()]
+                .into_iter()
+                .chain(caches.iter().map(PathBuf::as_path))
+                .collect::<Vec<_>>()
         );
         assert!(sandbox.sandbox().read_roots().contains(&repository));
         assert!(
@@ -1788,6 +1814,22 @@ mod tests {
                 .iter()
                 .map(|(name, value)| (*name, value.to_str().unwrap())),
         );
+        let cache_env = caches
+            .iter()
+            .flat_map(|cache| {
+                let uv = environment
+                    .contains_key("UV_CACHE_DIR")
+                    .then(|| ("UV_CACHE_DIR", cache.join("uv")));
+                [("pnpm_config_store_dir", cache.join("pnpm-store"))]
+                    .into_iter()
+                    .chain(uv)
+            })
+            .collect::<Vec<_>>();
+        expected.extend(
+            cache_env
+                .iter()
+                .map(|(name, value)| (*name, value.to_str().unwrap())),
+        );
         assert_eq!(environment, expected);
 
         let claude = crate::engine::claude_host::launch_command(
@@ -1833,6 +1875,11 @@ mod tests {
         expected_claude.insert("TMPPREFIX", prefix.to_str().unwrap());
         expected_claude.extend(
             tools
+                .iter()
+                .map(|(name, value)| (*name, value.to_str().unwrap())),
+        );
+        expected_claude.extend(
+            cache_env
                 .iter()
                 .map(|(name, value)| (*name, value.to_str().unwrap())),
         );
@@ -2367,6 +2414,7 @@ mod tests {
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
         let tmp = turn.join(MASTER_TMP);
+        let caches = default_master_tool_caches(&root.path, &repository);
         assert_eq!(
             sandbox
                 .sandbox()
@@ -2374,6 +2422,9 @@ mod tests {
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>(),
             [worktree.as_path(), home.as_path(), tmp.as_path()]
+                .into_iter()
+                .chain(caches.iter().map(PathBuf::as_path))
+                .collect::<Vec<_>>()
         );
         let profile = sandbox.sandbox().profile();
         let owner = PathBuf::from(std::env::var_os("HOME").unwrap())
