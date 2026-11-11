@@ -9,7 +9,7 @@ import { SdkTurnProjection, type HostAction } from "./host.turns.ts";
 
 export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string; instructionsFile?: string };
 
-const INSTRUCTIONS_BYTES_MAX = 65_536;
+const INSTRUCTIONS_BYTES_MAX = 131_539;
 
 export function parseLaunch(argv: string[]): Launch {
   try {

@@ -146,7 +146,11 @@ impl OwnerRuntimeHandle {
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
         let process = match claude {
-            true => claude_process(&prepared.instructions, process),
+            true => fit_process(
+                &prepared.instructions,
+                process,
+                crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize,
+            ),
             false => process,
         };
         let turn = if claude {
@@ -221,25 +225,27 @@ pub(super) const CLAUDE_PROCESS_BYTES_MAX: usize =
         - crate::instruction_files::SECTION_BYTES_MAX
         - 1;
 
-const CUT_NOTE: &str = "\n\n[CrazyAgent cut the app and project instructions here: a Claude master takes only this much of them beside its project context and instruction files. Shorten them on the Process page.]\n";
+const CUT_NOTE: &str = "\n\n[CrazyAgent cut the app and project instructions here: a master takes only this much of them beside its project context and instruction files. Shorten them on the Process page.]\n";
 
 const _: () = assert!(CUT_NOTE.len() < CLAUDE_PROCESS_BYTES_MAX);
 
-/// Fits what a Claude master gets from the Process page within the Claude host's prompt
-/// file limit beside its startup instruction, so no instruction text ever fails a turn:
-/// past the room the owner's app and project instructions are cut at a character boundary
-/// and end with a plain note, which the agent card shows, while the instruction files
-/// section, which has its own reserved room, stays whole. Inputs: the startup instruction
-/// and what `agent_home::text` built. Output: what the master gets and its home records.
-fn claude_process(
+/// Fits what a master gets from the Process page within its instruction file limit beside
+/// its startup instruction, so no instruction text ever fails a turn: past the room the
+/// owner's app and project instructions are cut at a character boundary and end with a
+/// plain note, which the agent card shows, while the instruction files section, which has
+/// its own reserved room, stays whole. Inputs: the startup instruction, what
+/// `agent_home::text` built and the harness's file limit. Output: what the master gets.
+pub(super) fn fit_process(
     instructions: &str,
     process: crate::agent_home::Given,
+    limit: usize,
 ) -> crate::agent_home::Given {
     assert!(instructions.len() <= crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
     assert!(process.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     assert!(process.section_bytes <= crate::instruction_files::SECTION_BYTES_MAX);
     assert!(process.section_bytes <= process.text.len());
-    let room = crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize - instructions.len() - 1;
+    assert!(limit >= crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize);
+    let room = limit - instructions.len() - 1;
     if process.text.len() <= room {
         return process;
     }
@@ -264,7 +270,7 @@ fn claude_process(
 /// instructions and the instruction files the engine read. Claude Code runs with setting
 /// sources off, which skips every `CLAUDE.md`, so its prompt file carries the same text.
 /// Input: both texts. Output: the prompt.
-fn master_prompt(instructions: &str, process: &str) -> String {
+pub(super) fn master_prompt(instructions: &str, process: &str) -> String {
     assert!(process.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     if process.is_empty() {
         return instructions.to_owned();

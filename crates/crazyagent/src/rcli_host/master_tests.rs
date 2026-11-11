@@ -355,10 +355,13 @@ fn no_clock_ends_a_turn_without_a_time_limit_and_each_limit_ends_it_on_time() {
 /// A stand-in rcli that never says it is ready and waits on its input until it is stopped.
 const WAITING_HOST: &str = "#!/bin/sh\nIFS= read -r line\n";
 
-/// Runs the waiting stand-in as a real rcli master host under a run clock and polls it
-/// until the host ends. Input: the clock, none for no master time limit. Output: the code
-/// the host ended with and how long after its launch.
-fn waiting_host_end(clock: Option<Duration>) -> (String, Duration) {
+/// Launches the waiting stand-in as a real rcli master host under a run clock, with its
+/// start bound shortened to `start` when given. Inputs: the clock, none for no master time
+/// limit, and the start bound. Output: the host, its launch moment and the case it uses.
+fn waiting_host(
+    clock: Option<Duration>,
+    start: Option<Duration>,
+) -> (RcliMasterHost, Instant, Case) {
     let mut case = Case::new();
     fs::write(&case.launch.executable, WAITING_HOST).unwrap();
     case.launch.artifact_sha256 = digest(WAITING_HOST.as_bytes());
@@ -372,6 +375,17 @@ fn waiting_host_end(clock: Option<Duration>) -> (String, Duration) {
     let boundary = sandbox(&case, &case.launch.cwd);
     let started = Instant::now();
     let mut host = RcliMasterHost::launch(case.launch.clone(), &boundary, clock).unwrap();
+    if let Some(start) = start {
+        host.shorten_start_time(start);
+    }
+    (host, started, case)
+}
+
+/// Runs the waiting stand-in as a real rcli master host and polls it until the host ends.
+/// Inputs: the clock, none for no master time limit, and the shortened start bound.
+/// Output: the code the host ended with and how long after its launch.
+fn waiting_host_end(clock: Option<Duration>, start: Option<Duration>) -> (String, Duration) {
+    let (mut host, started, _case) = waiting_host(clock, start);
     let ended = loop {
         match host.poll() {
             Ok(None) => assert!(
@@ -390,20 +404,46 @@ fn waiting_host_end(clock: Option<Duration>) -> (String, Duration) {
 
 /// A launched rcli host obeys the run clock it is given, the owner's master time limit, and
 /// has none without one (OB-5d). The stand-in never becomes ready: under a 1 s clock the
-/// host ends as out of time, and with no clock only the 5 s start bound ends it, which is
-/// no turn clock.
+/// host ends as out of time, and with no clock only the start bound ends it, which is no
+/// turn clock.
 #[test]
 fn a_launched_host_ends_at_its_run_clock_and_has_no_clock_without_one() {
-    let (code, after) = waiting_host_end(Some(Duration::from_secs(1)));
+    let (code, after) = waiting_host_end(Some(Duration::from_secs(1)), None);
     assert_eq!(code, "rcli_master_turn_deadline");
     assert!(after >= Duration::from_secs(1), "{after:?}");
     assert!(after < Duration::from_secs(5), "{after:?}");
-    let (code, after) = waiting_host_end(None);
+    let (code, after) = waiting_host_end(None, Some(Duration::from_secs(1)));
     assert_eq!(
         code, "rcli_master_startup_deadline",
         "no run clock ended it"
     );
-    assert!(after >= Duration::from_secs(5), "{after:?}");
+    assert!(after >= Duration::from_secs(1), "{after:?}");
+}
+
+/// PA-17 (DEC-141): an rcli master waits for its harness to start as long as a Codex or
+/// Claude Code master does, `START_TIME_MAX` with no run clock, where it used to give up
+/// after 5 s. A host still starting after 6 s keeps waiting; under a run clock the clock
+/// alone bounds the start, as it does for Codex.
+#[test]
+fn an_rcli_host_waits_for_its_start_as_long_as_the_other_masters() {
+    let (mut host, started, _case) = waiting_host(None, None);
+    assert_eq!(host.start_time(), crate::master_time_limit::START_TIME_MAX);
+    while started.elapsed() < Duration::from_secs(6) {
+        assert!(
+            matches!(host.poll(), Ok(None)),
+            "the start ended after {:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    host.shutdown().unwrap();
+    let (code, after) =
+        waiting_host_end(Some(Duration::from_secs(2)), Some(Duration::from_secs(1)));
+    assert_eq!(
+        code, "rcli_master_turn_deadline",
+        "the run clock bounds the start"
+    );
+    assert!(after >= Duration::from_secs(2), "{after:?}");
 }
 
 #[test]
@@ -470,6 +510,18 @@ fn an_instructions_file_adds_one_flag_and_only_a_private_single_link_file_outsid
     private(&empty, "");
     case.launch.instructions = Some(empty);
     rejection(case.launch.command(), "rcli_master_file_rejected");
+    let whole = runtime.join("whole.md");
+    private(&whole, &"a".repeat(super::INSTRUCTIONS_BYTES_MAX));
+    case.launch.instructions = Some(whole);
+    assert_eq!(
+        case.launch.command().unwrap().get_args().count(),
+        10,
+        "an instruction file of the size every master gets passes (PA-5)"
+    );
+    let large = runtime.join("large.md");
+    private(&large, &"a".repeat(super::INSTRUCTIONS_BYTES_MAX + 1));
+    case.launch.instructions = Some(large);
+    rejection(case.launch.command(), "rcli_master_file_rejected");
     case.launch.instructions = Some(file);
     assert_eq!(case.launch.command().unwrap().get_args().count(), 10);
 }
@@ -530,6 +582,7 @@ fn a_turn_of_ten_thousand_messages_and_large_frames_ends_with_its_reply() {
     let completed = EventBody::Completed {
         turn_id: turn_id.clone(),
         status: TurnStatus::Succeeded,
+        failure: None,
     };
     let done = turn.accept(&frame(completed), largest).unwrap().unwrap();
     assert_eq!(done.turn_id, turn_id);

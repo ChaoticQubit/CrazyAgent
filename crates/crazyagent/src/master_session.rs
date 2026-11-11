@@ -272,8 +272,8 @@ impl MasterSessionView {
                 .any(|binding| &binding.config_id == config)
     }
 
-    /// Checks the stored rebindings: bounded, never on an RCLI master, well formed, made
-    /// after the Open in revision order up to the session's version, each a real change.
+    /// Checks the stored rebindings: bounded, well formed, made after the Open in
+    /// revision order up to the session's version, each a real change.
     /// Output: false when the record cannot have come from `rebind`.
     pub(crate) fn rebinds_valid(&self) -> bool {
         let mut previous = (
@@ -282,9 +282,7 @@ impl MasterSessionView {
             self.owner.engine_epoch.as_str(),
             self.owner.revision_after.value(),
         );
-        if self.rebound.len() > REBINDS_MAX
-            || (self.selection.backend == MasterBackend::Rcli && !self.rebound.is_empty())
-        {
+        if self.rebound.len() > REBINDS_MAX {
             return false;
         }
         for binding in &self.rebound {
