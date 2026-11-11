@@ -1099,14 +1099,14 @@ fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
 }
 
 /// DEC-141 PA-19: what an earlier run left pinned in an agent home, an ACL on the home that
-/// denies new folders and removals or an immutable file at `skills`, refuses no launch of any
-/// harness. Codex, which loads skills from its home, has those pins released and starts with
+/// denies new folders and removals, an ACL on `skills` that denies its removal or an immutable
+/// file at `skills`, refuses no launch of any harness. Codex, which loads skills from its home, has those pins released and starts with
 /// an empty `skills` folder, on the same terms as Claude Code and RCLI.
 #[cfg(target_os = "macos")]
 #[test]
 fn skills_left_pinned_in_a_home_refuse_no_launch_of_any_harness() {
     for harness in ["claude-code", "codex", "rcli"] {
-        for pin in ["home acl", "skills file flag"] {
+        for pin in ["home acl", "skills acl", "skills file flag"] {
             let directory = tempfile::tempdir().unwrap();
             let _unpinned = Unpinned(directory.path().to_path_buf());
             let home = directory.path().canonicalize().unwrap().join("home");
@@ -1118,6 +1118,10 @@ fn skills_left_pinned_in_a_home_refuse_no_launch_of_any_harness() {
                 fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
                 let denied = &["+a", "everyone deny add_subdirectory,delete_child"];
                 assert!(chmod(denied, &home), "{harness}, {pin}: pinned");
+            } else if pin == "skills acl" {
+                fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+                let denied = &["+a", "everyone deny delete"];
+                assert!(chmod(denied, &skills), "{harness}, {pin}: pinned");
             } else {
                 fs::write(&skills, "planted\n").unwrap();
                 assert!(chflags("uchg", &skills), "{harness}, {pin}: pinned");
@@ -1140,8 +1144,9 @@ fn skills_left_pinned_in_a_home_refuse_no_launch_of_any_harness() {
 }
 
 /// DEC-141 PA-19: a `skills` file an agent hard-linked to an owner's file the owner made
-/// immutable is the one pin a Codex launch does not release, since releasing it would clear
-/// the owner's flag; that launch is refused with [`SKILLS_KEPT`] and the owner's flag stays.
+/// immutable and gave an ACL entry is the one pin a Codex launch does not release, since
+/// releasing it would clear the owner's pins; that launch is refused with [`SKILLS_KEPT`] and
+/// the owner's flag and ACL entry stay.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_entry_linked_to_an_owner_s_immutable_file_keeps_its_flag_and_refuses_codex() {
@@ -1154,6 +1159,10 @@ fn a_skills_entry_linked_to_an_owner_s_immutable_file_keeps_its_flag_and_refuses
     fs::write(&owner, "owner\n").unwrap();
     fs::hard_link(&owner, home.join("skills")).unwrap();
     assert!(
+        chmod(&["+a", "everyone deny write"], &owner),
+        "the owner adds an ACL entry"
+    );
+    assert!(
         chflags("uchg", &owner),
         "the owner makes the file immutable"
     );
@@ -1165,6 +1174,55 @@ fn a_skills_entry_linked_to_an_owner_s_immutable_file_keeps_its_flag_and_refuses
         Some(SKILLS_KEPT.to_owned())
     );
     assert!(immutable(&owner), "the launch cleared the owner's flag");
+    assert!(
+        listed(&[&owner]).contains("deny write"),
+        "the launch cleared the owner's ACL"
+    );
+}
+
+/// PALOW-M1: a process an earlier run left that swaps `skills`, a file it pinned, for a hard
+/// link to an owner's file with an immutable flag and an ACL entry, after the launch checked
+/// the entry and before it released it, leaves the owner's file as it was: the release acts on
+/// the descriptor it checked, never on the name, and the Codex launch is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_entry_swapped_for_an_owner_s_file_during_its_release_keeps_the_owner_s_pins() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    let skills = home.join("skills");
+    fs::write(&skills, "planted\n").unwrap();
+    assert!(chflags("uchg", &skills), "the agent pins its skills file");
+    let (swapped, linked) = (skills.clone(), owner.clone());
+    AFTER_SKILLS_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            assert!(chflags("nouchg", &swapped));
+            fs::remove_file(&swapped).unwrap();
+            fs::hard_link(&linked, &swapped).unwrap();
+            assert!(chmod(&["+a", "everyone deny write"], &linked));
+            assert!(chflags("uchg", &linked));
+        }));
+    });
+
+    let held = lock_only(&home, "codex");
+
+    assert!(
+        AFTER_SKILLS_OPEN.with(|step| step.borrow().is_none()),
+        "the release never reached the swap"
+    );
+    assert_eq!(
+        held.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned())
+    );
+    assert!(immutable(&owner), "the release cleared the owner's flag");
+    assert!(
+        listed(&[&owner]).contains("deny write"),
+        "the release cleared the owner's ACL"
+    );
 }
 
 #[cfg(target_os = "macos")]

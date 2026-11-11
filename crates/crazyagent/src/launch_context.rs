@@ -1824,12 +1824,13 @@ static PARKED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// makes an empty `skills` folder of the engine's again. Whatever `skills` is, even a link, is
 /// moved by descriptor into a fresh folder beside the home ([`park`]) and released and removed
 /// only there ([`clear`]), so no tool ever runs on a path an agent can swap (team-19 r1 M1).
-/// A `skills` that does not move has the home's own pins and its own cleared, each by its
-/// fixed path, and is moved once more, so a pin an earlier run left refuses no Codex launch a
-/// Claude Code launch would make (DEC-141 PA-19). A file with a second link keeps its pins: it
-/// may be the owner's file an agent linked in. A `skills` of another user is left alone. Input:
-/// the validated agent home. Output: Ok, or [`SKILLS_KEPT`] when `skills` stays in the home,
-/// comes back, or is no longer a folder once the engine made it.
+/// A `skills` that does not move has the home's own pins cleared by its fixed path and its
+/// own through one descriptor ([`release_skills`]), and is moved once more, so a pin an
+/// earlier run left refuses no Codex launch a Claude Code launch would make (DEC-141 PA-19).
+/// A file with a second link keeps its pins: it may be the owner's file an agent linked in. A
+/// `skills` of another user is left alone. Input: the validated agent home. Output: Ok, or
+/// [`SKILLS_KEPT`] when `skills` stays in the home, comes back, or is no longer a folder once
+/// the engine made it.
 #[cfg(unix)]
 fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, FileType};
@@ -1853,9 +1854,7 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     let mut moved = move_out();
     if !moved {
         release(home, false);
-        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory || stat.st_nlink == 1 {
-            release(&home.join("skills"), false);
-        }
+        release_skills(&parent);
         moved = move_out();
     }
     clear(&parked);
@@ -1869,6 +1868,70 @@ fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     }
     Ok(())
 }
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// A step a launch test runs in [`release_skills`] once `skills` is open and checked and
+    /// before anything on it changes, standing in for a process an earlier run left that swaps
+    /// the entry meanwhile. Runs once; None runs nothing.
+    pub(super) static AFTER_SKILLS_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clears the immutable and append-only flags and every ACL entry of a home's `skills` through
+/// one descriptor, never its path (PALOW-M1): opened from the home's handle without following
+/// a link and changed only when that open entry is this user's folder or a file with one link,
+/// so an owner's file an agent links in at that name, before or after the check, keeps its
+/// pins. Flags go through `/dev/fd/<n>`, the ACL through `/bin/chmod -N` on the descriptor
+/// given as its standard input. Input: the home's open folder.
+#[cfg(target_os = "macos")]
+fn release_skills(parent: &std::os::fd::OwnedFd) {
+    use nix::sys::stat::FileFlag;
+    use rustix::fs::FileType;
+    use std::os::fd::AsRawFd;
+    let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(entry) = rustix::fs::openat(parent, "skills", open, Mode::empty()) else {
+        return;
+    };
+    let Ok(found) = rustix::fs::fstat(&entry) else {
+        return;
+    };
+    let kind = FileType::from_raw_mode(found.st_mode);
+    assert_ne!(
+        kind,
+        FileType::Symlink,
+        "an entry opened without following a link is never one"
+    );
+    let single = kind == FileType::Directory || found.st_nlink == 1;
+    if !single || found.st_uid != rustix::process::geteuid().as_raw() {
+        return;
+    }
+    #[cfg(test)]
+    if let Some(step) = AFTER_SKILLS_OPEN.with(|step| step.borrow_mut().take()) {
+        step();
+    }
+    let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
+    let flags = FileFlag::from_bits_retain(found.st_flags);
+    if flags.intersects(pinning) {
+        let handle = PathBuf::from(format!("/dev/fd/{}", entry.as_raw_fd()));
+        let _ = nix::unistd::chflags(&handle, flags.difference(pinning));
+    }
+    let Ok(input) = entry.try_clone() else {
+        return;
+    };
+    let _ = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args(["-N", "/dev/stdin"])
+            .stdin(std::process::Stdio::from(input))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+}
+
+/// Leaves `skills` as it is off macOS, where the engine releases nothing an agent set; a
+/// pinned one keeps its Codex launches refused with [`SKILLS_KEPT`]. Input: unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn release_skills(_parent: &std::os::fd::OwnedFd) {}
 
 /// Makes a fresh owner-only folder beside the agent home, in the agent's engine folder that
 /// no sandboxed agent can write, to move the home's `skills` into, under a name no earlier
