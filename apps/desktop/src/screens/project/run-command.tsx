@@ -26,7 +26,7 @@ const REASONS: Record<string, string> = {
   [CONTROL]: "This line holds a hidden character. Copy it and run it yourself.",
   [CHAINED]: "This line chains commands. Copy it and run it yourself.",
 };
-const RUNS = "It runs in this project's terminal, inside the project sandbox.";
+const RUNS = "It runs in this project's terminal, at this project's access level.";
 const TYPED = "It is typed into this project's terminal. You press Enter.";
 const WENT = "Typed into a new terminal in the IDE tab.";
 const NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";

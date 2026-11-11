@@ -34,7 +34,8 @@ test("Run shows the command verbatim in the confirm and sends nothing before Con
   const html = renderToStaticMarkup(createElement(run.RunConfirm, { command: "cargo install alpha", mode: "type_and_run", open: true, pending: false, onConfirm: () => sent.push("confirm"), onCancel: () => sent.push("cancel") }));
   assert.match(html, /<pre[^>]*>cargo install alpha<\/pre>/);
   assert.match(html, /Run this command\?/);
-  assert.match(html, /It runs in this project&#x27;s terminal, inside the project sandbox\./);
+  assert.match(html, /It runs in this project&#x27;s terminal, at this project&#x27;s access level\./);
+  assert.doesNotMatch(html, /sandbox/i, "a Full access project has no sandbox, so the confirm never claims one");
   assert.match(html, />Run<\/button>/);
   assert.deepEqual(sent, []);
 });
