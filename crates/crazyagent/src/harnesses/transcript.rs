@@ -16,9 +16,17 @@ const CLAUDE_INTERRUPTED: &str = "[Request interrupted by user";
 const CONVERSATION_ID_BYTES_MAX: usize = 128;
 const EXCERPT_TAIL_BYTES_MAX: u64 = 4 * 1024 * 1024;
 const EXCERPT_MESSAGES_MAX: usize = 256;
+const CLAUDE_NOTIFICATION: &str = "<task-notification>";
+const CLAUDE_NOTIFICATION_MODE: &str = "task-notification";
+const NOTIFIED_TASKS_MAX: usize = 16;
 
 /// One fact read from a harness's own session record, whatever the harness.
 /// `Waiting` means the harness waits for the owner, such as an approval or a question.
+/// `BackgroundStarted` and `BackgroundEnded` follow a command the harness runs on after its
+/// tool call returns, such as Claude Code's Bash `run_in_background`, by its task id: it
+/// ends with its task notification, or with the agent's own stop of it, which brings none.
+/// Claude Code records a notification that comes while the agent is idle as a user message
+/// that starts a turn, and one that comes during a turn as a queued command attachment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
     TurnStarted,
@@ -28,6 +36,8 @@ pub enum TranscriptEvent {
     Interrupted,
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
+    BackgroundStarted { id: String },
+    BackgroundEnded { id: String },
 }
 
 /// Follows one harness session record as the harness appends to it: the Codex rollout of a
@@ -42,6 +52,7 @@ pub struct TranscriptReader {
     found: Option<(String, PathBuf)>,
     start: u64,
     pending: Vec<u8>,
+    scanned: usize,
     in_turn: bool,
     consumed: u64,
 }
@@ -89,6 +100,7 @@ impl TranscriptReader {
             found: None,
             start: 0,
             pending: Vec::new(),
+            scanned: 0,
             in_turn: false,
             consumed: 0,
         }
@@ -147,6 +159,13 @@ impl TranscriptReader {
         self.start
     }
 
+    /// Says whether this record reports the commands its harness starts in the background
+    /// and their ends, as a Claude Code transcript does; a Codex rollout reports neither.
+    /// Output: the answer.
+    pub fn reports_background(&self) -> bool {
+        matches!(self.source, Transcript::ClaudeSession { .. })
+    }
+
     /// Counts the bytes read from the record so far, so a caller can bound a session's output.
     /// Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
@@ -154,9 +173,10 @@ impl TranscriptReader {
     }
 
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
-    /// walking its lines by offset and draining the used ones once, so many short lines cost
-    /// one pass. Output: the facts in order, none while the record does not exist yet, or a
-    /// plain code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
+    /// scanning on from where the last read stopped and draining the used lines once, so many
+    /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
+    /// in order, none while the record does not exist yet, or a plain code when a line passes
+    /// `LINE_BYTES_MAX` or the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
             let opened = match &self.source {
@@ -183,9 +203,18 @@ impl TranscriptReader {
         self.consumed += count as u64;
         let mut events = Vec::new();
         let mut used = 0;
-        while let Some(length) = self.pending[used..].iter().position(|byte| *byte == b'\n') {
-            let line = &self.pending[used..=used + length];
-            used += length + 1;
+        let mut scanned = self.scanned;
+        while events.len() < EVENTS_PER_READ_MAX {
+            let Some(length) = self.pending[scanned..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            else {
+                scanned = self.pending.len();
+                break;
+            };
+            let line = &self.pending[used..=scanned + length];
+            used = scanned + length + 1;
+            scanned = used;
             let Ok(value) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
@@ -199,15 +228,14 @@ impl TranscriptReader {
                     events.push(fact);
                 }
             }
-            if events.len() >= EVENTS_PER_READ_MAX {
-                break;
-            }
         }
         self.pending.drain(..used);
+        self.scanned = scanned - used;
         if self.pending.len() > LINE_BYTES_MAX {
             return Err(failure("launch_transcript_line_too_long"));
         }
-        assert!(events.len() >= EVENTS_PER_READ_MAX || !self.pending.contains(&b'\n'));
+        assert!(self.scanned <= self.pending.len());
+        assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
     }
 
@@ -411,6 +439,26 @@ fn conversation_id(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Reads the task ids a Claude Code task notification says ended: each `<task-id>` of a
+/// message that starts with `<task-notification>`, as Claude Code writes one, kept as
+/// `conversation_id` keeps an id, at most `NOTIFIED_TASKS_MAX`. A message that only quotes
+/// a notification, such as a typed coordination message, names none (DEC-119). Takes the
+/// message text. Returns the ids, none for other text.
+fn notified_tasks(text: &str) -> Vec<String> {
+    if !text.starts_with(CLAUDE_NOTIFICATION) {
+        return Vec::new();
+    }
+    let ids: Vec<String> = text
+        .split("<task-id>")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("</task-id>"))
+        .filter_map(|(id, _)| conversation_id(&Value::String(id.trim().to_owned())))
+        .take(NOTIFIED_TASKS_MAX)
+        .collect();
+    assert!(ids.len() <= NOTIFIED_TASKS_MAX);
+    ids
+}
+
 fn line_text(text: &str) -> TranscriptEvent {
     let mut text = text.to_owned();
     if !text.ends_with('\n') {
@@ -465,32 +513,66 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
     }
 }
 
+/// The texts of a Claude Code content value: the string itself, or each text block of an
+/// array. Takes the value. Returns the texts, none for any other value.
+fn content_texts(content: &Value) -> Vec<&str> {
+    match content {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(items) => items
+            .iter()
+            .filter(|item| item["type"] == "text")
+            .filter_map(|item| item["text"].as_str())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
     let message = &value["message"];
     match value["type"].as_str() {
+        Some("attachment")
+            if value["attachment"]["type"] == "queued_command"
+                && value["attachment"]["commandMode"] == CLAUDE_NOTIFICATION_MODE =>
+        {
+            content_texts(&value["attachment"]["prompt"])
+                .iter()
+                .flat_map(|text| notified_tasks(text))
+                .map(|id| TranscriptEvent::BackgroundEnded { id })
+                .collect()
+        }
         Some("user") if value["isMeta"] != true => {
-            let texts: Vec<&str> = match &message["content"] {
-                Value::String(text) => vec![text.as_str()],
-                Value::Array(items) => items
+            let texts = content_texts(&message["content"]);
+            let result = &value["toolUseResult"];
+            let settled = matches!(result["status"].as_str(), Some("completed" | "cancelled"));
+            let mut facts: Vec<TranscriptEvent> = conversation_id(&result["backgroundTaskId"])
+                .filter(|_| result["backgroundEndsWithFinalResponse"] != true)
+                .map(|id| TranscriptEvent::BackgroundStarted { id })
+                .into_iter()
+                .chain(
+                    conversation_id(&result["task_id"])
+                        .into_iter()
+                        .chain(conversation_id(&result["taskId"]).filter(|_| settled))
+                        .map(|id| TranscriptEvent::BackgroundEnded { id }),
+                )
+                .collect();
+            facts.extend(
+                texts
                     .iter()
-                    .filter(|item| item["type"] == "text")
-                    .filter_map(|item| item["text"].as_str())
-                    .collect(),
-                _ => Vec::new(),
-            };
+                    .flat_map(|text| notified_tasks(text))
+                    .map(|id| TranscriptEvent::BackgroundEnded { id }),
+            );
             if texts
                 .iter()
                 .any(|text| text.starts_with(CLAUDE_INTERRUPTED))
             {
-                vec![
+                facts.extend([
                     TranscriptEvent::Interrupted,
                     TranscriptEvent::TurnFinished { success: false },
-                ]
-            } else if texts.is_empty() {
-                Vec::new()
-            } else {
-                vec![TranscriptEvent::TurnStarted]
+                ]);
+            } else if !texts.is_empty() {
+                facts.push(TranscriptEvent::TurnStarted);
             }
+            facts
         }
         Some("assistant") if value["isApiErrorMessage"] == true => {
             let code = value["error"].as_str().unwrap_or_default();
@@ -590,17 +672,214 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
     messages.into()
 }
 
-/// Reads one line of a harness conversation record as `conversation_messages` reads it:
-/// a Codex rollout `message` item or Claude Code `user` and `assistant` text. Takes the
-/// catalog harness id and the line. Returns the speaker and text, or none for any other
-/// line, a harness without a reader or a line that is not JSON.
-pub fn record_message(harness: &str, line: &[u8]) -> Option<(Speaker, String)> {
+/// Most bytes of one tool call's input or of one tool's output the session search keeps.
+pub const TOOL_TEXT_BYTES_MAX: usize = 32 * 1024;
+/// Most bytes of a tool value's plain lines made before the cut: the kept bytes and enough
+/// past them that a cut shows, a character's bytes at most.
+const FIELDS_BYTES_MAX: usize = TOOL_TEXT_BYTES_MAX + 4;
+
+/// Reads one line of a harness conversation record for the session search: the messages
+/// `conversation_messages` reads, plus each tool call with its input (Claude Code
+/// `tool_use`, Codex `function_call` and `custom_tool_call`) and each tool's output
+/// (`tool_result`, `function_call_output` and `custom_tool_call_output`), each cut to
+/// `TOOL_TEXT_BYTES_MAX` bytes. Takes the catalog harness id and the line. Returns who said
+/// it ("typed", "agent" or "tool") and the text, or none for any other line, a harness
+/// without a reader or a line that is not JSON.
+pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, String)> {
     let value = serde_json::from_slice::<Value>(line).ok()?;
     match harness {
-        "codex" => codex_message(&value),
-        "claude-code" => claude_message(&value),
+        "codex" => codex_entry(&value),
+        "claude-code" => claude_entry(&value),
         _ => None,
     }
+}
+
+fn speaker_name(speaker: Speaker) -> &'static str {
+    match speaker {
+        Speaker::Input => "typed",
+        Speaker::Agent => "agent",
+    }
+}
+
+fn codex_entry(value: &Value) -> Option<(&'static str, String)> {
+    let payload = &value["payload"];
+    if value["type"] != "response_item" {
+        return None;
+    }
+    match payload["type"].as_str()? {
+        "function_call" | "custom_tool_call" => {
+            let input = match &payload["arguments"] {
+                Value::String(text) => {
+                    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+                }
+                Value::Null => payload["input"].clone(),
+                other => other.clone(),
+            };
+            let name = payload["name"].as_str().unwrap_or("tool");
+            Some(("agent", tool_call(name, &input)))
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let output = match &payload["output"] {
+                Value::String(text) => match serde_json::from_str::<Value>(text) {
+                    Ok(Value::Object(map)) => map
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .unwrap_or(text.as_str())
+                        .to_owned(),
+                    _ => text.clone(),
+                },
+                other => fields(other),
+            };
+            Some(("tool", tool_output(&output)))
+        }
+        _ => codex_message(value).map(|(speaker, text)| (speaker_name(speaker), text)),
+    }
+}
+
+fn claude_entry(value: &Value) -> Option<(&'static str, String)> {
+    let speaker = match value["type"].as_str()? {
+        "user" if value["isMeta"] != true => "typed",
+        "assistant" if value["isApiErrorMessage"] != true => "agent",
+        _ => return None,
+    };
+    let mut texts: Vec<String> = claude_message(value)
+        .map(|(_, text)| text)
+        .into_iter()
+        .collect();
+    let mut output = false;
+    for part in value["message"]["content"].as_array().into_iter().flatten() {
+        match part["type"].as_str() {
+            Some("tool_use") => {
+                texts.push(tool_call(
+                    part["name"].as_str().unwrap_or("tool"),
+                    &part["input"],
+                ));
+            }
+            Some("tool_result") => {
+                output = true;
+                let text = match &part["content"] {
+                    Value::Array(items) => items
+                        .iter()
+                        .filter(|item| item["type"] == "text")
+                        .filter_map(|item| item["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    other => fields(other),
+                };
+                texts.push(tool_output(&text));
+            }
+            _ => {}
+        }
+    }
+    (!texts.is_empty()).then(|| (if output { "tool" } else { speaker }, texts.join("\n")))
+}
+
+fn tool_call(name: &str, input: &Value) -> String {
+    format!("Tool call {name}:\n{}", capped(&fields(input)))
+}
+
+fn tool_output(text: &str) -> String {
+    format!("Tool output:\n{}", capped(text))
+}
+
+/// A tool's input or output as plain lines: each field of an object as "name: value", a
+/// list of strings joined by spaces, a string as it is and any other value as compact JSON,
+/// so secret masking reads it line by line and word by word. Only the first
+/// `FIELDS_BYTES_MAX` bytes are made, so a deep or huge value costs about its kept bytes.
+/// Takes the JSON value. Returns the text, longer than `TOOL_TEXT_BYTES_MAX` only when the
+/// whole text is.
+fn fields(value: &Value) -> String {
+    let mut text = String::new();
+    push_fields(value, &mut text);
+    text
+}
+
+/// Appends a tool value's plain lines to `out`, as [`fields`] makes them, stopping once
+/// `out` holds `FIELDS_BYTES_MAX` bytes. Takes the value and the text to extend.
+fn push_fields(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => {}
+        Value::String(text) => push_bounded(out, text),
+        Value::Object(map) => {
+            for (at, (key, value)) in map.iter().enumerate() {
+                if out.len() >= FIELDS_BYTES_MAX {
+                    return;
+                }
+                if at > 0 {
+                    push_bounded(out, "\n");
+                }
+                push_bounded(out, key);
+                push_bounded(out, ": ");
+                push_fields(value, out);
+            }
+        }
+        Value::Array(items) if items.iter().all(Value::is_string) => {
+            for (at, item) in items.iter().filter_map(Value::as_str).enumerate() {
+                if out.len() >= FIELDS_BYTES_MAX {
+                    return;
+                }
+                if at > 0 {
+                    push_bounded(out, " ");
+                }
+                push_bounded(out, item);
+            }
+        }
+        other => {
+            let mut json = Bounded {
+                bytes: Vec::new(),
+                room: FIELDS_BYTES_MAX.saturating_sub(out.len()),
+            };
+            let _ = serde_json::to_writer(&mut json, other);
+            push_bounded(out, &String::from_utf8_lossy(&json.bytes));
+        }
+    }
+}
+
+/// Appends as much of `text` to `out` as fits under `FIELDS_BYTES_MAX` bytes, cut at a
+/// character boundary. Takes the text to extend and the text to add.
+fn push_bounded(out: &mut String, text: &str) {
+    let mut end = text.len().min(FIELDS_BYTES_MAX.saturating_sub(out.len()));
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
+}
+
+/// Bytes a JSON value is written into, at most `room` of them; a write past that fails, so
+/// serializing a huge value stops at the bound.
+struct Bounded {
+    bytes: Vec<u8>,
+    room: usize,
+}
+
+impl std::io::Write for Bounded {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let taken = bytes.len().min(self.room - self.bytes.len());
+        if taken == 0 && !bytes.is_empty() {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        self.bytes.extend_from_slice(&bytes[..taken]);
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Cuts a tool's text to `TOOL_TEXT_BYTES_MAX` bytes at the last white space before the
+/// bound, so no word and so no secret is split, and marks the cut with "...". Takes the
+/// text. Returns it whole when it fits.
+fn capped(text: &str) -> String {
+    if text.len() <= TOOL_TEXT_BYTES_MAX {
+        return text.to_owned();
+    }
+    let mut end = TOOL_TEXT_BYTES_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind(char::is_whitespace).unwrap_or(end);
+    format!("{}...", &text[..end])
 }
 
 fn codex_message(value: &Value) -> Option<(Speaker, String)> {
@@ -646,6 +925,41 @@ fn said(speaker: Speaker, text: String) -> Option<(Speaker, String)> {
     let start = text.trim_start();
     (!start.is_empty() && !start.starts_with('<') && !start.starts_with(CLAUDE_INTERRUPTED))
         .then_some((speaker, text))
+}
+
+pub mod pending;
+
+/// Reads what was typed into a harness conversation after byte `offset` of its record, as
+/// `conversation_messages` reads typed messages, from at most `EXCERPT_TAIL_BYTES_MAX`
+/// bytes past the offset, never following a link. Takes the harness, the record and the
+/// offset. Returns the typed texts oldest first, or none when the record cannot be read or
+/// is now shorter than the offset.
+pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<String>> {
+    let mut file = open_plain(record)?;
+    let length = file.metadata().ok()?.len();
+    if length < offset {
+        return None;
+    }
+    let mut read = Vec::new();
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.take(EXCERPT_TAIL_BYTES_MAX)
+        .read_to_end(&mut read)
+        .ok()?;
+    let mut typed = Vec::new();
+    for line in read.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let said = match harness {
+            "codex" => codex_message(&value),
+            "claude-code" => claude_message(&value),
+            _ => None,
+        };
+        if let Some((Speaker::Input, text)) = said {
+            typed.push(text);
+        }
+    }
+    Some(typed)
 }
 
 #[cfg(all(test, unix))]

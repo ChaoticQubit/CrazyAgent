@@ -6,7 +6,7 @@ use crazyagent::engine::owner::{
     ModelAccessCollection, NativeAuthMethod, OwnerClientKind, OwnerData, OwnerMutation, OwnerRead,
     OwnerResponse, OwnerResult,
 };
-use crazyagent::protocol::CredentialRef;
+use crazyagent::protocol::{ConfigId, CredentialRef};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -183,5 +183,73 @@ async fn clear_stuck_sign_in_ends_it_only_once_the_engine_answers() {
         .err()
         .map(|error| error.code);
     assert_eq!(own, Some("account_not_found"));
+    case.stop().await;
+}
+
+/// A bridge holding a sign-in it believes still runs, whose reads fail because the unknown
+/// outcome left its controller detached, and a config that sign-in did not start with.
+/// Input: the case. Output: the bridge and the config.
+async fn running_unreadable(case: &Case) -> (NativeBridge, ConfigId) {
+    let mut bridge = case.stuck().await;
+    let operation = bridge.native_auth.as_mut().unwrap();
+    operation.running = true;
+    operation.uncertain = false;
+    (bridge, ConfigId::new("d".repeat(64)).unwrap())
+}
+
+#[tokio::test]
+async fn a_recheck_whose_read_failed_is_tried_again_at_the_same_config() {
+    let case = Case::new().await;
+    let (mut bridge, moved) = running_unreadable(&case).await;
+    bridge.recheck_auth(&moved).await;
+    assert_eq!(bridge.native_auth.as_ref().unwrap().checked, None);
+    drop(bridge);
+    case.stop().await;
+}
+
+#[tokio::test]
+async fn a_recheck_reads_the_engine_once_per_config() {
+    let case = Case::new().await;
+    let (mut bridge, moved) = running_unreadable(&case).await;
+    bridge.native_auth.as_mut().unwrap().checked = Some(moved.clone());
+    let request = |bridge: &NativeBridge| bridge.native_auth.as_ref().unwrap().request_id.clone();
+    let before = request(&bridge);
+    bridge.recheck_auth(&moved).await;
+    assert_eq!(request(&bridge), before);
+    bridge
+        .recheck_auth(&ConfigId::new("e".repeat(64)).unwrap())
+        .await;
+    assert_ne!(request(&bridge), before);
+    drop(bridge);
+    case.stop().await;
+}
+
+/// PROTO-3-LOWS (rv-code r1 L1): a busy engine admitted no request, so the outcome is known.
+/// A sign-in the bridge holds as running stays running and certain, and the connection
+/// stays, so the next recheck retries instead of the sign-in turning stuck.
+#[tokio::test]
+async fn a_busy_engine_leaves_a_running_sign_in_running_and_connected() {
+    let case = Case::new().await;
+    let mut bridge = case.stuck().await;
+    bridge.connect().await.unwrap();
+    let operation = bridge.native_auth.as_mut().unwrap();
+    operation.running = true;
+    operation.uncertain = false;
+    let busy = crazyagent::engine::EngineError("owner_busy".to_owned());
+    assert_eq!(
+        bridge.settle_auth(Err(busy)).map_err(|error| error.code),
+        Err("owner_busy")
+    );
+    let operation = bridge.native_auth.as_ref().unwrap();
+    assert!(operation.running, "a busy engine ended the held sign-in");
+    assert!(
+        !operation.uncertain,
+        "a busy engine made the sign-in's outcome unknown"
+    );
+    assert!(
+        bridge.status().connected,
+        "a busy engine dropped the connection"
+    );
+    drop(bridge);
     case.stop().await;
 }

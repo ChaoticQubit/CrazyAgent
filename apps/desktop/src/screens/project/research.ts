@@ -1,9 +1,9 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
-import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
+import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
-import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
+import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -31,6 +31,10 @@ export function ago(at: number, now: number): string {
   return days === 1 ? "Yesterday" : `${days} days ago`;
 }
 
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
 const PROMPT_LINE_MAX = 140;
 const RATE_LIMITED = /^rate_limited until (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC: (.+)$/s;
 
@@ -47,6 +51,17 @@ export function rateLimit(job: Pick<ResearchJob, "status" | "error">): { until: 
 /** Names the owner's local clock time of a moment. Input: milliseconds. Output: for example "4:32 PM". */
 export function localClock(ms: number): string {
   return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+
+/** The Team panel's row key of one team agent. Input: its team id. Output: the key. */
+export function agentKey(id: number): string {
+  return `agent-${id}`;
+}
+
+/** Whether a team agent is starting, waiting or working, so its views keep reading. Input: its
+ * status. Output: true then. */
+export function liveAgent(status: TeamAgentStatus): boolean {
+  return LIVE_AGENT.includes(status);
 }
 
 /** The first line of a task prompt, cut to fit one row. Input: the prompt. Output: the line. */
@@ -92,6 +107,30 @@ export interface TeamAgentRow {
   rename: { agent: number; handle: string } | null;
   depth: number;
   lead: string | null;
+  stop: { agent: number } | null;
+  stoppedByYou: boolean;
+  teammates: TeammateRow[];
+  messageNote: string | null;
+}
+
+/** One teammate a harness split off in its own terminal window, as the Team panel shows it. */
+export interface TeammateRow {
+  key: string;
+  pane: string;
+  word: string;
+  stop: { agent: number; pane: string } | null;
+}
+
+/** The teammate rows of one harness: running first, then the ones that closed, as the engine
+ * lists them. Inputs: the harness agent and whether it runs now and was not stopped by the
+ * owner. Output: the rows, each with a Stop only while it and its harness run. */
+export function teammateRows(agent: Pick<TeamAgent, "id" | "teammates">, running: boolean): TeammateRow[] {
+  return (agent.teammates ?? []).map((mate) => ({
+    key: `teammate-${agent.id}-${mate.pane}`,
+    pane: mate.pane,
+    word: mate.stopped ? "Stopped by you" : mate.ended ? "Closed" : "Running",
+    stop: running && !mate.ended && !mate.stopped ? { agent: agent.id, pane: mate.pane } : null,
+  }));
 }
 
 /** Orders agents as their lead tree (N2): each lead followed by its own workers, depth first,
@@ -171,7 +210,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>
       item.agent === agent.id && (newest === undefined || item.id > newest.id) ? item : newest, undefined);
     return {
-      key: `agent-${agent.id}`,
+      key: agentKey(agent.id),
       role: agent.role === "master" ? "Master" : "Sub-agent",
       name: agent.label,
       harness: harnessLabel(agent.harness),
@@ -182,11 +221,15 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
       rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
       depth,
       lead: agent.parent != null ? names.get(agent.parent) ?? null : null,
+      stop: agent.role !== "master" && agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status) ? { agent: agent.id } : null,
+      stoppedByYou: agent.owner_stopped === true,
+      teammates: agent.role === "sub" ? teammateRows(agent, agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status)) : [],
+      messageNote: agent.message_note ?? null,
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
     key: `task-${item.id}`,
-    from: item.source === "owner" ? "From you" : "From the master",
+    from: taskFrom(item, names),
     to: (item.agent !== null ? names.get(item.agent) : undefined) ?? harnessLabel(item.harness),
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
@@ -196,6 +239,14 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** Names who handed a task out, as "From Grace (@lead-b)" for the lead that started it, "From a
+ * lead" for one the status does not list, else "From the master" or "From you" by its source.
+ * Inputs: the task and the agent names by id. Output: the words. */
+export function taskFrom(task: Pick<TeamStatus["tasks"][number], "source" | "parent">, names: ReadonlyMap<number, string>): string {
+  if (typeof task.parent === "number") return `From ${names.get(task.parent) ?? "a lead"}`;
+  return task.source === "owner" ? "From you" : "From the master";
 }
 
 /** One agent in the Finished fold-out: its name, harness, status word, what it last worked on
@@ -222,13 +273,15 @@ export function finishedLabel(count: number): string {
 
 /** Builds the Finished fold-out (DEC-102): every agent the engine marks finished, newest first.
  * It stays under Show too, where the list and graph also hold them, so Wake is always one
- * click away. Inputs: the team status, a harness namer and now in milliseconds.
- * Output: the rows. */
+ * click away. An idle agent is last active when its last task finished, or when it started
+ * if it ran none, never at its heartbeat, which a live idle agent keeps moving.
+ * Inputs: the team status, a harness namer and now in milliseconds. Output: the rows. */
 export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harnessLabel: (id: string) => string, now: number): FinishedRow[] {
   const rows = status.agents.filter((agent) => agent.finished === true).map((agent): FinishedRow => {
     const own = status.tasks.filter((item) => item.agent === agent.id);
     const last = own.reduce<(typeof own)[number] | undefined>((newest, item) => newest === undefined || item.id > newest.id ? item : newest, undefined);
-    const at = agent.stopped_ms ?? (agent.status === "idle" ? agent.heartbeat_ms : null);
+    const idle = own.reduce((since, item) => Math.max(since, item.finished_ms ?? since), agent.created_ms);
+    const at = agent.stopped_ms ?? (agent.status === "idle" ? idle : null);
     return {
       key: `finished-${agent.id}`,
       agent: agent.id,
@@ -237,7 +290,7 @@ export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harne
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (last ? `Last task: ${firstLine(last.prompt)}` : "No task yet"),
       result: last?.result ?? null,
-      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
+      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : agent.owner_stopped === true ? "Stopped by you" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
       tasks: own.length,
       wakeable: agent.wakeable === true,
       wakeNote: agent.wakeable === true ? null : agent.wake_note ?? "This version of the engine can't wake agents.",
@@ -312,7 +365,7 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   const ran = job.started_ms === null ? "" : elapsed((job.finished_ms ?? now) - job.started_ms);
   const base = { title: job.kind_label, elapsed: "", report: false, active: false };
   switch (job.status) {
-    case "queued": return { ...base, status: "Queued", tone: "neutral", progress: "Waiting to start", active: true };
+    case "queued": return { ...base, status: "Queued", tone: "neutral", progress: job.error?.trim() || "Waiting to start", active: true };
     case "needs_pool": {
       const limit = rateLimit(job);
       if (limit) return { ...base, status: `Rate limited until ${localClock(limit.until)}`, tone: "warn", progress: limit.reason };
@@ -347,23 +400,152 @@ export function waitingLine(jobs: ResearchJob[]): string {
   return `Research is waiting: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
 }
 
-/** Builds the Recent activity list from real job times.
- * Inputs: the jobs, the project name and when it was created. Output: every event, newest first. */
-export function activity(jobs: ResearchJob[], project: string, created: number | null): { at: number; text: string }[] {
-  const events: { at: number; text: string }[] = [];
-  if (created !== null) events.push({ at: created, text: `You created ${project} with ${jobs.length} research ${jobs.length === 1 ? "task" : "tasks"}` });
-  for (const job of jobs) {
-    if (job.started_ms !== null) events.push({ at: job.started_ms, text: `${job.kind_label} started` });
-    if (job.finished_ms === null) continue;
-    const file = job.report_path.slice(job.report_path.lastIndexOf("/") + 1);
-    if (job.status === "done") events.push({ at: job.finished_ms, text: `${job.kind_label} saved ${file}` });
-    else if (job.status === "failed") events.push({ at: job.finished_ms, text: `${job.kind_label} stopped: ${job.error?.trim() || "error"}` });
-    else if (job.status === "cancelled") events.push({ at: job.finished_ms, text: `${job.kind_label} was stopped` });
-  }
-  return events.sort((a, b) => b.at - a.at);
+/** The job kind of the roadmap and release process planning job, which shares the research queue. */
+export const PLANNING_KIND = "roadmap_planning";
+
+/** Keeps the research jobs of a project's job list, leaving out its planning jobs.
+ * Input: the jobs. Output: the research jobs in the same order. */
+export function researchJobs(jobs: ResearchJob[]): (ResearchJob & { kind: ResearchKind })[] {
+  return jobs.filter((job): job is ResearchJob & { kind: ResearchKind } => job.kind !== PLANNING_KIND);
+}
+
+/** Picks the newest planning job of a project's job list. Input: the jobs. Output: the job with
+ * the highest id, or null when the project never planned a roadmap. */
+export function planningJob(jobs: ResearchJob[]): ResearchJob | null {
+  let newest: ResearchJob | null = null;
+  for (const job of jobs) if (job.kind === PLANNING_KIND && (newest === null || job.id > newest.id)) newest = job;
+  return newest;
 }
 
 export const ACTIVITY_ROWS = 8;
+
+/** The group Overview shows activity under when it serves no goal. */
+export const PROJECT_GOAL = "Project";
+
+/** The group Overview shows research under when it serves no goal, closed until opened. */
+export const RESEARCH_GOAL = "Research";
+export const RESEARCH_KEY = "research";
+const PROJECT_KEY = "project";
+const RESEARCH_KINDS: ActivityKind[] = ["research_started", "research_saved", "research_stopped", "research_waiting"];
+
+/** The filter chips over Overview activity, All first. */
+export type ActivityFilter = "all" | "merge" | "change" | "tests" | "task" | "phase";
+export const ACTIVITY_FILTERS: { value: ActivityFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "merge", label: "Merges" },
+  { value: "change", label: "Changes" },
+  { value: "tests", label: "Tests" },
+  { value: "task", label: "Tasks" },
+  { value: "phase", label: "Phases" },
+];
+
+const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
+  created: null,
+  research_started: "task",
+  research_saved: "task",
+  research_stopped: "task",
+  research_waiting: "task",
+  task_started: "task",
+  task_finished: "task",
+  task_failed: "task",
+  task_stopped: "task",
+  changes_ready: "change",
+  accepted: "change",
+  discarded: "change",
+  conflict: "change",
+  sent_back: "change",
+  lead_merged: "merge",
+  merged_into_main: "merge",
+  undone: "merge",
+  work_started: "task",
+  work_review_ready: "task",
+  work_complete: "task",
+  work_closed: "task",
+  phase: "phase",
+  test: "tests",
+};
+
+/** The chip an event shows under besides All. Input: its kind. Output: the chip, or null for
+ * the project's creation, which shows only under All. */
+export function activityFilter(kind: ActivityKind): Exclude<ActivityFilter, "all"> | null {
+  return FILTER_OF[kind];
+}
+
+/** The goal an event is shown under. A named goal keys by its name; research with no goal goes
+ * under Research and anything else with no goal under Project, each keyed apart from a goal of
+ * that name. Input: the event. Output: the group key and its label. */
+export function activityGoal(item: ActivityItem): { key: string; goal: string } {
+  const goal = item.goal?.trim();
+  if (goal) return { key: `goal:${goal}`, goal };
+  return RESEARCH_KINDS.includes(item.kind) ? { key: RESEARCH_KEY, goal: RESEARCH_GOAL } : { key: PROJECT_KEY, goal: PROJECT_GOAL };
+}
+
+/** Project activity newest first, a later id first at the same time. Input: the events in any
+ * order. Output: a sorted copy. */
+export function newestActivity(items: ActivityItem[]): ActivityItem[] {
+  return [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
+}
+
+/** Places events the way Overview shows them among others: as activityGoal does, except that
+ * the Research or Project group of events with no goal reads "(no goal)" after its name when a
+ * named goal of that name is among the events, so the two are told apart. Input: the events
+ * shown together. Output: the placing of one of them. */
+export function goalPlacer(items: ActivityItem[]): (item: ActivityItem) => { key: string; goal: string } {
+  const named = new Set(items.map((item) => item.goal?.trim()).filter((goal): goal is string => Boolean(goal)));
+  return (item) => {
+    const place = activityGoal(item);
+    return place.key.startsWith("goal:") || !named.has(place.goal) ? place : { ...place, goal: `${place.goal} (no goal)` };
+  };
+}
+
+/** The step names a goal's phase events walk through, in the order each first showed, the step
+ * of the newest phase current and the steps before it done. A step is the phase text before its
+ * first colon, less a closing "done", or the whole text when it has no colon. Input: one goal's
+ * events in any order. Output: the steps, empty when the goal has no phase event. */
+export function phasePath(items: ActivityItem[]): { step: string; done: boolean }[] {
+  const phases = newestActivity(items).filter((item) => item.kind === "phase").reverse();
+  const name = (item: ActivityItem) => (item.text.split(":")[0] ?? "").trim().replace(/\s+done$/iu, "") || item.text.trim();
+  const steps = [...new Set(phases.map(name))];
+  const now = phases.length > 0 ? steps.indexOf(name(phases[phases.length - 1])) : -1;
+  assert(steps.length <= phases.length, "every step comes from a phase event");
+  return steps.map((step, index) => ({ step, done: index < now }));
+}
+
+/** How many steps a goal header's phase path shows at once. */
+export const PATH_STEPS_SHOWN = 4;
+
+/** The part of a phase path a goal header shows: at most `max` steps in a row that holds the
+ * current step, the last ones when the newest phase is the last step, with how many steps come
+ * before and after it. Inputs: the path from phasePath and the most steps shown. Output: the
+ * counts before and after and the steps shown. */
+export function pathWindow(steps: { step: string; done: boolean }[], max: number = PATH_STEPS_SHOWN): { before: number; steps: { step: string; done: boolean }[]; after: number } {
+  assert(max >= 1, "a path shows at least one step");
+  const current = steps.findIndex((step) => !step.done);
+  const at = current === -1 ? steps.length - 1 : current;
+  const before = Math.max(0, Math.min(at - (max - 1), steps.length - max));
+  const shown = steps.slice(before, before + max);
+  const after = steps.length - before - shown.length;
+  assert(after >= 0 && shown.length <= max, "the window stays inside the path");
+  return { before, steps: shown, after };
+}
+
+/** Groups project activity by the goal it serves, for Overview, as goalPlacer places each
+ * event among the whole read. Inputs: the events in any order and the whole read they come
+ * from, the events themselves by default. Output: one group per goal with its key and label,
+ * the group with the newest event first, each group's events newest first. */
+export function groupActivity(items: ActivityItem[], whole: ActivityItem[] = items): { key: string; goal: string; items: ActivityItem[] }[] {
+  const groups = new Map<string, { key: string; goal: string; items: ActivityItem[] }>();
+  const placed = goalPlacer(whole);
+  for (const item of newestActivity(items)) {
+    const place = placed(item);
+    const group = groups.get(place.key);
+    if (group) group.items.push(item);
+    else groups.set(place.key, { ...place, items: [item] });
+  }
+  const grouped = [...groups.values()];
+  assert(grouped.reduce((sum, group) => sum + group.items.length, 0) === items.length, "every event is in exactly one group");
+  return grouped;
+}
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
 

@@ -684,6 +684,39 @@ async fn a_send_after_a_plain_restart_moves_the_conversation_to_the_new_run() {
     assert!(!tampered(&|copy| copy.rebound[0].engine_epoch = None));
 }
 
+/// L59 (R7): a send after an engine restart that follows an outside edit of global.toml
+/// continues the same conversation when the edit leaves the master's scope alone, though no
+/// in-app edit ever stored the settings the conversation started under.
+#[tokio::test]
+async fn a_send_after_a_restart_continues_the_same_conversation_when_an_outside_edit_changed_only_settings_outside_it()
+ {
+    let mut case = RebindCase::start().await;
+    let session = case.open("outside-open").await;
+    case.restart(&settings(false, &SANDBOX)).await;
+    let (config, source) = case.basis().await;
+    let sent = case.submit(&session, "outside-send").await;
+    let turn = case.settled(&session, "outside-send").await;
+    let current = case.session().await;
+    case.stop().await.unwrap();
+    assert_ne!(
+        config, session.config_id,
+        "the outside edit changed the settings"
+    );
+    assert_eq!(
+        sent,
+        OwnerResult::Applied,
+        "an outside edit that leaves the master's scope alone does not end the conversation"
+    );
+    assert_eq!(
+        turn.and_then(|turn| turn.reason),
+        Some(MasterReason::ReadinessUnknown)
+    );
+    assert_eq!(current.session_id, session.session_id);
+    assert_eq!(current.binding(), (&config, source.as_str()));
+    assert_eq!(current.rebound.len(), 1);
+    assert!(current.rebinds_valid());
+}
+
 #[tokio::test]
 async fn a_conversation_rebound_as_often_as_allowed_then_asks_for_a_new_one() {
     let mut case = RebindCase::start().await;

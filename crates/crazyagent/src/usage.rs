@@ -5,10 +5,21 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
+pub mod activity;
 pub mod capture;
+pub mod health;
+pub mod metrics;
+pub mod money;
 pub mod poll;
+pub mod prices;
+pub mod recount;
 pub mod report;
+mod rules;
 pub mod service;
+pub mod turns;
+
+pub use recount::RecountStatus;
+pub use rules::THIRD_PARTY_NOTICES;
 
 pub const PLAN_BYTES_MAX: usize = 64;
 pub const FAILURE_BYTES_MAX: usize = 64;
@@ -30,7 +41,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_limits (
     five_hour_polled_percent REAL CHECK(five_hour_polled_percent BETWEEN 0 AND 100),
     five_hour_polled_resets_ms INTEGER,
     weekly_polled_percent REAL CHECK(weekly_polled_percent BETWEEN 0 AND 100),
-    weekly_polled_resets_ms INTEGER
+    weekly_polled_resets_ms INTEGER,
+    five_hour_left_out TEXT CHECK(five_hour_left_out IN ('claude','codex')),
+    weekly_left_out TEXT CHECK(weekly_left_out IN ('claude','codex'))
 );";
 
 const ADD_POLLED: &str = "
@@ -45,6 +58,12 @@ const ADD_POLLED: &str = "
         weekly_polled_resets_ms=weekly_resets_ms
     WHERE source='poll';";
 
+const ADD_LEFT_OUT: &str = "
+    ALTER TABLE account_limits ADD COLUMN five_hour_left_out TEXT
+        CHECK(five_hour_left_out IN ('claude','codex'));
+    ALTER TABLE account_limits ADD COLUMN weekly_left_out TEXT
+        CHECK(weekly_left_out IN ('claude','codex'));";
+
 const COLUMNS: &str = "account,plan,five_hour_percent,five_hour_resets_ms,weekly_percent,\
     weekly_resets_ms,five_hour_reset_override_ms,weekly_reset_override_ms,source,observed_ms,\
     checked_ms,failure";
@@ -55,6 +74,8 @@ const POLLED_BEFORE_COPIES: &str = "CASE WHEN source='poll' THEN five_hour_perce
     CASE WHEN source='poll' THEN five_hour_resets_ms END,\
     CASE WHEN source='poll' THEN weekly_percent END,\
     CASE WHEN source='poll' THEN weekly_resets_ms END";
+
+const LEFT_OUT_COLUMNS: &str = "five_hour_left_out,weekly_left_out";
 
 /// One provider limit window as last observed: the share used, 0 to 100, and when the
 /// window resets in milliseconds since the epoch, when the provider said.
@@ -82,18 +103,22 @@ pub enum LimitSource {
     Transcript,
 }
 
-/// What one read of an account's limits found. A window the read did not report stays
-/// as it was stored.
+/// What one read of an account's limits found, and whose usage call a poll made. A window
+/// a poll left out is cleared and marked left out by that provider; one a run's own record
+/// left out stays as it was stored.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Observation {
     pub plan: Option<String>,
     pub five_hour: Option<LimitWindow>,
     pub weekly: Option<LimitWindow>,
+    pub provider: Option<poll::Provider>,
 }
 
 /// An account's stored limits: the last observed windows and plan, the same windows as
 /// the last successful poll read them, the owner's manual reset times, where and when they
-/// were last read, and the plain code of the last failed poll.
+/// were last read, the plain code of the last failed poll, and the provider whose good poll
+/// left each window out until a read reports it again, with the sentence the cards show
+/// for that window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountLimits {
@@ -109,6 +134,10 @@ pub struct AccountLimits {
     pub observed_ms: Option<i64>,
     pub checked_ms: Option<i64>,
     pub failure: Option<String>,
+    pub five_hour_left_out: Option<poll::Provider>,
+    pub weekly_left_out: Option<poll::Provider>,
+    pub five_hour_left_out_label: Option<String>,
+    pub weekly_left_out_label: Option<String>,
 }
 
 impl AccountLimits {
@@ -134,6 +163,27 @@ impl AccountLimits {
     /// The weekly window as the last successful poll read it, as it stands at `now_ms`.
     pub fn polled_weekly_at(&self, now_ms: i64) -> Option<LimitWindow> {
         window_at(self.polled_weekly, self.weekly_reset_override_ms, now_ms)
+    }
+
+    /// Drops each window whose reset has passed when the last read of this account failed:
+    /// nothing has read the window that came next, so 0% would be a guess and the report
+    /// says not read instead. Scheduling keeps `window_at`. Input: the time now. Output:
+    /// none; the windows are cleared on this row.
+    fn forget_unread_windows(&mut self, now_ms: i64) {
+        if self.failure.is_none() {
+            return;
+        }
+        let passed = |window: Option<LimitWindow>, override_ms: Option<i64>| {
+            window
+                .and_then(|window| override_ms.or(window.resets_at_ms))
+                .is_some_and(|at| at <= now_ms)
+        };
+        if passed(self.five_hour, self.five_hour_reset_override_ms) {
+            self.five_hour = None;
+        }
+        if passed(self.weekly, self.weekly_reset_override_ms) {
+            self.weekly = None;
+        }
     }
 }
 
@@ -180,43 +230,207 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     Ok(db)
 }
 
-/// Adds the usage tables to a database when missing, and the polled copies of the
-/// windows to a store made before them, filled from the rows a poll wrote last.
-/// Input: the connection. Output: done, or `usage_unavailable`.
-pub fn initialize(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(storage)?;
-    if !has_polled_copies(db)? {
-        db.execute_batch("SAVEPOINT usage_polled")
-            .map_err(storage)?;
-        let added = db.execute_batch(ADD_POLLED);
-        let closed = match added {
-            Ok(()) => db.execute_batch("RELEASE usage_polled"),
-            Err(_) => db.execute_batch("ROLLBACK TO usage_polled; RELEASE usage_polled"),
-        };
-        closed.map_err(storage)?;
-        if added.is_err() && !has_polled_copies(db)? {
-            return Err(failure("usage_unavailable"));
+/// The sentence the cards show for a window a good poll left out: Codex has no such limit on
+/// the account's plan, and Claude has no such window running now. Inputs: the provider and
+/// the window. Output: the sentence.
+pub fn left_out_label(provider: poll::Provider, kind: WindowKind) -> &'static str {
+    match (provider, kind) {
+        (poll::Provider::Codex, WindowKind::FiveHour) => {
+            "Codex reports no 5-hour limit for this plan."
+        }
+        (poll::Provider::Codex, WindowKind::Weekly) => {
+            "Codex reports no weekly limit for this plan."
+        }
+        (poll::Provider::Claude, WindowKind::FiveHour) => {
+            "Claude reports no 5-hour window right now."
+        }
+        (poll::Provider::Claude, WindowKind::Weekly) => {
+            "Claude reports no weekly window right now."
         }
     }
-    db.execute_batch(capture::SCHEMA).map_err(storage)
 }
 
-fn has_polled_copies(db: &Connection) -> Result<bool, EngineError> {
+/// The key a removed project's usage rows move to, so totals by account and by day stay
+/// whole and a project added again under the same id starts from nothing. It fails
+/// `validate_identity`, so no project can have it as its id.
+pub const REMOVED_PROJECTS: &str = "<removed>";
+
+/// Moves a removed project's usage to `REMOVED_PROJECTS`: its token rows add into the rows
+/// already kept there for the same hour and run, its unreported marks and seen sessions keep
+/// the latest time, its turn rows add into the rows kept there for the same hour and agent,
+/// its runs and cuts keep counting there, an open recount's staged rows, homes and
+/// sessions follow them, and its rows in the copy Use new kept are deleted. A table this
+/// store lacks is skipped. Inputs: the owner's transaction and the project. Output: Ok, or
+/// the store failure.
+pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
+    assert_ne!(project, REMOVED_PROJECTS);
+    let has = |table: &str| -> Result<bool, EngineError> {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(storage)
+    };
+    let moves = [
+        (
+            "usage_tokens",
+            format!(
+                "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+                 SELECT hour_ms,kind,?2,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos
+                 FROM usage_tokens WHERE project=?1
+                 ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
+                 input=MIN(input+excluded.input,{max}), output=MIN(output+excluded.output,{max}),
+                 cache_read=MIN(cache_read+excluded.cache_read,{max}),
+                 cache_write=MIN(cache_write+excluded.cache_write,{max}),
+                 cost_nanos=MIN(cost_nanos+excluded.cost_nanos,{max})",
+                max = capture::ROW_TOKENS_MAX
+            ),
+        ),
+        (
+            "usage_recount_rows",
+            format!(
+                "INSERT INTO usage_recount_rows(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+                 SELECT hour_ms,kind,?2,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos
+                 FROM usage_recount_rows WHERE project=?1
+                 ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
+                 input=MIN(input+excluded.input,{max}), output=MIN(output+excluded.output,{max}),
+                 cache_read=MIN(cache_read+excluded.cache_read,{max}),
+                 cache_write=MIN(cache_write+excluded.cache_write,{max}),
+                 cost_nanos=MIN(cost_nanos+excluded.cost_nanos,{max})",
+                max = capture::ROW_TOKENS_MAX
+            ),
+        ),
+        (
+            "usage_unreported",
+            "INSERT INTO usage_unreported(hour_ms,kind,project,agent,harness,last_ms)
+             SELECT hour_ms,kind,?2,agent,harness,last_ms FROM usage_unreported WHERE project=?1
+             ON CONFLICT(hour_ms,kind,project,agent,harness) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)"
+                .to_owned(),
+        ),
+        (
+            "usage_seen",
+            "INSERT INTO usage_seen(project,agent,session,last_ms)
+             SELECT ?2,agent,session,last_ms FROM usage_seen WHERE project=?1
+             ON CONFLICT(project,agent,session) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)"
+                .to_owned(),
+        ),
+        (
+            "usage_turns",
+            format!(
+                "INSERT INTO usage_turns(hour_ms,project,agent,turns)
+                 SELECT hour_ms,?2,agent,turns FROM usage_turns WHERE project=?1
+                 ON CONFLICT(hour_ms,project,agent) DO UPDATE SET
+                 turns=MIN(turns+excluded.turns,{max})",
+                max = turns::HOUR_TURNS_MAX
+            ),
+        ),
+        (
+            "usage_activity",
+            "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns)
+             SELECT hour_ms,?2,agent,model,activity,turns,edit_turns,first_try_turns FROM usage_activity WHERE project=?1
+             ON CONFLICT(hour_ms,project,agent,model,activity) DO UPDATE SET
+             turns=turns+excluded.turns,edit_turns=edit_turns+excluded.edit_turns,first_try_turns=first_try_turns+excluded.first_try_turns"
+                .to_owned(),
+        ),
+    ];
+    for (table, add) in moves {
+        if has(table)? {
+            db.execute(&add, params![project, REMOVED_PROJECTS])
+                .map_err(storage)?;
+            db.execute(&format!("DELETE FROM {table} WHERE project=?1"), [project])
+                .map_err(storage)?;
+        }
+    }
+    for table in ["usage_runs", "usage_cut", "usage_recount_homes"] {
+        if has(table)? {
+            db.execute(
+                &format!("UPDATE {table} SET project=?2 WHERE project=?1"),
+                params![project, REMOVED_PROJECTS],
+            )
+            .map_err(storage)?;
+        }
+    }
+    if has("usage_tokens_before_recount")? {
+        db.execute(
+            "DELETE FROM usage_tokens_before_recount WHERE project=?1",
+            [project],
+        )
+        .map_err(storage)?;
+    }
+    if has("usage_recount_sessions")? {
+        db.execute(
+            "UPDATE OR IGNORE usage_recount_sessions SET project=?2 WHERE project=?1",
+            params![project, REMOVED_PROJECTS],
+        )
+        .map_err(storage)?;
+        db.execute(
+            "DELETE FROM usage_recount_sessions WHERE project=?1",
+            [project],
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// Adds the usage tables to a database when missing, and to a store made before them the
+/// polled copies of the windows, filled from the rows a poll wrote last, and the marks of
+/// windows a poll left out. Input: the connection. Output: done, or `usage_unavailable`.
+pub fn initialize(db: &Connection) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    add_columns(db, "weekly_polled_resets_ms", ADD_POLLED)?;
+    add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
+    db.execute_batch(capture::SCHEMA).map_err(storage)?;
+    health::upgrade(db)?;
+    db.execute_batch(health::SCHEMA).map_err(storage)?;
+    db.execute_batch(report::SCHEMA).map_err(storage)?;
+    db.execute_batch(money::SCHEMA).map_err(storage)?;
+    db.execute_batch(turns::SCHEMA).map_err(storage)?;
+    db.execute_batch(recount::SCHEMA).map_err(storage)?;
+    db.execute_batch(activity::SCHEMA).map_err(storage)?;
+    capture::count_rows(db)
+}
+
+fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {
+    if has_column(db, last)? {
+        return Ok(());
+    }
+    db.execute_batch("SAVEPOINT usage_columns")
+        .map_err(storage)?;
+    let added = db.execute_batch(batch);
+    let closed = match added {
+        Ok(()) => db.execute_batch("RELEASE usage_columns"),
+        Err(_) => db.execute_batch("ROLLBACK TO usage_columns; RELEASE usage_columns"),
+    };
+    closed.map_err(storage)?;
+    if added.is_err() && !has_column(db, last)? {
+        return Err(failure("usage_unavailable"));
+    }
+    Ok(())
+}
+
+fn has_column(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('account_limits') WHERE name='weekly_polled_resets_ms'",
-        [],
+        "SELECT COUNT(*) FROM pragma_table_info('account_limits') WHERE name=?1",
+        params![name],
         |row| row.get::<_, i64>(0),
     )
     .map(|count| count == 1)
     .map_err(storage)
 }
 
-fn polled_columns(db: &Connection) -> Result<&'static str, EngineError> {
-    Ok(if has_polled_copies(db)? {
+fn read_columns(db: &Connection) -> Result<String, EngineError> {
+    let polled = if has_column(db, "weekly_polled_resets_ms")? {
         POLLED_COLUMNS
     } else {
         POLLED_BEFORE_COPIES
-    })
+    };
+    let left_out = if has_column(db, "weekly_left_out")? {
+        LEFT_OUT_COLUMNS
+    } else {
+        "NULL,NULL"
+    };
+    Ok(format!("{COLUMNS},{polled},{left_out}"))
 }
 
 fn checked_window(window: Option<LimitWindow>) -> Result<Option<LimitWindow>, EngineError> {
@@ -250,11 +464,12 @@ fn checked_text(text: Option<&str>, max: usize) -> Result<Option<&str>, EngineEr
     }
 }
 
-/// Stores what a read of an account's limits found, keeping any window it did not report
-/// and the plan when it reported none. A polled window replaces the owner's manual reset
-/// for it and its polled copy, and a poll clears the last failure. A transcript reading is
-/// advisory: it keeps every manual reset and polled copy, and is ignored while a poll
-/// succeeded within `POLL_EVERY_MS`.
+/// Stores what a read of an account's limits found, keeping the plan when it reported none.
+/// A poll replaces each window, its polled copy and the owner's manual reset for it, clears
+/// the last failure, and marks a window it left out as left out by its provider; a poll
+/// must name its provider. A window any read reports clears that mark. A transcript reading
+/// is advisory: it keeps any window it did not report, every manual reset, polled copy and
+/// mark, and is ignored while a poll succeeded within `POLL_EVERY_MS`.
 /// Inputs: the store, the account, the observation, its source and the time.
 /// Output: done, `usage_limits_invalid` for a share outside 0..=100 or a bad time, or
 /// `usage_unavailable`.
@@ -269,26 +484,33 @@ pub fn record_observation(
     let weekly = checked_window(observation.weekly)?;
     let plan = checked_text(observation.plan.as_deref(), PLAN_BYTES_MAX)?;
     let polled = matches!(source, LimitSource::Poll);
+    assert!(
+        !polled || observation.provider.is_some(),
+        "a poll names whose usage call it made"
+    );
     let checked = polled.then_some(now_ms);
     db.execute(
         "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,\
             weekly_percent,weekly_resets_ms,source,observed_ms,checked_ms,failure,\
             five_hour_polled_percent,five_hour_polled_resets_ms,weekly_polled_percent,\
-            weekly_polled_resets_ms)
+            weekly_polled_resets_ms,five_hour_left_out,weekly_left_out)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,CASE WHEN ?12 THEN ?3 END,\
-            CASE WHEN ?12 THEN ?4 END,CASE WHEN ?12 THEN ?5 END,CASE WHEN ?12 THEN ?6 END)
+            CASE WHEN ?12 THEN ?4 END,CASE WHEN ?12 THEN ?5 END,CASE WHEN ?12 THEN ?6 END,\
+            CASE WHEN ?12 AND NOT ?10 THEN ?14 END,CASE WHEN ?12 AND NOT ?11 THEN ?14 END)
          ON CONFLICT(account) DO UPDATE SET
             plan=COALESCE(excluded.plan,plan),
-            five_hour_percent=CASE WHEN ?10 THEN excluded.five_hour_percent ELSE five_hour_percent END,
-            five_hour_resets_ms=CASE WHEN ?10 THEN excluded.five_hour_resets_ms ELSE five_hour_resets_ms END,
-            five_hour_reset_override_ms=CASE WHEN ?10 AND ?12 THEN NULL ELSE five_hour_reset_override_ms END,
-            weekly_percent=CASE WHEN ?11 THEN excluded.weekly_percent ELSE weekly_percent END,
-            weekly_resets_ms=CASE WHEN ?11 THEN excluded.weekly_resets_ms ELSE weekly_resets_ms END,
-            weekly_reset_override_ms=CASE WHEN ?11 AND ?12 THEN NULL ELSE weekly_reset_override_ms END,
-            five_hour_polled_percent=CASE WHEN ?10 AND ?12 THEN excluded.five_hour_percent ELSE five_hour_polled_percent END,
-            five_hour_polled_resets_ms=CASE WHEN ?10 AND ?12 THEN excluded.five_hour_resets_ms ELSE five_hour_polled_resets_ms END,
-            weekly_polled_percent=CASE WHEN ?11 AND ?12 THEN excluded.weekly_percent ELSE weekly_polled_percent END,
-            weekly_polled_resets_ms=CASE WHEN ?11 AND ?12 THEN excluded.weekly_resets_ms ELSE weekly_polled_resets_ms END,
+            five_hour_percent=CASE WHEN ?10 OR ?12 THEN excluded.five_hour_percent ELSE five_hour_percent END,
+            five_hour_resets_ms=CASE WHEN ?10 OR ?12 THEN excluded.five_hour_resets_ms ELSE five_hour_resets_ms END,
+            five_hour_reset_override_ms=CASE WHEN ?12 THEN NULL ELSE five_hour_reset_override_ms END,
+            weekly_percent=CASE WHEN ?11 OR ?12 THEN excluded.weekly_percent ELSE weekly_percent END,
+            weekly_resets_ms=CASE WHEN ?11 OR ?12 THEN excluded.weekly_resets_ms ELSE weekly_resets_ms END,
+            weekly_reset_override_ms=CASE WHEN ?12 THEN NULL ELSE weekly_reset_override_ms END,
+            five_hour_polled_percent=CASE WHEN ?12 THEN excluded.five_hour_percent ELSE five_hour_polled_percent END,
+            five_hour_polled_resets_ms=CASE WHEN ?12 THEN excluded.five_hour_resets_ms ELSE five_hour_polled_resets_ms END,
+            weekly_polled_percent=CASE WHEN ?12 THEN excluded.weekly_percent ELSE weekly_polled_percent END,
+            weekly_polled_resets_ms=CASE WHEN ?12 THEN excluded.weekly_resets_ms ELSE weekly_polled_resets_ms END,
+            five_hour_left_out=CASE WHEN ?10 THEN NULL WHEN ?12 THEN ?14 ELSE five_hour_left_out END,
+            weekly_left_out=CASE WHEN ?11 THEN NULL WHEN ?12 THEN ?14 ELSE weekly_left_out END,
             source=excluded.source,
             observed_ms=excluded.observed_ms,
             checked_ms=COALESCE(excluded.checked_ms,checked_ms),
@@ -308,6 +530,7 @@ pub fn record_observation(
             weekly.is_some(),
             polled,
             service::POLL_EVERY_MS,
+            observation.provider.map(provider_name),
         ],
     )
     .map_err(storage)?;
@@ -330,6 +553,27 @@ pub fn record_failure(
         params![account.as_str(), now_ms, code],
     )
     .map_err(storage)?;
+    Ok(())
+}
+
+/// Forgets one removed account's stored limits, so no limits card stays for it.
+/// Inputs: the engine store or a transaction on it, and the account. Output: done, nothing
+/// to do in a store that never kept limits, or `usage_unavailable`.
+pub(crate) fn forget_limits(db: &Connection, account: &CredentialRef) -> Result<(), EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_limits')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if kept {
+        db.execute(
+            "DELETE FROM account_limits WHERE account=?1",
+            params![account.as_str()],
+        )
+        .map_err(storage)?;
+    }
     Ok(())
 }
 
@@ -368,6 +612,22 @@ fn source_name(source: LimitSource) -> &'static str {
     }
 }
 
+fn provider_name(provider: poll::Provider) -> &'static str {
+    match provider {
+        poll::Provider::Claude => "claude",
+        poll::Provider::Codex => "codex",
+    }
+}
+
+fn left_out(row: &Row<'_>, at: usize) -> rusqlite::Result<Option<poll::Provider>> {
+    match row.get::<_, Option<String>>(at)?.as_deref() {
+        None => Ok(None),
+        Some("claude") => Ok(Some(poll::Provider::Claude)),
+        Some("codex") => Ok(Some(poll::Provider::Codex)),
+        Some(_) => Err(conversion(at)),
+    }
+}
+
 fn window(row: &Row<'_>, percent: usize) -> rusqlite::Result<Option<LimitWindow>> {
     let used: Option<f64> = row.get(percent)?;
     let resets: Option<i64> = row.get(percent + 1)?;
@@ -388,6 +648,8 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         Some("transcript") => Some(LimitSource::Transcript),
         Some(_) => return Err(conversion(8)),
     };
+    let five_hour_left_out = left_out(row, 16)?;
+    let weekly_left_out = left_out(row, 17)?;
     Ok(AccountLimits {
         account: CredentialRef::new(row.get::<_, String>(0)?).map_err(|_| conversion(0))?,
         plan: row.get(1)?,
@@ -401,6 +663,12 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         observed_ms: row.get(9)?,
         checked_ms: row.get(10)?,
         failure: row.get(11)?,
+        five_hour_left_out,
+        weekly_left_out,
+        five_hour_left_out_label: five_hour_left_out
+            .map(|provider| left_out_label(provider, WindowKind::FiveHour).to_owned()),
+        weekly_left_out_label: weekly_left_out
+            .map(|provider| left_out_label(provider, WindowKind::Weekly).to_owned()),
     })
 }
 
@@ -411,9 +679,9 @@ pub fn limits(
     db: &Connection,
     account: &CredentialRef,
 ) -> Result<Option<AccountLimits>, EngineError> {
-    let polled = polled_columns(db)?;
+    let columns = read_columns(db)?;
     db.query_row(
-        &format!("SELECT {COLUMNS},{polled} FROM account_limits WHERE account=?1"),
+        &format!("SELECT {columns} FROM account_limits WHERE account=?1"),
         params![account.as_str()],
         limits_row,
     )
@@ -424,10 +692,10 @@ pub fn limits(
 /// Reads every account's stored limits, ordered by account, as `limits` does.
 /// Input: the store. Output: the limits, or `usage_unavailable`.
 pub fn all_limits(db: &Connection) -> Result<Vec<AccountLimits>, EngineError> {
-    let polled = polled_columns(db)?;
+    let columns = read_columns(db)?;
     let mut statement = db
         .prepare(&format!(
-            "SELECT {COLUMNS},{polled} FROM account_limits ORDER BY account"
+            "SELECT {columns} FROM account_limits ORDER BY account"
         ))
         .map_err(storage)?;
     statement

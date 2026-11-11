@@ -170,7 +170,48 @@ fn every_bundled_manifest_entry_finds_its_skills_in_the_bundle() {
         assert!(!skill_folders(&folder).unwrap().is_empty(), "{}", entry.id);
         checked += 1;
     }
-    assert_eq!(checked, 9);
+    assert_eq!(checked, 10);
+}
+
+#[test]
+fn the_default_pack_bundles_the_grill_skill() {
+    let manifest = default_pack().unwrap();
+    let grill = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == "grill")
+        .expect("the default pack lists the grill skill");
+    assert!(grill.on_by_default);
+    assert_eq!(grill.license, "Apache-2.0");
+    assert_eq!(
+        grill.source,
+        PackSource::Bundled {
+            path: "skills/grill".into()
+        }
+    );
+    let (_, bytes) = FILES
+        .iter()
+        .find(|(path, _)| *path == "skills/grill/SKILL.md")
+        .expect("the grill skill is compiled into the engine");
+    let text = std::str::from_utf8(bytes).unwrap();
+    let (name, description) = crate::plugins::skill_folder::frontmatter(text).unwrap();
+    assert_eq!(name, "grill");
+    assert!(
+        description.contains("one question at a time"),
+        "{description}"
+    );
+    assert!(text.contains(&format!("`{}` tool", crate::team::tool::ASK_TOOL)));
+    assert_eq!(crate::questions::OPTIONS_MAX, 6);
+    assert!(text.contains("at most 6 short one-line ones"));
+    assert!(text.contains(&format!("`{}` tool", crate::team::tool::RECORD_TOOL)));
+    assert!(!text.contains("ask_owner"));
+    assert!(text.contains("`crazyagent-team`"));
+    assert!(text.contains("`recommended`"));
+    assert!(!text.contains('\u{2014}'));
+    let setup = private();
+    let bundled = extract(setup.path()).unwrap();
+    let folder = entry_folder(setup.path(), grill, Some(bundled.as_path())).unwrap();
+    assert_eq!(skill_folders(&folder).unwrap().len(), 1);
 }
 
 #[test]
@@ -180,4 +221,219 @@ fn each_bundled_path_has_its_own_fingerprint() {
     assert_ne!(tiger, digest("skills/linear-method"));
     assert_ne!(digest("skills/to-features"), digest("skills/to-feature"));
     assert_eq!(tiger.len(), 64);
+}
+
+#[test]
+fn the_shipped_hook_files_unpack_privately_replace_an_older_copy_and_name_their_entry() {
+    let setup = private();
+    assert_eq!(hook_folder(setup.path(), "graphify"), None);
+    let unpacked = extract_hooks(setup.path()).unwrap();
+    assert_eq!(unpacked, setup.path().join("bundled-hooks"));
+    assert_eq!(HOOK_FILES.len(), 3);
+    for (path, bytes) in HOOK_FILES {
+        let file = unpacked.join(path);
+        assert_eq!(std::fs::read(&file).unwrap(), *bytes, "{path}");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{path}");
+    }
+    let stale = unpacked.join("hooks/graphify/hooks/stale.sh");
+    std::fs::write(&stale, "old").unwrap();
+    assert_eq!(extract_hooks(setup.path()).unwrap(), unpacked);
+    assert!(!stale.exists());
+    assert_eq!(
+        hook_folder(setup.path(), "graphify"),
+        Some(unpacked.join("hooks/graphify"))
+    );
+    for id in ["caveman", "", "graphify/hooks", "../graphify"] {
+        assert_eq!(hook_folder(setup.path(), id), None, "{id:?}");
+    }
+    assert!(setup.path().join("bundled").symlink_metadata().is_err());
+    let read = crate::plugins::hook_folder::read(&unpacked.join("hooks/graphify")).unwrap();
+    assert_eq!(read.plugin, "graphify");
+    let hooks: Vec<(&str, Option<&str>)> = read
+        .hooks
+        .iter()
+        .map(|hook| (hook.event.as_str(), hook.matcher.as_deref()))
+        .collect();
+    assert_eq!(
+        hooks,
+        [
+            ("PreToolUse", Some("Bash")),
+            ("PreToolUse", Some("Read|Glob"))
+        ]
+    );
+}
+
+#[test]
+fn no_shipped_hook_file_carries_a_comment() {
+    let mut found = Vec::new();
+    for (path, bytes) in HOOK_FILES {
+        let text = std::str::from_utf8(bytes).expect("hook files are text");
+        found.extend(comments(path, text));
+        if path.ends_with(".sh") {
+            for (number, line) in text.lines().enumerate() {
+                let shebang = number == 0 && line.starts_with("#!");
+                if !shebang && (line.trim_start().starts_with('#') || hashed(line)) {
+                    found.push(format!("{path}:{}: {line}", number + 1));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+    let root = assets();
+    let mut on_disk = Vec::new();
+    walk(&root.join("hooks"), &mut on_disk);
+    let mut on_disk: Vec<String> = on_disk
+        .iter()
+        .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
+        .collect();
+    on_disk.sort();
+    let compiled: Vec<String> = HOOK_FILES
+        .iter()
+        .map(|(path, _)| (*path).to_owned())
+        .collect();
+    assert_eq!(compiled, on_disk);
+}
+
+fn reminder(folder: &Path, mode: &str, input: &str) -> (bool, String) {
+    use std::io::Write;
+    let setup = private();
+    let unpacked = extract_hooks(setup.path()).unwrap();
+    let script = unpacked.join("hooks/graphify/hooks/graphify-reminder.sh");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .arg(&script)
+        .arg(mode)
+        .current_dir(folder)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    (
+        output.status.success(),
+        String::from_utf8(output.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn the_graphify_reminder_nudges_only_searches_and_source_reads_where_a_graph_exists() {
+    let with_graph = private();
+    std::fs::create_dir(with_graph.path().join("graphify-out")).unwrap();
+    std::fs::write(with_graph.path().join("graphify-out/graph.json"), "{}").unwrap();
+    let without = private();
+    let search = r#"{"tool_input":{"command":"rg foo src"}}"#;
+    let listing = r#"{"tool_input":{"command":"ls -la"}}"#;
+    let source = r#"{"tool_input":{"file_path":"/p/src/main.rs"}}"#;
+    let graph_page = r#"{"tool_input":{"file_path":"/p/graphify-out/wiki/x.md"}}"#;
+    let image = r#"{"tool_input":{"file_path":"/p/logo.png"}}"#;
+    let (ok, nudge) = reminder(with_graph.path(), "search", search);
+    assert!(ok);
+    let parsed: serde_json::Value = serde_json::from_str(nudge.trim()).unwrap();
+    assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert!(
+        parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("graphify query")
+    );
+    let (ok, nudge) = reminder(with_graph.path(), "read", source);
+    assert!(ok);
+    assert!(nudge.contains("Give every sub-agent and teammate the same rule"));
+    for (folder, mode, input) in [
+        (with_graph.path(), "search", listing),
+        (with_graph.path(), "read", graph_page),
+        (with_graph.path(), "read", image),
+        (with_graph.path(), "other", search),
+        (without.path(), "search", search),
+        (without.path(), "read", source),
+    ] {
+        assert_eq!(
+            reminder(folder, mode, input),
+            (true, String::new()),
+            "{mode} {input}"
+        );
+    }
+}
+
+#[test]
+fn a_hookless_folder_with_a_bad_name_reads_as_having_no_hooks_before_its_name_is_checked() {
+    let parent = private();
+    let bad = parent.path().join(".bad");
+    std::fs::create_dir(&bad).unwrap();
+    assert_eq!(
+        crate::plugins::hook_folder::read(&bad),
+        Err("hooks_none_found")
+    );
+    std::fs::create_dir(bad.join("hooks")).unwrap();
+    std::fs::write(
+        bad.join("hooks/hooks.json"),
+        HOOK_FILES
+            .iter()
+            .find(|(path, _)| path.ends_with("hooks.json"))
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::plugins::hook_folder::read(&bad),
+        Err("hooks_plugin_manifest_missing")
+    );
+    std::fs::create_dir(bad.join(".claude-plugin")).unwrap();
+    std::fs::write(bad.join(".claude-plugin/plugin.json"), r#"{"name":".bad"}"#).unwrap();
+    assert_eq!(
+        crate::plugins::hook_folder::read(&bad),
+        Err("hook_plugin_name_invalid")
+    );
+}
+
+#[test]
+fn an_entrys_hooks_come_from_the_shipped_folder_else_a_real_cached_checkout_never_a_link() {
+    let setup = private();
+    let manifest = default_pack().unwrap();
+    let caveman = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == "caveman")
+        .unwrap();
+    let PackSource::Git { repo, commit, .. } = &caveman.source else {
+        panic!("caveman is a git entry");
+    };
+    let checkout = crate::setup::fetch::checkout_folder(setup.path(), repo, commit);
+    assert_eq!(
+        crate::setup::fetch::plugin_folder(setup.path(), caveman),
+        None
+    );
+    let elsewhere = private();
+    std::fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &checkout).unwrap();
+    assert_eq!(
+        crate::setup::fetch::plugin_folder(setup.path(), caveman),
+        None
+    );
+    std::fs::remove_file(&checkout).unwrap();
+    std::fs::create_dir(&checkout).unwrap();
+    assert_eq!(
+        crate::setup::fetch::plugin_folder(setup.path(), caveman),
+        Some(checkout)
+    );
+
+    let graphify = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == "graphify")
+        .unwrap();
+    extract_hooks(setup.path()).unwrap();
+    assert_eq!(
+        crate::setup::fetch::plugin_folder(setup.path(), graphify),
+        Some(setup.path().join("bundled-hooks/hooks/graphify"))
+    );
 }

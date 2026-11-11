@@ -1,8 +1,12 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(not(unix))]
+use std::path::PathBuf;
 use std::path::{Component, Path};
 
 pub const FILES_MAX: usize = 2048;
@@ -55,6 +59,20 @@ pub struct Found {
     pub skipped: usize,
 }
 
+/// A folder a copy is reading: on Unix held open, so a name swapped for a link after the
+/// folder was opened cannot send the walk somewhere else.
+#[cfg(unix)]
+type Folder = std::os::fd::OwnedFd;
+#[cfg(not(unix))]
+type Folder = PathBuf;
+
+/// One entry of a folder a copy is reading. On Unix it is opened without following a link.
+enum Opened {
+    Folder(Folder),
+    File(fs::File),
+    Other,
+}
+
 /// Files and bytes one copy has made so far.
 #[derive(Debug, Default)]
 pub struct Tally {
@@ -77,8 +95,10 @@ pub fn valid_plugin_name(name: &str) -> bool {
 /// Reads the command hooks a Claude Code plugin folder defines, running nothing: the
 /// `hooks/hooks.json` file and the `hooks` entry of `.claude-plugin/plugin.json`, an object
 /// or the relative path of a hooks file inside the folder, or a list of those. The plugin's
-/// name comes from `plugin.json`, else the folder's own name. Input: the absolute plugin
-/// folder. Output: what was found, or `hooks_none_found`, `hooks_invalid`, `hooks_too_many`,
+/// name comes only from `plugin.json`, never the folder's own name, and is checked only once
+/// hooks were found, so a folder with none reports `hooks_none_found` whatever it holds.
+/// Input: the absolute plugin folder. Output: what was found, or `hooks_none_found`,
+/// `hooks_invalid`, `hooks_too_many`, `hooks_plugin_manifest_missing`,
 /// `hook_plugin_name_invalid` or `skill_folder_not_found`.
 pub fn read(folder: &Path) -> Result<Found, &'static str> {
     if !folder.is_absolute()
@@ -93,12 +113,6 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
     )?
     .map(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|_| "hooks_invalid"))
     .transpose()?;
-    let plugin = manifest
-        .as_ref()
-        .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_owned))
-        .or_else(|| folder.file_name()?.to_str().map(str::to_owned))
-        .filter(|name| valid_plugin_name(name))
-        .ok_or("hook_plugin_name_invalid")?;
     let mut configs = Vec::new();
     if let Some(text) = read_small(
         &folder.join("hooks").join("hooks.json"),
@@ -135,7 +149,7 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
         }
     }
     let mut found = Found {
-        plugin,
+        plugin: String::new(),
         hooks: Vec::new(),
         skipped: 0,
     };
@@ -145,15 +159,23 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
     if found.hooks.is_empty() {
         return Err("hooks_none_found");
     }
+    let manifest = manifest.ok_or("hooks_plugin_manifest_missing")?;
+    found.plugin = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| valid_plugin_name(name))
+        .ok_or("hook_plugin_name_invalid")?
+        .to_owned();
     assert!(found.hooks.len() <= super::HOOKS_PER_PLUGIN_MAX);
     Ok(found)
 }
 
 /// Copies the parts of a plugin folder its hooks run from into a new folder of the plugin
 /// store: its `hooks` and `skills` folders and each other top-level entry a hook command
-/// names, never following a link and leaving out `.git` and `.DS_Store`. Files keep their
-/// owner execute bit. Inputs: the plugin folder, a destination that must not exist yet and
-/// the hooks read from the folder. Output: unit, or `hooks_too_large` or
+/// names, leaving out `.git` and `.DS_Store`. On Unix no link is followed, at any part of
+/// the folder's path or inside it. Files keep their owner execute bit. Inputs: the plugin
+/// folder's canonical path, a destination that must not exist yet and the hooks read from
+/// the folder. Output: unit, or `skill_folder_not_found`, `hooks_too_large` or
 /// `plugin_store_unavailable` after removing any partial copy.
 pub fn copy(source: &Path, destination: &Path, hooks: &[HookSpec]) -> Result<(), &'static str> {
     if fs::symlink_metadata(destination).is_ok() {
@@ -162,24 +184,18 @@ pub fn copy(source: &Path, destination: &Path, hooks: &[HookSpec]) -> Result<(),
     folder(destination)?;
     let mut tally = Tally::default();
     let result = (|| {
-        let mut entries = 0;
-        for entry in fs::read_dir(source).map_err(|_| "skill_folder_not_found")? {
-            entries += 1;
-            if entries > ENTRIES_MAX {
-                return Err("hooks_too_large");
+        let root = open_root(source).map_err(|_| "skill_folder_not_found")?;
+        for name in names(&root, "skill_folder_not_found")? {
+            if wanted(&name, hooks) {
+                copy_child(
+                    &root,
+                    &name,
+                    &destination.join(&name),
+                    1,
+                    &mut tally,
+                    (FILES_MAX, BYTES_MAX),
+                )?;
             }
-            let entry = entry.map_err(|_| "skill_folder_not_found")?;
-            let name = entry.file_name();
-            if !wanted(&name, hooks) {
-                continue;
-            }
-            copy_entry(
-                &entry.path(),
-                &destination.join(&name),
-                1,
-                &mut tally,
-                (FILES_MAX, BYTES_MAX),
-            )?;
         }
         Ok(())
     })();
@@ -198,11 +214,10 @@ pub fn copy_stored(
     destination: &Path,
     tally: &mut Tally,
 ) -> Result<(), &'static str> {
-    if !fs::symlink_metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
-        return Err("plugin_store_unavailable");
-    }
-    copy_entry(
-        source,
+    let root = open_folder(source).map_err(|_| "plugin_store_unavailable")?;
+    folder(destination)?;
+    copy_children(
+        &root,
         destination,
         0,
         tally,
@@ -299,7 +314,7 @@ fn wanted(name: &OsStr, hooks: &[HookSpec]) -> bool {
 }
 
 fn named(command: &str, name: &str) -> bool {
-    let after = [b'/', b'"', b'\'', b' ', b';', b')'];
+    let after = *b"/\"' ;)";
     command.match_indices(name).any(|(at, _)| {
         let before = at.checked_sub(1).map(|index| command.as_bytes()[index]);
         let next = command.as_bytes().get(at + name.len()).copied();
@@ -307,8 +322,30 @@ fn named(command: &str, name: &str) -> bool {
     })
 }
 
-fn copy_entry(
-    source: &Path,
+/// Copies each entry of an open folder but `.git` and `.DS_Store`. Inputs: the folder, its
+/// copy, its depth, the tally and the bounds. Output: unit, or a plain rejection code.
+fn copy_children(
+    from: &Folder,
+    target: &Path,
+    depth: usize,
+    tally: &mut Tally,
+    bounds: (usize, u64),
+) -> Result<(), &'static str> {
+    for name in names(from, "plugin_store_unavailable")? {
+        if name.to_str().is_some_and(|name| SKIPPED.contains(&name)) {
+            continue;
+        }
+        copy_child(from, &name, &target.join(&name), depth + 1, tally, bounds)?;
+    }
+    Ok(())
+}
+
+/// Copies one entry of an open folder, leaving out a link or anything else that is neither
+/// a file nor a folder. Inputs: the folder, the entry's name, its copy, its depth, the
+/// tally and the bounds. Output: unit, or a plain rejection code.
+fn copy_child(
+    parent: &Folder,
+    name: &OsStr,
     target: &Path,
     depth: usize,
     tally: &mut Tally,
@@ -317,39 +354,139 @@ fn copy_entry(
     if depth > DEPTH_MAX {
         return Err("hooks_too_large");
     }
-    let metadata = fs::symlink_metadata(source).map_err(|_| "plugin_store_unavailable")?;
-    if metadata.is_dir() {
-        folder(target)?;
-        let mut entries = 0;
-        for entry in fs::read_dir(source).map_err(|_| "plugin_store_unavailable")? {
-            entries += 1;
-            if entries > ENTRIES_MAX {
+    match open_entry(parent, name).map_err(|_| "plugin_store_unavailable")? {
+        Opened::Folder(inner) => {
+            folder(target)?;
+            copy_children(&inner, target, depth, tally, (files_max, bytes_max))
+        }
+        Opened::File(from) => {
+            let length = from
+                .metadata()
+                .map_err(|_| "plugin_store_unavailable")?
+                .len();
+            let bytes = tally.bytes.saturating_add(length);
+            if tally.files >= files_max || bytes > bytes_max {
                 return Err("hooks_too_large");
             }
-            let entry = entry.map_err(|_| "plugin_store_unavailable")?;
-            let name = entry.file_name();
-            if name.to_str().is_some_and(|name| SKIPPED.contains(&name)) {
-                continue;
-            }
-            copy_entry(
-                &entry.path(),
-                &target.join(name),
-                depth + 1,
-                tally,
-                (files_max, bytes_max),
-            )?;
+            tally.files += 1;
+            tally.bytes = bytes;
+            copy_file(from, target, length)
         }
-        return Ok(());
+        Opened::Other => Ok(()),
     }
-    if !metadata.is_file() {
-        return Ok(());
+}
+
+/// Opens a plugin folder one part at a time from the filesystem root, through no link at any
+/// part, so a parent swapped for a link after the folder was read cannot redirect the copy.
+/// Input: the canonical path. Output: the folder.
+#[cfg(unix)]
+fn open_root(path: &Path) -> std::io::Result<Folder> {
+    Ok(super::skill_folder::open_real(
+        path,
+        super::skill_folder::FOLDER,
+    )?)
+}
+
+#[cfg(not(unix))]
+fn open_root(path: &Path) -> std::io::Result<Folder> {
+    open_folder(path)
+}
+
+/// Opens a folder a copy starts from, refusing a link at its last part. Input: the path.
+/// Output: the folder.
+#[cfg(unix)]
+fn open_folder(path: &Path) -> std::io::Result<Folder> {
+    Ok(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?)
+}
+
+#[cfg(not(unix))]
+fn open_folder(path: &Path) -> std::io::Result<Folder> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        Ok(path.to_path_buf())
+    } else {
+        Err(std::io::ErrorKind::InvalidInput.into())
     }
-    tally.files += 1;
-    tally.bytes = tally.bytes.saturating_add(metadata.len());
-    if tally.files > files_max || tally.bytes > bytes_max {
-        return Err("hooks_too_large");
+}
+
+/// Lists an open folder, at most `ENTRIES_MAX` names. Inputs: the folder and the code for a
+/// failed read. Output: its names, or that code or `hooks_too_large`.
+#[cfg(unix)]
+fn names(folder: &Folder, unavailable: &'static str) -> Result<Vec<OsString>, &'static str> {
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::read_from(folder).map_err(|_| unavailable)? {
+        let entry = entry.map_err(|_| unavailable)?;
+        if matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if names.len() == ENTRIES_MAX {
+            return Err("hooks_too_large");
+        }
+        names.push(OsStr::from_bytes(entry.file_name().to_bytes()).to_owned());
     }
-    copy_file(source, target, metadata.len())
+    Ok(names)
+}
+
+#[cfg(not(unix))]
+fn names(folder: &Folder, unavailable: &'static str) -> Result<Vec<OsString>, &'static str> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(folder).map_err(|_| unavailable)? {
+        let entry = entry.map_err(|_| unavailable)?;
+        if names.len() == ENTRIES_MAX {
+            return Err("hooks_too_large");
+        }
+        names.push(entry.file_name());
+    }
+    Ok(names)
+}
+
+/// Opens one entry through its open parent without following a link, so an entry swapped
+/// after its check is refused. Inputs: the parent and the name. Output: what it is.
+#[cfg(unix)]
+fn open_entry(parent: &Folder, name: &OsStr) -> std::io::Result<Opened> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    match FileType::from_raw_mode(statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?.st_mode) {
+        FileType::Directory => Ok(Opened::Folder(openat(
+            parent,
+            name,
+            flags | OFlags::DIRECTORY,
+            Mode::empty(),
+        )?)),
+        FileType::RegularFile => {
+            let file = fs::File::from(openat(
+                parent,
+                name,
+                flags | OFlags::NONBLOCK,
+                Mode::empty(),
+            )?);
+            if file.metadata()?.is_file() {
+                Ok(Opened::File(file))
+            } else {
+                Err(std::io::ErrorKind::InvalidInput.into())
+            }
+        }
+        _ => Ok(Opened::Other),
+    }
+}
+
+#[cfg(not(unix))]
+fn open_entry(parent: &Folder, name: &OsStr) -> std::io::Result<Opened> {
+    let path = parent.join(name);
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.is_dir() {
+        Ok(Opened::Folder(path))
+    } else if metadata.is_file() {
+        Ok(Opened::File(open_plain(&path)?))
+    } else {
+        Ok(Opened::Other)
+    }
 }
 
 #[cfg(unix)]
@@ -365,36 +502,22 @@ fn folder(path: &Path) -> Result<(), &'static str> {
     fs::create_dir(path).map_err(|_| "plugin_store_unavailable")
 }
 
-#[cfg(unix)]
-fn copy_file(source: &Path, target: &Path, bytes: u64) -> Result<(), &'static str> {
+/// Copies an open file's first `bytes` bytes to a new file, on Unix keeping its owner
+/// execute bit. Inputs: the file, the new path and the length. Output: unit or
+/// `plugin_store_unavailable`.
+fn copy_file(from: fs::File, target: &Path, bytes: u64) -> Result<(), &'static str> {
     let unavailable = |_| "plugin_store_unavailable";
-    let from = open_plain(source).map_err(unavailable)?;
-    let opened = from.metadata().map_err(unavailable)?;
-    if !opened.is_file() || opened.len() != bytes {
-        return Err("plugin_store_unavailable");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        let runs = from.metadata().map_err(unavailable)?.permissions().mode() & 0o111 != 0;
+        options
+            .mode(if runs { 0o700 } else { 0o600 })
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
     }
-    let mode = if opened.permissions().mode() & 0o111 != 0 {
-        0o700
-    } else {
-        0o600
-    };
-    let mut to = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(target)
-        .map_err(unavailable)?;
+    let mut to = options.open(target).map_err(unavailable)?;
     let copied = std::io::copy(&mut from.take(bytes), &mut to).map_err(unavailable)?;
-    if copied != bytes {
-        return Err("plugin_store_unavailable");
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn copy_file(source: &Path, target: &Path, bytes: u64) -> Result<(), &'static str> {
-    let copied = fs::copy(source, target).map_err(|_| "plugin_store_unavailable")?;
     if copied != bytes {
         return Err("plugin_store_unavailable");
     }
@@ -438,3 +561,6 @@ fn read_small(path: &Path, max: u64) -> Result<Option<String>, &'static str> {
     }
     Ok(Some(text))
 }
+
+#[cfg(all(test, unix))]
+mod tests;

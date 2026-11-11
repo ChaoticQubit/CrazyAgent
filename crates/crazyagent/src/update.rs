@@ -315,7 +315,7 @@ fn allowed_url(text: &str) -> Result<url::Url, UpdateError> {
 }
 
 #[cfg(windows)]
-fn system_tool(name: &str) -> PathBuf {
+pub(crate) fn system_tool(name: &str) -> PathBuf {
     let executable = format!("{name}.exe");
     std::env::var_os("SystemRoot")
         .map(|root| PathBuf::from(root).join("System32").join(&executable))
@@ -324,7 +324,7 @@ fn system_tool(name: &str) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn system_tool(name: &str) -> PathBuf {
+pub(crate) fn system_tool(name: &str) -> PathBuf {
     let path = Path::new("/usr/bin").join(name);
     if path.is_file() {
         path

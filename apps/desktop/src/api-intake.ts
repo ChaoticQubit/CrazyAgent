@@ -1,4 +1,5 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
+import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
@@ -6,7 +7,7 @@ import {
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IntentReceipt, OnboardingView, ProjectsHome,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IntentReceipt, OnboardingView, ProjectsHome,
   SetupStatus,
 } from "./engine-client";
 
@@ -46,10 +47,15 @@ const COPY: Record<string, string> = {
   home_move_interrupted: "Moving your projects stopped part way. Check both folders before trying again.",
   home_move_too_many: "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  home_move_delete_in_progress: "A project in your projects folder is being deleted. Try again when it finishes. Nothing was moved.",
+  home_move_agent_work: "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved.",
+  home_move_changes_restorable: "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved.",
+  home_move_research_running: "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved.",
   home_folder_name_invalid: "Give the project a name with letters or digits, and no folder by that name.",
   home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
+  home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   folder_size_path_invalid: "Choose the folder again with Choose folder.",
   folder_size_unsafe: "That folder can't be measured.",
@@ -59,7 +65,7 @@ const COPY: Record<string, string> = {
   folder_size_interrupted: "Measuring the folder stopped. Try again.",
   crazyagent_folder_invalid: "The project's .crazyagent folder isn't a plain folder. Rename or remove it, then try again.",
   crazyagent_folder_unwritable: "CrazyAgent can't write the project's .crazyagent folder. Check the folder's permissions.",
-  git_exclude_invalid: "The project's git exclude file can't be updated. Check .git/info/exclude.",
+  git_exclude_invalid: "The project's git exclude file can't be updated: .git/info must be a plain folder and .git/info/exclude a plain file under 1 MiB, not links. Fix them, then try again.",
   owner_home_unknown: "Your home folder couldn't be found.",
   onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
   onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",
@@ -111,6 +117,7 @@ const COPY: Record<string, string> = {
   setup_store_unavailable: "The app's data folder can't be written.",
   pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_not_installed: "This entry isn't installed yet. Run setup first.",
+  stale_revision: "The pack changed in another window, so this was not saved. The list was reloaded.",
   pack_id_invalid: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_too_many: "Pick at most 64 entries.",
   pack_name_taken: "A skill or server with this name already exists. Remove it first, then try again.",
@@ -137,6 +144,34 @@ const COPY: Record<string, string> = {
   setup_reply_bounds: "Setup's reply was too large to show. Reload and try again.",
   owner_outcome_unknown_reconcile_same_identity: "CrazyAgent didn't answer in time. Try again.",
 };
+
+/** The warnings the Move anyway and Copy anyway question shows, one per issue, in the owner's
+ * words (DEC-115). Data loss lines come first wherever they are shown. */
+export const ADD_WARNINGS = {
+  close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
+  old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
+  across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
+  same_disk: "This is a rename on the same disk; it is quick.",
+  copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
+  large: "This folder is very large.",
+  unmeasured: "CrazyAgent couldn't measure it.",
+  too_many: "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time.",
+  unreadable: "Some files can't be read. They can't be copied, so a move across disks keeps the original in place and fails rather than leave them behind.",
+  unreadable_copy: "Some files can't be read. They can't be copied, so the copy fails rather than leave them behind.",
+  worktrees: "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired.",
+  linked_checkout: "The copy keeps this folder's link to another repository's git data. Where that link still reaches it, the copy and this folder share one index and current branch: switching branches, staging or resetting in either one changes the other, and uncommitted work in either can be lost. Where it does not, git fails in the copy.",
+  linked_worktree: "This folder is a git worktree of another repository, and that repository keeps this folder's staged changes and branch link. Right after the move, go to that repository and run git worktree repair with the moved folder's path. Until then git here may fail or seem to work, and a git worktree prune or git gc there drops those staged changes and the branch link for good; commits here that are on no branch can be lost too. The files stay.",
+  submodule: "This folder is a submodule of another repository. After the move, git here fails and the parent repository no longer finds it. Its git data stays in the parent repository, so moving the folder back brings git here back.",
+  git_data_unread: "CrazyAgent could not read this folder's git data, so it cannot tell what a move breaks.",
+  no_git: "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here.",
+  git_unread: "CrazyAgent couldn't read this folder's git setup, so it can't tell what moving or copying it breaks.",
+} as const;
+
+/** The size line of the very large warning once the folder was measured. Input: its bytes.
+ * Output: one sentence, such as "It is about 42 GB.". */
+export function measuredLine(bytes: number): string {
+  return `It is about ${formatBytes(bytes)}.`;
+}
 
 /** Plain sentence for one intake, GitHub or setup failure.
  * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
@@ -197,9 +232,10 @@ export function loadFolderSize(path: string): Promise<Result<FolderSize>> {
 }
 
 /** Moves or copies a folder into the projects folder, where it then shows as found.
- * Inputs: the absolute source folder, move or copy, and a generation. Output: the receipt. */
-export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<Result<IntentReceipt>> {
-  return wrap(() => addFolder(source, mode, generation));
+ * Inputs: the absolute source folder, move or copy, the soft refusals the owner chose to go past
+ * and a generation. Output: the receipt. */
+export function addExistingFolder(source: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => addFolder(source, mode, overrides, generation));
 }
 
 /** Starts setting up a found folder: the graph builds, then a mapping agent on the pool fills in
@@ -275,13 +311,13 @@ export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
 }
 
 /** Switches one installed pack entry on or off for every project.
- * Inputs: its id and the state. Output: the new setup status. */
-export function setPackEntry(id: string, on: boolean): Promise<Result<SetupStatus>> {
-  return wrap(() => switchEntry(id, on, nextGeneration()));
+ * Inputs: its id, the state and the pack version shown. Output: the new setup status. */
+export function setPackEntry(id: string, on: boolean, version: number): Promise<Result<SetupStatus>> {
+  return wrap(() => switchEntry(id, on, version, nextGeneration()));
 }
 
 /** Removes one installed pack entry and the skill or server it added.
- * Input: its id. Output: the new setup status. */
-export function removePackEntry(id: string): Promise<Result<SetupStatus>> {
-  return wrap(() => removeEntry(id, nextGeneration()));
+ * Inputs: its id and the pack version shown. Output: the new setup status. */
+export function removePackEntry(id: string, version: number): Promise<Result<SetupStatus>> {
+  return wrap(() => removeEntry(id, version, nextGeneration()));
 }

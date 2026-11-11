@@ -38,6 +38,7 @@ const HANDOFF_TURN_MIN_BYTES: usize = 160;
 /// The longest title a handoff part has, naming the conversation it comes from.
 const HANDOFF_TITLE_BYTES_MAX: usize = 128;
 
+#[cfg(unix)]
 const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -45,10 +46,28 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     active_ms INTEGER NOT NULL CHECK(active_ms >= started_ms)
 )";
 
+#[cfg(unix)]
 const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
-    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128)
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0),
+    last_line TEXT CHECK(last_line IS NULL OR length(last_line) BETWEEN 1 AND 80)
 )";
+
+/// Gives a table an older engine made the newest line of each session's terminal turns.
+#[cfg(unix)]
+const OWNER_TURNS_LINED: &str = "ALTER TABLE session_owner_turns ADD COLUMN last_line TEXT CHECK(last_line IS NULL OR length(last_line) BETWEEN 1 AND 80);";
+
+const _: () = assert!(LINE_CHARS_MAX == 80);
+
+/// Gives a table an older engine made its turn count: a row of a session with no engine
+/// turn counts the one terminal turn it proves, while a row of a session with engine turns
+/// may be the first creation's backfill of a kept conversation, so it counts none.
+#[cfg(unix)]
+const OWNER_TURNS_COUNTED: &str =
+    "ALTER TABLE session_owner_turns ADD COLUMN turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0);
+     UPDATE session_owner_turns SET turns=0
+     WHERE EXISTS(SELECT 1 FROM master_turns t WHERE t.session=session_owner_turns.session);";
 
 /// The SQL condition that the master session `s` holds an owner turn: a turn the engine ran
 /// for an owner message, or a turn its live master started in the terminal.
@@ -56,7 +75,9 @@ const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.sessi
 
 /// One master session as the Sessions list shows it. `created` and `last_activity` are
 /// engine revisions; `started_ms` and `active_ms` are wall-clock times, absent for sessions
-/// older than the marks. `agents` names the session's own sub-agents, newest first;
+/// older than the marks. `turns` counts the engine-run owner turns and the turns run in the
+/// live terminal; `last_line` is the newest engine-run line, else the newest terminal reply
+/// kept. `agents` names the session's own sub-agents, newest first;
 /// `results_waiting` counts finished sub-agent results queued for this session's master.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,27 +123,128 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 
 /// Creates the tables of session wall-clock marks and of sessions with an owner turn when
 /// the engine database opens. The first creation counts every session that kept a harness
-/// conversation as having one, so sessions used only in the live terminal stay listed.
-/// Takes the engine connection. Returns any SQLite failure.
+/// conversation and ran no engine turn as having one terminal turn, so sessions used only
+/// in the live terminal stay listed; a table an older engine made without the turn count
+/// gains it as `OWNER_TURNS_COUNTED` says. A new table, or one that gains the newest line,
+/// fills it once by `fill_lines`. Takes the engine connection. Returns any SQLite failure,
+/// with the table left as it was.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
     if table_exists(connection, "session_owner_turns")? {
+        if !owner_turns_column(connection, "turns")? {
+            owner_turns_change(connection, |connection| {
+                connection.execute_batch(OWNER_TURNS_COUNTED).map_err(error)
+            })?;
+        }
+        if !owner_turns_column(connection, "last_line")? {
+            owner_turns_change(connection, |connection| {
+                connection.execute_batch(OWNER_TURNS_LINED).map_err(error)?;
+                fill_lines(connection)
+            })?;
+        }
         return Ok(());
     }
     let backfill = if table_exists(connection, "team_master_conversations")? {
         "INSERT OR IGNORE INTO session_owner_turns(session,project)
-         SELECT session,project FROM team_master_conversations
-         WHERE length(session) BETWEEN 1 AND 128 AND length(project) BETWEEN 1 AND 128;"
+         SELECT c.session,c.project FROM team_master_conversations c
+         WHERE length(c.session) BETWEEN 1 AND 128 AND length(c.project) BETWEEN 1 AND 128
+         AND NOT EXISTS(SELECT 1 FROM master_turns t WHERE t.session=c.session);"
     } else {
         ""
     };
-    let created = connection.execute_batch(&format!(
-        "SAVEPOINT session_owner_turns; {OWNER_TURNS}; {backfill} RELEASE session_owner_turns;"
-    ));
-    if let Err(failure) = created {
+    owner_turns_change(connection, |connection| {
+        connection
+            .execute_batch(&format!("{OWNER_TURNS}; {backfill}"))
+            .map_err(error)?;
+        fill_lines(connection)
+    })
+}
+
+#[cfg(unix)]
+fn owner_turns_column(connection: &Connection, name: &str) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_owner_turns') WHERE name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Applies a change to the table of sessions with an owner turn all or nothing. Takes the
+/// engine connection and the change. Returns any failure, rolled back.
+#[cfg(unix)]
+fn owner_turns_change(
+    connection: &Connection,
+    change: impl FnOnce(&Connection) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    connection
+        .execute_batch("SAVEPOINT session_owner_turns")
+        .map_err(error)?;
+    let applied = change(connection).and_then(|()| {
+        connection
+            .execute_batch("RELEASE session_owner_turns")
+            .map_err(error)
+    });
+    if applied.is_err() {
         let _ = connection
             .execute_batch("ROLLBACK TO session_owner_turns; RELEASE session_owner_turns;");
-        return Err(error(failure));
+    }
+    applied
+}
+
+/// Fills the newest line of the sessions with terminal turns and no line yet from the last
+/// message of the harness conversation each kept, newest sessions first and at most
+/// `SESSIONS_LISTED_MAX`, so a session an older engine recorded shows a line once. A record
+/// that cannot be read leaves its line empty. Takes the engine connection. Returns any
+/// SQLite failure.
+#[cfg(unix)]
+fn fill_lines(connection: &Connection) -> Result<(), EngineError> {
+    if !table_exists(connection, "team_master_conversations")? {
+        return Ok(());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT o.session,c.harness,c.record FROM session_owner_turns o
+             JOIN team_master_conversations c ON c.session=o.session
+             JOIN master_sessions s ON s.id=o.session
+             WHERE o.turns > 0 AND o.last_line IS NULL AND length(c.harness) <= 64
+             ORDER BY s.version DESC LIMIT ?1",
+        )
+        .map_err(error)?;
+    let kept = statement
+        .query_map(
+            [i64::try_from(SESSIONS_LISTED_MAX).map_err(error)?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(kept.len() <= SESSIONS_LISTED_MAX);
+    for (session, harness, record) in kept {
+        let messages = crate::harnesses::transcript::conversation_messages(
+            &harness,
+            std::path::Path::new(&record),
+        );
+        let Some(line) = messages
+            .last()
+            .and_then(|(_, text)| clip(text, LINE_CHARS_MAX))
+        else {
+            continue;
+        };
+        connection
+            .execute(
+                "UPDATE session_owner_turns SET last_line=?1 WHERE session=?2",
+                params![line, session],
+            )
+            .map_err(error)?;
     }
     Ok(())
 }
@@ -137,9 +259,10 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .map_err(error)
 }
 
-/// Records that a project's master session had a turn in its live terminal, so the session
-/// is listed and New session may leave it. Takes the engine database, the project and the
-/// session. Returns Ok, also when the session id cannot be one or the table does not exist.
+/// Counts one turn a project's master session ran in its live terminal, so the session is
+/// listed, New session may leave it and the list shows the turn as a message; a row another
+/// project holds is left as it is. Takes the engine database, the project and the session.
+/// Returns Ok, also when the session id cannot be one or the table does not exist.
 pub(crate) fn mark_owner_turn(
     connection: &Connection,
     project: &ProjectId,
@@ -153,8 +276,40 @@ pub(crate) fn mark_owner_turn(
     }
     connection
         .execute(
-            "INSERT OR IGNORE INTO session_owner_turns(session,project) VALUES (?1,?2)",
+            "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)
+             ON CONFLICT(session) DO UPDATE SET turns=turns+1 WHERE project=excluded.project",
             params![session, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Keeps the reply of a turn a project's master session ran in its live terminal as the
+/// session's newest line in the Sessions list, counting the turn when its start was not
+/// seen; a row another project holds is left as it is. Takes the engine database, the
+/// project, the session and the reply. Returns Ok, also when the reply shows no words, the
+/// session id cannot be one or the table does not exist.
+pub(crate) fn mark_owner_reply(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    reply: &str,
+) -> Result<(), EngineError> {
+    let Some(line) = clip(reply, LINE_CHARS_MAX) else {
+        return Ok(());
+    };
+    if session.is_empty()
+        || session.len() > 128
+        || !table_exists(connection, "session_owner_turns")?
+    {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "INSERT INTO session_owner_turns(session,project,last_line) VALUES (?1,?2,?3)
+             ON CONFLICT(session) DO UPDATE SET last_line=excluded.last_line
+             WHERE project=excluded.project",
+            params![session, project.as_str(), line],
         )
         .map_err(error)?;
     Ok(())
@@ -180,6 +335,7 @@ pub(crate) fn has_owner_turn(
 /// Migration part that gives team tasks and team agents their owning session column.
 /// Tables not created yet are left to `team::initialize`, which makes the column.
 /// Takes the upgrade transaction. Returns Ok once both tables have the column.
+#[cfg(unix)]
 pub(crate) fn add_ownership_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx
@@ -338,15 +494,18 @@ pub(crate) fn list(
         if created == 0 || version < created || active < version {
             return Err(error("master_session_record"));
         }
+        let (terminal_turns, terminal_line) = terminal(connection, &session_id)?;
         let summary = MasterSessionSummary {
             phase,
             created: Cursor::new(created),
             last_activity: Cursor::new(active),
             started_ms: started_ms.map(u64::try_from).transpose().map_err(error)?,
             active_ms: active_ms.map(u64::try_from).transpose().map_err(error)?,
-            turns: turn_count(connection, &session_id)?,
+            turns: turn_count(connection, &session_id)?
+                .checked_add(terminal_turns)
+                .ok_or_else(|| error("master_session_record"))?,
             first_line: first_line(connection, &session_id)?,
-            last_line: last_line(connection, &session_id)?,
+            last_line: last_line(connection, &session_id)?.or(terminal_line),
             agents: agent_names(connection, project, &session_id)?,
             results_waiting: results_waiting(connection, &session_id)?,
             session_id,
@@ -372,6 +531,28 @@ fn turn_count(connection: &Connection, session: &SessionId) -> Result<u64, Engin
         )
         .map_err(error)?;
     u64::try_from(count).map_err(error)
+}
+
+/// The turns a session ran in its live terminal and the newest line kept from them, clipped
+/// for the list. Takes the connection and session. Returns 0 and None for a session with none.
+fn terminal(
+    connection: &Connection,
+    session: &SessionId,
+) -> Result<(u64, Option<String>), EngineError> {
+    let row: Option<(i64, Option<String>)> = connection
+        .query_row(
+            "SELECT turns,CASE WHEN length(CAST(last_line AS BLOB))<=1024 THEN last_line END
+             FROM session_owner_turns WHERE session=?1",
+            [session.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let (turns, line) = row.unwrap_or((0, None));
+    Ok((
+        u64::try_from(turns).map_err(error)?,
+        line.and_then(|line| clip(&line, LINE_CHARS_MAX)),
+    ))
 }
 
 /// The first line of a session's first owner message, clipped for the list.
@@ -528,7 +709,7 @@ pub fn session_state(
         )
         .map_err(error)?;
     let found = if landing {
-        crate::landing::list(connection, project)?
+        crate::landing::owner_list(connection, project)?
     } else {
         Vec::new()
     };
@@ -543,15 +724,10 @@ pub fn session_state(
             )
         })
         .take(STATE_ROWS_MAX)
-        .map(|change| {
-            format!(
-                "{} ({} files, +{} -{}), waiting for the owner",
-                change.agent.label, change.files, change.added, change.removed
-            )
-        })
+        .map(|change| crate::landing::open_set_line(&change))
         .collect();
     if !changes.is_empty() {
-        sections.push(listed("Pending change sets:", &changes));
+        sections.push(listed("Open change sets:", &changes));
     }
     if sections.is_empty() {
         return Ok(None);
@@ -719,22 +895,21 @@ fn record_summary(kept: &SessionConversation) -> Option<String> {
 }
 
 /// The engine hook the live master calls before it starts a project's live session. It
-/// continues the harness conversation the session kept when the master about to start
-/// can: the same harness and account, the session's master agent stopped with its own
-/// worktree, an id the harness resumes by and the record still a plain file. Otherwise
-/// the session starts as `fresh_harness` says. Takes the connection, project, session,
-/// the master's launch harness and the account connection. Returns the plan.
+/// continues the conversation the session kept when it can: the same harness, a kept account
+/// `continues` accepts for the one about to start, the session's master stopped with its
+/// worktree, a resumable id and the record a plain file; else as `fresh_harness` says. Takes
+/// the connection, project, session, launch harness and `continues`. Returns the plan.
 pub fn resume_harness(
     connection: &Connection,
     project: &ProjectId,
     session: &SessionId,
     harness: &str,
-    account: &str,
+    continues: &dyn Fn(&str) -> bool,
 ) -> Result<ResumePlan, EngineError> {
     let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
     if let Some(kept) = &kept
         && crate::harnesses::same(&kept.harness, harness)
-        && kept.connection == account
+        && continues(&kept.connection)
         && crate::harnesses::interactive::resumable(&kept.resume.id)
         && std::fs::symlink_metadata(&kept.resume.record).is_ok_and(|meta| meta.is_file())
         && stopped_master(connection, project, kept.agent)?
@@ -831,6 +1006,37 @@ pub fn switched_from(
         (None, None) => None,
     };
     Ok(earlier.filter(|earlier| !crate::harnesses::same(earlier, harness)))
+}
+
+/// Tells whether a session's master starts new because its last switch, to this harness
+/// under Start fresh, is not yet followed by a conversation the new harness reported: the
+/// kept conversation, if any, is still another harness's, which the owner chose not to
+/// carry over (HSL-1). Takes the connection, project, session and the harness about to
+/// start. Returns whether to start new.
+pub fn fresh_after_switch(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    harness: &str,
+) -> Result<bool, EngineError> {
+    let switch: Option<(Option<String>, String)> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END, mode
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session.as_str(), project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((Some(to), mode)) = switch else {
+        return Ok(false);
+    };
+    if !crate::harnesses::same(&to, harness) || SwitchMode::named(&mode) != Some(SwitchMode::Fresh)
+    {
+        return Ok(false);
+    }
+    let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
+    Ok(kept.is_none_or(|kept| !crate::harnesses::same(&kept.harness, harness)))
 }
 
 /// The display name of a harness: its catalog name, or the stored name the catalog does
@@ -1105,21 +1311,28 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
     use super::{
         HANDOFF_BYTES_MAX, HANDOFF_OMITTED, HANDOFF_TURN_BYTES_MAX, LOST_NOTE, ResumePlan,
-        STATE_BYTES_MAX, TURN_OMITTED, clip, flat, handoff, resume_harness, switched_from,
+        STATE_BYTES_MAX, TURN_OMITTED, handoff, resume_harness, switched_from,
     };
+    use super::{clip, flat};
+    #[cfg(unix)]
     use crate::harnesses::terminal_session::Resume;
+    #[cfg(unix)]
     use crate::protocol::{ProjectId, SessionId};
+    #[cfg(unix)]
     use crate::team::master::{SessionConversation, keep_conversation};
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// A switch handoff gives the new harness the session's earlier turns newest first, as
     /// many as fit its byte bound with a line saying older ones were left out, then the
     /// session's open tasks; and the switch is seen only for another harness, never for an
     /// alias of the one the conversation ran on.
+    #[cfg(unix)]
     #[test]
     fn a_switch_handoff_is_newest_first_bounded_and_lists_open_tasks() {
         let folder = tempfile::tempdir().unwrap();
@@ -1203,6 +1416,7 @@ mod tests {
     /// exceed the whole handoff, is cut to fit, never dropped: the new harness gets that
     /// turn's input and its last replies, a line saying earlier replies were left out, and
     /// the older turns after it.
+    #[cfg(unix)]
     #[test]
     fn a_long_newest_turn_is_cut_to_fit_the_handoff_not_dropped() {
         let folder = tempfile::tempdir().unwrap();
@@ -1273,6 +1487,7 @@ mod tests {
     /// A session with turns in both the kept harness conversation and the engine's master
     /// conversation hands over each in its own part, newest first, so the newest engine
     /// turns are never crowded out by a long harness conversation.
+    #[cfg(unix)]
     #[test]
     fn a_switch_handoff_keeps_a_part_for_each_conversation_newest_first() {
         let folder = tempfile::tempdir().unwrap();
@@ -1364,6 +1579,7 @@ mod tests {
     /// A switch is seen once: after the session's master switched to Codex, a later start on
     /// Codex is no switch even before Codex reported a conversation of its own, and a start
     /// on Claude Code again is a switch back from Codex.
+    #[cfg(unix)]
     #[test]
     fn a_switch_is_seen_once_even_before_the_new_harness_reports_its_conversation() {
         let folder = tempfile::tempdir().unwrap();
@@ -1413,6 +1629,7 @@ mod tests {
 
     /// An engine turn of multi-byte text longer than one handed-over turn is cut with a
     /// visible "..." where its reply was cut, never silently.
+    #[cfg(unix)]
     #[test]
     fn a_multi_byte_engine_turn_cut_to_fit_shows_where_it_was_cut() {
         let folder = tempfile::tempdir().unwrap();
@@ -1503,7 +1720,7 @@ mod tests {
                 &project,
                 &SessionId::new("s-fifo").unwrap(),
                 "claude-code",
-                "local-a",
+                &|_| true,
             );
             let _ = sent.send(plan.map_err(|problem| problem.0));
         });
@@ -1515,5 +1732,81 @@ mod tests {
             panic!("a FIFO is no record to resume: {plan:?}");
         };
         assert_eq!(note, LOST_NOTE);
+    }
+
+    /// A conversation kept while the master ran on one pool account resumes on the account the
+    /// schedule picks when the caller accepts the kept account for it (DEC-091, N-D14), and
+    /// starts fresh when it does not (ND14-L1); the caller is asked about the kept account.
+    /// Another harness never resumes it.
+    #[test]
+    fn a_kept_conversation_resumes_on_another_pool_account() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        let project = ProjectId::new("pool-project").unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,'master','claude',1,'account-a','stopped',1,1)",
+                [project.as_str()],
+            )
+            .unwrap();
+        let agent = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+                 VALUES (?1,?2,'/repo','/repo/.crazyagent/worktrees/agent-1','/repo/.git')",
+                rusqlite::params![agent, project.as_str()],
+            )
+            .unwrap();
+        let id = "5b0e2c1a-7d3f-4e8b-9a6c-2f1e0d9c8b7a";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        std::fs::write(&record, "{}\n").unwrap();
+        let kept = SessionConversation {
+            agent,
+            harness: "claude-code".into(),
+            connection: "account-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record: record.clone(),
+            },
+        };
+        keep_conversation(&connection, &project, "s-pool", &kept).unwrap();
+        let session = SessionId::new("s-pool").unwrap();
+
+        let subscription = |kept: &str| kept == "account-a";
+        let plan = resume_harness(
+            &connection,
+            &project,
+            &session,
+            "claude-code",
+            &subscription,
+        )
+        .unwrap();
+        assert_eq!(
+            plan,
+            ResumePlan::Resume {
+                agent,
+                conversation: id.into(),
+                record: record.clone(),
+            },
+            "a master started on another subscription continues the conversation kept on account-a"
+        );
+
+        let plan =
+            resume_harness(&connection, &project, &session, "claude-code", &|_| false).unwrap();
+        assert!(
+            matches!(plan, ResumePlan::Fresh { .. }),
+            "an account that cannot take the kept history starts fresh: {plan:?}"
+        );
+
+        let plan = resume_harness(&connection, &project, &session, "codex", &|_| true).unwrap();
+        assert!(
+            !matches!(plan, ResumePlan::Resume { .. }),
+            "another harness never resumes the kept conversation: {plan:?}"
+        );
     }
 }

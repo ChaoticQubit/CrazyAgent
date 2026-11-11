@@ -42,6 +42,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let budget = ResourceBudget::unit();
     let launch = claude_master_turn(
@@ -52,6 +53,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         "You are a test. Follow the user's instruction exactly.",
         Duration::from_millis(budget.wall_time_ms),
         None,
+        &[],
     )
     .unwrap();
     let MasterTurnLaunch {
@@ -169,6 +171,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: 240_000,
@@ -188,6 +191,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         "You are a test. Follow the user's steps exactly and use your tools for them.",
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &[],
     )
     .unwrap();
     let record = tool_record.unwrap();
@@ -196,6 +200,8 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         Some(crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &record,
+            mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         }),
     )
     .unwrap();
@@ -307,6 +313,7 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: 240_000,
@@ -326,6 +333,7 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
         "You are a test. Follow the user's steps exactly and use your tools for them.",
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &[],
     )
     .unwrap();
     let mut master = ClaudeHost::spawn(
@@ -476,6 +484,7 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: u64::try_from(DETACHED_LIVE_TIME.as_millis()).unwrap(),
@@ -495,6 +504,7 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
         "You are a test. Follow the user's steps exactly and use your tools for them.",
         DETACHED_LIVE_TIME,
         Some(&engine),
+        &[],
     )
     .unwrap();
     let mut master = ClaudeHost::spawn(

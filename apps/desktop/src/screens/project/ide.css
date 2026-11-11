@@ -1,0 +1,63 @@
+.main:has(.ide-tab),
+.main:has(.ide-tab) > .page,
+.page > .pj-project:has(.ide-tab),
+.pj-project > .pj-tab-panel:has(.ide-tab) {
+  display: flex;
+  flex-direction: column;
+}
+
+.main:has(.ide-tab) > .page,
+.page > .pj-project:has(.ide-tab),
+.pj-project > .pj-tab-panel:has(.ide-tab) {
+  flex: 1 0 auto;
+  min-height: 0;
+}
+
+.main:has(.ide-tab) > .page {
+  padding-bottom: var(--space-4);
+}
+
+.ide-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.ide-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-2);
+}
+
+.ide-status p {
+  margin: 0;
+}
+
+.ide-bar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ide-problem {
+  margin: 0;
+  color: var(--danger);
+}
+
+.ide-left {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.ide-panel {
+  flex: 1;
+  min-height: 240px;
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.ide-panel[hidden] {
+  display: none;
+}

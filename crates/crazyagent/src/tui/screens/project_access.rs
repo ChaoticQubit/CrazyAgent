@@ -1,26 +1,61 @@
 use super::new_project_view::{Look, Row, wrap_words};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView, ToolchainChoice};
+use super::project_team::window;
+use crate::sandbox::policy::{
+    AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolchainChoice,
+};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
-pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
-    "Agents run with your user's permissions: they can read your keys and change any file.";
+pub(in crate::tui) const FULL_ACCESS_WARNING: &str = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";
+
+/// What Full access means for the IDE, in the desktop's words.
+pub(in crate::tui) const FULL_ACCESS_IDE: &str = "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on. Until you trust the folder, IDE git and extensions that need trust stay off.";
 
 /// What a lower saved level does to agents already running: the engine stops each one that
-/// started above it.
-pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
-    "Lowering the level stops agents running above it; they restart at the new level.";
+/// started above it, but not what a Full access agent started outside its terminal.
+pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
+
+/// What saving a new level, hooks, agent folders or network choice does to the project's open
+/// IDE, the same in the desktop app.
+pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "Changing the level, the IDE hooks switch or the agent folders choice below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
+
+/// What turning a toolchain off does to work already running: the engine stops each agent,
+/// research job and master turn whose sandbox granted it.
+pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
+
+/// The IDE hooks switch's name, the same in Desktop.
+pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks";
+
+/// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
+pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. No effect at Full access: git runs as yours. Applies when the IDE next starts.";
+
+/// The agent folders choice's name, the same in the desktop app.
+pub(in crate::tui) const IDE_AGENT_FILES: &str = "IDE changes in agent folders";
+
+/// Why the agent folders choice has no effect under Full access (DEC-124), the same in the
+/// desktop app.
+pub(in crate::tui) const AGENT_FILES_IGNORED_UNDER_FULL: &str =
+    "Full access runs the IDE without a sandbox, so this choice does not apply.";
+
+/// Why the network choice has no effect under Full access: Full access runs agents with no
+/// sandbox, so nothing bounds their network.
+pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
+    "Full access runs agents without a sandbox, so this choice does not apply.";
 
 const TEXT_WIDTH: usize = 56;
 
-/// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level
-/// and one switch per toolchain family. Row 0 is the level, each later row one toolchain of
-/// the view. Busy while the engine saves; a refusal keeps the choices with the reason.
+/// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level,
+/// one switch per toolchain family, the network choice, the IDE hooks switch and the IDE agent
+/// folders choice. Row 0 is the level, each next row one toolchain of the view, then the
+/// network row, the IDE hooks switch, and the last row the agent folders choice. Busy while the engine saves; a refusal keeps the choices with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
     pub access: AgentAccess,
+    pub network: AgentNetwork,
     pub allowed: Vec<bool>,
+    pub ide_git_hooks: bool,
+    pub ide_agent_files: IdeAgentFiles,
     pub cursor: usize,
     pub confirm_full: bool,
     pub busy: bool,
@@ -41,7 +76,10 @@ impl AccessEdit {
     pub fn of(view: &PolicyView) -> Self {
         Self {
             access: view.access,
+            network: view.network,
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
+            ide_git_hooks: view.ide_git_hooks,
+            ide_agent_files: view.ide_agent_files,
             view: view.clone(),
             cursor: 0,
             confirm_full: false,
@@ -55,7 +93,7 @@ impl AccessEdit {
     /// Output: what the screen does next.
     pub fn key(&mut self, key: KeyEvent) -> AccessKey {
         assert_eq!(self.allowed.len(), self.view.toolchains.len());
-        assert!(self.cursor <= self.allowed.len());
+        assert!(self.cursor <= self.files_row());
         if self.busy {
             return match key.code {
                 KeyCode::Esc => AccessKey::Close,
@@ -78,7 +116,7 @@ impl AccessEdit {
         match key.code {
             KeyCode::Esc => return AccessKey::Close,
             KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.allowed.len()),
+            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.files_row()),
             KeyCode::Left => self.change(false),
             KeyCode::Right | KeyCode::Char(' ') => self.change(true),
             KeyCode::Enter if self.access == AgentAccess::Full => {
@@ -90,9 +128,10 @@ impl AccessEdit {
         AccessKey::Handled
     }
 
-    /// The policy the box would save: the chosen level and a choice for each toolchain
-    /// whose switch differs from the project's own use, so the others keep following the
-    /// project.
+    /// The policy the box would save: the chosen level, a choice for each toolchain whose
+    /// switch differs from the project's own use, so the others keep following the project,
+    /// the IDE hooks switch, the agent folders choice and the tool cache choice as the project
+    /// saved it (T8).
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
             .view
@@ -107,16 +146,63 @@ impl AccessEdit {
             .collect();
         let policy = AgentPolicy {
             access: self.access,
+            network: self.network,
             toolchains,
+            ide_git_hooks: self.ide_git_hooks,
+            tool_cache: self.view.tool_cache,
+            ide_agent_files: self.ide_agent_files,
         };
         assert!(policy.validate().is_ok());
         policy
     }
 
-    /// The box's lines: what the setting does, the level row, what lowering the level does
-    /// to running agents, the toolchain rows, the warning or the refusal, and the save line.
-    /// Input: the look. Output: the rows.
-    pub fn body(&self, look: &Look) -> Vec<Row> {
+    /// The box's lines fitted to the rows the window leaves it: what the setting does, the
+    /// level row, what lowering the level does to running agents, the toolchain rows, the
+    /// network row with its help, the IDE hooks row with its line, the agent folders row with
+    /// its help, the warning or the refusal,
+    /// and the save line, all of them when they fit. Else the warning or refusal and the save
+    /// line stay whole at the bottom, and the settings above them show a window that keeps the
+    /// cursor's row and as many of its help lines as fit, with how many lines sit above and
+    /// below it. Input: the look and the rows for the body. Output: at most that many rows, or
+    /// the action lines, the cursor's row and the counts when even those do not fit.
+    pub fn rows(&self, look: &Look, room: usize) -> Vec<Row> {
+        let (form, at, end) = self.form(look);
+        let actions = self.actions(look);
+        let actions_len = actions.len();
+        if form.len() + actions_len <= room {
+            let mut rows = form;
+            rows.extend(actions);
+            return rows;
+        }
+        let keep = room.saturating_sub(actions_len).max(1);
+        let mut size = keep;
+        let first = loop {
+            let first = window(end, form.len(), size).min(at);
+            let counts = usize::from(first > 0) + usize::from(first + size < form.len());
+            if size + counts <= keep || size == 1 {
+                break first;
+            }
+            size -= 1;
+        };
+        assert!(first <= at && at < first + size, "the cursor's row shows");
+        let below = form.len() - first - size;
+        let mut rows = Vec::with_capacity(room.max(size + actions_len + 2));
+        if first > 0 {
+            rows.push(Row::of(format!("{first} more lines above"), look.muted));
+        }
+        rows.extend(form.into_iter().skip(first).take(size));
+        if below > 0 {
+            rows.push(Row::of(format!("{below} more lines below"), look.muted));
+        }
+        rows.extend(actions);
+        assert!(rows.len() <= room || room < actions_len + 3);
+        rows
+    }
+
+    /// The box's settings lines, through the blank line after the agent folders choice, and the
+    /// line the cursor's row is on. Input: the look. Output: the rows, that line and the last
+    /// line of the help under it.
+    fn form(&self, look: &Look) -> (Vec<Row>, usize, usize) {
         let mut body: Vec<Row> = wrap_words(
             "Who decides what this project's agents may touch. Applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.",
             TEXT_WIDTH,
@@ -131,6 +217,7 @@ impl AccessEdit {
             .levels
             .iter()
             .find(|level| level.access == self.access);
+        let mut at = body.len();
         body.push(
             Row::of(mark(0), look.accent)
                 .push("Access      ", look.muted)
@@ -160,6 +247,12 @@ impl AccessEdit {
                 .into_iter()
                 .map(|line| Row::of(line, look.muted)),
         );
+        body.extend(
+            wrap_words(POLICY_RESTARTS_IDE, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
+        let mut end = body.len() - 1;
         body.push(Row::default());
         body.push(Row::of("Toolchains agents may use", look.accent));
         if self.view.toolchains.is_empty() {
@@ -176,6 +269,10 @@ impl AccessEdit {
                 (false, true) => "installed, not used by this project",
                 (false, false) => "",
             };
+            if self.cursor == index + 1 {
+                at = body.len();
+                end = at;
+            }
             body.push(
                 Row::of(mark(index + 1), look.accent)
                     .push(
@@ -189,36 +286,163 @@ impl AccessEdit {
                     .push(format!("   {note}"), look.muted),
             );
         }
+        body.extend(
+            wrap_words(TOOLCHAIN_OFF_STOPS_AGENTS, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
         body.push(Row::default());
-        if self.confirm_full {
+        body.push(Row::of("Network for agents with tools on", look.accent));
+        let network_row = self.allowed.len() + 1;
+        if self.cursor == network_row {
+            at = body.len();
+        }
+        body.push(
+            Row::of(mark(network_row), look.accent)
+                .push("Network     ", look.muted)
+                .push(
+                    format!("< {} >", self.network.label()),
+                    if self.cursor == network_row {
+                        look.selection
+                    } else {
+                        look.fg
+                    },
+                ),
+        );
+        body.extend(
+            wrap_words(network_help(self.network), TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("              {line}"), look.muted)),
+        );
+        if self.access == AgentAccess::Full {
             body.extend(
-                wrap_words(&format!("Full access: {FULL_ACCESS_WARNING}"), TEXT_WIDTH)
+                wrap_words(NETWORK_IGNORED_UNDER_FULL, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
-            body.push(
+        }
+        if self.cursor == network_row {
+            end = body.len() - 1;
+        }
+        body.push(Row::default());
+        body.push(Row::of("IDE git", look.accent));
+        let hooks = self.hooks_row();
+        if self.cursor == hooks {
+            at = body.len();
+        }
+        body.push(Row::of(mark(hooks), look.accent).push(
+            format!(
+                "{} {IDE_GIT_HOOKS}",
+                if self.ide_git_hooks { "[x]" } else { "[ ]" }
+            ),
+            if self.cursor == hooks {
+                look.selection
+            } else {
+                look.fg
+            },
+        ));
+        body.extend(
+            wrap_words(IDE_GIT_HOOKS_LINE, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("  {line}"), look.muted)),
+        );
+        if self.cursor == hooks {
+            end = body.len() - 1;
+        }
+        let files = self.files_row();
+        if self.cursor == files {
+            at = body.len();
+        }
+        body.push(
+            Row::of(mark(files), look.accent)
+                .push(format!("{IDE_AGENT_FILES}  "), look.muted)
+                .push(
+                    format!("< {} >", self.ide_agent_files.label()),
+                    if self.cursor == files {
+                        look.selection
+                    } else {
+                        look.fg
+                    },
+                ),
+        );
+        body.extend(
+            wrap_words(agent_files_help(self.ide_agent_files), TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("  {line}"), look.muted)),
+        );
+        if self.access == AgentAccess::Full {
+            body.extend(
+                wrap_words(AGENT_FILES_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(format!("  {line}"), look.warning)),
+            );
+        }
+        if self.cursor == files {
+            end = body.len() - 1;
+        }
+        body.push(Row::default());
+        assert!(at < body.len(), "the cursor's row is a settings line");
+        assert!(
+            at <= end && end < body.len(),
+            "the cursor's help follows its row"
+        );
+        (body, at, end)
+    }
+
+    /// The box's closing lines: the Full access warning with its y and n, or the refusal and
+    /// the save line. Input: the look. Output: the rows.
+    fn actions(&self, look: &Look) -> Vec<Row> {
+        if self.confirm_full {
+            let mut rows: Vec<Row> = wrap_words(
+                &format!("Full access: {FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}"),
+                TEXT_WIDTH,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.warning))
+            .collect();
+            rows.push(
                 Row::of("[> y Allow Full access ]", look.selection).push("   [ n Keep ]", look.fg),
             );
-            return body;
+            return rows;
         }
-        body.extend(
-            self.error
-                .iter()
-                .flat_map(|error| wrap_words(error, TEXT_WIDTH))
-                .map(|line| Row::of(line, look.error)),
-        );
-        body.push(if self.busy {
+        let mut rows: Vec<Row> = self
+            .error
+            .iter()
+            .flat_map(|error| wrap_words(error, TEXT_WIDTH))
+            .map(|line| Row::of(line, look.error))
+            .collect();
+        rows.push(if self.busy {
             Row::of("Saving...", look.running)
         } else {
             Row::of("[> Save ]", look.selection).push("   [ Cancel ]", look.fg)
         });
-        body
+        rows
+    }
+
+    fn hooks_row(&self) -> usize {
+        self.allowed.len() + 2
+    }
+
+    fn files_row(&self) -> usize {
+        self.hooks_row() + 1
     }
 
     fn change(&mut self, forward: bool) {
         self.error = None;
         if self.cursor == 0 {
             self.access = next_level(self.access, forward);
+            return;
+        }
+        if self.cursor == self.allowed.len() + 1 {
+            self.network = next_network(self.network, forward);
+            return;
+        }
+        if self.cursor == self.hooks_row() {
+            self.ide_git_hooks = !self.ide_git_hooks;
+            return;
+        }
+        if self.cursor == self.files_row() {
+            self.ide_agent_files = next_agent_files(self.ide_agent_files, forward);
             return;
         }
         let row = self.cursor - 1;
@@ -247,6 +471,63 @@ pub(in crate::tui) fn next_level(current: AgentAccess, forward: bool) -> AgentAc
         .map(|index| AgentAccess::ALL[index])
         .find(|candidate| candidate.unavailable().is_none())
         .unwrap_or(current)
+}
+
+/// The next network choice, cycling in either direction; every choice runs on every
+/// computer. Input: the current choice and the direction. Output: the next choice.
+pub(in crate::tui) fn next_network(current: AgentNetwork, forward: bool) -> AgentNetwork {
+    let at = AgentNetwork::ALL
+        .iter()
+        .position(|network| *network == current)
+        .unwrap_or(0);
+    let count = AgentNetwork::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    AgentNetwork::ALL[(at + step) % count]
+}
+
+/// The next agent folders choice, cycling in either direction. Input: the current choice and
+/// the direction. Output: the next choice.
+pub(in crate::tui) fn next_agent_files(current: IdeAgentFiles, forward: bool) -> IdeAgentFiles {
+    let at = IdeAgentFiles::ALL
+        .iter()
+        .position(|choice| *choice == current)
+        .unwrap_or(0);
+    let count = IdeAgentFiles::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    IdeAgentFiles::ALL[(at + step) % count]
+}
+
+/// What an agent folders choice lets the IDE, its terminals and its tasks do in agent
+/// folders at Sandboxed and Own branch (DEC-124), the same in the desktop app. Input: the
+/// choice. Output: the line.
+pub(in crate::tui) fn agent_files_help(choice: IdeAgentFiles) -> &'static str {
+    match choice {
+        IdeAgentFiles::AllowAll => {
+            "The IDE, its terminals and its tasks may edit, delete and rename files in agent folders."
+        }
+        IdeAgentFiles::NoDeleteOrRename => {
+            "Files in agent folders can be edited, Edit anyway included, but not deleted or renamed. Tools that delete as they go, such as cargo clean, fail there."
+        }
+        IdeAgentFiles::ReadOnly => {
+            "Nothing in the IDE may write in agent folders, Edit anyway included."
+        }
+    }
+}
+
+/// One line on what a network choice lets agents and the plugin check reach. Input: the
+/// choice. Output: the line.
+pub(in crate::tui) fn network_help(network: AgentNetwork) -> &'static str {
+    match network {
+        AgentNetwork::Open => {
+            "Agents with tools on reach the whole network, and so does the plugin check."
+        }
+        AgentNetwork::Https => {
+            "Agents and the plugin check reach port 443 only; agents also still reach the model."
+        }
+        AgentNetwork::None => {
+            "None limits agents to their model: a hosted model's own hosts, through the engine's proxy, or only the local model's port. The plugin check reaches nothing."
+        }
+    }
 }
 
 /// One line on what an access level lets agents do. Input: the level. Output: the line.

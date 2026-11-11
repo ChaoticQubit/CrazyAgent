@@ -96,11 +96,13 @@ impl Pools {
             return Flow::Handled;
         }
         if let Some(change) = editor.key(key, schedule, &pool) {
+            let version = schedule.version;
             schedule.update(&change);
             let generation = ctx.next_generation();
             self.saving.push(generation);
             ctx.request(Request::Settings(Box::new(SettingsJob::SetSchedule {
                 change,
+                version,
                 generation,
             })));
         }
@@ -231,7 +233,7 @@ pub fn used_by(pool: &PoolSummary, names: bool, ctx: &Ctx) -> String {
         .map(|cards| {
             cards
                 .iter()
-                .filter(|card| card.pool.as_deref() == Some(pool.name.as_str()))
+                .filter(|card| card.pool_id.as_ref() == Some(&pool.id))
                 .map(|card| card.name.clone())
                 .collect()
         })
@@ -609,6 +611,7 @@ mod tests {
             about: String::new(),
             platforms: Vec::new(),
             pool: Some(pool.into()),
+            pool_id: Some(CredentialRef::new(format!("pool-{pool}")).unwrap()),
             research: Default::default(),
             created_ms: None,
             activity: Default::default(),
@@ -708,7 +711,9 @@ mod tests {
     fn sent(ctx: &mut Ctx) -> (crate::scheduling::ScheduleChange, u64) {
         match ctx.next_request() {
             Some(Request::Settings(job)) => match *job {
-                SettingsJob::SetSchedule { change, generation } => {
+                SettingsJob::SetSchedule {
+                    change, generation, ..
+                } => {
                     assert!(generation > 0);
                     (change, generation)
                 }
@@ -959,6 +964,129 @@ mod tests {
     }
 
     #[test]
+    fn quick_choice_edits_sent_before_any_answer_all_land_on_the_versioned_schedule() {
+        use crate::protocol::Outcome;
+        use crate::scheduling::tests::{access, database};
+        use crate::scheduling::{AccountPlan, Pin, ScheduleChange, apply, load};
+        let (_directory, mut db) = database();
+        let access = access(&["member-1"]);
+        let member = CredentialRef::new("member-1").unwrap();
+        let save = |db: &mut rusqlite::Connection, change: &ScheduleChange, version: u64| {
+            let tx = db.transaction().unwrap();
+            let outcome = apply(&tx, &access, change, version).unwrap();
+            tx.commit().unwrap();
+            outcome
+        };
+        let never = |reserve_percent| AccountPlan {
+            reserve_percent,
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        };
+        let use_last = ScheduleChange::Account {
+            connection: member.clone(),
+            plan: AccountPlan {
+                pin: Some(Pin::UseLast),
+                ..AccountPlan::default()
+            },
+        };
+        assert_eq!(save(&mut db, &use_last, 0), Outcome::Applied);
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(load(&db).unwrap()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        while ctx.next_request().is_some() {}
+
+        let mut quick = Vec::new();
+        for key in [
+            Key::Char('p'),
+            Key::Char('>'),
+            Key::Char('>'),
+            Key::Char('>'),
+            Key::Char('<'),
+        ] {
+            screen.key(&key, &mut ctx);
+            let Some(Request::Settings(job)) = ctx.next_request() else {
+                panic!("a quick edit is sent at once");
+            };
+            let SettingsJob::SetSchedule {
+                change,
+                version,
+                generation,
+            } = *job
+            else {
+                panic!("a quick edit sends one schedule change");
+            };
+            quick.push((change, version, generation));
+        }
+        assert_eq!(
+            quick
+                .iter()
+                .map(|(_, version, _)| *version)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5],
+            "each edit names the version the edit before it makes"
+        );
+        for (change, version, _) in &quick {
+            assert_eq!(
+                save(&mut db, change, *version),
+                Outcome::Applied,
+                "a quick edit sent before any answer is never refused as stale"
+            );
+        }
+        let stored = load(&db).unwrap();
+        assert_eq!(stored.version, 6);
+        assert_eq!(
+            stored.plan(&member),
+            never(10),
+            "no quick edit is lost and Never use survives every reserve edit"
+        );
+        let (first, version, _) = &quick[0];
+        assert_eq!(
+            save(&mut db, first, *version),
+            Outcome::Rejected {
+                code: "stale_revision".into()
+            },
+            "an edit naming an old version is still refused"
+        );
+        assert_eq!(load(&db).unwrap(), stored);
+
+        for (_, _, generation) in &quick {
+            screen.arrive(
+                &settings(SettingsEvent::ScheduleSet(*generation, Ok(()))),
+                &mut ctx,
+            );
+        }
+        while ctx.next_request().is_some() {}
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(stored.clone()))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(shown.contains("Never used"), "{shown}");
+        screen.key(&Key::Char('>'), &mut ctx);
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the next edit is sent");
+        };
+        let SettingsJob::SetSchedule {
+            change, version, ..
+        } = *job
+        else {
+            panic!("the next edit sends one schedule change");
+        };
+        assert_eq!(
+            version, stored.version,
+            "after the read-back it names the stored version"
+        );
+        assert_eq!(save(&mut db, &change, version), Outcome::Applied);
+        assert_eq!(load(&db).unwrap().plan(&member), never(15));
+    }
+
+    #[test]
     fn account_choice_steps_stay_in_range() {
         use super::super::account_choice::{cycle, next_pin, plan_line, rank_step, reserve_step};
         use crate::scheduling::{AccountPlan, Pin, Strategy};
@@ -1023,6 +1151,7 @@ mod tests {
         let ranked = |id: &str, standing| RankedAccount {
             connection: CredentialRef::new(id).unwrap(),
             standing,
+            held_for: Vec::new(),
         };
         screen.arrive(
             &settings(SettingsEvent::Ranking(Ok(vec![PoolRanking {
@@ -1035,10 +1164,12 @@ mod tests {
                             weekly_resets_ms: None,
                             weekly_left_percent: Some(40),
                             use_last: false,
+                            why: crate::scheduling::OrderWhy::NoReading,
                         },
                     ),
                     ranked("member-9", Standing::NeverUse),
                 ],
+                own_order_projects: 0,
             }]))),
             &mut ctx,
         );
@@ -1061,10 +1192,57 @@ mod tests {
         assert!(asked[1].contains("Ranking"), "{asked:?}");
     }
 
+    /// An account one project holds after its agent reported a limit keeps its place in the
+    /// order and says, on its own line under it, which project holds it and until when
+    /// (SECAUDIT-RATELIMIT-FORGE).
+    #[test]
+    fn a_project_hold_shows_on_its_own_line_under_the_account_it_holds() {
+        use crate::scheduling::PoolRanking;
+        const HOUR: i64 = 3_600_000;
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        while ctx.next_request().is_some() {}
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let ranking: Vec<PoolRanking> = serde_json::from_value(serde_json::json!([{
+            "pool": "pool-main",
+            "strategy": "use_it_or_lose_it",
+            "accounts": [
+                {
+                    "connection": "member-1",
+                    "standing": {"kind": "next", "weekly_resets_ms": null,
+                        "weekly_left_percent": 40, "use_last": false,
+                        "why": {"kind": "no_reading"}},
+                    "held_for": [{"project": "project-a", "name": "Meals for two",
+                        "until_ms": 14 * HOUR + 1_800_000}]
+                },
+                {"connection": "member-9", "standing": {"kind": "never_use"}}
+            ],
+            "own_order_projects": 0
+        }]))
+        .expect("a ranking carries the holds of projects");
+        screen.arrive(&settings(SettingsEvent::Ranking(Ok(ranking))), &mut ctx);
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        let lines: Vec<&str> = shown.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(" 1. ChatGPT member-1"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(
+            lines[at + 1].starts_with("    Held for Meals for two until "),
+            "{shown}"
+        );
+        assert!(lines[at + 2].contains("member-9"), "{shown}");
+    }
+
     #[test]
     fn a_standing_reads_as_one_short_reason_in_local_time() {
         use super::super::account_choice::{at_text, standing_line};
-        use crate::scheduling::Standing;
+        use crate::scheduling::{OrderWhy, Standing};
         const HOUR: i64 = 3_600_000;
         assert_eq!(at_text(14 * HOUR + 1_800_000, 0, 0), "14:30");
         assert_eq!(at_text(4 * 24 * HOUR + 9 * HOUR, 0, 0), "Mon 09:00");
@@ -1075,6 +1253,7 @@ mod tests {
                 weekly_resets_ms: Some(4 * 24 * HOUR + 9 * HOUR),
                 weekly_left_percent: Some(40),
                 use_last: false,
+                why: OrderWhy::LeastUsed,
             }),
             "resets Mon 09:00, 40% left"
         );
@@ -1083,9 +1262,12 @@ mod tests {
                 weekly_resets_ms: None,
                 weekly_left_percent: None,
                 use_last: true,
+                why: OrderWhy::UseLast,
             }),
             "no usage read yet, used last"
         );
+        assert_eq!(line(Standing::NotSignedIn), "not signed in");
+        assert_eq!(line(Standing::SignInUnconfirmed), "sign-in needs a check");
         assert_eq!(
             line(Standing::ReserveReached {
                 reserve_percent: 20,

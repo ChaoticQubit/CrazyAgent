@@ -39,6 +39,39 @@ const LINKS_LEFT_OUT_MAX: usize = 64;
 #[cfg(unix)]
 const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
 
+/// The Git config the engine writes as an agent worktree's `config.worktree`, the last config
+/// file Git reads there once `extensions.worktreeConfig` is on: every transport is refused,
+/// each built-in one by name, over any rewrite or allow in an owner config file, and a URL no
+/// rule rewrites goes to the rule's transport. Not covered: `GIT_ALLOW_PROTOCOL`, `-c` or
+/// environment config, and a custom remote helper the owner allows by name.
+pub const REMOTE_LOCK: &[u8] = concat!(
+    "[protocol]\n\tallow = never\n",
+    "[protocol \"file\"]\n\tallow = never\n",
+    "[protocol \"git\"]\n\tallow = never\n",
+    "[protocol \"ssh\"]\n\tallow = never\n",
+    "[protocol \"http\"]\n\tallow = never\n",
+    "[protocol \"https\"]\n\tallow = never\n",
+    "[protocol \"ftp\"]\n\tallow = never\n",
+    "[protocol \"ftps\"]\n\tallow = never\n",
+    "[protocol \"ext\"]\n\tallow = never\n",
+    "[protocol \"fd\"]\n\tallow = never\n",
+    "[url \"agent-worktrees-are-local-only-use-the-project-folder::\"]\n\tinsteadOf =\n",
+)
+.as_bytes();
+
+/// The lock agent worktrees got before [`REMOTE_LOCK`] named each transport. A worktree
+/// holding it still counts as locked, as one made before any lock does.
+const PREVIOUS_REMOTE_LOCK: &[u8] = b"[protocol]\n\tallow = never\n[url \"agent-worktrees-are-local-only-use-the-project-folder::\"]\n\tinsteadOf =\n";
+
+/// The line Git prints for a fetch, pull or push tried in an agent worktree.
+pub const REMOTE_REFUSAL: &str =
+    "fatal: transport 'agent-worktrees-are-local-only-use-the-project-folder' not allowed";
+
+#[cfg(unix)]
+const GIT_TRUE: &[&str] = &["true", "yes", "on", "1"];
+#[cfg(unix)]
+const WORKTREE_CONFIG_TRIES: usize = 3;
+
 /// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
 /// the most content bytes across them, and the most path components in one path.
 #[cfg(unix)]
@@ -235,8 +268,9 @@ fn git_until(
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
-/// or global config, hooks, fsmonitor, replace objects, protocols or automatic
-/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
+/// or global config, hooks, fsmonitor, replace objects, grafts, commit-graph files,
+/// protocols or automatic maintenance. Inputs: the repository and the arguments. Output:
+/// the unspawned process.
 fn git_command(repository: &Path, args: &[&str]) -> Process {
     let mut command = Process::new("/usr/bin/git");
     command
@@ -248,6 +282,7 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
         .args([
@@ -267,6 +302,10 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
             "gc.auto=0",
             "-c",
             "maintenance.auto=false",
+            "-c",
+            "core.commitGraph=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
         ])
         .arg("--git-dir")
         .arg(repository.join(".git"))
@@ -1342,6 +1381,7 @@ pub(crate) fn lease_git_dir(
 /// Names the branch of the lease whose worktree is at `path`, the only ref a master
 /// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
 /// the worktree path. Output: the branch, or `lease_missing`.
+#[cfg(unix)]
 pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
     let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
     let body: Option<String> = connection
@@ -1519,8 +1559,9 @@ fn materialize(_record: &mut LeaseRecord) -> Result<(), EngineError> {
 /// the lease index, streams each blob through one `cat-file --batch` into files and
 /// symlinks written relative to the sealed worktree folder, marks the symlinks that would
 /// point outside the lease as skip-worktree instead of writing them, and requires Git to
-/// see the copy as the commit. Input: the reserved lease record, which gains its folder
-/// and metadata identities. Output: success, or the refusal code.
+/// see the copy as the commit. The worktree is made local-only first ([`lock_remotes`]).
+/// Input: the reserved lease record, which gains its folder and metadata identities.
+/// Output: success, or the refusal code.
 #[cfg(unix)]
 fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     let deadline = Instant::now() + MATERIALIZE_TIME_MAX;
@@ -1566,6 +1607,7 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
         .map_err(error)?;
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
+    lock_remotes(repository, target)?;
     ensure_submodule_stores(repository, &metadata)?;
     let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
     let lease = |args: &[&str]| {
@@ -1935,25 +1977,34 @@ impl<'a> Folders<'a> {
     }
 }
 
-/// Finds and checks the Git metadata folder of an engine lease worktree: it must sit in
-/// the repository's .git/worktrees, pass [`validate_admin`], link back to the lease, and
-/// hold no config.worktree, which Git reads for that worktree when
-/// extensions.worktreeConfig is on. Input: the
-/// lease record. Output: the metadata folder, or the refusal code.
-fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
-    let target = Path::new(&record.lease.path);
-    let bytes = bounded_read(&target.join(".git"), 4096)?;
+/// Finds a linked worktree's Git metadata folder from its `.git` file and checks that it
+/// sits in the repository's .git/worktrees. Inputs: the repository and the worktree.
+/// Output: the metadata folder, or the refusal code.
+fn linked_metadata(repository: &Path, worktree: &Path) -> Result<PathBuf, EngineError> {
+    let bytes = bounded_read(&worktree.join(".git"), 4096)?;
     let text = std::str::from_utf8(&bytes).map_err(error)?;
     let path = PathBuf::from(
         text.strip_prefix("gitdir: ")
             .and_then(|s| s.strip_suffix('\n'))
             .ok_or_else(|| error("invalid_worktree_git_pointer"))?,
     );
-    let root = Path::new(&record.lease.repository).join(".git/worktrees");
     canonical(&path)?;
-    if path.parent() != Some(root.as_path()) {
+    if path.parent() != Some(repository.join(".git/worktrees").as_path()) {
         return Err(error("worktree_metadata_escape"));
     }
+    Ok(path)
+}
+
+/// Finds and checks the Git metadata folder of an engine lease worktree: it must sit in
+/// the repository's .git/worktrees, pass [`validate_admin`], link back to the lease, and
+/// hold no config.worktree, which Git reads for that worktree when
+/// extensions.worktreeConfig is on, other than the engine's [`REMOTE_LOCK`]. Input: the
+/// lease record. Output: the metadata folder, or the refusal code.
+fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
+    let path = linked_metadata(
+        Path::new(&record.lease.repository),
+        Path::new(&record.lease.path),
+    )?;
     validate_admin(Path::new(&record.lease.repository), &path)?;
     if bounded_read(&path.join("commondir"), 32)? != b"../..\n"
         || bounded_read(&path.join("gitdir"), 4096)?
@@ -1961,10 +2012,317 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
     {
         return Err(error("worktree_backlink_mismatch"));
     }
-    if std::fs::symlink_metadata(path.join("config.worktree")).is_ok() {
+    if !remote_lock_kept(&path) {
         return Err(error("worktree_config_present"));
     }
     Ok(path)
+}
+
+/// Reads a worktree's `config.worktree`. Input: the worktree's Git metadata folder.
+/// Output: None when there is none, else whether it is a plain file holding exactly
+/// [`REMOTE_LOCK`].
+fn remote_lock(metadata: &Path) -> Option<bool> {
+    holds(metadata, REMOTE_LOCK)
+}
+
+/// Reads a worktree's `config.worktree` against one lock. Inputs: the worktree's Git
+/// metadata folder and the lock bytes. Output: None when there is none, else whether it is
+/// a plain file holding exactly those bytes.
+fn holds(metadata: &Path, lock: &[u8]) -> Option<bool> {
+    let path = metadata.join("config.worktree");
+    match std::fs::symlink_metadata(&path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(found) if found.is_file() && found.len() == lock.len() as u64 => {
+            Some(bounded_read(&path, lock.len()).is_ok_and(|bytes| bytes == lock))
+        }
+        _ => Some(false),
+    }
+}
+
+/// Tells whether a worktree's Git metadata holds no per-worktree config but the engine's
+/// remote lock: none at all, as worktrees made before the lock have, exactly
+/// [`REMOTE_LOCK`], or exactly [`PREVIOUS_REMOTE_LOCK`]. Input: the metadata folder.
+/// Output: the answer.
+pub(crate) fn remote_lock_kept(metadata: &Path) -> bool {
+    remote_lock(metadata) != Some(false) || holds(metadata, PREVIOUS_REMOTE_LOCK) == Some(true)
+}
+
+/// Tells whether a repository config listing turns `extensions.worktreeConfig` on as Git
+/// reads it: the last entry decides, and a key with no value is true. Input: the output of
+/// `git config --null --list`. Output: the answer.
+#[cfg(unix)]
+fn worktree_config_on(listing: &[u8]) -> bool {
+    listing
+        .split(|byte| *byte == 0)
+        .filter_map(|record| std::str::from_utf8(record).ok())
+        .filter_map(|record| {
+            let (key, value) = record.split_once('\n').unwrap_or((record, "true"));
+            key.eq_ignore_ascii_case("extensions.worktreeconfig")
+                .then_some(value)
+        })
+        .next_back()
+        .is_some_and(|value| GIT_TRUE.iter().any(|on| on.eq_ignore_ascii_case(value)))
+}
+
+/// What a worktree's `config.worktree` holds as the lock writer reads it: exactly
+/// [`REMOTE_LOCK`]; nothing, a strict prefix of [`REMOTE_LOCK`] or [`PREVIOUS_REMOTE_LOCK`]
+/// that an engine stop cut short, or the whole previous lock, all of which the engine
+/// replaces with the lock; or anything else, which it never overwrites.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockState {
+    Locked,
+    Open,
+    Foreign,
+}
+
+/// Reads which [`LockState`] a worktree's `config.worktree` is in, without following a
+/// link. Input: the worktree's Git metadata folder. Output: the state.
+#[cfg(unix)]
+fn lock_state(metadata: &Path) -> LockState {
+    let path = metadata.join("config.worktree");
+    match std::fs::symlink_metadata(&path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => LockState::Open,
+        Ok(found) if found.is_file() && found.len() <= REMOTE_LOCK.len() as u64 => {
+            match bounded_read(&path, REMOTE_LOCK.len()) {
+                Ok(bytes) if bytes == REMOTE_LOCK => LockState::Locked,
+                Ok(bytes)
+                    if REMOTE_LOCK.starts_with(&bytes)
+                        || PREVIOUS_REMOTE_LOCK.starts_with(&bytes) =>
+                {
+                    LockState::Open
+                }
+                _ => LockState::Foreign,
+            }
+        }
+        _ => LockState::Foreign,
+    }
+}
+
+/// The partial file the lock is written through before its rename onto `config.worktree`.
+#[cfg(unix)]
+const LOCK_PARTIAL: &str = ".config.worktree.partial";
+
+const _: () = assert!(PREVIOUS_REMOTE_LOCK.len() < REMOTE_LOCK.len());
+
+/// Writes [`REMOTE_LOCK`] as a worktree's `config.worktree` through a fresh partial file,
+/// synced and then renamed over it, all beneath the metadata folder opened once without
+/// following a link, so a stop never leaves a torn lock and nothing is written through a
+/// link. Input: the worktree's Git metadata folder. Output: success, or the I/O refusal.
+#[cfg(unix)]
+fn replace_lock(metadata: &Path) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let folder = rustix::fs::open(
+        metadata,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(error)?;
+    let _ = rustix::fs::unlinkat(&folder, LOCK_PARTIAL, AtFlags::empty());
+    let created = rustix::fs::openat(
+        &folder,
+        LOCK_PARTIAL,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o644),
+    )
+    .map_err(error)?;
+    let mut file = std::fs::File::from(created);
+    file.write_all(REMOTE_LOCK).map_err(error)?;
+    file.sync_all().map_err(error)?;
+    rustix::fs::renameat(&folder, LOCK_PARTIAL, &folder, "config.worktree").map_err(error)?;
+    rustix::fs::fsync(&folder).map_err(error)?;
+    Ok(())
+}
+
+/// Turns `extensions.worktreeConfig` on in a repository's own config when it is off, so Git
+/// reads each worktree's `config.worktree`. A write that loses `.git/config.lock` to another
+/// git, such as a second first-time setup or the owner's own git, reads the switch again
+/// and writes again, at most [`WORKTREE_CONFIG_TRIES`] writes. Input: the repository.
+/// Output: success, or the refusal code.
+#[cfg(unix)]
+fn turn_on_worktree_config(repository: &Path) -> Result<(), EngineError> {
+    let mut tries = 0;
+    loop {
+        let listing = git(
+            repository,
+            &["config", "--local", "--no-includes", "--null", "--list"],
+        )?;
+        if worktree_config_on(&listing) {
+            return Ok(());
+        }
+        tries += 1;
+        let written = git(
+            repository,
+            &["config", "--local", "extensions.worktreeConfig", "true"],
+        );
+        if written.is_ok() || tries >= WORKTREE_CONFIG_TRIES {
+            return written.map(drop);
+        }
+    }
+}
+
+/// Leaves a worktree's Git metadata holding exactly [`REMOTE_LOCK`]: a lock in place is
+/// kept, an [`LockState::Open`] one is replaced, and any other config is refused untouched.
+/// Input: the worktree's Git metadata folder. Output: success, or `worktree_config_present`.
+#[cfg(unix)]
+fn lock_metadata(metadata: &Path) -> Result<(), EngineError> {
+    match lock_state(metadata) {
+        LockState::Locked => {}
+        LockState::Open => replace_lock(metadata)?,
+        LockState::Foreign => return Err(error("worktree_config_present")),
+    }
+    if remote_lock(metadata) != Some(true) {
+        return Err(error("worktree_config_present"));
+    }
+    Ok(())
+}
+
+/// Makes a linked agent worktree local-only, so a push, pull or fetch there fails with
+/// [`REMOTE_REFUSAL`]: turns `extensions.worktreeConfig` on in the repository's own config
+/// when it is off, then leaves the worktree's `config.worktree` holding exactly
+/// [`REMOTE_LOCK`], repairing one an engine stop cut short or the previous lock. This is a
+/// plain guard for the owner's tools; the agent sandbox is the boundary. Inputs: the
+/// repository and the worktree. Output: success, or the refusal code.
+#[cfg(unix)]
+pub fn lock_remotes(repository: &Path, worktree: &Path) -> Result<(), EngineError> {
+    let metadata = linked_metadata(repository, worktree)?;
+    turn_on_worktree_config(repository)?;
+    lock_metadata(&metadata)
+}
+
+/// The most repositories one start sweep reads.
+#[cfg(unix)]
+const SWEEP_REPOSITORIES_MAX: usize = 1024;
+/// The most linked worktrees the start sweep reads in one repository.
+#[cfg(unix)]
+const SWEEP_WORKTREES_MAX: usize = 512;
+
+/// Every repository the engine knows: those its projects declare, those its team agents'
+/// worktrees were added from and those its leases are in, at most
+/// `SWEEP_REPOSITORIES_MAX`. Input: the store. Output: the repositories.
+#[cfg(unix)]
+pub(crate) fn known_repositories(
+    connection: &Connection,
+) -> Result<std::collections::BTreeSet<PathBuf>, EngineError> {
+    let mut repositories = std::collections::BTreeSet::new();
+    let limit = SWEEP_REPOSITORIES_MAX as i64;
+    let mut projects = connection
+        .prepare("SELECT body FROM projects LIMIT ?1")
+        .map_err(error)?;
+    for body in projects
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(error)?
+    {
+        let stored: StoredProject = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+        repositories.extend(stored.spec.repositories.into_iter().map(PathBuf::from));
+    }
+    for query in [
+        "SELECT DISTINCT repository FROM team_worktrees LIMIT ?1",
+        "SELECT DISTINCT repository FROM worktree_leases LIMIT ?1",
+    ] {
+        let mut statement = connection.prepare(query).map_err(error)?;
+        for repository in statement
+            .query_map([limit], |row| row.get::<_, String>(0))
+            .map_err(error)?
+        {
+            repositories.insert(PathBuf::from(repository.map_err(error)?));
+        }
+    }
+    Ok(repositories
+        .into_iter()
+        .filter(|repository| repository.is_absolute())
+        .take(SWEEP_REPOSITORIES_MAX)
+        .collect())
+}
+
+/// The engine's own linked worktrees of one repository: each one Git lists in
+/// `.git/worktrees` whose folder sits in the project's agent worktrees folder, as team and
+/// research agents' do, or is a lease's folder. The owner's own linked worktrees elsewhere
+/// are never listed. Inputs: the repository and the lease folders. Output: the worktrees
+/// with their metadata folders.
+#[cfg(unix)]
+fn agent_worktrees(
+    repository: &Path,
+    leases: &std::collections::BTreeSet<PathBuf>,
+) -> Vec<(PathBuf, PathBuf)> {
+    let agents = crate::projects_home::state_folder(repository).join("worktrees");
+    let Ok(entries) = std::fs::read_dir(repository.join(".git/worktrees")) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten().take(SWEEP_WORKTREES_MAX) {
+        let metadata = entry.path();
+        let Ok(bytes) = bounded_read(&metadata.join("gitdir"), 4096) else {
+            continue;
+        };
+        let Some(worktree) = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| text.strip_suffix("/.git\n"))
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        if worktree.parent() == Some(agents.as_path()) || leases.contains(&worktree) {
+            found.push((worktree, metadata));
+        }
+    }
+    assert!(found.len() <= SWEEP_WORKTREES_MAX);
+    found
+}
+
+/// Locks the remotes of every agent worktree the engine already made, once at engine start,
+/// so worktrees added before the lock, or whose lock a stop cut short, refuse remotes as new
+/// ones do: team and research worktrees in each known repository's agent worktrees folder
+/// and every lease's worktree, each linking back to the metadata it was found by. The
+/// owner's own linked worktrees are left alone. A worktree that cannot be locked logs its
+/// plain code and the sweep goes on. Input: the store. Output: how many worktrees now hold
+/// the lock.
+#[cfg(unix)]
+pub fn lock_existing(connection: &Connection) -> Result<usize, EngineError> {
+    let mut leases = std::collections::BTreeSet::new();
+    let mut statement = connection
+        .prepare("SELECT body FROM worktree_leases LIMIT ?1")
+        .map_err(error)?;
+    for body in statement
+        .query_map([SWEEP_REPOSITORIES_MAX as i64], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(error)?
+    {
+        let record: LeaseRecord = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+        leases.insert(PathBuf::from(record.lease.path));
+    }
+    let logged = |problem: EngineError| {
+        eprintln!(
+            "worktree_lock_failed cause={}",
+            crate::protocol::plain_code(&problem.0)
+        );
+    };
+    let mut locked = 0;
+    for repository in known_repositories(connection)? {
+        let found = agent_worktrees(&repository, &leases);
+        if found.is_empty() {
+            continue;
+        }
+        if let Err(problem) = turn_on_worktree_config(&repository) {
+            logged(problem);
+            continue;
+        }
+        for (worktree, metadata) in found {
+            let checked = linked_metadata(&repository, &worktree).and_then(|linked| {
+                if linked == metadata {
+                    lock_metadata(&metadata)
+                } else {
+                    Err(error("worktree_metadata_escape"))
+                }
+            });
+            match checked {
+                Ok(()) => locked += 1,
+                Err(problem) => logged(problem),
+            }
+        }
+    }
+    Ok(locked)
 }
 
 /// Checks a lease record's four pinned folders, the admitted root and .git, the worktree
@@ -2514,5 +2872,169 @@ mod tests {
             );
         }
         assert!(!link_stays_inside(Path::new("bytes"), &[0xff, 0xfe]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_missing_config_or_the_exact_remote_lock_counts_as_kept() {
+        let temporary = tempfile::tempdir().unwrap();
+        let metadata = temporary.path();
+        let config = metadata.join("config.worktree");
+        assert_eq!(remote_lock(metadata), None);
+        assert!(remote_lock_kept(metadata));
+        std::fs::write(&config, REMOTE_LOCK).unwrap();
+        assert_eq!(remote_lock(metadata), Some(true));
+        assert!(remote_lock_kept(metadata));
+        std::fs::write(&config, PREVIOUS_REMOTE_LOCK).unwrap();
+        assert_eq!(remote_lock(metadata), Some(false));
+        assert!(remote_lock_kept(metadata));
+        let mut previous_longer = PREVIOUS_REMOTE_LOCK.to_vec();
+        previous_longer.extend_from_slice(b"[core]\n\tfsmonitor = touch /tmp/x\n");
+        std::fs::write(&config, &previous_longer).unwrap();
+        assert!(!remote_lock_kept(metadata));
+        let mut longer = REMOTE_LOCK.to_vec();
+        longer.extend_from_slice(b"[core]\n\tfsmonitor = touch /tmp/x\n");
+        std::fs::write(&config, &longer).unwrap();
+        assert!(!remote_lock_kept(metadata));
+        let mut same_length = REMOTE_LOCK.to_vec();
+        same_length[2] = b'x';
+        std::fs::write(&config, &same_length).unwrap();
+        assert!(!remote_lock_kept(metadata));
+        std::fs::remove_file(&config).unwrap();
+        let elsewhere = metadata.join("elsewhere");
+        std::fs::write(&elsewhere, REMOTE_LOCK).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &config).unwrap();
+        assert!(!remote_lock_kept(metadata));
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        assert!(!remote_lock_kept(metadata));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_cut_short_or_previous_lock_is_replaced_and_any_other_config_is_left_alone() {
+        let temporary = tempfile::tempdir().unwrap();
+        let metadata = temporary.path();
+        let config = metadata.join("config.worktree");
+        let partial = metadata.join(LOCK_PARTIAL);
+        let repaired: [&[u8]; 6] = [
+            b"",
+            &REMOTE_LOCK[..1],
+            &REMOTE_LOCK[..REMOTE_LOCK.len() - 1],
+            PREVIOUS_REMOTE_LOCK,
+            &PREVIOUS_REMOTE_LOCK[..PREVIOUS_REMOTE_LOCK.len() - 3],
+            REMOTE_LOCK,
+        ];
+        assert_eq!(lock_state(metadata), LockState::Open);
+        lock_metadata(metadata).unwrap();
+        assert_eq!(std::fs::read(&config).unwrap(), REMOTE_LOCK);
+        for held in repaired {
+            std::fs::write(&config, held).unwrap();
+            std::fs::write(&partial, b"[core]\n\tfsmonitor = touch /tmp/x\n").unwrap();
+            let expected = if held == REMOTE_LOCK {
+                LockState::Locked
+            } else {
+                LockState::Open
+            };
+            assert_eq!(lock_state(metadata), expected, "{held:?}");
+            lock_metadata(metadata).unwrap();
+            assert_eq!(std::fs::read(&config).unwrap(), REMOTE_LOCK, "{held:?}");
+            assert_eq!(remote_lock(metadata), Some(true));
+            if held != REMOTE_LOCK {
+                assert!(!partial.exists(), "{held:?}");
+            }
+        }
+        let mut longer = REMOTE_LOCK.to_vec();
+        longer.extend_from_slice(b"\n");
+        let mut changed = REMOTE_LOCK[..REMOTE_LOCK.len() / 2].to_vec();
+        changed[1] = b'x';
+        let foreign: [&[u8]; 3] = [b"[core]\n\tfsmonitor = touch /tmp/x\n", &longer, &changed];
+        for held in foreign {
+            std::fs::write(&config, held).unwrap();
+            assert_eq!(lock_state(metadata), LockState::Foreign, "{held:?}");
+            assert_eq!(
+                lock_metadata(metadata).unwrap_err().0,
+                "worktree_config_present"
+            );
+            assert_eq!(std::fs::read(&config).unwrap(), held);
+        }
+        std::fs::remove_file(&config).unwrap();
+        let elsewhere = metadata.join("elsewhere");
+        std::fs::write(&elsewhere, &REMOTE_LOCK[..4]).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &config).unwrap();
+        assert_eq!(lock_state(metadata), LockState::Foreign);
+        assert!(lock_metadata(metadata).is_err());
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), &REMOTE_LOCK[..4]);
+        assert!(
+            std::fs::symlink_metadata(&config)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_worktree_config_switch_is_read_like_git_reads_it() {
+        let cases: [(&[u8], bool); 10] = [
+            (b"", false),
+            (b"core.bare\nfalse\0", false),
+            (b"extensions.worktreeconfig\ntrue\0", true),
+            (b"extensions.worktreeConfig\nYes\0", true),
+            (b"extensions.worktreeconfig\n1\0", true),
+            (b"extensions.worktreeconfig\0", true),
+            (b"extensions.worktreeconfig\nfalse\0", false),
+            (
+                b"extensions.worktreeconfig\ntrue\0extensions.worktreeconfig\noff\0",
+                false,
+            ),
+            (
+                b"extensions.worktreeconfig\nno\0extensions.worktreeconfig\non\0",
+                true,
+            ),
+            (b"remote.origin.url\nextensions.worktreeconfig\0", false),
+        ];
+        for (listing, on) in cases {
+            assert_eq!(
+                worktree_config_on(listing),
+                on,
+                "{}",
+                String::from_utf8_lossy(listing)
+            );
+        }
+    }
+
+    const WORKTREE_CONFIG_RACERS: usize = 8;
+    const WORKTREE_CONFIG_ROUNDS: usize = 10;
+
+    /// First-time setups of one repository that turn `extensions.worktreeConfig` on at the
+    /// same moment all succeed: one that loses `.git/config.lock` to another reads the switch
+    /// again and finds it on, so no lease or worktree fails on the race.
+    #[cfg(unix)]
+    #[test]
+    fn first_time_worktree_config_writes_that_race_all_succeed() {
+        for _ in 0..WORKTREE_CONFIG_ROUNDS {
+            let temporary = tempfile::tempdir().unwrap();
+            let repository = committed_repository(temporary.path());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKTREE_CONFIG_RACERS));
+            let racers: Vec<_> = (0..WORKTREE_CONFIG_RACERS)
+                .map(|_| {
+                    let (repository, barrier) = (repository.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        turn_on_worktree_config(&repository)
+                    })
+                })
+                .collect();
+            for racer in racers {
+                assert_eq!(racer.join().unwrap(), Ok(()));
+            }
+            let listing = git(
+                &repository,
+                &["config", "--local", "--no-includes", "--null", "--list"],
+            )
+            .unwrap();
+            assert!(worktree_config_on(&listing));
+        }
     }
 }

@@ -12,6 +12,7 @@ fn project(id: &str, name: &str) -> ProjectCard {
         about: String::new(),
         platforms: Vec::new(),
         pool: None,
+        pool_id: None,
         research: ResearchCounts::default(),
         created_ms: None,
         activity: Default::default(),
@@ -123,12 +124,22 @@ fn engine_rows(rows: &mut [String], from: usize, saved_at: usize) {
     }
 }
 
-fn with_add(row: &str, before: &str, gap: &str) -> String {
-    let added = format!("a Add{gap}");
-    let row = row.replacen(before, &format!("{added}{before}"), 1);
-    let room = format!("{}? Help", " ".repeat(added.len() + 1));
-    assert!(row.contains(&room), "the help line has room for a Add");
-    row.replacen(&room, " ? Help", 1)
+fn with_writes(rows: &mut Vec<String>, width: usize, hints: &str) {
+    rows[5] = format!("{:<width$}", format!("  {SUBTITLE}"));
+    rows.insert(
+        6,
+        format!(
+            "{:<width$}",
+            "  Agent memory writes  ← Loading →  w to change"
+        ),
+    );
+    let spare = rows.len() - 2;
+    assert!(
+        rows[spare].trim().is_empty(),
+        "a blank row makes room for the writes row"
+    );
+    rows.remove(spare);
+    *rows.last_mut().unwrap() = hints.to_owned();
 }
 
 fn settings(arrival: SettingsEvent) -> Arrival {
@@ -169,7 +180,11 @@ fn memory_frames_match_the_design() {
     shell.key(Key::Down);
     let mut expected = fixture("memory-80", &[]);
     engine_rows(&mut expected, 50, 66);
-    expected[23] = with_add(&expected[23], "/ Filter", "  ");
+    with_writes(
+        &mut expected,
+        80,
+        " Enter View  d Delete  a Add  w Agent memory writes  i Import  / Filter  ? Help ",
+    );
     assert_eq!(render(&mut shell, 80, 24), expected);
 
     let mut shell = Shell::with(memory_ctx(120, 36), Box::new(Memory::with(memories())));
@@ -177,7 +192,11 @@ fn memory_frames_match_the_design() {
     let mut expected = fixture("memory-120", &[]);
     engine_rows(&mut expected, 70, 92);
     expected[18] = format!("{:<120}", "  ✓ Saved from Tidepool for every project.");
-    expected[35] = with_add(&expected[35], "/ Filter", "   ");
+    with_writes(
+        &mut expected,
+        120,
+        " Enter View   d Delete   a Add   w Agent memory writes   i Import   / Filter   Shift-←→ Sections   Esc Home      ? Help ",
+    );
     assert_eq!(render(&mut shell, 120, 36), expected);
 }
 
@@ -185,7 +204,8 @@ fn memory_frames_match_the_design() {
 fn no_memories_shows_how_they_arrive() {
     let mut shell = Shell::with(memory_ctx(80, 24), Box::new(Memory::with(Vec::new())));
     let mut expected = fixture("memory-empty-80", &[]);
-    expected[23] = with_add(&expected[23], "Shift-", "  ");
+    expected[23] =
+        " a Add  w Agent memory writes  i Import  Shift-←→ Sections  Esc Home     ? Help ".into();
     assert_eq!(render(&mut shell, 80, 24), expected);
 }
 
@@ -273,6 +293,10 @@ fn add_memory_saves_a_note_for_the_chosen_projects() {
     assert_eq!(ctx.message().unwrap().lead, "Memory saved.");
     assert!(!screen.typing());
     assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
 
     screen.key(&Key::Char('a'), &mut ctx);
@@ -289,6 +313,10 @@ fn research_suggestions_come_first_and_save_for_every_project() {
     screen.shown(&mut ctx);
     assert!(matches!(ctx.next_request(), Some(Request::Projects)));
     assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites { set: None }
+    ));
     match job(&mut ctx) {
         SettingsJob::Suggestions { projects } => assert_eq!(projects.len(), 3),
         other => panic!("suggestions expected, got {other:?}"),
@@ -306,7 +334,7 @@ fn research_suggestions_come_first_and_save_for_every_project() {
     let (lines, _) = screen.body(116, &ctx);
     let shown = texts(&lines);
     assert!(shown[0].contains("7 saved   2 suggested"));
-    assert!(shown[5].contains("Labs want hourly exports.") && shown[5].contains("Suggested"));
+    assert!(shown[6].contains("Labs want hourly exports.") && shown[6].contains("Suggested"));
     assert!(
         shown
             .iter()
@@ -348,6 +376,10 @@ fn research_suggestions_come_first_and_save_for_every_project() {
     let (lines, _) = screen.body(116, &ctx);
     assert!(texts(&lines)[0].contains("1 suggested"));
     assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
 }
 
@@ -386,6 +418,10 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
         "This suggestion changed. The list now shows the latest."
     );
     assert!(matches!(job(&mut ctx), SettingsJob::Memories { .. }));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
     screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
     screen.arrive(
@@ -584,6 +620,10 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
         },
         other => panic!("settings request expected, got {other:?}"),
     }
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites { set: None }
+    ));
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
             SettingsJob::Suggestions { projects } => assert_eq!(
@@ -686,7 +726,7 @@ fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
         shown[0].contains("7 saved   1 kept in a project"),
         "one already used in all projects is not offered again"
     );
-    assert!(shown[5].contains("Crews sync at dawn.") && shown[5].contains("Fieldnotes Mobile"));
+    assert!(shown[6].contains("Crews sync at dawn.") && shown[6].contains("Fieldnotes Mobile"));
     assert!(
         shown
             .iter()
@@ -724,4 +764,122 @@ fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
         &mut ctx,
     );
     assert_eq!(ctx.message().unwrap().lead, "Now used in all projects.");
+}
+
+#[test]
+fn an_imported_memory_names_its_file_and_project() {
+    let ctx = memory_ctx(80, 24);
+    let imported = saved(
+        9,
+        "Plan meals on Sunday.",
+        only("tidepool"),
+        MemoryOrigin::Imported {
+            file: "meals.md".into(),
+        },
+    );
+    assert_eq!(source(&imported, &ctx), "Tidepool");
+    assert_eq!(
+        saved_line(&imported, &ctx),
+        "Imported from meals.md for Tidepool only."
+    );
+    for code in ["memory_import_folder_invalid", "memory_import_invalid"] {
+        assert!(!memory_plain(code).contains('_'), "{code}");
+    }
+}
+
+#[test]
+fn w_changes_agent_memory_writes_and_y_approves_only_a_memory_an_agent_asked_for() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut list = memories();
+    list.insert(
+        0,
+        saved(
+            8,
+            "Ship on Fridays.",
+            MemoryScope::Global,
+            MemoryOrigin::Requested {
+                agent: "Ada (@lead-a)".into(),
+            },
+        ),
+    );
+    let mut screen = Memory::with(list);
+
+    screen.key(&Key::Char('w'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites {
+            set: Some((AgentWrites::Ask, generation))
+        } if generation > 0
+    ));
+    screen.key(&Key::Char('w'), &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one change at a time");
+    screen.arrive(
+        &settings(SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Agents now ask you before a memory is saved."
+    );
+    screen.key(&Key::Char('w'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentWrites {
+            set: Some((AgentWrites::Save, _))
+        }
+    ));
+    screen.arrive(
+        &settings(SettingsEvent::AgentWrites(Ok(AgentWrites::Save))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Agents now save memories directly."
+    );
+
+    screen.key(&Key::Char('y'), &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::ApproveMemory { memory, generation } => {
+            assert_eq!(memory.as_str(), "memory-8");
+            assert!(generation > 0);
+        }
+        other => panic!("approve expected, got {other:?}"),
+    }
+    screen.key(&Key::Char('y'), &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one approval at a time");
+    screen.arrive(&settings(SettingsEvent::MemoryApproved(Ok(()))), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Memory approved. Agents get it from their next launch."
+    );
+    assert!(
+        matches!(job(&mut ctx), SettingsJob::Memories { .. }),
+        "the list reloads"
+    );
+    while ctx.next_request().is_some() {}
+
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Char('y'), &mut ctx);
+    assert_eq!(ctx.queued(), 0, "a memory nobody asked for is not approved");
+}
+
+#[test]
+fn the_agent_memory_writes_row_shows_the_engine_choice_and_how_to_change_it() {
+    let mut shell = Shell::with(memory_ctx(120, 36), Box::new(Memory::with(memories())));
+    let row = |shell: &mut Shell| {
+        render(shell, 120, 36)
+            .into_iter()
+            .find(|row| row.contains("Agent memory writes"))
+            .unwrap_or_else(|| panic!("no Agent memory writes row"))
+    };
+    assert!(row(&mut shell).contains("Loading"), "{}", row(&mut shell));
+    for (writes, chosen) in [
+        (AgentWrites::Ask, "Ask me first"),
+        (AgentWrites::Save, "Save directly"),
+    ] {
+        shell.arrive(settings(SettingsEvent::AgentWrites(Ok(writes))));
+        let shown = row(&mut shell);
+        assert!(shown.contains(chosen), "{shown}");
+        assert!(shown.contains("w to change"), "{shown}");
+    }
 }

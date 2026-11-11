@@ -42,21 +42,55 @@ const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
 #[cfg(unix)]
 const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
-#[cfg(unix)]
-const SECRET_MARKERS: [&str; 10] = [
+const SECRET_MARKERS: [&str; 13] = [
     "api_key",
     "api-key",
     "apikey",
     "secret",
     "password",
+    "passwd",
     "authorization",
     "bearer ",
     "access_token",
     "refresh_token",
     "id_token",
+    "cookie",
+    "private key",
 ];
-#[cfg(unix)]
-const SECRET_PREFIXES: [&str; 13] = [
+const SECRET_KEY_ENDS: [&str; 10] = [
+    "token",
+    "auth",
+    "pass",
+    "passwd",
+    "_pwd",
+    "credential",
+    "credentials",
+    "sessionid",
+    "session_id",
+    "_key",
+];
+const KEY_SEPARATORS: [&str; 4] = ["=", ":", "=>", ":="];
+const PLAIN_P_FLAGS: [&str; 13] = [
+    "-pthread",
+    "-pedantic",
+    "-pedantic-errors",
+    "-pie",
+    "-pipe",
+    "-pg",
+    "-print",
+    "-print0",
+    "-printf",
+    "-prune",
+    "-path",
+    "-perm",
+    "-pretty",
+];
+const KEY_BLOCK_BEGIN: &str = "-----begin";
+const KEY_BLOCK_END: &str = "-----end";
+const BASE64_RUN_MIN: usize = 20;
+const WRAPPED_TAIL_MIN: usize = 8;
+const PGPASS_FIELDS_MIN: usize = 5;
+const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
@@ -69,11 +103,10 @@ const SECRET_PREFIXES: [&str; 13] = [
     "xoxp-",
     "glpat-",
     "AKIA",
+    "ASIA",
     "eyJ",
 ];
-#[cfg(unix)]
 const HIDDEN_LINE: &str = "[hidden: this line may contain a secret]";
-#[cfg(unix)]
 const HIDDEN_WORD: &str = "[hidden]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -120,6 +153,7 @@ pub enum ResearchKind {
     DesignResearch,
     FrontEndDesign,
     TechStackResearch,
+    RoadmapPlanning,
 }
 
 impl ResearchKind {
@@ -129,6 +163,16 @@ impl ResearchKind {
         Self::DesignResearch,
         Self::FrontEndDesign,
         Self::TechStackResearch,
+    ];
+    /// Every kind a setup may hold: the research toggles, then the roadmap planning toggle,
+    /// whose job waits until the project's other jobs end.
+    pub const CHOICES: [ResearchKind; 6] = [
+        Self::MarketResearch,
+        Self::CompetitorResearch,
+        Self::DesignResearch,
+        Self::FrontEndDesign,
+        Self::TechStackResearch,
+        Self::RoadmapPlanning,
     ];
 
     /// Names the research toggle in plain language for every client.
@@ -141,6 +185,7 @@ impl ResearchKind {
             Self::DesignResearch => "Design research",
             Self::FrontEndDesign => "Front-end design",
             Self::TechStackResearch => "Tech stack research",
+            Self::RoadmapPlanning => "Roadmap and release process",
         }
     }
 
@@ -154,6 +199,7 @@ impl ResearchKind {
             Self::DesignResearch => "design_research",
             Self::FrontEndDesign => "front_end_design",
             Self::TechStackResearch => "tech_stack_research",
+            Self::RoadmapPlanning => "roadmap_planning",
         }
     }
 
@@ -161,14 +207,17 @@ impl ResearchKind {
     /// Takes the snake case name.
     /// Returns the kind, or none for an unknown name.
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.name() == name)
+        Self::CHOICES.into_iter().find(|kind| kind.name() == name)
     }
 
     /// Gives the report path of this kind relative to the project folder.
     /// Takes the research kind.
-    /// Returns `context/research/<kind>.md`.
+    /// Returns `context/research/<kind>.md`, or the roadmap beside the brief for planning.
     pub fn report_path(self) -> String {
-        format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name())
+        match self {
+            Self::RoadmapPlanning => crate::planning::ROADMAP.to_owned(),
+            _ => format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name()),
+        }
     }
 }
 
@@ -244,23 +293,27 @@ impl TeamPlan {
         Ok(())
     }
 
-    /// Refuses a plan the owner writes when it adds a harness that cannot run team agents.
-    /// Takes the written plan and the saved plan it replaces; a harness the saved plan already
-    /// names is kept, so an old plan still saves unchanged. Returns `team_harness_unavailable`.
+    /// Refuses a plan the owner writes when its master cannot run the project master or an
+    /// agent row cannot run team agents. Takes the written plan and the saved plan it
+    /// replaces; the saved master and saved rows are kept in their own place, so an old plan
+    /// still saves unchanged but a master-only harness never becomes an agent row. Returns
+    /// `team_harness_unavailable`.
     fn check_writable(&self, saved: Option<&TeamPlan>) -> Result<(), &'static str> {
-        let added = self.harnesses().any(|id| {
-            crate::team::launch_harness(id).is_none()
-                && !saved.is_some_and(|saved| saved.harnesses().any(|known| known == id))
+        let master = crate::team::master_backend(&self.master).is_some()
+            || saved.is_some_and(|saved| saved.master == self.master);
+        let rows = self.sub_harnesses.iter().all(|slot| {
+            crate::team::launch_harness(&slot.harness).is_some()
+                || saved.is_some_and(|saved| {
+                    saved
+                        .sub_harnesses
+                        .iter()
+                        .any(|known| known.harness == slot.harness)
+                })
         });
-        if added {
+        if !(master && rows) {
             return Err("team_harness_unavailable");
         }
         Ok(())
-    }
-
-    fn harnesses(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.master.as_str())
-            .chain(self.sub_harnesses.iter().map(|slot| slot.harness.as_str()))
     }
 
     /// Counts the master and every sub-harness agent.
@@ -352,7 +405,7 @@ impl ProjectSetup {
             team.validate()?;
         }
         assert!(self.platforms.len() <= Platform::ALL.len());
-        assert!(self.research.len() <= ResearchKind::ALL.len());
+        assert!(self.research.len() <= ResearchKind::CHOICES.len());
         Ok(())
     }
 }
@@ -362,6 +415,15 @@ impl ProjectSetup {
 pub struct StoredDocument {
     pub name: String,
     pub bytes: u64,
+}
+
+/// A project's extra read-only folders in saved order, with the version the owner's screen
+/// sends back when it changes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPaths {
+    pub paths: Vec<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,14 +444,14 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
-/// The revision a project setup is recorded at; only the owner's
-/// `UpdateProjectSetup` raises it.
+/// The revision a project setup is recorded at; the owner's `UpdateProjectSetup` raises it,
+/// and so does Plan roadmap now when it turns planning on.
 pub(crate) const FIRST_REVISION: u64 = 1;
 
 impl StoredSetup {
-    /// Whether the owner saved this setup after it was recorded: only
-    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
-    /// an onboarding whose setup was saved is finished.
+    /// Whether the owner saved this setup after it was recorded: only owner
+    /// changes raise the revision past [`FIRST_REVISION`], and Plan roadmap now
+    /// refuses an unconfirmed onboarding, so an onboarding whose setup was saved is finished.
     pub fn saved(&self) -> bool {
         self.revision > FIRST_REVISION
     }
@@ -574,6 +636,7 @@ pub enum ContextKind {
     Brief,
     Document,
     Research,
+    Plan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,10 +677,17 @@ pub enum SetupQuery {
     Jobs {
         project: ProjectId,
     },
+    /// Reads what removing the project would do before the owner picks how (DEC-118).
+    Removal {
+        project: ProjectId,
+    },
     Context {
         project: ProjectId,
     },
     ReadPaths {
+        project: ProjectId,
+    },
+    HiddenPaths {
         project: ProjectId,
     },
     AgentPolicy {
@@ -654,6 +724,21 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    CoordQuestions {
+        project: ProjectId,
+    },
+    TeamMessages {
+        project: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+    },
+    /// Sends the owner's default master Open for a project whose live master switch is
+    /// already on when no live session holds the master, so an existing project's master
+    /// gets its session and restarts on it (LMS-1).
+    OpenLiveSession {
+        project: ProjectId,
+        generation: u64,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -662,15 +747,22 @@ pub enum SetupView {
     Catalog(Box<ProjectCatalog>),
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
+    Removal(Box<crate::team::cleanup::RemovalPreview>),
     Context(ProjectContext),
-    ReadPaths(Vec<String>),
+    ReadPaths(ReadPaths),
+    HiddenPaths(Vec<String>),
     AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    CoordQuestions(Box<crate::team::questions::Inbox>),
+    TeamMessages(Box<crate::team::agent_messages::AgentMessages>),
     Library(crate::memory::library::LibraryView),
+    /// A live master switch that is on although the owner's default Open opened no session
+    /// for it, with the engine's code or the plain reason, so the owner sees why (LMS-M1).
+    LiveWithoutSession(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -703,6 +795,10 @@ pub enum SetupAction {
     Remove {
         project_id: ProjectId,
     },
+    Delete {
+        project_id: ProjectId,
+        name: String,
+    },
     CancelResearch {
         project_id: ProjectId,
         job: i64,
@@ -711,12 +807,21 @@ pub enum SetupAction {
         project_id: ProjectId,
         job: i64,
     },
+    PlanRoadmap {
+        project_id: ProjectId,
+    },
     SetReadPaths {
+        project_id: ProjectId,
+        version: u64,
+        paths: Vec<String>,
+    },
+    SetHiddenPaths {
         project_id: ProjectId,
         paths: Vec<String>,
     },
     SetAgentPolicy {
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
     },
 }
@@ -771,6 +876,16 @@ impl SetupAction {
                 }
                 Ok(())
             }
+            Self::SetHiddenPaths { paths, .. } => {
+                if paths.len() > crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                    || paths
+                        .iter()
+                        .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
+                {
+                    return Err(failure("hidden_paths_invalid"));
+                }
+                Ok(())
+            }
             Self::SetAgentPolicy { policy, .. } => policy.validate().map_err(failure),
             Self::Update { name, setup, .. } => {
                 let renamed = name.as_ref().map(|name| ProjectSpec {
@@ -785,7 +900,13 @@ impl SetupAction {
                 }
                 setup.validate()
             }
-            Self::Remove { .. } => Ok(()),
+            Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
+            Self::Delete { name, .. } => {
+                if name.len() > DELETE_NAME_BYTES_MAX {
+                    return Err(failure("project_spec_bounds"));
+                }
+                Ok(())
+            }
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -869,7 +990,7 @@ pub fn catalog(
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");
     }
-    if research.len() > ResearchKind::ALL.len() {
+    if research.len() > ResearchKind::CHOICES.len() {
         return Err("research_duplicate");
     }
     let catalog = ProjectCatalog {
@@ -1486,8 +1607,8 @@ fn sync_pool_status(tx: &Transaction<'_>, config: &EffectiveConfig) -> Result<()
     Ok(())
 }
 
-/// Atomically claims the oldest queued research job for one runner.
-/// Takes a connection, the configuration, a claimer identity and the time.
+/// Atomically claims the oldest queued research job for one runner; a roadmap planning job
+/// waits until its project's other jobs end. Takes a connection, the configuration, a claimer identity and the time.
 /// Returns the claimed job marked Running, or none when nothing is claimable.
 pub fn claim_research_job(
     connection: &mut Connection,
@@ -1502,10 +1623,14 @@ pub fn claim_research_job(
     sync_pool_status(&tx, config)?;
     let id: Option<i64> = tx
         .query_row(
-            "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
-            started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
-            WHERE id=(SELECT id FROM research_jobs WHERE status='queued' ORDER BY id LIMIT 1)
-            AND status='queued' RETURNING id",
+            &format!(
+                "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
+                started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
+                WHERE id=(SELECT id FROM research_jobs WHERE status='queued' AND {}
+                ORDER BY id LIMIT 1)
+                AND status='queued' RETURNING id",
+                crate::planning::AFTER_RESEARCH
+            ),
             params![claimer, now],
             |row| row.get(0),
         )
@@ -1770,14 +1895,25 @@ pub(crate) fn execute(
             setup,
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
+        SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
-        SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
-        SetupAction::SetAgentPolicy { project_id, policy } => {
-            set_agent_policy(tx, project_id, policy)
+        SetupAction::SetReadPaths {
+            project_id,
+            version,
+            paths,
+        } => set_read_paths(tx, project_id, *version, paths),
+        SetupAction::SetHiddenPaths { project_id, paths } => {
+            set_hidden_paths(tx, project_id, paths)
         }
+        SetupAction::SetAgentPolicy {
+            project_id,
+            version,
+            policy,
+        } => set_agent_policy(tx, project_id, *version, policy),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
+        SetupAction::PlanRoadmap { project_id } => plan_roadmap(tx, config, project_id),
         SetupAction::SaveToMemory {
             project_id,
             research,
@@ -1896,7 +2032,7 @@ fn delete_context(
         return Ok(rejected("project_setup_missing"));
     };
     let kind = context_kind(path).ok_or_else(|| failure("context_path_invalid"))?;
-    if kind == ContextKind::Brief {
+    if matches!(kind, ContextKind::Brief | ContextKind::Plan) {
         return Ok(rejected("context_item_protected"));
     }
     let (directory, name) = path
@@ -2135,9 +2271,11 @@ fn cancel_research(
     Ok(Outcome::Applied)
 }
 
-/// Queues a failed or cancelled research job again with a fresh attempt budget.
+/// Queues a failed or cancelled research job again with a fresh attempt budget. A job whose
+/// kind was turned off turns it back on, so the next setup edit does not cancel it again.
 /// Takes the transaction, configuration, project and job id. Returns Applied,
-/// `research_job_missing`, or `research_job_not_retryable` for a job that is not stopped.
+/// `research_job_missing`, `project_setup_missing`, `setup_unconfirmed` for a kind turned off in
+/// an unconfirmed setup review, or `research_job_not_retryable` for a job that is not stopped.
 fn retry_research(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2153,6 +2291,12 @@ fn retry_research(
     ) {
         return Ok(rejected("research_job_not_retryable"));
     }
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    if !stored.research.contains(&job.kind) && unconfirmed(tx, project_id, &stored)? {
+        return Ok(rejected("setup_unconfirmed"));
+    }
     let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
     let changed = tx
         .execute(
@@ -2165,39 +2309,159 @@ fn retry_research(
     if changed != 1 {
         return Ok(rejected("research_job_not_retryable"));
     }
+    turn_on(tx, &mut stored, job.kind)?;
     Ok(Outcome::Applied)
 }
 
+/// Whether a found or cloned project's setup review is still open, so its setup was never saved.
+/// Takes the transaction, project and stored setup. Returns true until the owner confirms it.
+fn unconfirmed(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    stored: &StoredSetup,
+) -> Result<bool, EngineError> {
+    let onboarding: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM onboarding WHERE project=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(onboarding && !stored.saved())
+}
+
+/// Turns a research kind on in the stored setup and raises its revision, so an edit drafted
+/// before it is refused as stale instead of cancelling the kind's job. A kind already on is kept.
+/// Takes the transaction, the stored setup and the kind. Returns nothing.
+fn turn_on(
+    tx: &Transaction<'_>,
+    stored: &mut StoredSetup,
+    kind: ResearchKind,
+) -> Result<(), EngineError> {
+    if !stored.research.contains(&kind) {
+        let before = stored.revision;
+        stored.research.push(kind);
+        stored.revision = before
+            .checked_add(1)
+            .ok_or_else(|| failure("project_setup_revision_limit"))?;
+        save_setup(tx, stored)?;
+        assert!(stored.revision > before);
+    }
+    assert!(stored.research.contains(&kind));
+    Ok(())
+}
+
+/// Queues the project's roadmap planning job for Plan roadmap now: its finished or stopped job
+/// runs again, so a project keeps one planning row, or a first one is added. Turning the toggle
+/// on raises the setup revision, so an edit drafted before it is refused as stale instead of
+/// cancelling the job. A found or cloned project plans from its setup review until confirmed.
+/// Takes the transaction, configuration and project. Returns Applied, `project_setup_missing`,
+/// `setup_unconfirmed`, or `planning_busy` while the planning job waits or runs.
+fn plan_roadmap(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    if unconfirmed(tx, project_id, &stored)? {
+        return Ok(rejected("setup_unconfirmed"));
+    }
+    let kind = ResearchKind::RoadmapPlanning;
+    let jobs = load_jobs(tx, "project", &project_id.as_str())?;
+    let waiting = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
+    match jobs.iter().rev().find(|job| job.kind == kind) {
+        Some(job)
+            if matches!(
+                job.status,
+                ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running
+            ) =>
+        {
+            return Ok(rejected("planning_busy"));
+        }
+        Some(job) => {
+            let changed = tx
+                .execute(
+                    "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                    cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                    finished_ms=NULL WHERE id=?1 AND status IN ('done','failed','cancelled')",
+                    params![job.id, waiting.stored()],
+                )
+                .map_err(error)?;
+            assert_eq!(changed, 1);
+        }
+        None => {
+            let harnesses = stored.team.research_harnesses();
+            assert!(!harnesses.is_empty());
+            insert_job(tx, project_id, kind, harnesses[0], waiting, now_ms())?;
+        }
+    }
+    turn_on(tx, &mut stored, kind)?;
+    Ok(Outcome::Applied)
+}
+
+/// The longest project name a Delete everything may carry as the owner typed it.
+const DELETE_NAME_BYTES_MAX: usize = 1024;
+
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 19] = [
+const REMOVED_WITH_PROJECT: [&str; 44] = [
     "research_jobs",
     "onboarding",
     "team_messages",
+    "team_events",
+    "team_agent_messages",
+    "team_message_settings",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
+    "team_wake_rules",
+    "team_nesting",
+    "team_new_folder_limit",
     "team_time_limits",
     "team_master_switch",
+    "team_master_apply",
     "team_session_switches",
     "team_finished_view",
     "team_agent_branches",
+    "team_master_branch",
+    "team_land_on",
+    "team_background",
+    "team_merge_ask",
+    "team_master_lands",
+    "team_reask_empty",
+    "team_master_idle_stop",
+    "team_master_live_terminal",
+    "team_wall",
+    "team_catch_up_main",
+    "team_reuse_idle",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
     "team_wake_requests",
     "team_owner_stops",
+    "team_status_log",
+    "team_owner_turns",
+    "team_caps",
+    "team_token_budgets",
+    "team_teammates",
+    "team_account_spread",
     "team_agent_conversations",
     "agent_instruction_settings",
+    "instruction_imports",
     "project_setups",
 ];
 
 /// Saves a project's extra read-only folders once each passes
-/// [`crate::sandbox::extra_paths::checked`]. Takes the transaction, project and typed paths.
-/// Returns Applied, or a plain rejection for an unknown project or a refused path.
+/// [`crate::sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
+/// Takes the transaction, project, the version the screen showed and the typed paths.
+/// Returns Applied, or a plain rejection for an unknown project, a refused path or
+/// `stale_revision` when the folders changed since.
 fn set_read_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     paths: &[String],
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
@@ -2217,16 +2481,47 @@ fn set_read_paths(
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
+    let item = crate::storage::versioned::read_paths_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
+    }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
 
+/// Saves a project's hidden folders once each passes
+/// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
+/// kept out of them. Takes the transaction, project and typed paths. Returns Applied, or a
+/// plain rejection for an unknown project or a refused path.
+fn set_hidden_paths(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    paths: &[String],
+) -> Result<Outcome, EngineError> {
+    let Some(setup) = load_setup(tx, project_id)? else {
+        return Ok(rejected("invalid_project"));
+    };
+    let folder = setup.project_folder();
+    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
+        Ok(checked) => checked,
+        Err(code) => return Ok(rejected(code)),
+    };
+    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
+        return Ok(rejected(code));
+    }
+    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    Ok(Outcome::Applied)
+}
+
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
-/// choices. Takes the transaction, project and policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy or a level this computer cannot run.
+/// choices, when the owner's screen showed the current version. Takes the transaction,
+/// project, the version the screen read and the policy. Returns Applied, or a plain
+/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
+/// a policy that changed since it was read (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     policy: &crate::sandbox::policy::AgentPolicy,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
@@ -2245,6 +2540,10 @@ fn set_agent_policy(
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
     }
+    let item = crate::storage::versioned::agent_policy_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
+    }
     crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
     Ok(Outcome::Applied)
 }
@@ -2252,10 +2551,17 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops. Its project-scoped MCP servers, skills, secrets and per-project
-/// switches are cleared too, so a new project reusing the id never inherits them. Returns
-/// `invalid_project` for an unknown project.
+/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
+/// ended agents are deleted, so a waiting step is never
+/// claimed and a running one stops; its read folders, agent access, agent settings and its
+/// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
+/// per-project switches are cleared too, so a new project reusing the id never inherits
+/// them. The versions of its read folders, agent access, agent settings, project
+/// instructions, team settings and project wake rule move on once more, so a project added
+/// again under the same id refuses a save from a screen read before the removal (V2V-1,
+/// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
+/// and their wake rule versions need no move. Returns `invalid_project` for an unknown
+/// project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2280,8 +2586,24 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::storage::agent_text::forget_project(tx, project_id)?;
+    crate::questions::forget_project(tx, project_id)?;
+    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    for item in [
+        crate::storage::versioned::read_paths_item(project_id),
+        crate::storage::versioned::agent_policy_item(project_id),
+        crate::storage::versioned::instruction_settings_item(project_id),
+        crate::storage::versioned::process_text_item(Some(project_id)),
+        crate::storage::versioned::team_settings_item(project_id),
+        crate::storage::versioned::team_rule_item(Some(project_id), 0),
+    ] {
+        crate::storage::versioned::retire(tx, &item)?;
+    }
     crate::scheduling::forget_project(tx, project_id.as_str())?;
+    crate::coord::forget_project(tx, project_id)?;
+    crate::activity::forget_project(tx, project_id)?;
+    crate::usage::forget_project(tx, project_id.as_str())?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2304,6 +2626,37 @@ fn remove(
     assert_eq!(removed, 1);
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
+}
+
+/// Records a Delete everything once the owner transport finished its disk work: the
+/// project's records go as in Remove from dashboard when every folder reached the Trash, the
+/// exact names and folder identities of its engine files recorded in the same write, and
+/// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
+/// the transport's outcome and the revision. Output: the outcome to record.
+pub(crate) fn record_delete(
+    tx: &Transaction<'_>,
+    action: &SetupAction,
+    outcome: &Result<Vec<crate::projects_home::RecordedFile>, String>,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let SetupAction::Delete { project_id, .. } = action else {
+        return Err(failure("delete_record_invalid"));
+    };
+    let files = match outcome {
+        Ok(files) => files,
+        Err(code) => return Ok(rejected(code)),
+    };
+    let recorded = remove(tx, project_id, revision)?;
+    if matches!(recorded, Outcome::Applied) {
+        for (name, inode) in files {
+            tx.execute(
+                "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+                params![name, inode],
+            )
+            .map_err(error)?;
+        }
+    }
+    Ok(recorded)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks
@@ -2617,10 +2970,10 @@ pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineE
 }
 
 /// Loads the stored setup of one project.
-/// Takes a transaction and the project.
+/// Takes a connection or a transaction and the project.
 /// Returns the setup, or none for a project created without one.
 pub fn load_setup(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     project: &ProjectId,
 ) -> Result<Option<StoredSetup>, EngineError> {
     let body: Option<String> = tx
@@ -2643,6 +2996,9 @@ fn context_kind(path: &str) -> Option<ContextKind> {
     let rest = path.strip_prefix("context/")?;
     if rest == "brief.md" {
         return Some(ContextKind::Brief);
+    }
+    if [crate::planning::ROADMAP, crate::planning::RELEASE_PROCESS].contains(&path) {
+        return Some(ContextKind::Plan);
     }
     let (directory, name) = rest.split_once('/')?;
     if name.is_empty()
@@ -2757,6 +3113,9 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
         Ok(())
     };
     push(format!("{CONTEXT_DIRECTORY}/brief.md"), ContextKind::Brief)?;
+    for path in [crate::planning::ROADMAP, crate::planning::RELEASE_PROCESS] {
+        push(path.to_owned(), ContextKind::Plan)?;
+    }
     for (directory, kind) in [
         ("documents", ContextKind::Document),
         ("research", ContextKind::Research),
@@ -2977,34 +3336,256 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
         })
 }
 
-/// Hides words and lines that look like credentials before a log line leaves the engine.
-/// Takes one plain line. Returns it with token-like words replaced, or a fixed notice for a
-/// line that names a credential field.
-#[cfg(unix)]
-fn redact(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        return HIDDEN_LINE.into();
-    }
-    line.split(' ')
-        .map(|word| if secret_like(word) { HIDDEN_WORD } else { word })
+/// Hides words and lines that look like credentials before text leaves the engine: a
+/// research log line, or a past conversation's message, tool input or tool output. Takes
+/// the text, one line or many. Returns it with the same line breaks and white space: each
+/// line naming a credential field, and each line of a private key block from its BEGIN line
+/// to its END line, a fixed notice; each credential-like word, the value after a key named
+/// like a credential, a URL's user part and a wrapped token's tail replaced. This masks
+/// known shapes, not every secret: one in another shape, a short value under a key not
+/// named like a credential or one split across messages stays.
+pub(crate) fn redact(text: &str) -> String {
+    let mut key_block = false;
+    let mut wrapped = false;
+    text.split('\n')
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            key_block |= lower.contains(KEY_BLOCK_BEGIN);
+            let hidden = key_block || SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
+            if key_block && lower.contains(KEY_BLOCK_END) {
+                key_block = false;
+            }
+            if hidden {
+                wrapped = false;
+                return HIDDEN_LINE.to_owned();
+            }
+            let (kept, ends_hidden) = redact_words(line, wrapped);
+            wrapped = ends_hidden;
+            kept
+        })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
 }
 
-#[cfg(unix)]
-fn secret_like(word: &str) -> bool {
-    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
-    let prefixed = SECRET_PREFIXES
-        .iter()
-        .any(|prefix| core.starts_with(*prefix) && core.len() >= 16);
-    let opaque = core.len() >= 32
-        && core
+/// Where the value of a key named like a credential sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyValue {
+    /// In the key's own word: `KEY=value`, `"key":"value"`, `--key=value`.
+    Inline,
+    /// In the next word: `key: value`, `"key": "value"`, `--key value`.
+    Next,
+    /// In the word after a lone separator word: `key = value`, `"key" : "value"`.
+    Apart,
+}
+
+/// Masks the credential-like words of one line that names no credential field: a word
+/// [`secret_like`] finds, a key's value [`secret_key`] finds, also after a lone
+/// `KEY_SEPARATORS` word, the `user:password` after `-u` or `--user`, a URL's user part
+/// and, when the line before ended in a masked word, a token tail as the line's first
+/// word. Takes the line and whether the line before ended in a masked word. Returns the
+/// line and whether it ends in one.
+fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
+    let mut kept = String::with_capacity(line.len());
+    let mut value_next = false;
+    let mut separator_next = false;
+    let mut user_next = false;
+    let mut first = true;
+    let mut ends_hidden = false;
+    for piece in line.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_end_matches(char::is_whitespace);
+        if word.is_empty() {
+            kept.push_str(piece);
+            continue;
+        }
+        let key = secret_key(word);
+        let hide = value_next
+            || (user_next && word.contains(':'))
+            || (wrapped && first && wrapped_tail(word))
+            || key == Some(KeyValue::Inline)
+            || secret_like(word);
+        value_next =
+            key == Some(KeyValue::Next) || (separator_next && KEY_SEPARATORS.contains(&word));
+        separator_next = key == Some(KeyValue::Apart);
+        user_next = matches!(word, "-u" | "--user");
+        first = false;
+        if hide {
+            kept.push_str(HIDDEN_WORD);
+        } else {
+            push_without_user_part(&mut kept, word);
+        }
+        kept.push_str(&piece[word.len()..]);
+        ends_hidden = hide && word.len() == piece.len();
+    }
+    (kept, ends_hidden)
+}
+
+/// Finds a key named like a credential in a word: a run of letters, digits, `-` and `_`
+/// whose name, in any ASCII case and `-` read as `_`, ends with one of `SECRET_KEY_ENDS`,
+/// followed, after any closing quote, by `=` or a single `:`, a whole-word `--key` flag,
+/// or a key ending the word, whose value follows a lone separator word. Takes the word.
+/// Returns where the key's value sits, or none.
+fn secret_key(word: &str) -> Option<KeyValue> {
+    let bytes = word.as_bytes();
+    let name = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    let mut start = 0;
+    while start < bytes.len() {
+        if !name(bytes[start]) {
+            start += 1;
+            continue;
+        }
+        let end = start + bytes[start..].iter().take_while(|&&b| name(b)).count();
+        let run = &bytes[start..end];
+        let named = SECRET_KEY_ENDS.iter().any(|ending| {
+            let ending = ending.as_bytes();
+            run.len() >= ending.len()
+                && run[run.len() - ending.len()..]
+                    .iter()
+                    .zip(ending)
+                    .all(|(&have, &want)| {
+                        have.to_ascii_lowercase() == want || (have == b'-' && want == b'_')
+                    })
+        });
+        if named {
+            if start == 0 && end == bytes.len() && bytes[0] == b'-' {
+                return Some(KeyValue::Next);
+            }
+            let after = end
+                + bytes[end..]
+                    .iter()
+                    .take_while(|&&b| matches!(b, b'"' | b'\''))
+                    .count();
+            let separator = bytes.get(after);
+            if matches!(separator, Some(b'=' | b':')) && bytes.get(after + 1) != separator {
+                let value = &bytes[after + 1..];
+                return Some(if value.iter().any(u8::is_ascii_alphanumeric) {
+                    KeyValue::Inline
+                } else {
+                    KeyValue::Next
+                });
+            }
+            if after == bytes.len() {
+                return Some(KeyValue::Apart);
+            }
+        }
+        start = end;
+    }
+    None
+}
+
+/// Whether a word at a line's start can be the wrapped tail of a token masked at the end of
+/// the line before: at least `WRAPPED_TAIL_MIN` bytes of the token and base64 alphabets,
+/// holding a digit. Takes the word.
+fn wrapped_tail(word: &str) -> bool {
+    word.len() >= WRAPPED_TAIL_MIN
+        && word.bytes().any(|b| b.is_ascii_digit())
+        && word
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        && core.bytes().any(|b| b.is_ascii_digit())
-        && core.bytes().any(|b| b.is_ascii_alphabetic());
-    prefixed || opaque
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+}
+
+/// Appends a word with the user part of each URL in it, `scheme://user:password@host`,
+/// replaced by the hidden mark, keeping the scheme, host and path. Takes the text to extend
+/// and the word.
+fn push_without_user_part(kept: &mut String, word: &str) {
+    let mut rest = word;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        kept.push_str(head);
+        let authority = tail.find(['/', '?', '#']).map_or(tail, |end| &tail[..end]);
+        rest = match authority.rfind('@') {
+            Some(user_end) => {
+                kept.push_str(HIDDEN_WORD);
+                &tail[user_end..]
+            }
+            None => tail,
+        };
+    }
+    kept.push_str(rest);
+}
+
+/// Whether a word looks like a credential on its own: a run of letters, digits, `-` and
+/// `_` inside it (the value of `KEY=value` or `"key":"value"`) starting with a known token
+/// prefix and at least 16 bytes long, or an opaque such run of at least 32 bytes mixing
+/// letters and digits; a base64 run of at least `BASE64_RUN_MIN` bytes mixing upper case,
+/// lower case and digits with no plain lowercase folder name between its `/`, or one such
+/// part between its `/` alone (a webhook URL's secret path part); a `.pgpass`-style line,
+/// host, port, database and user fields of letters, digits, `.`, `_`, `-` or `*` and then a
+/// filled password field whatever it holds; a `-p<password>` flag other than the known
+/// `PLAIN_P_FLAGS`, or a `--user=user:password` flag; or a path to a
+/// credential the sandbox guards. Takes the word.
+fn secret_like(word: &str) -> bool {
+    let token = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let core = word.trim_matches(|c: char| !token(c));
+    let tokenish = std::iter::once(core)
+        .chain(core.split(|c: char| !token(c)))
+        .any(|part| {
+            let prefixed = SECRET_PREFIXES
+                .iter()
+                .any(|prefix| part.starts_with(*prefix) && part.len() >= 16);
+            let opaque = part.len() >= 32
+                && part.chars().all(token)
+                && part.bytes().any(|b| b.is_ascii_digit())
+                && part.bytes().any(|b| b.is_ascii_alphabetic());
+            prefixed || opaque
+        });
+    let base64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    let mixed = |run: &str| {
+        run.len() >= BASE64_RUN_MIN
+            && run.bytes().any(|b| b.is_ascii_digit())
+            && run.bytes().any(|b| b.is_ascii_uppercase())
+            && run.bytes().any(|b| b.is_ascii_lowercase())
+    };
+    let encoded = word.split(|c: char| !base64(c)).any(|run| {
+        let path = run
+            .split('/')
+            .any(|folder| folder.len() >= 3 && folder.bytes().all(|b| b.is_ascii_lowercase()));
+        (mixed(run) && !path) || run.split('/').any(mixed)
+    });
+    let named = |field: &&str| {
+        !field.is_empty()
+            && field
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'*'))
+    };
+    let mut fields = word
+        .trim_start_matches(['\'', '"', '`'])
+        .splitn(PGPASS_FIELDS_MIN, ':');
+    let pgpass = fields
+        .by_ref()
+        .take(PGPASS_FIELDS_MIN - 1)
+        .filter(named)
+        .count()
+        == PGPASS_FIELDS_MIN - 1
+        && fields.next().is_some_and(|password| !password.is_empty());
+    let password_flag = word
+        .strip_prefix("-p")
+        .is_some_and(|value| !value.is_empty())
+        && !PLAIN_P_FLAGS.contains(&word);
+    let user_flag = word
+        .strip_prefix("--user=")
+        .is_some_and(|value| value.contains(':'));
+    tokenish || encoded || pgpass || password_flag || user_flag || credential_path(word)
+}
+
+/// Whether a word names a credential file or folder the sandbox guards
+/// ([`crate::sandbox::credential_places`]) as a whole part of a path, in any ASCII case.
+/// Takes the word.
+fn credential_path(word: &str) -> bool {
+    if !word.contains(['.', '/']) {
+        return false;
+    }
+    let bytes = word.as_bytes();
+    let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-');
+    (0..bytes.len())
+        .filter(|&at| at == 0 || !part(bytes[at - 1]))
+        .any(|at| {
+            crate::sandbox::credential_places().any(|place| {
+                let end = at + place.len();
+                end <= bytes.len()
+                    && bytes[at..end].eq_ignore_ascii_case(place.as_bytes())
+                    && bytes.get(end).is_none_or(|&b| b == b'/' || !part(b))
+            })
+        })
 }
 
 #[cfg(all(test, unix))]

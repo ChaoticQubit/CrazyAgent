@@ -209,8 +209,24 @@ pub fn project_folder(stored: &str) -> Result<PathBuf, &'static str> {
 /// project folder. Inputs: the canonical project folder and the relative path.
 /// Output: the file's canonical path, or `context_item_not_openable`.
 pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static str> {
-    assert!(folder.is_absolute());
     let refused = "context_item_not_openable";
+    let extension = Path::new(relative)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    if !extension.is_some_and(|value| DOCUMENT_EXTENSIONS.contains(&value.as_str())) {
+        return Err(refused);
+    }
+    project_file(folder, relative).map_err(|_| refused)
+}
+
+/// Resolves one file inside a project folder for the owner's own editor, of any type:
+/// a relative path of plain parts, not a link, and a regular file still inside the folder.
+/// Inputs: the canonical folder and the relative path. Output: the file's canonical path,
+/// `project_file_missing` when nothing is there, or `project_file_not_openable`.
+pub fn project_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static str> {
+    assert!(folder.is_absolute());
+    let refused = "project_file_not_openable";
     let path = Path::new(relative);
     if relative.is_empty()
         || relative.len() > OPEN_PATH_BYTES_MAX
@@ -220,15 +236,14 @@ pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static s
     {
         return Err(refused);
     }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase);
-    if !extension.is_some_and(|value| DOCUMENT_EXTENSIONS.contains(&value.as_str())) {
-        return Err(refused);
-    }
     let joined = folder.join(path);
-    let metadata = std::fs::symlink_metadata(&joined).map_err(|_| refused)?;
+    let metadata = match std::fs::symlink_metadata(&joined) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("project_file_missing");
+        }
+        Err(_) => return Err(refused),
+    };
     if !metadata.file_type().is_file() {
         return Err(refused);
     }
@@ -531,6 +546,62 @@ mod tests {
             read.recv_timeout(std::time::Duration::from_secs(5)),
             Ok(None),
             "a FIFO is refused without waiting for a writer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_file_for_the_editor_is_any_regular_file_inside_the_folder_and_never_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let folder = home.join("notes");
+        std::fs::create_dir_all(folder.join("src/nested")).unwrap();
+        std::fs::write(folder.join("src/app.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(folder.join("run.command"), "#!/bin/sh\n").unwrap();
+        std::fs::write(home.join("outside.rs"), "kept outside").unwrap();
+        std::os::unix::fs::symlink(home.join("outside.rs"), folder.join("src/escape.rs")).unwrap();
+        std::os::unix::fs::symlink(&home, folder.join("up")).unwrap();
+        assert_eq!(
+            project_file(&folder, "src/app.rs"),
+            Ok(folder.join("src/app.rs"))
+        );
+        assert_eq!(
+            project_file(&folder, "run.command"),
+            Ok(folder.join("run.command")),
+            "the owner's editor only reads it, so any type opens"
+        );
+        assert_eq!(
+            project_file(&folder, "src/added.rs"),
+            Err("project_file_missing")
+        );
+        for refused in [
+            "src/escape.rs",
+            "up/outside.rs",
+            "src/nested",
+            "../outside.rs",
+            "src/../../outside.rs",
+            "/etc/hosts",
+            "",
+        ] {
+            assert_eq!(
+                project_file(&folder, refused),
+                Err("project_file_not_openable"),
+                "{refused}"
+            );
+        }
+        let long = "a/".repeat(OPEN_PATH_BYTES_MAX / 2 + 1);
+        assert_eq!(
+            project_file(&folder, &long),
+            Err("project_file_not_openable")
+        );
+        assert_eq!(
+            context_file(&folder, "src/app.rs"),
+            Err("context_item_not_openable"),
+            "context files keep their document types"
+        );
+        assert_eq!(
+            context_file(&folder, "src/escape.rs"),
+            Err("context_item_not_openable")
         );
     }
 

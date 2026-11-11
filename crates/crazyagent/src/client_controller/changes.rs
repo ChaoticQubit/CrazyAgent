@@ -1,5 +1,7 @@
 use super::*;
-use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
+use crate::landing::{
+    AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches, WaitingChanges,
+};
 use crate::protocol::ProjectId;
 
 impl OwnerController {
@@ -16,11 +18,28 @@ impl OwnerController {
         self.changes_client()?.change_sets(project).await
     }
 
-    /// Reads one page of a change set's diff; callers ask for the next page only when
-    /// the owner reaches it. Inputs: the change set and the page, 0 first. Output: the
-    /// page's files with their marks, its plain text and the next page.
-    pub async fn change_diff(&self, id: ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
-        self.changes_client()?.change_diff(id, page).await
+    /// Counts the change sets waiting for the owner in Changes, across the projects the engine
+    /// has, and the given project's among them. Input: the project, if any. Output: the
+    /// counts of change sets ready to review or conflicting, or a `CHANGES_CODES` refusal; an
+    /// older engine refuses it.
+    pub async fn waiting_changes(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<WaitingChanges, EngineError> {
+        self.changes_client()?.waiting_changes(project).await
+    }
+
+    /// Reads one page of a change set's diff at the head the owner is reading; callers ask
+    /// for the next page only when the owner reaches it. Inputs: the change set, that head
+    /// and the page, 0 first. Output: the page's files with their marks, its plain text and
+    /// the next page, or `changes_stale` once the set moved to another head.
+    pub async fn change_diff(
+        &self,
+        id: ChangeSetId,
+        head: String,
+        page: u16,
+    ) -> Result<ChangeDiff, EngineError> {
+        self.changes_client()?.change_diff(id, head, page).await
     }
 
     /// Lands a change set as one squash commit on the owner's checked-out branch.
@@ -76,6 +95,13 @@ impl OwnerController {
     /// Output: Ok once pending, or a refusal such as `changes_restore_expired`.
     pub async fn restore_changes(&self, id: ChangeSetId) -> Result<(), EngineError> {
         self.changes_client()?.restore_changes(id).await
+    }
+
+    /// Undoes a change set its own Accept merged, with one revert commit. Input: the
+    /// change set. Output: the undo commit and branch, the conflicting files, or a refusal
+    /// such as `changes_undo_unavailable`.
+    pub async fn undo_changes(&self, id: ChangeSetId) -> Result<AcceptOutcome, EngineError> {
+        self.changes_client()?.undo_changes(id).await
     }
 
     /// Asks the agent to update a conflicting change set: the engine merges the owner's

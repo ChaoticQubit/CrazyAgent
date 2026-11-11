@@ -1,10 +1,20 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
+use crate::engine::owner::{
+    OwnerClientKind, OwnerMutation, OwnerOperation, OwnerRequest, OwnerResponse, OwnerResult,
+};
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
+
+/// One end-to-end test per option of each agent Messages timeline setting, through a real
+/// engine, its owner connection and a real tmux pane.
+mod message_timeline;
+
+/// One test per refusal and outcome of removing a project, Remove from dashboard or
+/// Delete everything, through a real engine and its owner connection (DEC-118).
+mod delete;
 
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one
@@ -116,6 +126,23 @@ impl Engine {
 
     async fn stop(mut self) {
         self.service.take().unwrap().shutdown().await.unwrap();
+    }
+
+    /// Stops this engine and starts a new one on the same data folder, as a restart does.
+    async fn restart(&mut self) {
+        self.service.take().unwrap().shutdown().await.unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            self.root.path(),
+            "e.sock",
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        self.service = Some(service);
+        self._stop = stop;
     }
 }
 
@@ -938,6 +965,200 @@ async fn team_plan_writes_refuse_harnesses_that_cannot_run_team_agents_but_saved
 }
 
 #[tokio::test]
+async fn team_plans_take_a_master_only_harness_as_the_master_but_never_as_a_team_agent() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let rcli_master = TeamPlan {
+        master: "rcli".into(),
+        master_tools: true,
+        sub_harnesses: vec![],
+        min_agents: 1,
+        max_agents: 1,
+    };
+    let rcli_row = HarnessSlot {
+        harness: "rcli".into(),
+        agents: 1,
+        tools: true,
+    };
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            ProjectSetup {
+                team: Some(rcli_master.clone()),
+                ..pooled_setup(vec![])
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(created),
+        OwnerResult::Applied,
+        "a new project takes RCLI as its master"
+    );
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(saved.team.master, "rcli");
+    let status = owner.team_status(project.clone()).await.unwrap();
+    assert_eq!(
+        (
+            status.harnesses[0].harness.as_str(),
+            status.harnesses[0].runnable
+        ),
+        ("rcli", true),
+        "the team lists its RCLI master as one that runs"
+    );
+    let with_rcli_row = TeamPlan {
+        sub_harnesses: vec![rcli_row.clone()],
+        max_agents: 2,
+        ..rcli_master.clone()
+    };
+    let refused = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision,
+            None,
+            ProjectSetup {
+                team: Some(with_rcli_row),
+                ..pooled_setup(vec![])
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(refused),
+        rejected("team_harness_unavailable"),
+        "a saved RCLI master does not let RCLI in as a team agent"
+    );
+    let codex_master = TeamPlan {
+        master: "codex".into(),
+        ..rcli_master.clone()
+    };
+    let switched = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision,
+            None,
+            ProjectSetup {
+                team: Some(codex_master),
+                ..pooled_setup(vec![])
+            },
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(switched), OwnerResult::Applied);
+    let back = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision + 1,
+            None,
+            ProjectSetup {
+                team: Some(rcli_master.clone()),
+                ..pooled_setup(vec![])
+            },
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(back),
+        OwnerResult::Applied,
+        "Settings switches the master to RCLI"
+    );
+    let other = ProjectId::new("setup-rcli-row").unwrap();
+    let row_refused = owner
+        .setup_project(
+            other,
+            spec("Recipe box"),
+            ProjectSetup {
+                team: Some(TeamPlan {
+                    master: "codex".into(),
+                    sub_harnesses: vec![rcli_row],
+                    max_agents: 2,
+                    ..rcli_master
+                }),
+                ..pooled_setup(vec![])
+            },
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(row_refused), rejected("team_harness_unavailable"));
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='setup-rcli-row'"),
+        0
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// The owner reads a project's activity through the engine: a research run the runner
+/// claimed is listed above the project's creation, a read cut by its limit says so, and a
+/// limit outside 1 to `LIST_MAX` is refused.
+#[tokio::test]
+async fn owner_reads_the_project_activity_through_the_engine() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+
+    let read = owner.project_activity(project.clone(), 50).await.unwrap();
+    assert!(!read.more, "every event fits");
+    let items = read.items;
+
+    let seen: Vec<(crate::activity::ActivityKind, &str, &str)> = items
+        .iter()
+        .map(|item| (item.kind, item.actor.as_str(), item.text.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (
+                crate::activity::ActivityKind::ResearchStarted,
+                "Research",
+                "Research started: Market research"
+            ),
+            (
+                crate::activity::ActivityKind::Created,
+                "Owner",
+                "You created Meal planner"
+            ),
+        ]
+    );
+    let newest = owner.project_activity(project.clone(), 1).await.unwrap();
+    assert_eq!(newest.items.len(), 1);
+    assert!(
+        newest.more,
+        "a read cut by its limit says older events were left out"
+    );
+    for limit in [0, crate::activity::LIST_MAX + 1] {
+        let refused = owner
+            .project_activity(project.clone(), limit)
+            .await
+            .unwrap_err();
+        assert!(refused.0.contains("activity_limit_invalid"), "{refused:?}");
+    }
+}
+
+#[tokio::test]
 async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
@@ -1086,6 +1307,120 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     engine.stop().await;
 }
 
+/// Reads one project's newest research job of a kind. Inputs: the owner client, the project
+/// and the kind. Output: the job.
+async fn job_of(
+    owner: &mut OwnerController,
+    project: &ProjectId,
+    kind: ResearchKind,
+) -> ResearchJob {
+    owner
+        .research_jobs(project.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|job| job.kind == kind)
+        .expect("the project has a job of this kind")
+}
+
+#[tokio::test]
+async fn a_retried_job_whose_research_was_turned_off_is_not_cancelled_by_the_next_save() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let planning = ResearchKind::RoadmapPlanning;
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let planned = owner.plan_roadmap(project.clone(), 2).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(saved.revision, 2);
+    assert!(saved.research.contains(&planning));
+
+    let mut off = saved.editable();
+    off.research = vec![ResearchKind::MarketResearch];
+    let response = owner
+        .update_project_setup(project.clone(), 2, None, off, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let before_retry = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(before_retry.revision, 3);
+    assert!(!before_retry.research.contains(&planning));
+    let job = job_of(&mut owner, &project, planning).await;
+    assert_eq!(job.status, ResearchStatus::Cancelled);
+
+    let retried = owner.retry_research(project.clone(), job.id, 4).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    let after_retry = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        after_retry.revision, 4,
+        "turning the kind back on raises the revision"
+    );
+    assert_eq!(
+        after_retry.research,
+        [ResearchKind::MarketResearch, planning],
+        "the retried kind is on again"
+    );
+    let queued = job_of(&mut owner, &project, planning).await;
+    assert_eq!(
+        (queued.id, queued.status, queued.cancel_requested),
+        (job.id, ResearchStatus::Queued, false)
+    );
+
+    let mut drafted_before = before_retry.editable();
+    drafted_before.about = "Plans meals for two.".into();
+    let stale = owner
+        .update_project_setup(project.clone(), 3, None, drafted_before, 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(stale),
+        rejected("stale_revision"),
+        "an edit drafted before the retry cannot turn the kind off unseen"
+    );
+    let mut fresh = after_retry.editable();
+    fresh.about = "Plans meals for two.".into();
+    let response = owner
+        .update_project_setup(project.clone(), 4, None, fresh, 6)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let kept = job_of(&mut owner, &project, planning).await;
+    assert_eq!(
+        (kept.id, kept.status, kept.cancel_requested),
+        (job.id, ResearchStatus::Queued, false),
+        "the next save keeps the retried job"
+    );
+
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch).await;
+    let stopped = owner.cancel_research(project.clone(), market.id, 7).await;
+    assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
+    let retried = owner.retry_research(project.clone(), market.id, 8).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .project_setup(project.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        5,
+        "a kind still on keeps the revision"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Releasing an account cancels the research job and closes the master conversation that
 /// hold it, does not fail on a holder whose conversation already ended, and reads the
 /// account free once the remaining holds end.
@@ -1196,9 +1531,35 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms)
             VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0);
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
-            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');",
+            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
+            INSERT INTO team_owner_turns(message,project) VALUES (1,'setup-pooled');
+            INSERT INTO team_master_idle_stop(project,choice) VALUES ('setup-pooled','off');
+            INSERT INTO team_master_live_terminal(project,terminal) VALUES ('setup-pooled',0);
+            INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
+            VALUES ('setup-pooled',1,NULL,'question','Which theme?','delivered',0);
+            INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
+            VALUES ('setup-pooled',1,'master','message','Start with the header',0);
+            INSERT INTO team_message_settings(project,keep_master,kept,progress,results,owner_items,page_size)
+            VALUES ('setup-pooled',0,500,1,'full',1,25);",
         )
         .unwrap();
+    let questions = crate::questions::open(engine.root.path()).unwrap();
+    crate::questions::ask(
+        &questions,
+        &project,
+        &crate::questions::Asker::Master(1),
+        &crate::questions::Ask {
+            question: "Ship on Friday?".into(),
+            options: Vec::new(),
+            recommended: None,
+            context: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::questions::count_pending(&questions).unwrap(),
+        [(project.clone(), 1)]
+    );
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
@@ -1225,6 +1586,40 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         0,
         "its agents' kept conversations go with it"
     );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM questions_log WHERE project='setup-pooled'"),
+        0,
+        "its questions to the owner go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
+        0,
+        "the owner's chat turns go with it"
+    );
+    assert!(
+        crate::questions::count_pending(&questions)
+            .unwrap()
+            .is_empty(),
+        "the questions badge no longer counts the removed project"
+    );
+    for (table, what) in [
+        ("team_events", "its agents' events"),
+        (
+            "team_agent_messages",
+            "the words kept for its agents' timelines",
+        ),
+        ("team_message_settings", "its Messages settings"),
+        ("team_master_idle_stop", "its master idle stop choice"),
+        ("team_master_live_terminal", "its live terminal setting"),
+    ] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{what} go with it"
+        );
+    }
     assert!(
         Path::new(&folder)
             .join(".crazyagent/context/brief.md")
@@ -1259,12 +1654,12 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         .await
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
-    assert!(
-        owner
-            .project_read_paths(project.clone())
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![],
+            version: 0
+        }
     );
 
     let shared = tempfile::Builder::new()
@@ -1281,13 +1676,16 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
     let text = |path: &Path| path.to_str().unwrap().to_owned();
 
     let saved = owner
-        .set_project_read_paths(project.clone(), vec![text(&alias), text(&docs)], 2)
+        .set_project_read_paths(project.clone(), 0, vec![text(&alias), text(&docs)], 2)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
     assert_eq!(
         owner.project_read_paths(project.clone()).await.unwrap(),
-        vec![text(&docs)],
+        ReadPaths {
+            paths: vec![text(&docs)],
+            version: 1
+        },
         "a link is saved as the folder it names, once"
     );
 
@@ -1320,6 +1718,7 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         let refused = owner
             .set_project_read_paths(
                 project.clone(),
+                1,
                 vec![text(&docs), typed.clone()],
                 generation,
             )
@@ -1330,8 +1729,11 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
     }
     assert_eq!(
         owner.project_read_paths(project.clone()).await.unwrap(),
-        vec![text(&docs)],
-        "a refused change keeps the saved folders"
+        ReadPaths {
+            paths: vec![text(&docs)],
+            version: 1
+        },
+        "a refused change keeps the saved folders and their version"
     );
 
     let removed = owner
@@ -1345,6 +1747,576 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         "the project's read-only folders go with it"
     );
     drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn stale_project_setup_write_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let opened = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(opened.revision, 1, "both windows open revision 1");
+
+    let first = ProjectSetup {
+        about: "Plans meals for two.".into(),
+        ..pooled_setup(vec![])
+    };
+    let landed = owner
+        .update_project_setup(project.clone(), 1, Some("Meals for two".into()), first, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(landed), OwnerResult::Applied);
+    let brief_path = opened.state_folder().join("context/brief.md");
+    let brief = std::fs::read_to_string(&brief_path).unwrap();
+
+    let second = ProjectSetup {
+        about: "Plans a week of meals.".into(),
+        tech_stack: vec!["rust".into()],
+        ..pooled_setup(vec![])
+    };
+    for (revision, generation) in [(1, 3), (0, 4), (99, 5)] {
+        let refused = owner
+            .update_project_setup(
+                project.clone(),
+                revision,
+                Some("Week planner".into()),
+                second.clone(),
+                generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save from revision {revision} never replaces revision 2"
+        );
+    }
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            stored.revision,
+            stored.name.as_str(),
+            stored.about.as_str(),
+            stored.tech_stack.as_slice()
+        ),
+        (
+            2,
+            "Meals for two",
+            "Plans meals for two.",
+            ["typescript".to_owned()].as_slice()
+        ),
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&brief_path).unwrap(),
+        brief,
+        "the brief keeps the edit that landed"
+    );
+
+    let redone = owner
+        .update_project_setup(project.clone(), 2, None, second, 6)
+        .await
+        .unwrap();
+    assert_eq!(result(redone), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (stored.revision, stored.about.as_str()),
+        (3, "Plans a week of meals."),
+        "after a re-read the redo lands"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn stale_read_paths_write_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let shared = tempfile::Builder::new()
+        .prefix("ca-stale-read-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let real = std::fs::canonicalize(shared.path()).unwrap();
+    let (docs, assets) = (real.join("docs"), real.join("assets"));
+    std::fs::create_dir(&docs).unwrap();
+    std::fs::create_dir(&assets).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+
+    let opened = owner.project_read_paths(project.clone()).await.unwrap();
+    assert_eq!(opened.version, 0, "folders nobody saved are at version 0");
+    let landed = owner
+        .set_project_read_paths(project.clone(), opened.version, vec![text(&docs)], 2)
+        .await
+        .unwrap();
+    assert_eq!(result(landed), OwnerResult::Applied);
+
+    for (version, generation) in [(opened.version, 3), (7, 4)] {
+        let refused = owner
+            .set_project_read_paths(project.clone(), version, vec![text(&assets)], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save from version {version} never replaces version 1"
+        );
+    }
+    let invalid_and_stale = owner
+        .set_project_read_paths(project.clone(), 0, vec!["relative".into()], 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(invalid_and_stale),
+        rejected("read_path_not_absolute"),
+        "a refused folder is named before the version is checked"
+    );
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![text(&docs)],
+            version: 1
+        },
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT version FROM versioned_items WHERE item='read-paths:setup-pooled'
+             AND writer='owner'"
+        ),
+        1
+    );
+
+    let redone = owner
+        .set_project_read_paths(project.clone(), 1, vec![text(&docs), text(&assets)], 6)
+        .await
+        .unwrap();
+    assert_eq!(result(redone), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![text(&docs), text(&assets)],
+            version: 2
+        },
+        "after a re-read the redo lands"
+    );
+
+    let removed = owner.remove_project(project.clone(), 7).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='read-paths:setup-pooled'"),
+        3,
+        "a removed project's folders move their version on once more (V2V-1)"
+    );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_read_paths(project.clone()).await.unwrap(),
+        ReadPaths {
+            paths: vec![],
+            version: 3
+        },
+        "the project added again under the same id starts with no folders"
+    );
+    for (version, generation) in [(0, 9), (1, 10), (2, 11)] {
+        let refused = owner
+            .set_project_read_paths(project.clone(), version, vec![text(&assets)], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save read before the removal at version {version} is refused"
+        );
+    }
+    let fresh = owner
+        .set_project_read_paths(project.clone(), 3, vec![text(&assets)], 12)
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A removed project's team settings version moves on once more, so a team setting saved
+/// from a screen read before the removal is refused on a project added again under the same
+/// id, which keeps its defaults until a change from a fresh read (V2SYNC-2).
+#[tokio::test]
+async fn a_team_setting_read_before_a_projects_removal_is_refused_on_the_project_added_again() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let read = owner.team_status(project.clone()).await.unwrap();
+    assert_eq!(
+        read.settings_version, 0,
+        "team settings nobody saved are at version 0"
+    );
+    let warmed = owner
+        .team_action(
+            crate::team::TeamAction::KeepWarm {
+                project_id: project.clone(),
+                on: true,
+                version: read.settings_version,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(warmed), OwnerResult::Applied);
+    let before = owner.team_status(project.clone()).await.unwrap();
+    assert!(before.keep_warm);
+    assert_eq!(before.settings_version, 1);
+
+    let removed = owner.remove_project(project.clone(), 3).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='team-settings:setup-pooled'"),
+        2,
+        "removal moves the team settings version past every screen read before it"
+    );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    let readded = owner.team_status(project.clone()).await.unwrap();
+    assert!(
+        !readded.keep_warm,
+        "the project added again starts with its defaults"
+    );
+    assert_eq!(readded.settings_version, 2);
+    for (version, generation) in [(read.settings_version, 5), (before.settings_version, 6)] {
+        let refused = owner
+            .team_action(
+                crate::team::TeamAction::FinishedAgents {
+                    project_id: project.clone(),
+                    show: true,
+                    version,
+                },
+                generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a screen read at version {version}, before the removal"
+        );
+    }
+    assert!(
+        !owner
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .show_finished
+    );
+    let fresh = owner
+        .team_action(
+            crate::team::TeamAction::FinishedAgents {
+                project_id: project.clone(),
+                show: true,
+                version: readded.settings_version,
+            },
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
+    let shown = owner.team_status(project).await.unwrap();
+    assert!(shown.show_finished);
+    assert_eq!(shown.settings_version, 3);
+}
+
+#[tokio::test]
+async fn a_removed_projects_wake_rule_goes_with_it_and_a_screen_read_before_cannot_save_it_again() {
+    use crate::team::events::{RuleTarget, WakeRule};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let target = RuleTarget::Project {
+        project_id: project.clone(),
+    };
+    let quiet = WakeRule {
+        question: false,
+        finished: false,
+        failed: true,
+        change_set_ready: false,
+        progress: false,
+        hourly_cap: 7,
+    };
+    let wake = |rule: WakeRule, version: u64| crate::team::TeamAction::Wake {
+        target: target.clone(),
+        rule: Some(rule),
+        version,
+    };
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let read = owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .events
+        .wake;
+    assert_eq!(read.project, None);
+    assert_eq!(read.project_version, 0, "no project rule was saved yet");
+    let saved = owner.team_action(wake(quiet, 0), 2).await.unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let before = owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .events
+        .wake;
+    assert_eq!(before.project, Some(quiet));
+    assert_eq!(before.project_version, 1);
+
+    let removed = owner.remove_project(project.clone(), 3).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT COUNT(*) FROM team_wake_rules WHERE project='setup-pooled'"),
+        0,
+        "the project's wake rules go with it"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT version FROM versioned_items WHERE item='team-rule:project:setup-pooled'"
+        ),
+        2,
+        "removal moves the project rule version past every screen read before it (V2V-1)"
+    );
+
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    let readded = owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .events
+        .wake;
+    assert_eq!(
+        readded.project, None,
+        "the project added again starts with no rule of its own"
+    );
+    assert_eq!(readded.project_version, 2);
+    for (version, generation) in [(read.project_version, 5), (before.project_version, 6)] {
+        let refused = owner
+            .team_action(wake(quiet, version), generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a wake screen read at version {version}, before the removal"
+        );
+    }
+    assert_eq!(
+        owner
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .events
+            .wake
+            .project,
+        None,
+        "no stale save reached the project added again"
+    );
+    let fresh = owner
+        .team_action(wake(quiet, readded.project_version), 7)
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
+    let shown = owner.team_status(project).await.unwrap().events.wake;
+    assert_eq!(shown.project, Some(quiet));
+    assert_eq!(shown.project_version, 3);
+}
+
+#[tokio::test]
+async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() {
+    use crate::team::{ChildLanding, DEPTH_DEFAULT, NEW_FOLDER_FILES_DEFAULT, TeamAction};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let settings = |status: &crate::team::TeamStatus| {
+        (
+            status.sub_agent_depth,
+            status.child_landing,
+            status.new_folder_files_max,
+        )
+    };
+    let defaults = (DEPTH_DEFAULT, ChildLanding::Lead, NEW_FOLDER_FILES_DEFAULT);
+    let chosen = (3, ChildLanding::Owner, 100);
+    assert_ne!(chosen.0, defaults.0);
+    assert_ne!(chosen.2, defaults.2);
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        settings(&owner.team_status(project.clone()).await.unwrap()),
+        defaults
+    );
+    for (action, generation) in [
+        (
+            TeamAction::SubAgentDepth {
+                project_id: project.clone(),
+                depth: chosen.0,
+            },
+            2,
+        ),
+        (
+            TeamAction::ChildLanding {
+                project_id: project.clone(),
+                mode: chosen.1,
+            },
+            3,
+        ),
+        (
+            TeamAction::NewFolderLimit {
+                project_id: project.clone(),
+                files: chosen.2,
+            },
+            4,
+        ),
+    ] {
+        let saved = owner.team_action(action, generation).await.unwrap();
+        assert_eq!(result(saved), OwnerResult::Applied);
+    }
+    assert_eq!(
+        settings(&owner.team_status(project.clone()).await.unwrap()),
+        chosen
+    );
+
+    let removed = owner.remove_project(project.clone(), 5).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in ["team_nesting", "team_new_folder_limit"] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project (V24-L1)"
+        );
+    }
+
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        settings(&owner.team_status(project).await.unwrap()),
+        defaults,
+        "the project added again starts with the default depth, child landing and new folder limit"
+    );
+}
+
+#[tokio::test]
+async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_stays_gone() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM project_setups WHERE project='setup-pooled'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='setup-pooled'"),
+        1,
+        "the project itself is still there"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project).await.unwrap_err().0,
+        "project_setup_missing"
+    );
+    let gone = ProjectId::new("setup-gone").unwrap();
+    assert_eq!(
+        owner.project_agent_policy(gone).await.unwrap_err().0,
+        "invalid_project"
+    );
     engine.stop().await;
 }
 
@@ -1381,21 +2353,54 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         .find(|row| row.toolchain == Toolchain::Rust)
         .expect("the owner's rustup and cargo are found");
     assert!(rust.installed);
+    assert_eq!(fresh.version, 0, "a policy nobody saved is at version 0");
 
     let policy = AgentPolicy {
         access: AgentAccess::OwnBranch,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: vec![ToolchainChoice {
             toolchain: Toolchain::Rust,
             allowed: !rust.allowed,
         }],
+        ide_git_hooks: true,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
     };
     let saved = owner
-        .set_project_agent_policy(project.clone(), policy.clone(), 2)
+        .set_project_agent_policy(project.clone(), fresh.version, policy.clone(), 2)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
     let view = owner.project_agent_policy(project.clone()).await.unwrap();
     assert_eq!(view.access, AgentAccess::OwnBranch);
+    assert!(view.ide_git_hooks);
+    assert_eq!(view.version, 1);
+    let stale = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            AgentPolicy {
+                access: AgentAccess::Sandboxed,
+                toolchains: Vec::new(),
+                ide_git_hooks: false,
+                tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
+                network: crate::sandbox::policy::AgentNetwork::default(),
+            },
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(stale),
+        rejected("stale_revision"),
+        "a save from the policy another window replaced never lands"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        view,
+        "the refused save left the saved policy and its version"
+    );
     assert_eq!(
         view.toolchains
             .iter()
@@ -1410,6 +2415,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let twice = AgentPolicy {
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: vec![
             ToolchainChoice {
                 toolchain: Toolchain::Node,
@@ -1420,10 +2426,14 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 allowed: false,
             },
         ],
+        ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
     };
     assert_eq!(twice.validate(), Err("agent_policy_invalid"));
     let action = SetupAction::SetAgentPolicy {
         project_id: project.clone(),
+        version: view.version,
         policy: twice,
     };
     assert_eq!(action.validate().unwrap_err().0, "agent_policy_invalid");
@@ -1438,15 +2448,23 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let full = AgentPolicy {
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: Vec::new(),
+        ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
     };
     let saved = owner
-        .set_project_agent_policy(project.clone(), full, 3)
+        .set_project_agent_policy(project.clone(), view.version, full, 3)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
     let view = owner.project_agent_policy(project.clone()).await.unwrap();
     assert_eq!(view.access, AgentAccess::Full);
+    assert!(
+        !view.ide_git_hooks,
+        "a save with the switch off turns it off"
+    );
     assert_eq!(
         view.toolchains
             .iter()
@@ -1472,6 +2490,80 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         0,
         "the project's agent access goes with it"
     );
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='agent-policy:setup-pooled'"),
+        3,
+        "removal moves the access version past every screen read before it (V2V-1)"
+    );
+    for item in [
+        "instruction-settings:setup-pooled",
+        "process:project:setup-pooled",
+    ] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT version FROM versioned_items WHERE item='{item}'"
+            )),
+            1,
+            "{item} moves on at removal even when it was never saved"
+        );
+    }
+
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    let readded = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(readded.access, AgentAccess::Sandboxed);
+    assert_eq!(readded.version, 3);
+    let from_before = owner
+        .set_project_agent_policy(
+            project.clone(),
+            view.version,
+            AgentPolicy {
+                access: AgentAccess::Full,
+                toolchains: Vec::new(),
+                ide_git_hooks: false,
+                tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
+                network: crate::sandbox::policy::AgentNetwork::default(),
+            },
+            6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(from_before),
+        rejected("stale_revision"),
+        "a screen that showed Full before the removal never gives the project added again Full"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        readded,
+        "the project added again stays Sandboxed"
+    );
+    let chosen = owner
+        .set_project_agent_policy(
+            project.clone(),
+            readded.version,
+            AgentPolicy {
+                access: AgentAccess::OwnBranch,
+                toolchains: Vec::new(),
+                ide_git_hooks: false,
+                tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
+                network: crate::sandbox::policy::AgentNetwork::default(),
+            },
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(chosen), OwnerResult::Applied);
     drop(owner);
     engine.stop().await;
 }
@@ -1531,6 +2623,7 @@ async fn the_owner_pauses_and_cancels_a_team_whose_full_status_passes_one_reply(
             crate::team::TeamAction::LiveMaster {
                 project_id: project.clone(),
                 on: false,
+                version: status.settings_version,
             },
         ),
     ] {
@@ -1542,5 +2635,345 @@ async fn the_owner_pauses_and_cancels_a_team_whose_full_status_passes_one_reply(
         1
     );
     drop(owner);
+    engine.stop().await;
+}
+
+/// Removing a project takes the owner's agent limits, token budget, account spread and the
+/// teammate panes the engine saw with it (S4, DEC-104 K8), so a reused id starts with none.
+#[tokio::test]
+async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    for (generation, action) in [
+        (
+            2,
+            crate::team::TeamAction::MaxHarnesses {
+                project_id: project.clone(),
+                max: Some(2),
+            },
+        ),
+        (
+            3,
+            crate::team::TeamAction::MaxTeammates {
+                project_id: project.clone(),
+                max: Some(3),
+            },
+        ),
+        (
+            4,
+            crate::team::TeamAction::TokenBudget {
+                project_id: project.clone(),
+                tokens: Some(crate::team::BUDGET_CHOICES[0]),
+            },
+        ),
+        (
+            5,
+            crate::team::TeamAction::SpreadAccounts {
+                project_id: project.clone(),
+                on: true,
+            },
+        ),
+    ] {
+        let response = owner.team_action(action.clone(), generation).await.unwrap();
+        assert_eq!(result(response), OwnerResult::Applied, "{action:?}");
+    }
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_teammates(agent,project,pane,seen_ms) VALUES (1,'setup-pooled','%3',1)",
+            [],
+        )
+        .unwrap();
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_status_log(project,agent,status,at_ms) VALUES ('setup-pooled',1,'idle',1)",
+            [],
+        )
+        .unwrap();
+    let tables = [
+        "team_status_log",
+        "team_caps",
+        "team_token_budgets",
+        "team_account_spread",
+        "team_teammates",
+    ];
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            1,
+            "{table} holds the project's row before removal"
+        );
+    }
+
+    let removed = owner.remove_project(project.clone(), 6).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A live agent keeps its row when its project is removed, and the status it writes after
+/// that logs nothing: the removal already took the project's history (HB-S5-I).
+#[tokio::test]
+async fn a_live_agent_stopped_after_its_project_is_removed_logs_no_status() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) \
+         VALUES ('setup-pooled','sub','codex',0,'working',1,1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE team_agents SET status='idle' WHERE project='setup-pooled'",
+        [],
+    )
+    .unwrap();
+    let logged = "SELECT count(*) FROM team_status_log WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(logged), 1, "logged while the project exists");
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled'"),
+        1,
+        "the live agent keeps its row"
+    );
+    assert_eq!(engine.rows(logged), 0, "the removal took the history");
+    db.execute(
+        "UPDATE team_agents SET status='stopped' WHERE project='setup-pooled'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(engine.rows(logged), 0, "no history for a removed project");
+    drop(db);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// The owner reads one sub-agent's Messages timeline through the engine (MSG-B) and saves the
+/// project's Messages settings with a team action (MSG-E): the page carries the speakers the
+/// engine stored and the saved settings, the team status shows them too, and a bad page size,
+/// another project's agent or an unlisted setting is refused with a plain code.
+#[tokio::test]
+async fn the_owner_reads_a_sub_agent_s_messages_timeline_and_saves_its_settings_through_the_engine()
+{
+    use crate::team::agent_messages::{EntryKind, MessageSettings, ResultsShown, Speaker};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(ENGINE_WAIT).unwrap();
+    let agent = |project: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,stopped_ms) VALUES (?1,'sub','codex',0,'stopped',1,1,1)",
+                [project],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let ada = agent("setup-pooled");
+    let far = agent("elsewhere");
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,delivered,created_ms,finished_ms)
+             VALUES ('setup-pooled','master','codex',0,'Build the page','done',{ada},1,10,10);
+             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
+             VALUES ('setup-pooled',{ada},'master','message','Start with the header',20);
+             INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
+             VALUES ('setup-pooled',{ada},NULL,'question','Which theme?','delivered',30);"
+        ))
+        .unwrap();
+    drop(connection);
+
+    let page = owner
+        .team_agent_messages(project.clone(), ada, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| (entry.from, entry.kind, entry.text.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Speaker::Agent, EntryKind::Question, Some("Which theme?")),
+            (
+                Speaker::Master,
+                EntryKind::Message,
+                Some("Start with the header")
+            ),
+            (Speaker::Master, EntryKind::Task, Some("Build the page")),
+        ]
+    );
+    assert_eq!(page.settings, MessageSettings::default());
+    for (agent, limit, code) in [
+        (ada, Some(0), "team_messages_limit_invalid"),
+        (
+            ada,
+            Some(crate::team::agent_messages::PAGE_MAX + 1),
+            "team_messages_limit_invalid",
+        ),
+        (far, None, "team_agent_not_found"),
+    ] {
+        let refused = owner
+            .team_agent_messages(project.clone(), agent, None, limit)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.0);
+        assert_eq!(refused, Err(code.to_owned()), "{agent} {limit:?}");
+    }
+
+    let chosen = MessageSettings {
+        page_size: 25,
+        results: ResultsShown::Full,
+        owner_items_shown: false,
+        ..MessageSettings::default()
+    };
+    let saved = owner
+        .team_action(
+            crate::team::TeamAction::MessageSettings {
+                project_id: project.clone(),
+                settings: chosen,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .team_agent_messages(project.clone(), ada, None, None)
+            .await
+            .unwrap()
+            .settings,
+        chosen
+    );
+    assert_eq!(
+        owner
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .message_settings,
+        chosen
+    );
+    let unlisted = owner
+        .team_action(
+            crate::team::TeamAction::MessageSettings {
+                project_id: project.clone(),
+                settings: MessageSettings {
+                    kept_per_project: 1000,
+                    ..chosen
+                },
+            },
+            3,
+        )
+        .await;
+    assert_eq!(
+        unlisted.map(|_| ()).map_err(|error| error.0),
+        Err("team_message_settings_invalid".to_owned())
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// The Save both the desktop and the TUI send ends the project's open IDE once the new
+/// level is committed, so nothing keeps running at the level the owner just changed.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_applied_access_save_stops_the_projects_running_ide() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let checkout = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let servers = engine
+        .service
+        .as_ref()
+        .unwrap()
+        .owner_runtime()
+        .unwrap()
+        .ide_servers();
+    servers
+        .open(
+            &project,
+            &std::fs::canonicalize(checkout.path()).unwrap(),
+            &crate::ide::server::tests::cached_build(),
+        )
+        .await
+        .unwrap();
+    assert!(servers.group(&project).is_some());
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    let full = AgentPolicy {
+        access: AgentAccess::Full,
+        ..AgentPolicy::default()
+    };
+    let saved = owner
+        .set_project_agent_policy(project.clone(), view.version, full, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while servers.group(&project).is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the IDE kept running after its level was saved"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     engine.stop().await;
 }

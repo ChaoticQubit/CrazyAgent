@@ -7,10 +7,11 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const CHROME = process.env.CRAZYAGENT_CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
+const PAGE = '<!doctype html><html lang="en"><head></head><body></body></html>';
 
 /** Bundles one test fixture and the production modules it imports into a script that defines
  * `Fixture` in the page. Input: the fixture path. Output: the script text. */
@@ -42,15 +43,20 @@ async function devtoolsEndpoint(profile, chrome) {
 }
 
 /** Opens one DevTools connection. Input: its WebSocket URL. Output: `send(method, params)`, which
- * fails a call Chrome does not answer within CALL_MS or once the connection closes, and
- * `close()`. */
+ * fails a call Chrome does not answer within CALL_MS or once the connection closes,
+ * `on(method, listener)` for DevTools events such as `Network.loadingFailed`, and `close()`. */
 async function connect(url) {
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error("DevTools connection failed")); });
   const waiting = new Map();
+  const listeners = new Map();
   let next = 0;
   socket.onmessage = (message) => {
     const reply = JSON.parse(message.data);
+    if (reply.method) {
+      for (const listener of listeners.get(reply.method) ?? []) listener(reply.params);
+      return;
+    }
     const pending = waiting.get(reply.id);
     if (!pending) return;
     waiting.delete(reply.id);
@@ -72,7 +78,8 @@ async function connect(url) {
     waiting.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
     socket.send(JSON.stringify({ id, method, params }));
   });
-  return { send, close: () => socket.close() };
+  const on = (method, listener) => listeners.set(method, [...(listeners.get(method) ?? []), listener]);
+  return { send, on, close: () => socket.close() };
 }
 
 /** Starts the one headless Google Chrome a test file's pages run in, before any test starts, so
@@ -80,7 +87,7 @@ async function connect(url) {
  * file has nothing left to run, or is killed if the process ends another way. Output: the
  * DevTools origin and browser endpoint. */
 async function launch() {
-  assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}`);
+  assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}; set CRAZYAGENT_CHROME to its executable`);
   const profile = mkdtempSync(join(tmpdir(), "ca-chrome-"));
   const chrome = spawn(CHROME, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--no-first-run", "--no-default-browser-check", "--disable-extensions", "about:blank"], { stdio: "ignore" });
@@ -115,8 +122,11 @@ const chrome = await launch();
 /** Runs a check in a fresh page of the file's headless Google Chrome, in its own browser context
  * so no storage, permission or cache crosses tests, and always closes that context afterwards.
  * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
- * `send(method, params)` for DevTools commands and `context`, the browser context id. Output:
- * what the check returns. */
+ * `send(method, params)` for DevTools commands, `on(method, listener)` for DevTools events such
+ * as `Network.loadingFailed` and `context`, the browser context id. The page has the doctype
+ * the app's page has, so a check measures the layout the app shows. A promise a script returns
+ * is held by a DevTools object until it settles: awaited unheld, DevTools can answer "Promise was
+ * collected" while the page goes on working. Output: what the check returns. */
 export async function withPage(check) {
   const browser = await connect(chrome.browser);
   try {
@@ -127,13 +137,20 @@ export async function withPage(check) {
       const page = await connect(`${chrome.origin}/devtools/page/${targetId}`);
       try {
         const evaluate = async (expression) => {
-          const reply = await page.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-          if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
-          return reply.result.value;
+          const failed = (reply) => {
+            if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
+            return reply;
+          };
+          const { result } = failed(await page.send("Runtime.evaluate", { expression }));
+          if (result.subtype === "promise") return failed(await page.send("Runtime.awaitPromise", { promiseObjectId: result.objectId, returnByValue: true })).result.value;
+          if (!result.objectId) return result.value;
+          return failed(await page.send("Runtime.callFunctionOn", { objectId: result.objectId, functionDeclaration: "function () { return this; }", returnByValue: true })).result.value;
         };
+        await evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();`);
+        assert.equal(await evaluate("document.compatMode"), "CSS1Compat", "the page is in standards mode, as the app's page is");
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
-        return await check({ evaluate, send: page.send, context: browserContextId });
+        return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });
       } finally {
         page.close();
       }

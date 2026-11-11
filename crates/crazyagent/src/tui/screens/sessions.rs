@@ -1,4 +1,4 @@
-use super::new_project_view::{Look, Row, columns, list_row, spread};
+use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, window};
 use super::project_time::{clock, duration};
 use crate::master_session::{MasterOwnerAction, MasterSessionPhase};
@@ -280,7 +280,9 @@ impl Sessions {
                 vec![("y", "Delete it"), ("n", "Keep it")],
             ),
         });
-        let list_room = room.saturating_sub(usize::from(question.is_some()) * 2);
+        let question = question.map(|(text, keys)| (wrap_words(&text, width), keys));
+        let list_room =
+            room.saturating_sub(question.as_ref().map_or(0, |(lines, _)| lines.len() + 1));
         if self.open {
             body.extend(self.list(width, list_room, now_ms, offset, look));
         }
@@ -289,7 +291,11 @@ impl Sessions {
             if !body.is_empty() {
                 body.push(Row::default());
             }
-            body.push(Row::of(question, look.warning).pad(width));
+            body.extend(
+                question
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning).pad(width)),
+            );
             keys
         } else {
             vec![
@@ -440,5 +446,5 @@ fn agent_names(agents: &[String]) -> String {
     agents.join(", ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

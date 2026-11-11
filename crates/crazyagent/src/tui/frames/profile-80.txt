@@ -17,8 +17,8 @@
                                                                                 
   Colors                                                                        
   (*) Follow macOS   ( ) Dark   ( ) Light   ( ) Terminal colors                 
-                                                                                
+  Master Shift-←→       (*) Switch tabs ( ) Send to the agent                   
+  Shift-Enter           (*) Auto        ( ) Off                                 
   [ Save changes ]                                                              
-                                                                                
  ✓ Saved.                                                                       
  Tab Next field  Enter Next  Shift-←→ Sections  Esc Home                 ? Help 

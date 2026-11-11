@@ -49,6 +49,7 @@ impl OwnerRuntimeHandle {
             home_dir,
             cwd: prepared.cwd.clone(),
             profile_config_sha256,
+            instructions: None,
         })
     }
 }
@@ -543,6 +544,7 @@ fallback_allowed = false
         PreparedMasterTurn {
             text: prepared.text.clone(),
             message: prepared.message.clone(),
+            owner_turn: prepared.owner_turn,
             instructions: prepared.instructions.clone(),
             tools: prepared.tools,
             session: prepared.session.clone(),
@@ -554,6 +556,8 @@ fallback_allowed = false
             lease: prepared.lease.clone(),
             agent_project: prepared.agent_project.clone(),
             agent_policy: prepared.agent_policy.clone(),
+            hidden_paths: prepared.hidden_paths.clone(),
+            tools_off: prepared.tools_off.clone(),
         }
     }
 

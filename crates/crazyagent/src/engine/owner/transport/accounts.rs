@@ -199,6 +199,7 @@ impl OwnerClient {
     ) -> Result<Reply, EngineError> {
         let time = action.time(self.timeout) + self.timeout;
         tokio::time::timeout(time, async {
+            let read = read_kind(&action);
             let envelope = Envelope {
                 accounts: action,
                 secret_present: key.is_some(),
@@ -237,7 +238,9 @@ impl OwnerClient {
                 sent.map_err(|_| failure("accounts_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -532,6 +535,17 @@ fn public_code(error: EngineError) -> String {
         error.0
     } else {
         "accounts_outcome_unknown".into()
+    }
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Catalog => Some("accounts.catalog"),
+        Action::List { .. } => Some("accounts.list"),
+        Action::LocalModels { .. } => Some("accounts.local_models"),
+        _ => None,
     }
 }
 

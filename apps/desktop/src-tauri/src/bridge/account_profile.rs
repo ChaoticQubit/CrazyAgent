@@ -101,7 +101,8 @@ impl NativeBridge {
             return Err(failure("draft_generation_limit"));
         }
         let (scope, connection) = self.selected_model_connection(ticket)?;
-        self.allow_account_change(|stuck| crazyagent::config::same_account(stuck, &connection))?;
+        self.allow_account_change(|stuck| crazyagent::config::same_account(stuck, &connection))
+            .await?;
         validate_profile_connection(&connection, secret.is_some())?;
         let request = AccountProfileRequest {
             request_id: profile_id()?,
@@ -330,7 +331,7 @@ fn profile_id() -> Result<RequestId, BridgeError> {
     RequestId::new(native_random_id()?).map_err(|_| failure("account_identity_unavailable"))
 }
 
-fn profile_error(error: EngineError) -> BridgeError {
+pub(super) fn profile_error(error: EngineError) -> BridgeError {
     caused(
         match error.0.as_str() {
             "controller_disconnected" => "not_connected",
@@ -372,6 +373,7 @@ fn profile_error(error: EngineError) -> BridgeError {
                     BridgeError {
                         code: "account_profile_rejected_read_same_request",
                         cause: native.cause,
+                        account: None,
                     }
                 } else {
                     native

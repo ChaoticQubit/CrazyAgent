@@ -3,6 +3,7 @@ use super::process::{
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -36,6 +37,8 @@ struct PendingWrite {
 struct OwnedChild {
     child: Child,
     warden: Option<Warden>,
+    follower: Option<Follower>,
+    lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
@@ -58,12 +61,13 @@ struct Custody(Option<OwnedChild>);
 pub(super) fn run(
     command: Command,
     profile: Option<NativeProfileUse>,
+    unconfined: bool,
     mut input: mpsc::Receiver<WriteRequest>,
     shared: Arc<ProcessShared>,
     deadline: Instant,
     output_limit: u64,
 ) {
-    let mut custody = match start(command, profile, &shared) {
+    let mut custody = match start(command, profile, unconfined, &shared) {
         Ok(custody) => custody,
         Err(code) => {
             if let Ok(mut state) = shared.lock() {
@@ -101,6 +105,7 @@ pub(super) fn run(
 fn start(
     command: Command,
     profile: Option<NativeProfileUse>,
+    unconfined: bool,
     shared: &Arc<ProcessShared>,
 ) -> Result<Custody, &'static str> {
     if let Some(profile) = &profile {
@@ -112,6 +117,8 @@ fn start(
         return Err("codex_host_start_cancelled");
     }
     let mut command = selected_command(command);
+    let token = LineageToken::new().ok_or("codex_host_spawn_failed")?;
+    command.env(LINEAGE_VARIABLE, token.as_str());
     let (child, warden) = warden::spawn(
         command
             .stdin(Stdio::piped())
@@ -119,9 +126,12 @@ fn start(
             .stderr(Stdio::piped()),
     )
     .map_err(|_| "codex_host_spawn_failed")?;
+    let follower = unconfined.then(|| Follower::start(child.id(), Some(token)));
     let mut custody = Custody(Some(OwnedChild {
         child,
         warden,
+        follower,
+        lineage: None,
         profile,
         stdin: None,
         stdout: None,
@@ -280,7 +290,13 @@ impl OwnedChild {
         }
     }
 
+    /// Stops the harness: closes its input and kills its group and itself. At Full access it
+    /// first takes the harness's lineage, followed from its start, once, so what left the
+    /// group can be checked when the run completes. Takes nothing.
     fn stop(&mut self) {
+        if let Some(follower) = self.follower.take() {
+            self.lineage = Some(follower.stop());
+        }
         self.stopped_at.get_or_insert_with(Instant::now);
         self.stdin = None;
         self.pending = None;
@@ -418,6 +434,11 @@ impl OwnedChild {
         }
     }
 
+    /// Publishes the run's end and releases the account lease. At Full access, no warden
+    /// reaches what left the group, so the lineage taken at the stop, or now when the harness
+    /// ended on its own, is checked first; while some of it still runs the run ends with that
+    /// code and the lease stays held until it ends or the owner signs the account out.
+    /// Takes nothing.
     fn publish_completion(&mut self) {
         assert!(self.complete());
         assert!(self.status.is_some() || self.abandoned);
@@ -426,6 +447,20 @@ impl OwnedChild {
         {
             self.shared.fail("codex_host_profile_invalid");
         }
+        let mut left = None;
+        let lineage = match self.follower.take() {
+            Some(follower) => Some(follower.stop()),
+            None => self.lineage.take(),
+        };
+        if let Some(lineage) = lineage
+            && let Err(unstopped) = lineage.and_then(Lineage::settle)
+        {
+            left = Some(unstopped.code());
+            self.shared.fail(unstopped.code());
+            if let (Unstopped::Left(leftovers), Some(profile)) = (unstopped, self.profile.take()) {
+                leftovers.hold(Some(profile.account().clone()), profile);
+            }
+        }
         self.profile = None;
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
@@ -433,7 +468,9 @@ impl OwnedChild {
             state.cleanup_error = if self.accounting_failed {
                 Some("codex_host_pipe_accounting")
             } else {
-                self.abandoned.then_some("codex_host_cleanup_uncertain")
+                self.abandoned
+                    .then_some("codex_host_cleanup_uncertain")
+                    .or(left)
             };
         }
     }

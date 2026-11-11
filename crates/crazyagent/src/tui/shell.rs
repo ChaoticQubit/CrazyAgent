@@ -1,9 +1,12 @@
+use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
+use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, help_line, hint,
+    Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, footer, header, hint,
     strip_bidi, too_small,
 };
 use super::keys::{Global, Key, global};
@@ -12,9 +15,9 @@ use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::{Arrival, ProjectCard};
+use super::seam::{Arrival, ProjectCard, Request};
 use super::text::{cells, join, list_row, pad, styled};
-use super::theme::Role;
+use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use ratatui::Frame;
@@ -190,6 +193,16 @@ impl Shell {
         shell
     }
 
+    /// Delivers the busy reply, code `owner_busy`, of each request the full request queue
+    /// refused during the last event, so the screen that asked stops waiting on it and says
+    /// so. Replies to requests refused while these are delivered wait for the next event.
+    /// Input: none. Output: none.
+    fn answer_refused(&mut self) {
+        for arrival in self.ctx.take_refused() {
+            self.take_arrival(arrival);
+        }
+    }
+
     /// Says whether the owner asked to quit.
     /// Input: none. Output: true once the loop should end.
     pub fn quitting(&self) -> bool {
@@ -227,6 +240,7 @@ impl Shell {
             .last_mut()
             .expect("the stack is never empty")
             .resized(ctx);
+        self.answer_refused();
     }
 
     /// True while something on screen animates, so the loop ticks.
@@ -257,11 +271,35 @@ impl Shell {
     /// Asks the top screen to refresh its data.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn refresh(&mut self) {
+        self.show();
+        self.answer_refused();
+    }
+
+    /// Asks the top screen to refresh its data inside an event, which answers the requests
+    /// the full queue refuses once it ends. Input: none. Output: none.
+    fn show(&mut self) {
+        if self.ctx.link == Link::Ready {
+            self.ctx
+                .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+        }
         let ctx = &mut self.ctx;
         self.stack
             .last_mut()
             .expect("the stack is never empty")
             .shown(ctx);
+    }
+
+    /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
+    /// many change sets wait for the owner, in all and in the top screen's project, then
+    /// refreshes the top screen.
+    /// Input: none. Output: none; requests are queued on the context.
+    pub fn tick(&mut self) {
+        let project = self.top().project();
+        self.ctx
+            .request(Request::Changes(Box::new(ChangesQuery::Waiting {
+                project,
+            })));
+        self.refresh();
     }
 
     fn running(&self) -> usize {
@@ -318,7 +356,7 @@ impl Shell {
             Flow::Back => {
                 if self.stack.len() > 1 {
                     self.stack.pop();
-                    self.refresh();
+                    self.show();
                 }
             }
         }
@@ -330,7 +368,7 @@ impl Shell {
         }
         self.stack.push(screen);
         assert!(self.stack.len() <= STACK_MAX);
-        self.refresh();
+        self.show();
     }
 
     fn home(&mut self) {
@@ -338,12 +376,12 @@ impl Shell {
             self.stack.first().and_then(|screen| screen.place()) == Some(Place::Home);
         if root_is_home {
             self.stack.truncate(1);
-            self.refresh();
+            self.show();
         } else {
             self.stack.clear();
             let screen = open(&Place::Home, &mut self.ctx);
             self.stack.push(screen);
-            self.refresh();
+            self.show();
         }
     }
 
@@ -360,6 +398,11 @@ impl Shell {
     /// ignores goes back.
     /// Input: the key. Output: none; check `quitting` afterwards.
     pub fn key(&mut self, key: Key) {
+        self.take_key(key);
+        self.answer_refused();
+    }
+
+    fn take_key(&mut self, key: Key) {
         if let Some(overlay) = self.overlay.take() {
             self.overlay_key(overlay, &key);
             return;
@@ -463,6 +506,11 @@ impl Shell {
     /// react, top first; only the top screen may change the stack.
     /// Input: the arrival. Output: none.
     pub fn arrive(&mut self, arrival: Arrival) {
+        self.take_arrival(arrival);
+        self.answer_refused();
+    }
+
+    fn take_arrival(&mut self, arrival: Arrival) {
         let was_ready = self.ctx.link == Link::Ready;
         match &arrival {
             Arrival::Connected(identity) => {
@@ -549,7 +597,26 @@ impl Shell {
                         ),
                     });
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Reveal(event) = event.as_ref()
+                {
+                    self.ctx.say(event.message());
+                }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Changes(event) = event.as_ref()
+                    && let ChangesQuery::Waiting { project } = &event.query
+                {
+                    self.ctx.store.waiting = match &event.result {
+                        Ok(ChangesView::Waiting(count)) => Some((project.clone(), *count)),
+                        _ => None,
+                    };
+                }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
+                if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::Questions(event) = event.as_ref()
+                {
+                    self.questions(event);
+                }
             }
             _ => {}
         }
@@ -565,7 +632,47 @@ impl Shell {
         }
         self.apply(top_flow);
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
-            self.refresh();
+            self.show();
+        }
+    }
+
+    /// Keeps the pending counts for the footer badge and says once when a project has a new
+    /// question; the first read only fills the badge. A settled answer or dismissal reads
+    /// the counts again. Input: one Questions reply. Output: none.
+    fn questions(&mut self, event: &QuestionsEvent) {
+        match (&event.query, &event.result) {
+            (QuestionsQuery::Counts, Ok(QuestionsReply::Counts(counts))) => {
+                if let Some(before) = self.ctx.store.questions.ready()
+                    && let Some((project, _)) = counts.iter().find(|(project, count)| {
+                        let was = before
+                            .iter()
+                            .find(|(seen, _)| seen == project)
+                            .map_or(0, |(_, count)| *count);
+                        *count > was
+                    })
+                {
+                    let name = self
+                        .ctx
+                        .store
+                        .projects
+                        .ready()
+                        .and_then(|cards| cards.iter().find(|card| card.id == *project))
+                        .map_or_else(|| "a project".to_owned(), |card| card.name.clone());
+                    self.ctx.say(Message::warning(
+                        &format!("New question in {name}."),
+                        "Answer it on the project's Questions tab.",
+                    ));
+                }
+                self.ctx.store.questions = Load::Ready(counts.clone());
+            }
+            (QuestionsQuery::Counts, Err(code)) if self.ctx.store.questions.ready().is_none() => {
+                self.ctx.store.questions = Load::Failed(code.clone());
+            }
+            (QuestionsQuery::Answer { .. } | QuestionsQuery::Dismiss { .. }, Ok(_)) => {
+                self.ctx
+                    .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+            }
+            _ => {}
         }
     }
 
@@ -602,20 +709,21 @@ impl Shell {
         let vertical = format!("{}{}", glyphs.up, glyphs.down);
         let left = vec![
             styled("Everywhere", Role::Heading, theme),
-            key("Ctrl-K", "Go to anything", 11),
-            key("Esc", "Back or cancel", 11),
-            key("Tab", "Next field or panel", 11),
-            key("Shift-Tab", "Previous", 11),
-            key(&format!("Shift-{arrows}"), "Next tab", 11),
-            key("?", "This help", 11),
-            key("Ctrl-Q", "Quit", 11),
+            key("Ctrl-K", "Go to anything", 13),
+            key("Esc", "Back or cancel", 13),
+            key("Tab", "Next field or panel", 13),
+            key("Shift-Tab", "Previous", 13),
+            key(&format!("Shift-{arrows}"), "Next tab", 13),
+            key("?", "This help", 13),
+            key("Ctrl-Q", "Quit", 13),
             Line::default(),
             styled("Text fields", Role::Heading, theme),
-            key(&arrows, "Move the cursor", 11),
-            key("Ctrl-A E", "Start, end", 11),
-            key("Ctrl-W", "Delete a word", 11),
-            key("Ctrl-U", "Clear the field", 11),
-            key("Ctrl-J", "New line", 11),
+            key(&arrows, "Move the cursor", 13),
+            key("Ctrl-A E", "Start, end", 13),
+            key("Ctrl-W", "Delete a word", 13),
+            key("Ctrl-U", "Clear the field", 13),
+            key("Ctrl-J", "New line", 13),
+            key("Shift-Enter", "New line, if supported", 13),
         ];
         let mut right = vec![
             styled("Lists", Role::Heading, theme),
@@ -643,7 +751,7 @@ impl Shell {
             .collect();
         body.push(Line::default());
         body.push(styled(
-            "Letter keys work when you are not typing in a field.",
+            "Letter keys work outside fields. In tmux, use Ctrl-J for a new line.",
             Role::Muted,
             theme,
         ));
@@ -755,7 +863,9 @@ impl Shell {
         let theme = self.ctx.theme.clone();
         let glyphs = self.ctx.glyphs;
         let top = self.stack.last().expect("the stack is never empty");
-        let header_line = header(width, &top.crumbs(), top.status(&self.ctx), &theme, glyphs);
+        let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
+        let status = with_waiting(waiting, top.status(&self.ctx), &theme);
+        let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
             frame.buffer_mut(),
@@ -782,7 +892,13 @@ impl Shell {
         draw_lines(
             frame.buffer_mut(),
             help,
-            &[help_line(width, &hints, &theme, glyphs)],
+            &[footer(
+                width,
+                &hints,
+                self.ctx.store.pending(),
+                &theme,
+                glyphs,
+            )],
         );
         let mut cursor = if screen_modal.is_some() || self.overlay.is_some() {
             None
@@ -817,12 +933,61 @@ impl Shell {
     }
 }
 
+/// The header status with the count of change sets that wait for the owner in front of it.
+/// Inputs: the count sentence, the top screen's own status and the theme.
+/// Output: the status line; no sentence leaves the screen's status as it is.
+fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -> Line<'static> {
+    let Some(text) = waiting else {
+        return status;
+    };
+    let note = Line::from(Span::styled(text, theme.warning));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
+}
+
+/// The header's count of change sets that wait for the owner. On a project's screens, once
+/// the count was read for that project, it says how many wait in its Changes and how many
+/// in other projects; elsewhere it counts every project. Inputs: the last count with the
+/// project it was read for, and the top screen's project. Output: the sentence, or None
+/// when nothing waits.
+fn waiting_text(
+    waiting: Option<&(
+        Option<crate::protocol::ProjectId>,
+        crate::landing::WaitingChanges,
+    )>,
+    top: Option<&crate::protocol::ProjectId>,
+) -> Option<String> {
+    let (asked, count) = waiting?;
+    let Some(here) = count.here.filter(|_| asked.as_ref() == top) else {
+        return waiting_sets(count.all, "in your projects");
+    };
+    let others = count.all.checked_sub(here)?;
+    match (waiting_sets(here, "in Changes"), others) {
+        (None, _) => waiting_sets(others, "in other projects"),
+        (Some(text), 0) => Some(text),
+        (Some(text), others) => Some(format!("{text}, {others} in other projects")),
+    }
+}
+
+/// Counts change sets in one sentence. Inputs: the count and where they wait.
+/// Output: "1 change set waits <place>" or "N change sets wait <place>"; None for zero.
+fn waiting_sets(count: u32, place: &str) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some(format!("1 change set waits {place}")),
+        count => Some(format!("{count} change sets wait {place}")),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
     use crate::tui::glyphs::UNICODE;
+    use crate::tui::keys::{ShiftArrows, ShiftEnter};
     use crate::tui::seam::{Activity, ResearchCounts};
     use crate::tui::theme::{Appearance, Colors, Depth};
 
@@ -845,6 +1010,7 @@ mod tests {
             about: String::new(),
             platforms: Vec::new(),
             pool: None,
+            pool_id: None,
             research: ResearchCounts {
                 running,
                 ..Default::default()
@@ -1209,7 +1375,7 @@ mod tests {
         let mut shell = loaded();
         shell.key(Key::Tab);
         shell.key(Key::Char('!'));
-        for _ in 0..7 {
+        for _ in 0..9 {
             shell.key(Key::Tab);
         }
         shell.key(Key::Enter);
@@ -1223,6 +1389,82 @@ mod tests {
         shell.arrive(Arrival::ProfileSaved(Ok(())));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a saved profile has nothing to lose");
+    }
+
+    #[test]
+    fn saving_the_profile_keeps_the_master_shift_arrows_choice_on_this_computer() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("tui-colors");
+        let mut ctx = ctx();
+        ctx.prefs = Some(colors.clone());
+        ctx.store.profile = Load::Ready(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }));
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        assert_eq!(shell.ctx.shift_arrows, ShiftArrows::SwitchTabs);
+        for _ in 0..8 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Tab);
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        assert_eq!(
+            shell.ctx.shift_arrows,
+            ShiftArrows::SwitchTabs,
+            "the choice applies once saved"
+        );
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        assert_eq!(shell.ctx.shift_arrows, ShiftArrows::SendToAgent);
+        assert_eq!(
+            crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
+            ShiftArrows::SendToAgent
+        );
+    }
+
+    #[test]
+    fn saving_the_profile_keeps_the_shift_enter_choice_on_this_computer() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("tui-colors");
+        let mut ctx = ctx();
+        ctx.prefs = Some(colors.clone());
+        ctx.store.profile = Load::Ready(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }));
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        assert_eq!(shell.ctx.shift_enter, ShiftEnter::Auto);
+        for _ in 0..9 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        assert_eq!(
+            shell.ctx.shift_enter,
+            ShiftEnter::Auto,
+            "the choice applies once saved"
+        );
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        assert_eq!(shell.ctx.shift_enter, ShiftEnter::Off);
+        assert_eq!(
+            crate::tui::prefs::load_shift_enter(&crate::tui::prefs::shift_enter_path(&colors)),
+            ShiftEnter::Off
+        );
+        assert_eq!(
+            crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
+            ShiftArrows::SwitchTabs,
+            "the other choice is kept as it was"
+        );
     }
 
     #[test]

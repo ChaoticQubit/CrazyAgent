@@ -9,8 +9,9 @@ const card = await import("../src/screens/project/usage.tsx");
 const tokens = (input) => ({ input, output: 0, cache_read: 0, cache_write: 0 });
 const row = (key, input) => ({ key, tokens: tokens(input), runs: 1, last_ms: 0 });
 const lines = (agent, added, removed) => ({ agent, change_sets: 1, added, removed, commits: 0, committed_added: 0, committed_removed: 0 });
-const report = (agents, agentLines = []) => ({
+const report = (agents, agentLines = [], partialHomes = 0) => ({
   since_ms: null, total: tokens(0), runs: 0, projects: [], pools: [], accounts: [], agents, days: [], lines: [], agent_lines: agentLines, limits: [],
+  partial_homes: partialHomes,
 });
 const team = [
   { id: 1, role: "master", label: "Team master" },
@@ -46,6 +47,10 @@ test("the Usage card shows tokens and lines today and over 7 days, and its loadi
   assert.match(words, /Ada \(@login-page\) 1\.2K \+10 -2 4K \+40 -9/);
   assert.match(words, /Team master 0 \+0 -0 900 \+3 -1/);
   assert.match(words, /Grace \(@signup\) 0 \+0 -0 0 \+5 -0/);
+  assert.doesNotMatch(words, /may be missing/);
+  const cut = text(renderToStaticMarkup(createElement(card.AgentUsageView, { today: { kind: "ok", value: today }, week: { kind: "ok", value: report(week.agents, week.agent_lines, 1) }, agents: team })));
+  assert.match(cut, /Some usage may be missing: 1 agent home holds more records than one scan reads/);
+  assert.match(cut, /Ada \(@login-page\) 1\.2K \+10 -2 4K \+40 -9/);
   const empty = text(renderToStaticMarkup(createElement(card.AgentUsageView, { today: { kind: "ok", value: report([]) }, week: { kind: "ok", value: report([]) }, agents: team })));
   assert.match(empty, /No agent used tokens or changed lines in the last 7 days\./);
   assert.match(renderToStaticMarkup(createElement(card.AgentUsageView, { today: { kind: "loading" }, week: { kind: "ok", value: week }, agents: team })), /skeleton/);
@@ -53,4 +58,20 @@ test("the Usage card shows tokens and lines today and over 7 days, and its loadi
   assert.match(failed, /Couldn't load usage\. CrazyAgent couldn't confirm what happened/);
   assert.equal(renderToStaticMarkup(createElement(card.AgentUsageView, { today: { kind: "not_ready" }, week: { kind: "not_ready" }, agents: team })), "");
   assert.equal(renderToStaticMarkup(createElement(card.AgentUsageView, { today: { kind: "ok", value: today }, week: { kind: "error", code: "usage_unavailable", message: "" }, agents: team })), "");
+});
+
+test("an agent on a harness without a reader shows usage not reported, never zero tokens", () => {
+  const flagged = (key, input, harness) => ({ ...row(key, input), not_reported_by: harness });
+  const todayRcli = report([flagged("master-harbor", 0, "RCLI")]);
+  const weekRcli = report([row("team-3", 4000), flagged("master-harbor", 0, "RCLI"), flagged("team-4", 700, "Gemini CLI")], [lines("team-4", 5, 0)]);
+  const rows = card.agentUsage(todayRcli, weekRcli, team);
+  assert.deepEqual(rows.map((r) => [r.name, r.notReportedToday ?? null, r.notReportedWeek ?? null]), [
+    ["Ada (@login-page)", null, null],
+    ["Grace (@signup)", null, "Gemini CLI"],
+    ["Team master", "RCLI", "RCLI"],
+  ]);
+  const words = text(renderToStaticMarkup(createElement(card.AgentUsageView, { today: { kind: "ok", value: todayRcli }, week: { kind: "ok", value: weekRcli }, agents: team })));
+  assert.match(words, /Team master Usage not reported by RCLI \+0 -0 Usage not reported by RCLI \+0 -0/);
+  assert.match(words, /Grace \(@signup\) 0 \+0 -0 700 \+ usage not reported by Gemini CLI \+5 -0/);
+  assert.match(words, /Ada \(@login-page\) 0 \+0 -0 4K \+0 -0/);
 });

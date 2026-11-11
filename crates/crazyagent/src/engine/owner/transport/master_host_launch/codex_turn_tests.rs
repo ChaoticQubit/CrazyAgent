@@ -31,7 +31,7 @@ fn codex_account(managed: &Path) -> String {
     let record = json!({
         "OPENAI_API_KEY": null,
         "tokens": {
-            "id_token": "unit-identity",
+            "id_token": format!("unit-header.{claims}.unit-identity-signature"),
             "access_token": access,
             "refresh_token": "unit-refresh-secret",
             "account_id": "unit-account"
@@ -155,6 +155,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let MasterTurnLaunch {
         command,
@@ -169,6 +170,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &connection,
         Duration::from_secs(3600),
         None,
+        &[],
     )
     .unwrap();
     let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
@@ -177,6 +179,9 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         serde_json::from_slice(&std::fs::read(home.join("auth.json")).unwrap()).unwrap();
     assert_eq!(written["tokens"]["access_token"], access);
     assert_eq!(written["tokens"]["refresh_token"], "");
+    let identity = written["tokens"]["id_token"].as_str().unwrap();
+    assert!(identity.ends_with(".unexchangeable"), "{identity}");
+    assert!(!identity.contains("unit-identity-signature"), "{identity}");
     assert!(tool_record.is_none());
     let today = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
     assert!(command.get_args().eq(today.get_args()));
@@ -194,11 +199,18 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     let unused = crate::engine::claude_host::MasterTools {
         engine: &engine,
         drop: &engine,
+        mailbox: &engine,
+        off: &[],
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
+    let caches = default_master_tool_caches(&root.path, &repository);
+    let off_tmp = off_turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
-        [&worktree, &home, &off_turn.join("tmp")]
+        [&worktree, &home, &off_tmp]
+            .into_iter()
+            .chain(&caches)
+            .collect::<Vec<_>>()
     );
     assert!(sandbox.sandbox().read_roots().contains(&repository));
     drop(credential);
@@ -212,6 +224,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let MasterTurnLaunch {
         command,
@@ -226,6 +239,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &connection,
         Duration::from_secs(3600),
         Some(&engine),
+        &[crate::team::tool::RECALL_TOOL.to_owned()],
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -238,9 +252,12 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     assert_eq!(written["tokens"]["refresh_token"], "");
     let record = turn.join("tmp").join(crate::team::tool::DROP_FILE);
     assert_eq!(tool_record.as_deref(), Some(record.as_path()));
+    let off = [crate::team::tool::RECALL_TOOL.to_owned()];
     let tools = crate::engine::claude_host::MasterTools {
         engine: &engine,
         drop: &record,
+        mailbox: &turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER),
+        off: &off,
     };
     let envs: Vec<(String, String)> = command
         .get_envs()
@@ -284,16 +301,39 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         .collect();
     assert_eq!(servers.len(), 1, "{settings:?}");
     let parsed: toml::Table = toml::from_str(servers[0]).unwrap();
+    let mailbox = turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let served: Vec<String> = parsed["mcp_servers"]["crazyagent-team"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        super::claude_turn_tests::listed_by(&served),
+        [
+            crate::team::tool::TOOL_NAME,
+            crate::team::tool::ASK_TOOL,
+            crate::team::tool::RECORD_TOOL,
+            crate::team::tool::REMEMBER_TOOL
+        ],
+        "a console master with tools asks the owner and remembers through the engine, less the tools switched off"
+    );
+    assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     let expected: toml::Table = toml::from_str(&format!(
-        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}]\n",
+        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"recall\"]\n",
         engine.to_str().unwrap(),
-        record.to_str().unwrap()
+        record.to_str().unwrap(),
+        mailbox.to_str().unwrap()
     ))
     .unwrap();
     assert_eq!(parsed, expected);
+    let turn_tmp = turn.join("tmp");
     assert_eq!(
         sandbox.sandbox().writable_roots().collect::<Vec<_>>(),
-        [&worktree, &home, &turn.join("tmp")]
+        [&worktree, &home, &turn_tmp]
+            .into_iter()
+            .chain(&caches)
+            .collect::<Vec<_>>()
     );
     assert!(sandbox.sandbox().read_roots().contains(&install));
     assert!(sandbox.sandbox().read_roots().contains(&repository));
@@ -313,9 +353,10 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .position(|arg| arg.starts_with("mcp_servers="))
             .unwrap();
         args[server] = format!(
-            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?}]}},owner={{command=\"/usr/bin/true\"}}}}",
+            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?},{:?},\"recall\"]}},owner={{command=\"/usr/bin/true\"}}}}",
             engine.to_str().unwrap(),
-            record.to_str().unwrap()
+            record.to_str().unwrap(),
+            mailbox.to_str().unwrap()
         );
     });
     assert!(require_master_tool_policy(&widened, Some(tools)).is_err());
@@ -396,20 +437,47 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         })
     };
     assert_eq!(
-        require_master_tool_policy(&served(&engine, &[&record]), Some(tools)),
+        require_master_tool_policy(
+            &served(&engine, &[&record, &mailbox, Path::new("recall")]),
+            Some(tools)
+        ),
         Ok(())
     );
     for (name, refused) in [
         (
             "another executable",
-            served(Path::new("/usr/bin/true"), &[&record]),
+            served(
+                Path::new("/usr/bin/true"),
+                &[&record, &mailbox, Path::new("recall")],
+            ),
         ),
-        ("a link to the engine", served(&link, &[&record])),
-        ("a hard link to the engine", served(&hard, &[&record])),
-        ("another turn's drop file", served(&engine, &[&other_drop])),
+        (
+            "a link to the engine",
+            served(&link, &[&record, &mailbox, Path::new("recall")]),
+        ),
+        (
+            "a hard link to the engine",
+            served(&hard, &[&record, &mailbox, Path::new("recall")]),
+        ),
+        (
+            "another turn's drop file",
+            served(&engine, &[&other_drop, &mailbox, Path::new("recall")]),
+        ),
+        (
+            "a switched-off tool listed again",
+            served(&engine, &[&record, &mailbox]),
+        ),
         (
             "an extra argument",
-            served(&engine, &[&record, Path::new("--verbose")]),
+            served(
+                &engine,
+                &[
+                    &record,
+                    &mailbox,
+                    Path::new("recall"),
+                    Path::new("--verbose"),
+                ],
+            ),
         ),
         (
             "a second setting in the same flag",
@@ -439,11 +507,19 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         credential,
         tool_record,
     };
-    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+    let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref()).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off).map_err(|error| error.0)
+    };
+    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+        checked_off(backend, turn, engine, &off)
     };
     let unverified: Result<(), String> = Err("master_delegate_unverified".to_owned());
+    assert_eq!(
+        checked_off(MasterBackend::Codex, &turn, Some(&engine), &[]),
+        unverified,
+        "a turn built with recall switched off is not the turn with every tool on"
+    );
     assert_eq!(checked(MasterBackend::Codex, &turn, Some(&engine)), Ok(()));
     assert_eq!(
         checked(MasterBackend::Codex, &turn, Some(&hard)),
@@ -530,6 +606,8 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
     let tools = crate::engine::claude_host::MasterTools {
         engine: &codex,
         drop: &drop,
+        mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+        off: &[],
     };
     let command = master_command(&codex, &home, &base, ACCOUNT_DEFAULT_MODEL, Some(tools)).unwrap();
     let mut features = Command::new(&codex);

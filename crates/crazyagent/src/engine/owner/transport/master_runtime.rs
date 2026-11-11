@@ -17,7 +17,7 @@ use crate::sandbox::InstalledSandbox;
 use crate::storage::{
     Job, MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
 };
-use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_turn};
+use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_reported, count_turn};
 use std::fs::File;
 #[cfg(unix)]
 use std::io::Seek;
@@ -30,6 +30,8 @@ use std::time::Duration;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
+/// How often a running master turn checks its grants against the policy the owner saved.
+const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
 /// SQLite's refusal when another engine connection held the database write lock past the
 /// storage wait; the write was rolled back, so the turn is driven again (LB-28).
 const STORAGE_BUSY: &str = "database is locked";
@@ -41,6 +43,59 @@ pub(super) const CHANGES_WAITING: &str = "The edits from this turn are waiting f
 /// review; the refusal code follows in brackets.
 pub(super) const CHANGES_NOT_KEPT: &str =
     "The edits from this turn could not be kept for review and stay only in the master's worktree.";
+/// The most conflicting files a note under a master turn names.
+const NOTE_FILES_MAX: usize = 10;
+
+/// Lands the change set a master turn made when the project lets the master merge into main
+/// itself (DEC-117 Q2), and says what happened in the note under the turn; None when the set
+/// waits for the owner as before. A failure is logged by its plain code and the set waits.
+/// Inputs: the store and the change set. Output: the note.
+fn master_landed_note(
+    db: &rusqlite::Connection,
+    id: &crate::landing::ChangeSetId,
+) -> Option<String> {
+    let landed = crate::projects_home::owner_home()
+        .and_then(|home| crate::landing::land_master_set(db, &home, id));
+    match landed {
+        Ok(None) => None,
+        Ok(Some(outcome)) => Some(master_land_words(&outcome)),
+        Err(error) => {
+            eprintln!(
+                "master_land_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    }
+}
+
+/// What the note under a master turn says after trying to land the turn's change set. Only
+/// a set of nothing but conflict fixes gets this far, so a land is named as that. Input:
+/// the outcome. Output: the note.
+fn master_land_words(outcome: &crate::landing::AcceptOutcome) -> String {
+    match outcome {
+        crate::landing::AcceptOutcome::Landed { branch, .. } => format!(
+            "The master merged its conflict fix into {branch} itself, as this project's setting lets it at Full access. Activity lists the merge."
+        ),
+        crate::landing::AcceptOutcome::Conflict { files } => {
+            let named: Vec<&str> = files
+                .iter()
+                .take(NOTE_FILES_MAX)
+                .map(String::as_str)
+                .collect();
+            let more = files.len().saturating_sub(named.len());
+            let more = if more == 0 {
+                String::new()
+            } else {
+                format!(" and {more} more")
+            };
+            format!(
+                "The master's change set conflicts with the branch it lands on in {}{more}, so the master did not merge it. It is waiting for you in Changes.",
+                named.join(", ")
+            )
+        }
+    }
+}
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
@@ -53,6 +108,8 @@ pub(super) struct MasterHostLaunch {
     pub(super) capture: File,
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
     pub(super) tool_record: Option<std::path::PathBuf>,
+    pub(super) access: crate::sandbox::policy::AgentAccess,
+    pub(super) toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 pub(super) struct Capture {
@@ -74,6 +131,8 @@ struct ActiveMaster {
     capture_ref: RequestId,
     provenance: Provenance,
     reported: Tokens,
+    access: crate::sandbox::policy::AgentAccess,
+    toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 impl MasterHost {
@@ -322,6 +381,63 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Tells whether the policy the owner saved now no longer covers what a running master
+    /// turn's sandbox profile granted. Inputs: the prepared turn, its id, and the level and
+    /// toolchains it runs with. Output: why it must stop, none while covered, or the storage
+    /// refusal.
+    async fn master_turn_narrowed(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        access: crate::sandbox::policy::AgentAccess,
+        toolchains: &[crate::sandbox::toolchains::Toolchain],
+    ) -> Result<Option<crate::sandbox::policy::Narrowing>, EngineError> {
+        let saved = match self
+            .master_runtime_command(MasterRuntimeCommand::Policy {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Policy(saved) => *saved,
+            _ => return Err(failure("master_runtime_result")),
+        };
+        Ok(crate::sandbox::policy::narrowing(
+            saved.as_ref(),
+            Some(prepared.repository.as_path()),
+            Some(access),
+            None,
+            toolchains,
+        ))
+    }
+
+    /// Answers the memory calls a running console master turn with its tools on left in its
+    /// mailbox, `remember` and `recall` under the master's name, as the team runtime does for
+    /// a master without its live terminal. Takes the prepared turn, its id and the turn's
+    /// mailbox. Returns Ok, or the refusal of a turn that is not running with its tools on.
+    pub(super) async fn serve_master_memory(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        mailbox: &std::path::Path,
+    ) -> Result<(), EngineError> {
+        match self
+            .master_runtime_command(MasterRuntimeCommand::ServeMemory {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+                mailbox: mailbox.to_path_buf(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(_) => Ok(()),
+            _ => Err(failure("master_runtime_result")),
+        }
+    }
+
     /// Takes the profile of a prepared master turn and names its conversation in the agent
     /// register as a holder of the turn's account until the returned hold is dropped, which
     /// the caller keeps until the turn's host has closed. Takes the prepared turn and its
@@ -458,6 +574,7 @@ impl OwnerRuntimeHandle {
                 .map(std::path::Path::to_path_buf)
         });
         let lease = prepared.lease.clone();
+        let settings = self.ide_servers().settings_files();
         let landed = tokio::task::spawn_blocking(move || {
             let root = root.ok_or_else(|| failure("changes_unavailable"))?;
             let db = crate::landing::open(&root)?;
@@ -468,20 +585,28 @@ impl OwnerRuntimeHandle {
                 worktree,
                 git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
             };
-            crate::landing_turns::record(&db, &workspace, &end)
+            let landed = crate::landing_turns::record(&db, &workspace, &end, settings.as_ref())?;
+            let merged = match &landed {
+                crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
+                _ => None,
+            };
+            Ok((landed, merged))
         })
         .await
         .unwrap_or_else(|_| Err(failure("changes_unavailable")));
         let note = match landed {
-            Ok(
+            Ok((
                 crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
-            ) => {
+                _,
+            )) => {
                 return turn;
             }
-            Ok(crate::landing_turns::Landed::Added(_)) => CHANGES_WAITING.to_owned(),
+            Ok((crate::landing_turns::Landed::Added(_), merged)) => {
+                merged.unwrap_or_else(|| CHANGES_WAITING.to_owned())
+            }
             Err(error) => format!(
                 "{CHANGES_NOT_KEPT} ({})",
-                crate::protocol::plain_code(&error.0)
+                crate::landing::refusal_code(&error)
             ),
         };
         let noted = when_storage_frees(|| {
@@ -553,6 +678,31 @@ impl OwnerRuntimeHandle {
         result
     }
 
+    /// Records where the master's leased worktree starts before its turn runs, unless the
+    /// engine already did, on a blocking thread with the landing store, so a master whose
+    /// turn ends with only its own commits keeps them as its change set. Input: the
+    /// prepared turn. Output: Ok once a start is stored, or the plain refusal.
+    async fn record_master_start(&self, prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
+        let root = self.authority.root.verify().ok().and_then(|()| {
+            self.authority
+                .root
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+        let repository = prepared.repository.clone();
+        let worktree = prepared.cwd.clone();
+        let lease = prepared.lease.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = root.ok_or_else(|| failure("changes_unavailable"))?;
+            let db = crate::landing::open(&root)?;
+            let git_dir = crate::worktrees::lease_git_dir(&db, &lease)?;
+            crate::landing::record_master_start(&db, &repository, &worktree, &git_dir)
+        })
+        .await
+        .unwrap_or_else(|_| Err(failure("changes_unavailable")))
+    }
+
     async fn drive_turn(
         &self,
         project_id: &ProjectId,
@@ -578,6 +728,7 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
             MasterRuntimeResult::Profile(_)
+            | MasterRuntimeResult::Policy(_)
             | MasterRuntimeResult::Checkout(_)
             | MasterRuntimeResult::Waiting => {
                 return Err(failure("master_runtime_result"));
@@ -596,10 +747,13 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        if prepared.session.selection.backend == MasterBackend::Rcli {
-            return self.launch_rcli_master_turn(&prepared, turn_id).await;
-        }
-        let result = self.launch_master_turn(&prepared, turn_id).await;
+        let result = match self.record_master_start(&prepared).await {
+            Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
+                return self.launch_rcli_master_turn(&prepared, turn_id).await;
+            }
+            Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
+            Err(error) => Err(error),
+        };
         match result {
             Ok(turn) => Ok(turn),
             Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
@@ -641,6 +795,11 @@ impl OwnerRuntimeHandle {
         let _folder = launch.folder;
         let _credential = launch.credential;
         let tool_record = launch.tool_record;
+        let (access, toolchains) = (launch.access, launch.toolchains);
+        let mailbox = tool_record
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(|tmp| tmp.join(crate::team::tool::MAILBOX_FOLDER));
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -705,15 +864,22 @@ impl OwnerRuntimeHandle {
                 worktree_lease: prepared.worktree_lease.clone(),
             },
             reported: Tokens::default(),
+            access,
+            toolchains,
         };
+        let (notes, noted) = match &tool_record {
+            Some(_) => self.session_notes(prepared).await,
+            None => (String::new(), Vec::new()),
+        };
+        let text = format!("{notes}{}", prepared.text);
         let observed = self
-            .collect_master_turn(prepared, turn_id, &mut active)
+            .collect_master_turn(prepared, turn_id, &text, &mut active, mailbox.as_deref())
             .await;
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
-        self.count_master_usage(prepared, home, active.reported)
+        self.count_master_usage(prepared, Some(home), active.reported)
             .await;
         if let Some(diagnostic) = active.host.diagnostic()
             && (closed.is_err() || observed.is_err() || diagnostic.late_lines > 0)
@@ -729,6 +895,11 @@ impl OwnerRuntimeHandle {
                 &diagnostic,
                 error.map(|error| error.0.as_str()),
             );
+        }
+        if let Some(record) = &tool_record {
+            let replied = matches!(&observed, Ok(MasterRuntimeObservation::Response { .. }));
+            let noted = if replied { noted } else { Vec::new() };
+            self.log_session_asks(prepared, record, noted).await;
         }
         closed.map_err(|error| {
             EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0))
@@ -752,20 +923,22 @@ impl OwnerRuntimeHandle {
     }
 
     /// Counts one finished master turn under its project's master row before its home is
-    /// removed: the usage Claude Code reported for the turn, or the Codex records in the
-    /// home. A store that cannot be written leaves the turn uncounted and logs only the
-    /// failure code. Inputs: the prepared turn, its home and the reported usage.
-    async fn count_master_usage(
+    /// removed: the usage Claude Code reported for the turn, the Codex records in the home,
+    /// or the usage frames an rcli host reported, which keeps no records, and one turn on the
+    /// same row (`usage::turns`). A store that cannot be written leaves the turn uncounted
+    /// and logs only the failure code. Inputs: the prepared turn, its home when it has
+    /// records and the reported usage.
+    pub(super) async fn count_master_usage(
         &self,
         prepared: &PreparedMasterTurn,
-        home: std::path::PathBuf,
+        home: Option<std::path::PathBuf>,
         reported: Tokens,
     ) {
         let connection = &prepared.profile.binding().connection;
         let (format, harness) = match prepared.session.selection.backend {
-            MasterBackend::Claude => (Format::Claude, "claude-code"),
-            MasterBackend::Codex => (Format::Codex, "codex"),
-            MasterBackend::Rcli => return,
+            MasterBackend::Claude => (Some(Format::Claude), "claude-code"),
+            MasterBackend::Codex => (Some(Format::Codex), "codex"),
+            MasterBackend::Rcli => (None, "rcli"),
         };
         let attribution = Attribution {
             kind: RunKind::Master,
@@ -776,18 +949,20 @@ impl OwnerRuntimeHandle {
             harness: harness.to_owned(),
         };
         let session = prepared.session.session_id.as_str().to_owned();
+        let project = prepared.session.project_id.clone();
         let root = super::changes::engine_root(&self.authority);
         let counted = tokio::task::spawn_blocking(move || {
             let db = crate::usage::open(&root?)?;
-            count_turn(
-                &db,
-                &home,
-                format,
-                &attribution,
-                reported,
-                &session,
-                crate::team::now_ms(),
-            )
+            let now_ms = crate::team::now_ms();
+            let tokens = match (format, home) {
+                (Some(format), Some(home)) => {
+                    count_turn(&db, &home, format, &attribution, reported, &session, now_ms)
+                        .map(|_| ())
+                }
+                _ => count_reported(&db, &attribution, reported, &session, now_ms),
+            };
+            let turn = crate::usage::turns::count(&db, &project, &attribution.agent, now_ms);
+            tokens.and(turn)
         })
         .await;
         let problem = match counted {
@@ -798,11 +973,97 @@ impl OwnerRuntimeHandle {
         eprintln!("master usage not counted: {problem}");
     }
 
+    /// Reads the engine lines that go before a conversation master's prompt: how the owner
+    /// settled its questions since a turn last carried them, then its questions still open
+    /// with this turn's owner message number for `record_answer`. A store that cannot be
+    /// read gives no lines, and the notes come on a later turn. Input: the prepared turn.
+    /// Output: the lines and the ids of the notes they carry.
+    async fn session_notes(&self, prepared: &PreparedMasterTurn) -> (String, Vec<u64>) {
+        let root = super::changes::engine_root(&self.authority);
+        let project = prepared.session.project_id.clone();
+        let session = prepared.session.session_id.clone();
+        let asker = crate::questions::Asker::Session(session.clone());
+        let read = tokio::task::spawn_blocking(move || {
+            let db = crate::questions::open(&root?)?;
+            let notes = crate::questions::session_notes(&db, &project, &session)?;
+            let pending = crate::questions::pending(&db, &project)?;
+            Ok::<_, EngineError>((notes, pending))
+        })
+        .await;
+        match read {
+            Ok(Ok((notes, pending))) => {
+                let (lines, carried) = crate::team::tool::questions::note_lines(&notes);
+                let open =
+                    crate::team::tool::questions::open_line(&pending, &asker, prepared.owner_turn);
+                (format!("{lines}{open}"), carried)
+            }
+            Ok(Err(problem)) => {
+                eprintln!("master question notes not read: {}", problem.0);
+                (String::new(), Vec::new())
+            }
+            Err(_) => {
+                eprintln!("master question notes not read: questions_unavailable");
+                (String::new(), Vec::new())
+            }
+        }
+    }
+
+    /// Records and logs what a conversation master asked of the owner during a turn, under
+    /// its session, whatever the turn's outcome, and marks the notes a replied turn carried
+    /// as given. A refusal is logged as its code; the master sees on its next turn which of
+    /// its questions are open. Unmarked notes come again on the next turn. Inputs: the
+    /// prepared turn, its delegation drop file and the ids of the notes it carried.
+    async fn log_session_asks(
+        &self,
+        prepared: &PreparedMasterTurn,
+        record: &std::path::Path,
+        noted: Vec<u64>,
+    ) {
+        let root = super::changes::engine_root(&self.authority);
+        let project = prepared.session.project_id.clone();
+        let session = prepared.session.session_id.clone();
+        let owner = prepared
+            .owner_turn
+            .map(|number| (number, prepared.message.clone()));
+        let record = record.to_path_buf();
+        let logged = tokio::task::spawn_blocking(move || {
+            let db = crate::questions::open(&root?)?;
+            let refused = crate::team::tool::questions::apply_session_calls(
+                &db,
+                &project,
+                &session,
+                owner
+                    .as_ref()
+                    .map(|(number, text)| (*number, text.as_str())),
+                &record,
+            );
+            if !noted.is_empty() {
+                crate::questions::notes_delivered(&db, &project, &session, &noted)?;
+            }
+            Ok::<_, EngineError>(refused.len())
+        })
+        .await;
+        match logged {
+            Ok(Ok(0)) => {}
+            Ok(Ok(refused)) => eprintln!("master question calls refused: {refused}"),
+            Ok(Err(problem)) => eprintln!("master question not logged: {}", problem.0),
+            Err(_) => eprintln!("master question not logged: questions_unavailable"),
+        }
+    }
+
+    /// Collects a running console master turn to its end: the host's events up to the
+    /// reply, with the turn inspected for cancellation and its memory calls served one
+    /// INSPECT_INTERVAL after the last inspection ended, so a slow inspection never leaves
+    /// the host's events and deadline unread (OP-22 r1). Inputs: the prepared turn, its id,
+    /// the prompt it sends with the engine's question lines, the active host and the turn's
+    /// mailbox. Output: the observation, or an engine error.
     async fn collect_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
+        text: &str,
         active: &mut ActiveMaster,
+        mailbox: Option<&std::path::Path>,
     ) -> Result<MasterRuntimeObservation, EngineError> {
         self.record_master_child(prepared, turn_id, active.host.process_group())
             .await?;
@@ -841,13 +1102,11 @@ impl OwnerRuntimeHandle {
         {
             return Ok(MasterRuntimeObservation::Cancelled);
         }
-        active
-            .host
-            .start_turn(turn_id.clone(), &prepared.text)
-            .await?;
+        active.host.start_turn(turn_id.clone(), text).await?;
         let mut reply = ReplyText::default();
         let mut inspect = tokio::time::interval(INSPECT_INTERVAL);
         inspect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut policy_checked = std::time::Instant::now();
         loop {
             let event = tokio::select! {
                 biased;
@@ -863,6 +1122,22 @@ impl OwnerRuntimeHandle {
                     if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Running) {
                         return Err(failure("master_runtime_state_changed"));
                     }
+                    if policy_checked.elapsed() >= POLICY_CHECK_EVERY {
+                        policy_checked = std::time::Instant::now();
+                        if let Some(narrowed) = self
+                            .master_turn_narrowed(prepared, turn_id, active.access, &active.toolchains)
+                            .await?
+                        {
+                            return Err(failure(narrowed.code()));
+                        }
+                    }
+                    if let Some(mailbox) = mailbox
+                        && crate::team::tool::calls_waiting(mailbox)
+                        && let Err(error) = self.serve_master_memory(prepared, turn_id, mailbox).await
+                    {
+                        eprintln!("{}", super::master_memory_diagnostic(&error));
+                    }
+                    inspect.reset();
                     continue;
                 }
                 event = active.host.next_event() => event?,
@@ -1106,11 +1381,17 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_health_unknown"
         | "master_sign_in_missing"
-        | "native_profile_credential_unavailable" => MasterReason::ReadinessUnknown,
+        | "native_profile_credential_unavailable"
+        | "native_profile_codex_api_key"
+        | "native_profile_codex_token_unreadable" => MasterReason::ReadinessUnknown,
         "gateway_invalid_authentication"
         | "native_profile_credential_expiring"
         | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,
-        "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
+        "gateway_connection_changed_or_denied"
+        | "agent_access_lowered"
+        | "agent_toolchain_lowered"
+        | "agent_policy_unreadable"
+        | "agent_project_unreadable" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
         "gateway_rate_limited" => MasterReason::RateLimited,
@@ -1148,6 +1429,26 @@ mod tests {
     use crate::master_session::MasterReason;
     use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_note_after_a_master_land_calls_it_a_conflict_fix() {
+        use crate::landing::AcceptOutcome;
+        let landed = master_land_words(&AcceptOutcome::Landed {
+            commit: "c0".into(),
+            branch: "main".into(),
+        });
+        assert_eq!(
+            landed,
+            "The master merged its conflict fix into main itself, as this project's setting lets it at Full access. Activity lists the merge."
+        );
+        let conflict = master_land_words(&AcceptOutcome::Conflict {
+            files: vec!["README".into(), "NOTES".into()],
+        });
+        assert_eq!(
+            conflict,
+            "The master's change set conflicts with the branch it lands on in README, NOTES, so the master did not merge it. It is waiting for you in Changes."
+        );
+    }
 
     #[test]
     fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {

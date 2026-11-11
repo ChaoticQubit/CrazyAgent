@@ -1,11 +1,26 @@
 use super::*;
 use crate::project_setup::{StoredSetup, TeamPlan};
+use crate::storage::versioned::LastWriter;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Barrier;
 
+/// Makes a temporary engine folder whose `engine.db` is in WAL and written in it, as an engine
+/// leaves it. The macOS system SQLite refuses a writer at once in a rollback journal while a
+/// read-only connection holds a read, and refuses read-only connections on a WAL file never
+/// written in WAL. No engine on a disk that takes WAL meets either; the engine does not check
+/// that WAL took. Output: the folder's guard and its canonical path.
 fn root() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mode: String = database
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    database
+        .execute_batch("CREATE TABLE written_in_wal(x); DROP TABLE written_in_wal;")
+        .unwrap();
     (directory, root)
 }
 
@@ -45,16 +60,53 @@ fn with_project(root: &Path, folder: &Path) -> ProjectId {
     project
 }
 
-fn read(root: &Path, project: Option<ProjectId>) -> Result<Option<String>, EngineError> {
-    run(root, None, Action::Read { project }, None)
+fn read(root: &Path, project: Option<ProjectId>) -> Result<ProcessText, EngineError> {
+    match run(root, Action::Read { project }, None)? {
+        Answer::Current(current) => Ok(current),
+        _ => panic!("a read answers the text and its version"),
+    }
 }
 
 fn save(
     root: &Path,
     project: Option<ProjectId>,
     text: &str,
-) -> Result<Option<String>, EngineError> {
-    run(root, None, Action::Save { project }, Some(text.into()))
+    version: u64,
+) -> Result<SavedText, EngineError> {
+    keep(root, project, text, version, None)
+}
+
+fn keep(
+    root: &Path,
+    project: Option<ProjectId>,
+    text: &str,
+    version: u64,
+    opened: Option<u64>,
+) -> Result<SavedText, EngineError> {
+    let action = Action::Save {
+        project,
+        version,
+        opened,
+    };
+    match run(root, action, Some(text.into()))? {
+        Answer::Saved(saved) => Ok(saved),
+        _ => panic!("a save answers saved or stale"),
+    }
+}
+
+fn answered(answer: Answer) -> String {
+    match answer {
+        Answer::Text(text) => text,
+        Answer::Current(current) => current.text,
+        _ => panic!("the request answers a text"),
+    }
+}
+
+fn shown(text: &str, version: u64) -> ProcessText {
+    ProcessText {
+        text: text.into(),
+        version,
+    }
 }
 
 #[test]
@@ -64,25 +116,39 @@ fn the_app_and_a_project_text_are_saved_and_read_through_the_protocol() {
     fs::create_dir_all(folder.join(".crazyagent")).unwrap();
     let project = with_project(&root, &folder);
 
-    assert_eq!(read(&root, None).unwrap().as_deref(), Some(""));
-    assert_eq!(save(&root, None, "App rule.\n").unwrap(), None);
-    assert_eq!(read(&root, None).unwrap().as_deref(), Some("App rule.\n"));
-
-    assert_eq!(
-        read(&root, Some(project.clone())).unwrap().as_deref(),
-        Some("")
+    assert_eq!(read(&root, None).unwrap(), shown("", 0));
+    let saved = save(&root, None, "App rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            saved,
+            SavedText::Saved {
+                version: 1,
+                size: Some(_)
+            }
+        ),
+        "{saved:?}"
     );
-    assert_eq!(
-        save(&root, Some(project.clone()), "Project rule.\n").unwrap(),
-        None
+    assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
+
+    assert_eq!(read(&root, Some(project.clone())).unwrap(), shown("", 0));
+    let saved = save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            saved,
+            SavedText::Saved {
+                version: 1,
+                size: Some(_)
+            }
+        ),
+        "{saved:?}"
     );
     assert_eq!(
         fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
         "Project rule.\n"
     );
     assert_eq!(
-        read(&root, Some(project)).unwrap().as_deref(),
-        Some("Project rule.\n")
+        read(&root, Some(project)).unwrap(),
+        shown("Project rule.\n", 1)
     );
     let unknown = ProjectId::new("not-set-up").unwrap();
     assert_eq!(
@@ -99,13 +165,14 @@ fn the_global_instructions_are_read_only_on_the_explicit_import() {
     fs::write(home.join(".claude/CLAUDE.md"), "OWNER-GLOBAL-RULE\n").unwrap();
 
     for action in [Action::Read { project: None }, Action::Default] {
-        let text = run(&root, Some(&home), action, None).unwrap().unwrap();
+        let text = answered(run(&root, action, None).unwrap());
         assert!(!text.contains("OWNER-GLOBAL-RULE"));
     }
     assert_eq!(crate::agent_home::read_app(&root).unwrap(), "");
 
-    let imported = run(&root, Some(&home), Action::ImportGlobal, None).unwrap();
-    assert_eq!(imported.as_deref(), Some("OWNER-GLOBAL-RULE\n"));
+    let path = home.join(".claude/CLAUDE.md");
+    let imported = answered(run(&root, Action::ReadFile { path }, None).unwrap());
+    assert_eq!(imported, "OWNER-GLOBAL-RULE\n");
     assert_eq!(
         crate::agent_home::read_app(&root).unwrap(),
         "",
@@ -114,15 +181,15 @@ fn the_global_instructions_are_read_only_on_the_explicit_import() {
 
     let empty = root.join("empty");
     fs::create_dir_all(&empty).unwrap();
+    let path = empty.join(".claude/CLAUDE.md");
     assert_eq!(
-        run(&root, Some(&empty), Action::ImportGlobal, None)
-            .unwrap_err()
-            .0,
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
         "process_import_missing"
     );
+    let path = PathBuf::from("relative/CLAUDE.md");
     assert_eq!(
-        run(&root, None, Action::ImportGlobal, None).unwrap_err().0,
-        "process_import_missing"
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
+        "process_request_invalid"
     );
 }
 
@@ -136,17 +203,14 @@ fn an_import_follows_the_owners_linked_global_file() {
     fs::create_dir_all(&dotfiles).unwrap();
     fs::write(dotfiles.join("AGENTS.md"), "LINKED-RULE\n").unwrap();
     std::os::unix::fs::symlink(dotfiles.join("AGENTS.md"), home.join(".claude/CLAUDE.md")).unwrap();
+    let path = home.join(".claude/CLAUDE.md");
     assert_eq!(
-        run(&root, Some(&home), Action::ImportGlobal, None)
-            .unwrap()
-            .as_deref(),
-        Some("LINKED-RULE\n")
+        answered(run(&root, Action::ReadFile { path: path.clone() }, None).unwrap()),
+        "LINKED-RULE\n"
     );
     fs::write(dotfiles.join("AGENTS.md"), "a".repeat(TEXT_BYTES_MAX + 1)).unwrap();
     assert_eq!(
-        run(&root, Some(&home), Action::ImportGlobal, None)
-            .unwrap_err()
-            .0,
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
         "process_text_too_large"
     );
 }
@@ -154,7 +218,7 @@ fn an_import_follows_the_owners_linked_global_file() {
 #[test]
 fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
     let (_directory, root) = root();
-    let text = run(&root, None, Action::Default, None).unwrap().unwrap();
+    let text = answered(run(&root, Action::Default, None).unwrap());
     assert_eq!(text, crate::agent_home::DEFAULT_PROCESS);
     crate::agent_home::validate(&text).unwrap();
     assert!(!text.contains('\u{2014}'), "no em dash");
@@ -196,19 +260,25 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
 fn a_mismatched_or_oversized_request_is_refused() {
     let (_directory, root) = root();
     assert_eq!(
-        run(&root, None, Action::Save { project: None }, None)
-            .unwrap_err()
-            .0,
+        run(
+            &root,
+            Action::Save {
+                project: None,
+                version: 0,
+                opened: None
+            },
+            None
+        )
+        .unwrap_err()
+        .0,
         "process_request_invalid"
     );
     assert_eq!(
-        run(&root, None, Action::Default, Some("x".into()))
-            .unwrap_err()
-            .0,
+        run(&root, Action::Default, Some("x".into())).unwrap_err().0,
         "process_request_invalid"
     );
     assert_eq!(
-        save(&root, None, &"a".repeat(TEXT_BYTES_MAX + 1))
+        save(&root, None, &"a".repeat(TEXT_BYTES_MAX + 1), 0)
             .unwrap_err()
             .0,
         "process_text_too_large"
@@ -238,45 +308,571 @@ fn a_mismatched_or_oversized_request_is_refused() {
     );
 }
 
+fn kept_over(root: &Path, project: Option<&ProjectId>) -> Vec<crate::storage::versioned::Force> {
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let tx = connection.unchecked_transaction().unwrap();
+    crate::storage::versioned::forces(&tx, &crate::storage::versioned::process_text_item(project))
+        .unwrap()
+}
+
 #[test]
-fn saves_at_once_each_read_back_the_settings_they_stored() {
-    use crate::instruction_files::Choice;
+fn stale_process_text_save_is_refused() {
     let (_directory, root) = root();
     let folder = root.join("project");
-    fs::create_dir_all(&folder).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
     let project = with_project(&root, &folder);
-    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+
+    for scope in [None, Some(project.clone())] {
+        let opened = read(&root, scope.clone()).unwrap();
+        assert_eq!(opened, shown("", 0));
+        let saved = save(&root, scope.clone(), "Desktop rule.\n", opened.version).unwrap();
+        assert!(
+            matches!(
+                saved,
+                SavedText::Saved {
+                    version: 1,
+                    size: Some(_)
+                }
+            ),
+            "{saved:?}"
+        );
+        assert_eq!(
+            save(&root, scope.clone(), "TUI rule.\n", opened.version).unwrap(),
+            SavedText::Stale {
+                version: 0,
+                current: shown("Desktop rule.\n", 1),
+                writer: LastWriter::Owner,
+            },
+            "the second client is shown the text saved since it opened"
+        );
+        assert_eq!(
+            read(&root, scope.clone()).unwrap(),
+            shown("Desktop rule.\n", 1),
+            "a refused save changes nothing"
+        );
+        assert!(kept_over(&root, scope.as_ref()).is_empty());
+
+        for opened in [1, 2] {
+            assert_eq!(
+                keep(&root, scope.clone(), "TUI rule.\n", 1, Some(opened))
+                    .unwrap_err()
+                    .0,
+                "process_request_invalid",
+                "Keep mine is only for a version newer than the one opened"
+            );
+        }
+        let kept = keep(&root, scope.clone(), "TUI rule.\n", 1, Some(0)).unwrap();
+        assert!(
+            matches!(
+                kept,
+                SavedText::Saved {
+                    version: 2,
+                    size: Some(_)
+                }
+            ),
+            "Keep mine writes over the version the conflict showed: {kept:?}"
+        );
+        assert_eq!(read(&root, scope.clone()).unwrap(), shown("TUI rule.\n", 2));
+        let records = kept_over(&root, scope.as_ref());
+        assert_eq!(records.len(), 1, "Keep mine is recorded");
+        assert_eq!(
+            (
+                records[0].replaced_version,
+                &records[0].replaced_writer,
+                records[0].version
+            ),
+            (1, &LastWriter::Owner, 2)
+        );
+        assert!(
+            matches!(
+                keep(&root, scope.clone(), "Late rule.\n", 1, Some(0)).unwrap(),
+                SavedText::Stale {
+                    version: 1,
+                    current: ProcessText { version: 2, .. },
+                    ..
+                }
+            ),
+            "Keep mine never writes over a version it was not shown"
+        );
+        assert_eq!(kept_over(&root, scope.as_ref()).len(), 1);
+    }
+    assert_eq!(crate::agent_home::read_app(&root).unwrap(), "TUI rule.\n");
+    assert_eq!(
+        fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+        "TUI rule.\n"
+    );
+
+    let racers = 6;
+    let start = Barrier::new(racers);
+    let results: Vec<SavedText> = std::thread::scope(|threads| {
+        let runs: Vec<_> = (0..racers)
+            .map(|index| {
+                let (root, start) = (&root, &start);
+                threads.spawn(move || {
+                    start.wait();
+                    save(root, None, &format!("Racer {index}.\n"), 2).unwrap()
+                })
+            })
+            .collect();
+        runs.into_iter().map(|run| run.join().unwrap()).collect()
+    });
+    let won: Vec<usize> = (0..racers)
+        .filter(|index| matches!(results[*index], SavedText::Saved { version: 3, .. }))
+        .collect();
+    assert_eq!(won.len(), 1, "two saves never both win: {results:?}");
+    let winner = format!("Racer {}.\n", won[0]);
+    for (index, result) in results.iter().enumerate() {
+        if index != won[0] {
+            assert_eq!(
+                result,
+                &SavedText::Stale {
+                    version: 2,
+                    current: shown(&winner, 3),
+                    writer: LastWriter::Owner,
+                },
+                "every other save is shown the winner's text"
+            );
+        }
+    }
+    assert_eq!(read(&root, None).unwrap(), shown(&winner, 3));
+
+    fs::remove_dir_all(folder.join(".crazyagent")).unwrap();
+    assert_eq!(
+        save(&root, Some(project.clone()), "Lost rule.\n", 2)
+            .unwrap_err()
+            .0,
+        "process_project_folder_missing"
+    );
+    assert_eq!(
+        read(&root, Some(project)).unwrap(),
+        shown("", 2),
+        "a save whose file could not be written keeps the version"
+    );
+}
+
+fn agent_read(root: &Path, project: &ProjectId, agent: i64) -> Result<ProcessText, EngineError> {
+    let action = Action::AgentText {
+        project: project.clone(),
+        agent,
+    };
+    match run(root, action, None)? {
+        Answer::Current(current) => Ok(current),
+        _ => panic!("an agent text read answers the text and its version"),
+    }
+}
+
+fn agent_save(
+    root: &Path,
+    project: &ProjectId,
+    agent: i64,
+    text: &str,
+    version: u64,
+    opened: Option<u64>,
+) -> Result<SavedText, EngineError> {
+    let action = Action::SaveAgentText {
+        project: project.clone(),
+        agent,
+        version,
+        opened,
+    };
+    match run(root, action, Some(text.into()))? {
+        Answer::Saved(saved) => Ok(saved),
+        _ => panic!("an agent text save answers saved or stale"),
+    }
+}
+
+#[test]
+fn stale_agent_instructions_save_is_refused() {
+    use crate::storage::{agent_text, versioned};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let agent = team_agent(&root, project.as_str(), "sub", "codex");
+    let elsewhere = team_agent(&root, "process-2", "sub", "codex");
+
+    assert_eq!(agent_read(&root, &project, agent).unwrap(), shown("", 0));
+    let parser = "Only touch the parser.\n";
+    assert_eq!(
+        agent_save(&root, &project, agent, parser, 0, None).unwrap(),
+        SavedText::Saved {
+            version: 1,
+            size: None
+        }
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Write the docs.\n", 0, None).unwrap(),
+        SavedText::Stale {
+            version: 0,
+            current: shown(parser, 1),
+            writer: LastWriter::Owner,
+        },
+        "a save from a screen opened before the last save is shown that save"
+    );
+    assert_eq!(
+        agent_read(&root, &project, agent).unwrap(),
+        shown(parser, 1)
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Write the docs.\n", 1, Some(1))
+            .unwrap_err()
+            .0,
+        "process_request_invalid"
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Write the docs.\n", 1, Some(0)).unwrap(),
+        SavedText::Saved {
+            version: 2,
+            size: None
+        },
+        "Keep mine writes over the version the conflict showed"
+    );
+    let item = versioned::agent_instructions_item(&project, agent);
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let tx = connection.unchecked_transaction().unwrap();
+        let records = versioned::forces(&tx, &item).unwrap();
+        assert_eq!(
+            (
+                records.len(),
+                records[0].replaced_version,
+                records[0].version
+            ),
+            (1, 1, 2),
+            "Keep mine is recorded"
+        );
+    }
+
+    let mut connection = versioned::open(&root).unwrap();
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let from_agent = versioned::Writer::Agent(crate::terminal::AgentId::team(agent).unwrap());
+    assert_eq!(
+        agent_text::save(&tx, &project, agent, "Agent edit.\n", 1, &from_agent),
+        Err(versioned::Refusal::Stale(versioned::Stale {
+            version: 1,
+            current: 2,
+            writer: LastWriter::Owner,
+        })),
+        "an agent writing over a version it did not read is refused"
+    );
+    assert_eq!(
+        agent_text::read(&tx, &project, agent).unwrap(),
+        ("Write the docs.\n".to_owned(), 2)
+    );
+    drop(tx);
+
+    for (asked, code) in [
+        (elsewhere, "process_agent_unknown"),
+        (agent + 100, "process_agent_unknown"),
+        (0, "process_request_invalid"),
+    ] {
+        assert_eq!(agent_read(&root, &project, asked).unwrap_err().0, code);
+        assert_eq!(
+            agent_save(&root, &project, asked, "x", 0, None)
+                .unwrap_err()
+                .0,
+            code
+        );
+    }
+    assert_eq!(
+        agent_save(
+            &root,
+            &project,
+            agent,
+            &"a".repeat(TEXT_BYTES_MAX + 1),
+            2,
+            None
+        )
+        .unwrap_err()
+        .0,
+        "process_text_too_large"
+    );
+    assert_eq!(
+        agent_read(&root, &project, agent).unwrap(),
+        shown("Write the docs.\n", 2),
+        "a refused save changes nothing"
+    );
+
+    let given = crate::agent_home::with_agent(
+        crate::agent_home::render("App rule.", "Project rule."),
+        "Write the docs.\n",
+    );
+    let (app, own, mine) = (
+        given.find("App rule.").unwrap(),
+        given.find("Project rule.").unwrap(),
+        given.find("Write the docs.").unwrap(),
+    );
+    assert!(
+        app < own && own < mine,
+        "the agent's own text comes last: {given}"
+    );
+    assert!(given.contains("## Instructions for this agent"));
+
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    agent_text::forget_project(&tx, &project).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        agent_read(&root, &project, agent).unwrap(),
+        shown("", 0),
+        "a removed project leaves no agent text or version behind"
+    );
+}
+
+#[test]
+fn the_store_under_test_runs_the_journal_mode_the_engine_keeps_it_in() {
+    let (_directory, root) = root();
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mode: String = database
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+}
+
+/// Saves made at once from six screens each name the version they read: a save lands only
+/// on the version it read and reads back what it stored at the next one, every other save
+/// is refused as stale, and the stored version counts exactly the saves that landed (Q35).
+#[test]
+fn saves_at_once_land_only_on_the_version_they_read() {
+    use crate::instruction_files::{EditDelivery, Mode};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    let options: Vec<InstructionSettings> = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
-        .flat_map(|files| {
-            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
+        .flat_map(|mode| [true, false].map(|transcripts| (mode, transcripts)))
+        .zip(
+            [
+                EditDelivery::NextMessage,
+                EditDelivery::Restart,
+                EditDelivery::Badge,
+            ]
+            .into_iter()
+            .cycle(),
+        )
+        .map(|((mode, transcripts), edits)| InstructionSettings {
+            mode,
+            transcripts,
+            edits,
         })
         .collect();
     assert_eq!(options.len(), 6);
-    let start = std::sync::Barrier::new(options.len());
-    std::thread::scope(|scope| {
+    let start = Barrier::new(options.len());
+    let landed: u64 = std::thread::scope(|scope| {
         let saves: Vec<_> = options
             .iter()
             .map(|&settings| {
                 let (root, project, start) = (&root, &project, &start);
                 scope.spawn(move || {
                     start.wait();
+                    let mut landed = 0_u64;
                     for _ in 0..100 {
-                        assert_eq!(
-                            instruction_settings(root, project, Some(settings)),
-                            Ok(settings)
-                        );
+                        let read = instruction_settings(root, project, None).unwrap();
+                        match instruction_settings(
+                            root,
+                            project,
+                            Some((settings, Some(read.version))),
+                        ) {
+                            Ok(saved) => {
+                                assert_eq!(
+                                    saved,
+                                    InstructionView {
+                                        settings,
+                                        version: read.version + 1
+                                    }
+                                );
+                                landed += 1;
+                            }
+                            Err(refused) => assert_eq!(refused.0, versioned::STALE_CODE),
+                        }
                     }
+                    landed
                 })
             })
             .collect();
-        for save in saves {
-            save.join()
-                .expect("every save reads back what it stored, whatever saves beside it");
-        }
+        saves
+            .into_iter()
+            .map(|save| {
+                save.join()
+                    .expect("every save lands on the version it read or is refused as stale")
+            })
+            .sum()
     });
-    assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
+    assert!(
+        landed >= 1,
+        "a save on the version no other save moved always lands"
+    );
+    let now = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(now.version, landed);
+    assert!(options.contains(&now.settings));
 }
 
+/// A save from an older version is refused as stale and leaves the stored settings and
+/// version as they were; a save naming no version is refused while the stored settings are
+/// readable and replaces them, at the next version, once they are not (Q35).
+#[test]
+fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_save_with_no_version()
+{
+    use crate::instruction_files::{EditDelivery, Mode};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(
+        fresh,
+        InstructionView {
+            settings: InstructionSettings::default(),
+            version: 0
+        }
+    );
+    let none = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        transcripts: false,
+        edits: EditDelivery::Restart,
+    };
+    let saved = instruction_settings(&root, &project, Some((none, Some(0)))).unwrap();
+    assert_eq!(
+        saved,
+        InstructionView {
+            settings: none,
+            version: 1
+        }
+    );
+    let user = InstructionSettings {
+        mode: Mode::AppOnly,
+        transcripts: true,
+        edits: EditDelivery::Badge,
+    };
+    assert_eq!(
+        instruction_settings(&root, &project, Some((user, Some(0))))
+            .unwrap_err()
+            .0,
+        versioned::STALE_CODE
+    );
+    assert_eq!(
+        instruction_settings(&root, &project, Some((user, None)))
+            .unwrap_err()
+            .0,
+        versioned::STALE_CODE,
+        "readable settings are never replaced by a save that read no version"
+    );
+    assert_eq!(instruction_settings(&root, &project, None).unwrap(), saved);
+
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_instruction_settings SET mode='bogus' WHERE project=?1",
+            [project.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        instruction_settings(&root, &project, None).unwrap_err().0,
+        "instruction_settings_invalid"
+    );
+    assert_eq!(
+        instruction_settings(&root, &project, Some((user, None))).unwrap(),
+        InstructionView {
+            settings: user,
+            version: 2
+        },
+        "unreadable settings are replaced at the next version"
+    );
+    assert_eq!(
+        instruction_settings(&root, &project, Some((none, None)))
+            .unwrap_err()
+            .0,
+        versioned::STALE_CODE
+    );
+}
+
+#[test]
+fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_when_saved_again() {
+    use crate::instruction_files::{EditDelivery, Mode};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let agent = team_agent(&root, project.as_str(), "sub", "codex");
+    let settings = InstructionSettings {
+        mode: Mode::AppOnly,
+        transcripts: true,
+        edits: EditDelivery::Badge,
+    };
+    assert_ne!(settings, InstructionSettings::default());
+    let save_settings = || -> Result<InstructionView, EngineError> {
+        let action = Action::SaveSettings {
+            project: project.clone(),
+            settings,
+            version: Some(0),
+        };
+        match run(&root, action, None)? {
+            Answer::Settings(view) => Ok(view),
+            _ => panic!("a settings save answers the settings"),
+        }
+    };
+    let writer = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(
+        save(&root, None, "App rule.\n", 0).unwrap_err().0,
+        "process_save_unavailable"
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Only touch the parser.\n", 0, None)
+            .unwrap_err()
+            .0,
+        "process_save_unavailable"
+    );
+    assert_eq!(
+        save_settings().unwrap_err().0,
+        "instruction_settings_save_unavailable"
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+
+    assert_eq!(
+        read(&root, None).unwrap(),
+        shown("", 0),
+        "nothing was saved"
+    );
+    assert_eq!(agent_read(&root, &project, agent).unwrap(), shown("", 0));
+    assert_eq!(
+        instruction_settings(&root, &project, None).unwrap(),
+        InstructionView {
+            settings: InstructionSettings::default(),
+            version: 0
+        }
+    );
+    let saved = save(&root, None, "App rule.\n", 0).unwrap();
+    assert!(
+        matches!(saved, SavedText::Saved { version: 1, .. }),
+        "saving again lands: {saved:?}"
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Only touch the parser.\n", 0, None).unwrap(),
+        SavedText::Saved {
+            version: 1,
+            size: None
+        }
+    );
+    assert_eq!(
+        save_settings().unwrap(),
+        InstructionView {
+            settings,
+            version: 1
+        }
+    );
+}
+
+#[cfg(unix)]
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::team::initialize(&connection).unwrap();
@@ -341,14 +937,12 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     };
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
         files: Vec::new(),
         section_bytes: 0,
-        context: Vec::new(),
     };
     let sub_home = launched_home(&root, sub);
     prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
@@ -450,7 +1044,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
 #[test]
 fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
     use crate::agent_home::{AgentProject, Given, Harness, prepare};
-    use crate::instruction_files::{Choice, Record, State};
+    use crate::instruction_files::{Mode, Record, State};
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
@@ -473,14 +1067,12 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         text: "# Rules\n".into(),
         files: files.clone(),
         section_bytes: 0,
-        context: Vec::new(),
     };
     let launch = AgentProject {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: Choice::Project,
-        owner_home: None,
+        mode: Mode::Both,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
     assert_eq!(
@@ -523,14 +1115,12 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     };
     let given = Given {
         text: "# Rules\n".into(),
         files: Vec::new(),
         section_bytes: 0,
-        context: Vec::new(),
     };
     prepare(&home, Harness::Codex, &launch, &given).unwrap();
     record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
@@ -595,10 +1185,255 @@ fn a_received_payload_holds_the_rendered_bound() {
     );
 }
 
-/// Reads the plain codes a source file refuses with, before its tests.
-/// Input: the file text. Output: each `process_` code once.
+fn given(root: &Path, project: &ProjectId) -> Result<String, EngineError> {
+    run(
+        root,
+        Action::Given {
+            project: project.clone(),
+        },
+        None,
+    )
+    .map(answered)
+}
+
+/// What the Process page shows as what agents read is what a launch gives them now: the
+/// engine's own render for the project's mode, with its title and headings. A part the
+/// engine cannot read refuses the read with that part's code, so the page never shows the
+/// rest as all of it.
+#[test]
+fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "  Project rule.\n\n", 0).unwrap();
+    let both = given(&root, &project).unwrap();
+    assert_eq!(
+        both,
+        crate::agent_home::render("App rule.\n", "  Project rule.\n\n")
+    );
+    assert!(
+        both.starts_with("# Instructions from CrazyAgent\n") && both.contains("Project rule.\n"),
+        "{both}"
+    );
+    let mut version = instruction_settings(&root, &project, None).unwrap().version;
+    for (mode, app, own) in [
+        (Mode::ProjectOnly, "", "  Project rule.\n\n"),
+        (Mode::AppOnly, "App rule.\n", ""),
+        (Mode::Both, "App rule.\n", "  Project rule.\n\n"),
+    ] {
+        let settings = InstructionSettings {
+            mode,
+            ..InstructionSettings::default()
+        };
+        version = instruction_settings(&root, &project, Some((settings, Some(version))))
+            .unwrap()
+            .version;
+        assert_eq!(
+            given(&root, &project).unwrap(),
+            crate::agent_home::render(app, own),
+            "{mode:?}"
+        );
+    }
+    let app = root.join(crate::agent_home::APP_FILE);
+    fs::remove_file(&app).unwrap();
+    fs::write(root.join("elsewhere.md"), "Other rule.\n").unwrap();
+    std::os::unix::fs::symlink(root.join("elsewhere.md"), &app).unwrap();
+    assert_eq!(given(&root, &project).unwrap_err().0, "process_text_unsafe");
+    let unknown = ProjectId::new("not-set-up").unwrap();
+    assert_eq!(
+        given(&root, &unknown).unwrap_err().0,
+        "process_project_unknown"
+    );
+}
+
+/// The refusal a save gets when the project's agents would get no instructions after it.
+const NONE_GIVEN_CODE: &str = "process_instructions_would_be_empty";
+
+/// Saves one project's Delivery mode at the version read, keeping its other settings.
+/// Inputs: the engine root, the project and the mode. Output: what the save answered.
+fn switch(
+    root: &Path,
+    project: &ProjectId,
+    mode: crate::instruction_files::Mode,
+) -> Result<InstructionView, EngineError> {
+    let read = instruction_settings(root, project, None).unwrap();
+    let settings = InstructionSettings {
+        mode,
+        ..read.settings
+    };
+    instruction_settings(root, project, Some((settings, Some(read.version))))
+}
+
+/// A Delivery switch after which the project's agents would get no instructions at all is
+/// refused by the engine, whichever client sends it, and changes nothing: Project only on
+/// an empty project file, App only on an empty app text. A change that keeps the mode, and
+/// a switch to a mode whose text is there, still save.
+#[test]
+fn a_delivery_switch_that_leaves_agents_no_instructions_is_refused() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    let quiet = InstructionSettings {
+        transcripts: !fresh.settings.transcripts,
+        ..fresh.settings
+    };
+    let kept = instruction_settings(&root, &project, Some((quiet, Some(fresh.version)))).unwrap();
+    assert_eq!(kept.settings, quiet, "a change that keeps the mode saves");
+
+    save(&root, None, "App rule.\n", 0).unwrap();
+    let before = instruction_settings(&root, &project, None).unwrap();
+    let given_before = given(&root, &project).unwrap();
+    assert_eq!(given_before, crate::agent_home::render("App rule.\n", ""));
+    assert_eq!(
+        switch(&root, &project, Mode::ProjectOnly),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Project only on an empty project file"
+    );
+    assert_eq!(instruction_settings(&root, &project, None).unwrap(), before);
+    assert_eq!(given(&root, &project).unwrap(), given_before);
+
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert_eq!(
+        switch(&root, &project, Mode::ProjectOnly)
+            .unwrap()
+            .settings
+            .mode,
+        Mode::ProjectOnly,
+        "Project only saves once the project file has text"
+    );
+    assert!(
+        matches!(
+            save(&root, None, "", 1),
+            Ok(SavedText::Saved { version: 2, .. })
+        ),
+        "an app text no agent of the project reads may be cleared"
+    );
+    let before = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(
+        switch(&root, &project, Mode::AppOnly),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "App only on an empty app text"
+    );
+    assert_eq!(instruction_settings(&root, &project, None).unwrap(), before);
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("", "Project rule.\n")
+    );
+}
+
+/// An app text save after which a project's agents would get no instructions at all is
+/// refused and keeps the saved text and its version: a blank app text under App only, or
+/// under Both on an empty project file. With the project's own text there, the app text
+/// may be cleared.
+#[test]
+fn an_app_text_save_that_leaves_agents_no_instructions_is_refused() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    switch(&root, &project, Mode::AppOnly).unwrap();
+    for blank in ["", " \n\n"] {
+        assert_eq!(
+            save(&root, None, blank, 1),
+            Err(EngineError(NONE_GIVEN_CODE.into())),
+            "App only: {blank:?}"
+        );
+    }
+    assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
+
+    switch(&root, &project, Mode::Both).unwrap();
+    assert_eq!(
+        save(&root, None, "", 1),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Both on an empty project file"
+    );
+    assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("App rule.\n", "")
+    );
+
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            save(&root, None, "", 1),
+            Ok(SavedText::Saved { version: 2, .. })
+        ),
+        "with the project's own text the app text may be cleared"
+    );
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("", "Project rule.\n")
+    );
+}
+
+/// A project text save after which the project's agents would get no instructions at all
+/// is refused by the engine, which knows the mode even when the page could not read it: a
+/// blank text under Project only, or under Both with an empty app text. A project text the
+/// mode does not give may be cleared.
+#[test]
+fn a_project_text_save_that_leaves_agents_no_instructions_is_refused() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    switch(&root, &project, Mode::ProjectOnly).unwrap();
+    assert_eq!(
+        save(&root, Some(project.clone()), "", 1),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Project only"
+    );
+    assert_eq!(
+        read(&root, Some(project.clone())).unwrap(),
+        shown("Project rule.\n", 1)
+    );
+
+    switch(&root, &project, Mode::Both).unwrap();
+    assert_eq!(
+        save(&root, Some(project.clone()), "\n", 1),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Both with an empty app text"
+    );
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("", "Project rule.\n")
+    );
+
+    save(&root, None, "App rule.\n", 0).unwrap();
+    switch(&root, &project, Mode::AppOnly).unwrap();
+    assert!(
+        matches!(
+            save(&root, Some(project.clone()), "", 1),
+            Ok(SavedText::Saved { version: 2, .. })
+        ),
+        "App only does not give the project text, so it may be cleared"
+    );
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("App rule.\n", "")
+    );
+}
+
+/// Reads the plain codes a source file refuses with, before its tests, whichever of
+/// `#[cfg(test)]` or `#[cfg(all(test, ...))]` gates them. Input: the file text. Output:
+/// each `process_` code once.
 fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
-    let code = source.split("#[cfg(test)]").next().unwrap();
+    let end = ["#[cfg(test)]", "#[cfg(all(test"]
+        .into_iter()
+        .filter_map(|gate| source.find(gate))
+        .min()
+        .unwrap_or(source.len());
+    let code = &source[..end];
     ["\"process_", "\"agent_instructions_"]
         .into_iter()
         .flat_map(|prefix| code.match_indices(prefix))
@@ -611,13 +1446,21 @@ fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
 
 #[test]
 fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
-    let found: std::collections::BTreeSet<&str> = [
+    let (prefixes, found): (
+        std::collections::BTreeSet<&str>,
+        std::collections::BTreeSet<&str>,
+    ) = [
         include_str!("../../../agent_home.rs"),
         include_str!("process.rs"),
     ]
     .into_iter()
     .flat_map(refusals)
-    .collect();
+    .partition(|literal| literal.ends_with('_'));
+    assert_eq!(
+        prefixes,
+        std::collections::BTreeSet::from(["agent_instructions_too_large_"]),
+        "the one prefix builds launch refusals, which the Process page never answers with"
+    );
     assert!(found.len() >= 12);
     for code in &found {
         assert!(
@@ -629,4 +1472,159 @@ fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted, PROCESS_CODES);
+}
+
+#[cfg(unix)]
+#[test]
+fn process_adoption_round_trip() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let unknown = ProjectId::new("never-set-up").unwrap();
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+    }
+    let project = with_project(&root, &folder);
+    let master = team_agent(&root, project.as_str(), "master", "claude-code");
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    team_agent(&root, "another-project", "sub", "codex");
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        for _ in 0..2 {
+            crate::coord::record_tool(&connection, sub, "graphify", 5).unwrap();
+        }
+        crate::coord::record_tool(&connection, sub, "ctx_execute", 5).unwrap();
+        crate::coord::record_tool(&connection, master, "Edit", 5).unwrap();
+        crate::coord::record_tool(&connection, sub, "skill:tdd", 5).unwrap();
+        let skill = |id: &str, name: &str, scope: serde_json::Value, key: &str, enabled: bool| {
+            let folder = format!("plugins/skills/{id}/{name}");
+            fs::create_dir_all(root.join(&folder)).unwrap();
+            fs::write(
+                root.join(&folder).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: The {name} rule.\n---\n"),
+            )
+            .unwrap();
+            let body = serde_json::json!({
+                "id": id,
+                "name": name,
+                "description": format!("The {name} rule."),
+                "scope": scope,
+                "enabled": enabled,
+                "source": format!("/owner/skills/{name}"),
+                "folder": folder,
+            });
+            connection
+                .execute(
+                    "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES(?1,'skill',?2,?3,?4)",
+                    rusqlite::params![id, key, name, body.to_string()],
+                )
+                .unwrap();
+        };
+        let own = serde_json::json!({"kind": "project", "project_id": project.as_str()});
+        let elsewhere = serde_json::json!({"kind": "project", "project_id": "another-project"});
+        skill(
+            "s1",
+            "zeta",
+            serde_json::json!({"kind": "global"}),
+            "global",
+            true,
+        );
+        skill("s2", "tdd", own, "project:process-1", true);
+        skill(
+            "s3",
+            "off",
+            serde_json::json!({"kind": "global"}),
+            "global",
+            false,
+        );
+        skill("s4", "theirs", elsewhere, "project:another-project", true);
+    }
+
+    let view = adoption(&root, &project).unwrap();
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "nudges are off by default (DEC-111 Q4)"
+    );
+    assert_eq!(
+        view.counted,
+        crate::coord::settings::COUNTED_TOOLS_DEFAULT
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(
+        view.agents
+            .iter()
+            .map(|row| (row.agent, row.harness.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(sub, "codex"), (master, "claude-code")],
+        "the project's own agents, newest first"
+    );
+    assert_eq!(
+        (view.agents[0].graphify, view.agents[0].context_mode),
+        (2, 1)
+    );
+    assert_eq!(
+        (view.agents[1].graphify, view.agents[1].context_mode),
+        (0, 0)
+    );
+    assert_eq!(
+        view.skills,
+        vec!["tdd".to_owned(), "zeta".to_owned()],
+        "the project's enabled skills, its own and global ones, by name"
+    );
+    assert_eq!(view.agents[0].skills, vec![1, 0]);
+    assert_eq!(view.agents[1].skills, vec![0, 0]);
+    assert!(
+        view.agents
+            .iter()
+            .all(|row| row.counts.len() == view.counted.len())
+    );
+
+    let request: Envelope = serde_json::from_value(serde_json::json!({
+        "process": {"kind": "adoption", "project": project.as_str()},
+        "text_bytes": null
+    }))
+    .unwrap();
+    assert!(
+        matches!(request.process, Action::Adoption { project: ref asked } if *asked == project)
+    );
+    let wire = serde_json::to_vec(&Reply::Adoption {
+        adoption: view.clone(),
+    })
+    .unwrap();
+    match serde_json::from_slice::<Reply>(&wire).unwrap() {
+        Reply::Adoption { adoption } => assert_eq!(adoption, view),
+        _ => panic!("an adoption reply reads back as one"),
+    }
+
+    {
+        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        let spec = crate::protocol::ProjectSpec {
+            name: "Process".into(),
+            repositories: vec![],
+        };
+        assert!(matches!(
+            crate::storage::create_project(&tx, &project, &spec).unwrap(),
+            crate::protocol::Outcome::Applied
+        ));
+        tx.commit().unwrap();
+        let on = crate::coord::settings::CoordSettings {
+            nudges: crate::coord::settings::Nudges::TenMinutes,
+            ..Default::default()
+        };
+        crate::coord::settings::write(&connection, &project, &on).unwrap();
+    }
+    assert_eq!(
+        adoption(&root, &project).unwrap().nudges,
+        crate::coord::settings::Nudges::TenMinutes,
+        "the view shows nudges the owner turned on"
+    );
+
+    assert_eq!(
+        adoption(&root, &unknown).unwrap_err().0,
+        "process_project_unknown"
+    );
 }

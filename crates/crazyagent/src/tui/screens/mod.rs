@@ -12,6 +12,7 @@ mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
+pub(in crate::tui) mod planning_line;
 pub(in crate::tui) mod process;
 pub mod profile_form;
 pub(in crate::tui) mod project;
@@ -21,16 +22,11 @@ pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
-#[cfg_attr(
-    not(all(test, unix)),
-    expect(
-        dead_code,
-        reason = "v1-tui-projects plugs the live team view into the project screen"
-    )
-)]
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
+pub(in crate::tui) mod questions;
+pub(in crate::tui) mod recovery_banner;
 pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;
@@ -40,6 +36,8 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod team_messages;
+pub(in crate::tui) mod team_settings;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
@@ -50,6 +48,8 @@ mod new_project_frames;
 #[cfg(all(test, unix))]
 mod new_project_tests;
 #[cfg(all(test, unix))]
+mod planning_line_tests;
+#[cfg(all(test, unix))]
 mod project_access_tests;
 #[cfg(all(test, unix))]
 mod project_frames;
@@ -57,6 +57,8 @@ mod project_frames;
 mod project_page_tests;
 #[cfg(all(test, unix))]
 mod project_tests;
+#[cfg(all(test, unix))]
+mod questions_tests;
 
 use super::ctx::Ctx;
 use super::frame::{Hint, Modal};
@@ -130,17 +132,19 @@ pub enum ProjectTab {
     Conversation,
     Agents,
     Changes,
+    Questions,
     Context,
     Settings,
 }
 
 impl ProjectTab {
     /// Every tab in order.
-    pub const ALL: [ProjectTab; 6] = [
+    pub const ALL: [ProjectTab; 7] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
+        Self::Questions,
         Self::Context,
         Self::Settings,
     ];
@@ -153,6 +157,7 @@ impl ProjectTab {
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
             Self::Changes => "Changes",
+            Self::Questions => "Questions",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }
@@ -184,6 +189,10 @@ pub enum Place {
         first_run: bool,
     },
     Team {
+        id: ProjectId,
+        name: String,
+    },
+    TeamSettings {
         id: ProjectId,
         name: String,
     },
@@ -333,6 +342,34 @@ pub trait Screen {
     fn place(&self) -> Option<Place> {
         None
     }
+
+    /// The project this screen belongs to, so the header can tell that project's waiting
+    /// change sets from the rest. Input: none. Output: the project of `place`, or None
+    /// outside a project.
+    fn project(&self) -> Option<ProjectId> {
+        match self.place()? {
+            Place::Project { id, .. }
+            | Place::Team { id, .. }
+            | Place::TeamSettings { id, .. }
+            | Place::Master { id, .. }
+            | Place::ProjectProcess { id, .. } => Some(id),
+            Place::Onboarding { project, .. } => project,
+            Place::Home
+            | Place::Welcome
+            | Place::Settings(_)
+            | Place::AddAccount
+            | Place::NewPool
+            | Place::NewPoolFrom(_)
+            | Place::EditPool(_)
+            | Place::NewProject
+            | Place::Setup { .. }
+            | Place::HomeFolder { .. }
+            | Place::AddProject
+            | Place::AddFolder
+            | Place::CloneRepo
+            | Place::Usage => None,
+        }
+    }
 }
 
 /// Builds the screen for a place.
@@ -352,6 +389,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::TeamSettings { id, name } => {
+            Box::new(team_settings::TeamSettings::new(id.clone(), name.clone()))
+        }
         Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::ProjectProcess { id, name } => {
             Box::new(process::ProcessPage::new(process::Scope::Project {

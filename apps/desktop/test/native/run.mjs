@@ -22,9 +22,10 @@ const started = new Date().toISOString();
 const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
-const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE ?? "baseline";
-assert(["baseline", "model-access", "model-access-read-only", "native-auth"].includes(suite),
+const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
+assert(["model-access", "model-access-read-only", "native-auth", "pools-screen"].includes(suite),
   "closed native suite required");
+const WEBDRIVER_SECONDS = suite === "pools-screen" ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {
@@ -128,8 +129,7 @@ async function ready(entry) {
     const text = bytes.toString("utf8");
     if (text.includes("\n")) {
       const value = JSON.parse(text.slice(0, text.indexOf("\n")));
-      assert.equal(value.ready, true);
-      assert.match(value.baseline_id, /^[A-Za-z0-9._:-]{1,128}$/);
+      assert.deepEqual(value, { ready: true });
       return value;
     }
     await pause(100);
@@ -203,21 +203,22 @@ async function execute() {
   const binaries = [binary(app), binary(fixture)];
   const env = environment();
   const port = await unusedPort();
+  const projects = join(env.HOME, "Projects");
+  mkdirSync(projects, { mode: 0o700 });
   const engine = launch("engine", fixture,
-    [suite === "model-access" || suite === "native-auth" ? "serve-model-access" : "serve",
-      engineRoot], env, 150);
+    [suite === "model-access-read-only" ? "serve" : "serve-model-access",
+      engineRoot, projects], env, WEBDRIVER_SECONDS + 30);
   let failure = null;
   let code = 1;
   try {
-    const state = await ready(engine);
-    env.CRAZYAGENT_DESKTOP_TEST_BASELINE = state.baseline_id;
+    await ready(engine);
     env.CRAZYAGENT_DESKTOP_TEST_PORT = String(port);
     const test = launch("webdriver", process.execPath,
       ["--import", pathToFileURL(join(appRoot, "test/native/private-log-preload.mjs")).href,
         join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run",
-        suite === "baseline" ? "wdio.conf.mjs" : suite === "native-auth" ?
-          "test/native/native-auth.wdio.conf.mjs" : "test/native/model-access.wdio.conf.mjs"],
-      env, 120);
+        suite === "native-auth" ? "test/native/native-auth.wdio.conf.mjs"
+          : "test/native/model-access.wdio.conf.mjs"],
+      env, WEBDRIVER_SECONDS);
     const result = await test.done;
     assert(!test.reason && result.code !== null, "native test process did not exit normally");
     code = result.code;

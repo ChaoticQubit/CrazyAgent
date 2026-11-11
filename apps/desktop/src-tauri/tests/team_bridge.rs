@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 14] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
@@ -22,6 +22,7 @@ const COMMANDS: [&str; 13] = [
     "desktop_team_keep_warm",
     "desktop_team_time_limits",
     "desktop_team_on_harness_switch",
+    "desktop_team_apply_harness_switch",
     "desktop_team_finished_agents",
     "desktop_team_live_master",
     "desktop_team_pause",
@@ -141,7 +142,8 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         refused.rejection.as_deref(),
         Some("team_harness_not_in_plan")
     );
-    let warm = bridge.team_keep_warm(&id, true, 5).await?;
+    let version = bridge.team_status(&id).await?.settings_version;
+    let warm = bridge.team_keep_warm(&id, true, version, 5).await?;
     assert!(matches!(warm.outcome, ActionOutcome::Applied), "{warm:?}");
 
     let team = bridge.team_status(&id).await?;
@@ -236,8 +238,9 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         (None, None, Some(600)),
         "no time limit and a 10 minute idle stop until the owner sets them"
     );
+    let read = team.settings_version;
     let limited = bridge
-        .team_time_limits(&id, Some(3600), Some(14_400), None, 15)
+        .team_time_limits(&id, Some(3600), Some(14_400), None, read, 15)
         .await?;
     assert!(
         matches!(limited.outcome, ActionOutcome::Applied),
@@ -253,8 +256,16 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         (Some(3600), Some(14_400), None),
         "an idle stop of None is Off"
     );
+    assert_eq!(team.settings_version, read + 1);
     let refused = bridge
-        .team_time_limits(&id, Some(7200), Some(3600), Some(600), 16)
+        .team_time_limits(
+            &id,
+            Some(7200),
+            Some(3600),
+            Some(600),
+            team.settings_version,
+            16,
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -262,6 +273,25 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         ("team_action_invalid", Some("team_time_limits_invalid")),
         "a session limit below the task limit is refused and names the engine's reason"
     );
+    let stale = bridge
+        .team_time_limits(&id, Some(1800), None, Some(120), read, 21)
+        .await?;
+    assert_eq!(
+        stale.rejection.as_deref(),
+        Some("stale_revision"),
+        "time limits saved from the read before the last change are refused"
+    );
+    let team = bridge.team_status(&id).await?;
+    assert_eq!(
+        (
+            team.turn_limit_secs,
+            team.session_limit_secs,
+            team.idle_stop_secs
+        ),
+        (Some(3600), Some(14_400), None),
+        "the newer limits survive a save from an older read"
+    );
+    assert_eq!(team.settings_version, read + 1);
     assert_eq!(
         bridge.team_status("absent-project").await.unwrap_err().code,
         "project_setup_missing"
@@ -473,7 +503,9 @@ async fn crowded(root: &Path) -> Result<(), Box<dyn Error>> {
         matches!(cancelled.outcome, ActionOutcome::Applied),
         "{cancelled:?}"
     );
-    let live = bridge.team_live_master(&id, false, 5).await?;
+    let live = bridge
+        .team_live_master(&id, false, team.settings_version, 5)
+        .await?;
     assert!(matches!(live.outcome, ActionOutcome::Applied), "{live:?}");
     assert!(bridge.team_status(&id).await?.paused);
     Ok(())
@@ -494,6 +526,325 @@ async fn desktop_pauses_and_cancels_a_team_whose_full_status_passes_one_reply() 
         .await
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(30), crowded(root.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+const COORD_COMMANDS: [&str; 6] = [
+    "desktop_tool_switches",
+    "desktop_set_tool_switch",
+    "desktop_restore_tool_switches",
+    "desktop_team_coordination",
+    "desktop_team_harness_mode",
+    "desktop_team_harness_delivery",
+];
+
+#[test]
+fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls_them() {
+    let build = include_str!("../build.rs");
+    let bindings = include_str!("../src/lib.rs");
+    let capability = include_str!("../capabilities/main-window.json");
+    let api = include_str!("../../src/api.ts");
+    for command in COORD_COMMANDS {
+        assert_eq!(
+            build.matches(&format!("\"{command}\"")).count(),
+            1,
+            "{command} build"
+        );
+        assert!(
+            bindings.contains(&format!("async fn {command}(")),
+            "{command} binding"
+        );
+        assert_eq!(
+            bindings
+                .lines()
+                .filter(|line| line.trim() == format!("{command},"))
+                .count(),
+            1,
+            "{command} handler"
+        );
+        let permission = format!("\"allow-{}\"", command.replace('_', "-"));
+        assert_eq!(
+            capability.matches(&permission).count(),
+            1,
+            "{command} capability"
+        );
+        assert!(
+            api.contains(&format!("\"{command}\"")),
+            "{command} web view call"
+        );
+    }
+}
+
+async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::coord::settings::{
+        ClaudeDisplay, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo,
+        RoleSkills, SubagentMode, TaskStart,
+    };
+    use crazyagent::coord::tool_switches::Switch;
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let created = bridge
+        .setup_project(
+            ProjectSpec {
+                name: "Chores".into(),
+                repositories: vec![],
+            },
+            setup(),
+            1,
+        )
+        .await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+
+    let global = bridge.tool_switches(None, None).await?;
+    assert!(
+        global
+            .iter()
+            .all(|view| view.builtin && view.global == Switch::On)
+    );
+    bridge
+        .set_tool_switch(None, None, "start_work".into(), Switch::Off)
+        .await?;
+    let here = bridge
+        .set_tool_switch(Some(id.clone()), None, "start_work".into(), Switch::On)
+        .await?;
+    let start = here.iter().find(|view| view.tool == "start_work").unwrap();
+    assert_eq!((start.global, start.here), (Switch::Off, Some(Switch::On)));
+    let hidden = bridge
+        .set_tool_switch(None, None, "recall".into(), Switch::Hidden)
+        .await?;
+    assert_eq!(
+        hidden
+            .iter()
+            .find(|view| view.tool == "recall")
+            .unwrap()
+            .global,
+        Switch::Hidden
+    );
+    let restored = bridge.restore_tool_switches(None, None).await?;
+    assert!(restored.iter().all(|view| view.global == Switch::On));
+    let project = bridge.tool_switches(Some(id.clone()), None).await?;
+    let start = project
+        .iter()
+        .find(|view| view.tool == "start_work")
+        .unwrap();
+    assert_eq!(
+        (start.global, start.here),
+        (Switch::On, Some(Switch::On)),
+        "a global restore keeps the project's own switch"
+    );
+    assert_eq!(
+        bridge
+            .set_tool_switch(None, None, "nope".into(), Switch::Off)
+            .await
+            .unwrap_err()
+            .code,
+        "tool_unknown"
+    );
+
+    let defaults = bridge.team_status(&id).await?.coordination.unwrap();
+    assert_eq!(defaults.settings, CoordSettings::default());
+    let chosen = CoordSettings {
+        questions_to: QuestionsTo::Me,
+        overlaps: Overlaps::Block,
+        nudges: Nudges::TenMinutes,
+        counted_tools: vec!["start_work".into(), "ctx_*".into()],
+        role_skills: RoleSkills {
+            master: None,
+            lead: Some(Vec::new()),
+            worker: Some(vec!["release-notes".into()]),
+        },
+        claude_display: ClaudeDisplay::Fullscreen,
+        task_start: TaskStart::Off,
+    };
+    for receipt in [
+        bridge.team_coordination(&id, chosen.clone(), 2).await?,
+        bridge
+            .team_harness_mode(&id, HarnessKind::ClaudeCode, SubagentMode::Native, 3)
+            .await?,
+        bridge
+            .team_harness_delivery(&id, HarnessKind::Codex, Delivery::TypingOnly, 4)
+            .await?,
+    ] {
+        assert!(
+            matches!(receipt.outcome, ActionOutcome::Applied),
+            "{receipt:?}"
+        );
+    }
+    let refused = bridge
+        .team_harness_mode(&id, HarnessKind::Rcli, SubagentMode::Native, 5)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code, refused.cause.as_deref()),
+        ("team_action_invalid", Some("coord_native_unsupported"))
+    );
+    let saved = bridge.team_status(&id).await?.coordination.unwrap();
+    assert_eq!(saved.settings, chosen);
+    let row = |harness: HarnessKind| {
+        let row = saved
+            .harnesses
+            .iter()
+            .find(|row| row.harness == harness)
+            .unwrap();
+        (row.mode, row.delivery)
+    };
+    assert_eq!(
+        row(HarnessKind::ClaudeCode),
+        (SubagentMode::Native, Delivery::Auto)
+    );
+    assert_eq!(
+        row(HarnessKind::Codex),
+        (SubagentMode::AppSpawned, Delivery::TypingOnly)
+    );
+    assert_eq!(
+        row(HarnessKind::Rcli),
+        (SubagentMode::AppSpawned, Delivery::Auto)
+    );
+    assert!(bridge.pending_intent()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn desktop_sets_tool_switches_and_coordination_through_the_real_engine() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-coord-desk-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), coordinated(root.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+/// Sends every New folder limit choice through the desktop bridge to the real engine and
+/// reads each back in the team status the Team controls show; a count outside the choices
+/// is refused and leaves the last choice. Takes the engine root. Returns any failure.
+async fn new_folder_limits(root: &Path) -> Result<(), Box<dyn Error>> {
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Folders".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(), 1).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    assert_eq!(
+        bridge.team_status(&id).await?.new_folder_files_max,
+        crazyagent::team::NEW_FOLDER_FILES_DEFAULT
+    );
+    let mut generation = 2;
+    for files in crazyagent::team::NEW_FOLDER_FILES_CHOICES {
+        let saved = bridge.team_new_folder_limit(&id, files, generation).await?;
+        generation += 1;
+        assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
+        assert_eq!(bridge.team_status(&id).await?.new_folder_files_max, files);
+    }
+    let refused = bridge
+        .team_new_folder_limit(&id, 999, generation)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code, refused.cause.as_deref()),
+        ("team_action_invalid", Some("team_new_folder_limit_invalid")),
+        "a count outside the choices is refused and names the engine's reason"
+    );
+    assert_eq!(
+        bridge.team_status(&id).await?.new_folder_files_max,
+        crazyagent::team::NEW_FOLDER_FILES_CHOICES[3]
+    );
+    Ok(())
+}
+
+/// Sends every Terminals per window choice through the desktop bridge to the real engine
+/// and reads each back the way a terminal wall window reads it and in the team status the
+/// Agent settings show; Six until the owner picks another. Takes the engine root. Returns
+/// any failure.
+async fn terminals_per_window_choices(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::team::TerminalsPerWindow::{Four, Nine, Six};
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Wall".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(), 1).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    assert_eq!(bridge.terminals_per_window(&id).await?, Six);
+    assert_eq!(bridge.team_status(&id).await?.terminals_per_window, Six);
+    for (generation, choice) in (2..).zip([Four, Nine, Six, Nine]) {
+        let saved = bridge
+            .team_terminals_per_window(&id, choice, generation)
+            .await?;
+        assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
+        assert_eq!(bridge.terminals_per_window(&id).await?, choice);
+        assert_eq!(bridge.team_status(&id).await?.terminals_per_window, choice);
+    }
+    Ok(())
+}
+
+/// Every Terminals per window choice the desktop sends is saved, read back by the wall and
+/// shown (owner 2026-11-07, OS-4, every-option rule).
+#[tokio::test]
+async fn desktop_saves_and_reads_every_terminals_per_window_choice() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-wall-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        terminals_per_window_choices(root.path()),
+    )
+    .await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+/// Every New folder limit choice the desktop sends is saved and shown (fix/changes-vs-owner-branch
+/// DEC-107 rule 3, every-option rule).
+#[tokio::test]
+async fn desktop_saves_and_shows_every_new_folder_limit_choice() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-folders-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result =
+        tokio::time::timeout(Duration::from_secs(20), new_folder_limits(root.path())).await;
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();

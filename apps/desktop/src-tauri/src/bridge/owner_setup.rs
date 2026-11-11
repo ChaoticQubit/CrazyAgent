@@ -1,7 +1,10 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
+use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
+use crazyagent::quit_settings::QuitSettings;
+use crazyagent::sandbox_settings::SandboxSettings;
 
 fn profile_code(code: &str) -> &'static str {
     match code {
@@ -53,6 +56,120 @@ impl NativeBridge {
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::SaveOwnerProfile { profile }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads the owner's sandbox settings. Input: none. Output: the stored settings, or the
+    /// defaults before the first save.
+    pub async fn sandbox_settings(&mut self) -> Result<SandboxSettings, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .sandbox_settings()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves the owner's sandbox settings as one retained owner intent. Inputs: the full
+    /// settings and a fresh draft generation. Output: the intent receipt.
+    pub async fn set_sandbox_settings(
+        &mut self,
+        settings: SandboxSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::SandboxSettings)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetSandboxSettings { settings }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads when the engine removes finished agents' worktrees on its own. Input: none.
+    /// Output: the stored setting, or the default before the first save.
+    pub async fn cleanup_settings(&mut self) -> Result<CleanupSettings, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .cleanup_settings()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves when the engine removes finished agents' worktrees on its own, as one retained
+    /// owner intent. Inputs: the full setting and a fresh draft generation. Output: the
+    /// intent receipt.
+    pub async fn set_cleanup_settings(
+        &mut self,
+        settings: CleanupSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::CleanupSettings)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetCleanupSettings { settings }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads what quitting does to running team agents and how long the ones left running
+    /// wait for the engine. Input: none. Output: the stored setting, or the default before the
+    /// first save.
+    pub async fn quit_settings(&mut self) -> Result<QuitSettings, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .quit_settings()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves what quitting does to running team agents and how long the ones left running
+    /// wait, as one retained owner intent. Inputs: the full setting and a fresh draft
+    /// generation. Output: the intent receipt.
+    pub async fn set_quit_settings(
+        &mut self,
+        settings: QuitSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::QuitSettings)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetQuitSettings { settings }, generation)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await

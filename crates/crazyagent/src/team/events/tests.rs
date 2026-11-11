@@ -55,6 +55,7 @@ impl Fixture {
         let tmux = installed(&base).expect("tmux must be installed on this machine");
         let connection = Connection::open(base.join("engine.db")).unwrap();
         super::super::initialize(&connection).unwrap();
+        crate::project_setup::initialize(&connection).unwrap();
         Self {
             _root: root,
             base,
@@ -119,6 +120,18 @@ impl Drop for Fixture {
                 .stderr(Stdio::null()),
         );
     }
+}
+
+fn put_rule(
+    connection: &Connection,
+    target: &RuleTarget,
+    rule: Option<&WakeRule>,
+) -> Result<(), &'static str> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let version = rule_version(&tx, target).unwrap();
+    let done = set_rule(&tx, target, rule, version).unwrap();
+    tx.commit().unwrap();
+    done
 }
 
 fn project() -> ProjectId {
@@ -193,6 +206,7 @@ fn a_question_on_a_real_sub_agent_screen_is_recorded_once_and_its_typed_answer_r
             host.as_ref(),
             &project(),
             &format!("codex-{agent}"),
+            Said::Answer,
             "1"
         )
         .unwrap(),
@@ -513,7 +527,15 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
         "the master is not a sub-agent to send to"
     );
     let send = |agent: String, text: &str| {
-        send_to_agent(&fixture.connection, host.as_ref(), &project(), &agent, text).unwrap()
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent,
+            Said::Message,
+            text,
+        )
+        .unwrap()
     };
     assert_eq!(send(live.to_string(), "  \n"), Err("team_message_invalid"));
     assert_eq!(
@@ -531,6 +553,86 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
         Err("team_agent_not_running")
     );
     assert_eq!(send(live.to_string(), "hi"), Ok(live));
+}
+
+/// An id form names only the agent with that id: agent 8 holding the handle `team-7` from
+/// before handles were checked cannot take agent 7's messages, and `send_to_id` types into
+/// agent 7 alone.
+#[test]
+fn an_id_form_reaches_its_own_agent_even_when_another_agent_holds_it_as_a_handle() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    for id in [7, 8] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,?2,'sub','codex',1,'idle',1,1)",
+                params![id, PROJECT],
+            )
+            .unwrap();
+        fixture.pane(&host, id, &["/bin/sh", "-c", "exec cat"]);
+    }
+    super::super::names::assign_persona(&fixture.connection, &project(), 8).unwrap();
+    fixture
+        .connection
+        .execute("UPDATE team_names SET handle='team-7' WHERE agent=8", [])
+        .unwrap();
+    for name in ["team-7", "@team-7", "7", "codex-7", "Sub-agent 7"] {
+        assert_eq!(
+            resolve(&fixture.connection, &project(), name).unwrap(),
+            Some(7),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            "team-7",
+            Said::Message,
+            "first"
+        )
+        .unwrap(),
+        Ok(7)
+    );
+    assert_eq!(
+        send_to_id(&fixture.connection, host.as_ref(), &project(), 7, "second").unwrap(),
+        Ok(())
+    );
+    for (id, refused) in [
+        (8, Ok(())),
+        (9, Err("team_agent_not_found")),
+        (0, Err("team_agent_not_found")),
+    ] {
+        assert_eq!(
+            send_to_id(&fixture.connection, host.as_ref(), &project(), id, "third").unwrap(),
+            refused,
+            "{id}"
+        );
+    }
+    assert_eq!(
+        send_to_id(
+            &fixture.connection,
+            host.as_ref(),
+            &ProjectId::new(OTHER).unwrap(),
+            7,
+            "fourth"
+        )
+        .unwrap(),
+        Err("team_agent_not_found")
+    );
+    let screen = |id: i64| {
+        String::from_utf8_lossy(&host.screen(&AgentId::team(id).unwrap()).unwrap()).into_owned()
+    };
+    let deadline = Instant::now() + WAIT;
+    while !(screen(7).contains("second") && screen(8).contains("third")) {
+        assert!(Instant::now() < deadline, "{}\n{}", screen(7), screen(8));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(screen(7).contains("first"));
+    assert!(!screen(8).contains("first") && !screen(8).contains("second"));
+    assert!(!screen(7).contains("third") && !screen(7).contains("fourth"));
 }
 
 /// A numbered name reaches that agent, never another agent whose handle was stored in that
@@ -589,12 +691,81 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
             host.as_ref(),
             &project(),
             &named.to_string(),
+            Said::Message,
             "hi"
         )
         .unwrap(),
         Ok(named),
         "typed into the numbered agent, not the paneless holder"
     );
+}
+
+/// A name a finished and a running sub-agent share reaches the running one (DEC-111 Q19), so
+/// the master's finished list names the finished one by its number only, whether they share
+/// the persona or the handle in any case, or one's persona is the other's handle. A name only
+/// it carries, or one only a stopped agent or another project's agent also carries, still
+/// shows with its number.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_is_listed_by_number_only() {
+    let fixture = Fixture::new();
+    let name = |agent: i64, project: &str, persona: &str, handle: Option<&str>| {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![agent, project, persona, handle],
+            )
+            .unwrap();
+    };
+    let finished = |persona: &str, handle: Option<&str>| {
+        let id = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'/repo',?3,'/repo/.git')",
+                params![id, PROJECT, format!("/repo/agent-{id}")],
+            )
+            .unwrap();
+        name(id, PROJECT, persona, handle);
+        id
+    };
+    let other = |project: &str, status: &str, persona: &str, handle: Option<&str>| {
+        let id = fixture.agent(project, "sub", "codex", status);
+        name(id, project, persona, handle);
+    };
+    let ada = finished("Ada", None);
+    let cy = finished("Cy", Some("charts"));
+    let di = finished("Di", Some("api"));
+    let bo = finished("Bo", Some("docs"));
+    let fay = finished("Fay", None);
+    let gus = finished("Gus", Some("maps"));
+    let ivy = finished("Ivy", Some("kit"));
+    other(PROJECT, "working", "Ada", None);
+    other(PROJECT, "idle", "cy", Some("login"));
+    other(PROJECT, "starting", "Eve", Some("API"));
+    other(PROJECT, "stopped", "Bo", Some("docs"));
+    other(OTHER, "working", "Fay", None);
+    other(PROJECT, "working", "Hal", Some("gus"));
+    other(PROJECT, "idle", "Kit", None);
+    let lines: std::collections::BTreeMap<i64, String> =
+        finished_agents(&fixture.connection, &project(), 1)
+            .unwrap()
+            .into_iter()
+            .collect();
+    let line = |named: String| format!("- {named} (Codex): no task yet; finished");
+    assert_eq!(
+        lines,
+        std::collections::BTreeMap::from([
+            (ada, line(format!("Sub-agent {ada}"))),
+            (cy, line(format!("Sub-agent {cy}"))),
+            (di, line(format!("Sub-agent {di}"))),
+            (bo, line(format!("Bo (@docs), Sub-agent {bo}"))),
+            (fay, line(format!("Fay, Sub-agent {fay}"))),
+            (gus, line(format!("Sub-agent {gus}"))),
+            (ivy, line(format!("Sub-agent {ivy}"))),
+        ])
+    );
+    assert!(!lines[&ada].contains("Ada"), "{}", lines[&ada]);
 }
 
 #[test]
@@ -980,6 +1151,91 @@ fn an_escalation_is_an_unseen_notification_until_the_owner_sees_it() {
     );
 }
 
+/// A project's unseen question notifications are counted in full even when more of them
+/// wait than the app window lists, so the app can count each pending question once.
+#[test]
+fn each_project_reports_its_unseen_question_notifications_beyond_the_listed_window() {
+    let fixture = Fixture::new();
+    let asked = VIEW_NOTIFICATIONS_MAX + 5;
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    for at in 0..asked {
+        notify(
+            &tx,
+            &project(),
+            NotificationKind::Question,
+            "Which database?",
+            1 + at,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    for at in 0..2 {
+        escalate(
+            &fixture.connection,
+            &project(),
+            "Spend on a new provider?",
+            100 + at,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    let view = app(&fixture.connection).unwrap();
+    assert_eq!(
+        view.projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: asked + 2,
+            questions: asked,
+        }]
+    );
+    let listed = view
+        .notifications
+        .iter()
+        .filter(|item| item.kind == NotificationKind::Question)
+        .count() as i64;
+    assert!(listed < asked, "the window lists only {listed} of {asked}");
+}
+
+/// A Normal work question to the owner notifies with the same `question` kind as the
+/// questions log, but only the questions log's notification counts as a pending question, so
+/// the app neither drops the work question from the sidebar count nor counts it twice.
+#[test]
+fn a_work_question_alert_counts_as_unseen_but_not_as_a_pending_question() {
+    let fixture = Fixture::new();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    notify(
+        &tx,
+        &project(),
+        NotificationKind::Question,
+        "Which database?",
+        1,
+    )
+    .unwrap();
+    let alert = notify(
+        &tx,
+        &project(),
+        NotificationKind::Question,
+        "Ada asks you: Which port?",
+        2,
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO team_owner_alerts(source,ref,since,project,agent,notification) VALUES ('question',9,2,?1,7,?2)",
+        params![PROJECT, alert],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        app(&fixture.connection).unwrap().projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: 2,
+            questions: 1,
+        }]
+    );
+}
+
 #[test]
 fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let fixture = Fixture::new();
@@ -1012,6 +1268,7 @@ fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let count = |id: &str, unseen: i64| ProjectUnseen {
         project_id: ProjectId::new(id).unwrap(),
         unseen,
+        questions: 0,
     };
     assert_eq!(
         view.projects,
@@ -1289,7 +1546,7 @@ fn with_finished_muted_a_result_ending_in_a_question_starts_no_master() {
     let fixture = Fixture::new();
     let connection = &fixture.connection;
     let ada = fixture.agent(PROJECT, "sub", "codex", "working");
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
@@ -1299,7 +1556,6 @@ fn with_finished_muted_a_result_ending_in_a_question_starts_no_master() {
             ..WakeRule::default()
         }),
     )
-    .unwrap()
     .unwrap();
     let task = fixture.task(
         ada,
@@ -1320,7 +1576,7 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
     let fixture = Fixture::new();
     let connection = &fixture.connection;
     let ada = fixture.agent(PROJECT, "sub", "codex", "working");
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
@@ -1330,7 +1586,6 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
             ..WakeRule::default()
         }),
     )
-    .unwrap()
     .unwrap();
     for (kind, text) in [
         (EventKind::Finished, "Done."),
@@ -1471,14 +1726,13 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
         hourly_cap: 2,
         ..WakeRule::default()
     };
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         Some(&rule),
     )
-    .unwrap()
     .unwrap();
     record(
         connection,
@@ -1541,17 +1795,14 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
         hourly_cap: 0,
         ..WakeRule::default()
     };
-    set_rule(connection, &RuleTarget::App, Some(&never))
-        .unwrap()
-        .unwrap();
-    set_rule(
+    put_rule(connection, &RuleTarget::App, Some(&never)).unwrap();
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         None,
     )
-    .unwrap()
     .unwrap();
     record(
         connection,
@@ -1633,14 +1884,13 @@ fn only_the_events_in_a_wake_are_named_and_none_while_the_hourly_cap_holds() {
         hourly_cap: 1,
         ..WakeRule::default()
     };
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         Some(&rule),
     )
-    .unwrap()
     .unwrap();
     for at in [300, 301] {
         let tx = immediate(connection).unwrap();
@@ -1697,9 +1947,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         hourly_cap: 1,
         ..shipped
     };
-    set_rule(connection, &RuleTarget::App, Some(&app))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &RuleTarget::App, Some(&app)).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (app, RuleLevel::App)
@@ -1707,16 +1955,12 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
     let here = RuleTarget::Project {
         project_id: project(),
     };
-    set_rule(connection, &here, Some(&project_rule))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &here, Some(&project_rule)).unwrap();
     let mine = RuleTarget::Agent {
         project_id: project(),
         agent: ada,
     };
-    set_rule(connection, &mine, Some(&agent_rule))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &mine, Some(&agent_rule)).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (agent_rule, RuleLevel::Agent)
@@ -1731,7 +1975,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         ..shipped
     };
     assert_eq!(
-        set_rule(connection, &here, Some(&too_high)).unwrap(),
+        put_rule(connection, &here, Some(&too_high)),
         Err("team_wake_cap_invalid")
     );
     for target in [
@@ -1745,7 +1989,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         },
     ] {
         assert_eq!(
-            set_rule(connection, &target, Some(&shipped)).unwrap(),
+            put_rule(connection, &target, Some(&shipped)),
             Err("team_agent_not_found")
         );
     }
@@ -1781,7 +2025,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
             .iter()
             .any(|event| event.kind == EventKind::Question && event.state == EventState::Muted)
     );
-    set_rule(connection, &mine, None).unwrap().unwrap();
+    put_rule(connection, &mine, None).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (project_rule, RuleLevel::Project)
@@ -1844,7 +2088,7 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
         }))
         .unwrap();
         status.events.questions = questions;
-        crate::team::graph(&status)
+        crate::team::graph(&status, &Default::default())
             .nodes
             .into_iter()
             .find(|node| node.id == format!("team-{agent}"))
@@ -1858,4 +2102,643 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
     let delivered = view(connection, &project()).unwrap().questions;
     assert!(delivered.is_empty(), "{delivered:?}");
     assert_eq!(node(delivered, ada), Some(0));
+}
+
+fn write_rule(
+    connection: &Connection,
+    target: &RuleTarget,
+    rule: Option<&WakeRule>,
+    version: u64,
+) -> Result<(), &'static str> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let done = set_rule(&tx, target, rule, version).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
+#[test]
+fn stale_team_rule_write_is_refused() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let here = RuleTarget::Project {
+        project_id: project(),
+    };
+    let mine = RuleTarget::Agent {
+        project_id: project(),
+        agent: ada,
+    };
+    let quiet = WakeRule {
+        progress: false,
+        ..WakeRule::default()
+    };
+    let loud = WakeRule {
+        hourly_cap: 9,
+        ..WakeRule::default()
+    };
+    for target in [&RuleTarget::App, &here, &mine] {
+        assert_eq!(rule_version(connection, target).unwrap(), 0);
+    }
+
+    assert_eq!(write_rule(connection, &here, Some(&quiet), 0), Ok(()));
+    for version in [0, 2] {
+        assert_eq!(
+            write_rule(connection, &here, Some(&loud), version),
+            Err("stale_revision"),
+            "a save from version {version} never replaces version 1"
+        );
+    }
+    let shown = view(connection, &project()).unwrap().wake;
+    assert_eq!(
+        (shown.project, shown.project_version),
+        (Some(quiet), 1),
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        write_rule(connection, &here, None, 0),
+        Err("stale_revision"),
+        "a stale Reset is refused too"
+    );
+    assert_eq!(
+        write_rule(
+            connection,
+            &here,
+            Some(&WakeRule {
+                hourly_cap: HOURLY_CAP_MAX + 1,
+                ..quiet
+            }),
+            0
+        ),
+        Err("team_wake_cap_invalid"),
+        "a bad limit is named before the version is checked"
+    );
+    assert_eq!(write_rule(connection, &here, Some(&loud), 1), Ok(()));
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.project_version,
+        2
+    );
+
+    assert_eq!(
+        rule_version(connection, &mine).unwrap(),
+        0,
+        "each level keeps its own version"
+    );
+    assert_eq!(write_rule(connection, &mine, Some(&quiet), 0), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&loud), 0),
+        Err("stale_revision")
+    );
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: quiet,
+            version: 1
+        }]
+    );
+    assert_eq!(write_rule(connection, &mine, None, 1), Ok(()));
+    assert!(view(connection, &project()).unwrap().wake.agents.is_empty());
+    assert_eq!(
+        rule_version(connection, &mine).unwrap(),
+        2,
+        "a cleared level keeps moving its version"
+    );
+    for version in [0, 1] {
+        assert_eq!(
+            write_rule(connection, &mine, Some(&loud), version),
+            Err("stale_revision"),
+            "a window that saw version {version} before the clear re-reads"
+        );
+    }
+    assert_eq!(write_rule(connection, &mine, Some(&loud), 2), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&quiet), 1),
+        Err("stale_revision"),
+        "a save read before the clear never replaces the rule set after it"
+    );
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
+    );
+
+    assert_eq!(
+        write_rule(connection, &RuleTarget::App, Some(&quiet), 0),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &RuleTarget::App, Some(&loud), 0),
+        Err("stale_revision")
+    );
+    let everywhere = app(connection).unwrap();
+    assert_eq!((everywhere.rule, everywhere.rule_version), (Some(quiet), 1));
+    assert_eq!(view(connection, &project()).unwrap().wake.app_version, 1);
+}
+
+#[test]
+fn a_cleared_agent_level_shows_its_version_so_the_owner_can_set_it_again() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let bo = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let master = fixture.agent(PROJECT, "master", "codex", "working");
+    let elsewhere = fixture.agent(OTHER, "sub", "codex", "working");
+    let level = |project_id: &str, agent: i64| RuleTarget::Agent {
+        project_id: ProjectId::new(project_id).unwrap(),
+        agent,
+    };
+    let quiet = WakeRule {
+        progress: false,
+        ..WakeRule::default()
+    };
+    let loud = WakeRule {
+        hourly_cap: 9,
+        ..WakeRule::default()
+    };
+    assert!(
+        view(connection, &project())
+            .unwrap()
+            .wake
+            .cleared
+            .is_empty()
+    );
+
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), Some(&quiet), 0),
+        Ok(())
+    );
+    assert!(
+        view(connection, &project())
+            .unwrap()
+            .wake
+            .cleared
+            .is_empty(),
+        "a level with its own rule is listed with the rules"
+    );
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), None, 1),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &level(OTHER, elsewhere), Some(&quiet), 0),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &level(OTHER, elsewhere), None, 1),
+        Ok(())
+    );
+
+    let shown = view(connection, &project()).unwrap().wake;
+    assert!(shown.agents.is_empty());
+    assert_eq!(
+        shown.cleared,
+        vec![ClearedRule {
+            agent: ada,
+            version: 2
+        }],
+        "only this project's cleared sub-agent levels, never {bo}, the master {master} or another project's {elsewhere}"
+    );
+    assert_eq!(
+        write_rule(
+            connection,
+            &level(PROJECT, ada),
+            Some(&loud),
+            shown.cleared[0].version
+        ),
+        Ok(()),
+        "the version the view showed sets the cleared level again"
+    );
+    let again = view(connection, &project()).unwrap().wake;
+    assert!(again.cleared.is_empty());
+    assert_eq!(
+        again.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
+    );
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), Some(&quiet), 2),
+        Err("stale_revision"),
+        "the cleared version is spent once the level is set again"
+    );
+}
+
+fn event_state(connection: &Connection, id: i64) -> String {
+    connection
+        .query_row("SELECT state FROM team_events WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// K2b: a worker's queued events go to its own lead as one engine note keyed `events-<first
+/// id>` and end Delivered; a kind its wake rule mutes ends Muted; the master's wake check
+/// never sees a worker's events, only its leads'.
+#[test]
+fn a_workers_events_reach_its_lead_as_one_note_and_never_wake_the_master() {
+    let fixture = Fixture::new();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let connection = &fixture.connection;
+    let master = fixture.agent(PROJECT, "master", "claude-code", "idle");
+    let lead = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let worker = fixture.agent(PROJECT, "sub", "codex", "idle");
+    connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            [lead, worker],
+        )
+        .unwrap();
+    let finished = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Finished,
+        "Wrote page.md",
+        10,
+    )
+    .unwrap()
+    .unwrap();
+    let failed = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Failed,
+        "Tests did not build",
+        11,
+    )
+    .unwrap()
+    .unwrap();
+    let progress = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Progress,
+        "Half way",
+        12,
+    )
+    .unwrap()
+    .unwrap();
+
+    let tx = immediate(connection).unwrap();
+    assert_eq!(due(&tx, &project(), 13).unwrap(), None);
+    drop(tx);
+
+    forward_to_parents(connection, &project(), 14).unwrap();
+    assert_eq!(event_state(connection, finished), "delivered");
+    assert_eq!(event_state(connection, failed), "delivered");
+    assert_eq!(event_state(connection, progress), "muted");
+    let notes = crate::coord::pending(connection, lead, crate::coord::PENDING_MAX).unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].from, crate::coord::Party::Engine);
+    assert_eq!(notes[0].kind, crate::coord::MessageKind::Note);
+    assert!(notes[0].body.contains("Wrote page.md"), "{}", notes[0].body);
+    assert!(
+        notes[0].body.contains("Tests did not build"),
+        "{}",
+        notes[0].body
+    );
+    let key: String = connection
+        .query_row(
+            "SELECT idem_key FROM coord_messages WHERE id=?1",
+            [notes[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        key,
+        format!("{}{finished}", crate::coord::delivery::EVENTS_KEY)
+    );
+    assert!(
+        crate::coord::pending(connection, master, crate::coord::PENDING_MAX)
+            .unwrap()
+            .is_empty()
+    );
+
+    let own = record(
+        connection,
+        &project(),
+        lead,
+        None,
+        EventKind::Finished,
+        "Merged both workers",
+        15,
+    )
+    .unwrap()
+    .unwrap();
+    forward_to_parents(connection, &project(), 16).unwrap();
+    assert_eq!(event_state(connection, own), "queued");
+    let tx = immediate(connection).unwrap();
+    let wake = due(&tx, &project(), 17)
+        .unwrap()
+        .expect("the lead's event wakes the master");
+    assert_eq!(wake.events, [own]);
+}
+
+/// K2b: a task a lead handed to its worker ends Carried, since its result reaches the lead,
+/// while a task the owner gave an agent with no lead is queued for the master.
+#[test]
+fn a_task_a_lead_delegated_ends_carried() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let lead = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let worker = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let delegated = fixture.task(worker, "lead", "done", Some("Wrote page.md"));
+    connection
+        .execute(
+            "UPDATE team_tasks SET parent=?1 WHERE id=?2",
+            [lead, delegated],
+        )
+        .unwrap();
+    let owned = fixture.task(lead, "owner", "done", Some("Merged"));
+    let carried = task_ended(connection, delegated, 20).unwrap().unwrap();
+    let queued = task_ended(connection, owned, 21).unwrap().unwrap();
+    assert_eq!(event_state(connection, carried), "carried");
+    assert_eq!(event_state(connection, queued), "queued");
+}
+
+/// What the master typed into a sub-agent is kept for the agent's Messages timeline only once
+/// its terminal took it (MSG-A): a message and an answer are kept with the master as speaker
+/// and their kind, their escape, control and bidirectional characters dropped, while blank
+/// or long text and an agent that is stopped or has no terminal keep nothing. With the
+/// project's keep setting off the timeline still shows a message was sent, with no text.
+#[test]
+fn only_a_master_message_or_answer_the_terminal_took_is_kept_for_the_timeline() {
+    use super::super::agent_messages::{EntryKind, MessageSettings, Speaker, read, save_settings};
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let live = fixture.agent(PROJECT, "sub", "codex", "working");
+    let stopped = fixture.agent(PROJECT, "sub", "codex", "stopped");
+    let paneless = fixture.agent(PROJECT, "sub", "codex", "working");
+    fixture.pane(&host, live, &["/bin/sh", "-c", "exec cat"]);
+    let kept = || -> i64 {
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM team_agent_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let send = |agent: i64, said: Said, text: &str| {
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent.to_string(),
+            said,
+            text,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        send(live, Said::Message, "Check the login page first"),
+        Ok(live)
+    );
+    assert_eq!(
+        send(
+            live,
+            Said::Answer,
+            "Use option 2\u{1b}[31m red\u{0} \u{9b}1m \u{202e}reversed\u{2066} done"
+        ),
+        Ok(live)
+    );
+    assert_eq!(kept(), 2);
+    for (agent, text) in [
+        (live, "  \n".to_owned()),
+        (live, "x".repeat(SEND_BYTES_MAX + 1)),
+        (stopped, "hi".to_owned()),
+        (paneless, "hi".to_owned()),
+    ] {
+        assert!(send(agent, Said::Message, &text).is_err(), "{agent}");
+    }
+    assert_eq!(kept(), 2, "a refused or untyped text is never kept");
+
+    let page = read(&fixture.connection, &project(), live, None, None).unwrap();
+    let said: Vec<(Speaker, EntryKind, Option<&str>)> = page
+        .entries
+        .iter()
+        .map(|entry| (entry.from, entry.kind, entry.text.as_deref()))
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            (
+                Speaker::Master,
+                EntryKind::Answer,
+                Some("Use option 2(31m red 1m reversed done")
+            ),
+            (
+                Speaker::Master,
+                EntryKind::Message,
+                Some("Check the login page first")
+            ),
+        ]
+    );
+    assert!(!page.older);
+
+    let tx =
+        Transaction::new_unchecked(&fixture.connection, TransactionBehavior::Immediate).unwrap();
+    save_settings(
+        &tx,
+        &project(),
+        &MessageSettings {
+            keep_master_messages: false,
+            ..MessageSettings::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(send(live, Said::Message, "Secret plan"), Ok(live));
+    let newest = read(&fixture.connection, &project(), live, None, None)
+        .unwrap()
+        .entries
+        .remove(0);
+    assert_eq!(
+        (newest.from, newest.kind, newest.text),
+        (Speaker::Master, EntryKind::Message, None),
+        "with the setting off only the fact of the message is kept"
+    );
+    let stored: Option<String> = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM team_agent_messages ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, None, "no text is stored when the setting is off");
+}
+
+/// The master's status reply keeps its newest events within the reply cap: past the cap the
+/// oldest events are left out with a line saying how many, never the newest, and the
+/// finished list before them stays whole (WKC-3).
+#[test]
+fn a_full_status_keeps_the_newest_events_and_the_finished_list_within_the_reply_cap() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    for n in 0..FINISHED_LISTED_MAX {
+        let agent = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+                params![agent, PROJECT, format!("worktrees/agent-{agent}")],
+            )
+            .unwrap();
+        let task = fixture.task(agent, "owner", "done", Some("Done."));
+        connection
+            .execute(
+                "UPDATE team_tasks SET prompt=?1 WHERE id=?2",
+                params![format!("Finished task {n} {}", "w".repeat(200)), task],
+            )
+            .unwrap();
+    }
+    let workers: Vec<i64> = (0..5)
+        .map(|_| fixture.agent(PROJECT, "sub", "codex", "working"))
+        .collect();
+    for n in 0..STATUS_EVENTS_MAX {
+        let text = format!("event-{n:02} {}", "x".repeat(EVENT_TEXT_BYTES_MAX - 12));
+        let worker = workers[usize::try_from(n).unwrap() % workers.len()];
+        assert!(
+            record(
+                connection,
+                &project(),
+                worker,
+                None,
+                EventKind::Finished,
+                &text,
+                10 + n
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+    let told = status(connection, &project()).unwrap().text();
+    assert!(
+        told.len() <= crate::team::tool::REPLY_TEXT_MAX,
+        "{} bytes",
+        told.len()
+    );
+    assert_eq!(
+        crate::team::bound_text(&told, crate::team::tool::REPLY_TEXT_MAX),
+        told
+    );
+    assert!(
+        told.contains(&format!("event-{:02} ", STATUS_EVENTS_MAX - 1)),
+        "the newest event reaches the master"
+    );
+    assert!(!told.contains("event-00 "), "the oldest event is left out");
+    assert_eq!(
+        told.lines().filter(|line| line.starts_with("- ")).count(),
+        FINISHED_LISTED_MAX,
+        "the finished list stays whole"
+    );
+    let left = told
+        .lines()
+        .find(|line| line.ends_with(" older events left out to fit this reply."))
+        .unwrap_or_else(|| panic!("no left-out line in {told}"));
+    let count: i64 = left.split(' ').next().unwrap().parse().unwrap();
+    let shown = told
+        .lines()
+        .filter(|line| line.starts_with("[team] "))
+        .count();
+    assert_eq!(count + i64::try_from(shown).unwrap(), STATUS_EVENTS_MAX);
+}
+
+fn research_job(fixture: &Fixture, project: &str, status: &str) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES (?1,'market','codex',0,?2,1)",
+            params![project, status],
+        )
+        .unwrap();
+}
+
+fn at_work(project: &str, agents: i64) -> ProjectWorking {
+    ProjectWorking {
+        project_id: ProjectId::new(project).unwrap(),
+        agents,
+    }
+}
+
+#[test]
+fn working_list_counts_agents_at_work_and_running_research_as_a_project_card_does() {
+    let fixture = Fixture::new();
+    fixture.agent(PROJECT, "master", "claude-code", "working");
+    fixture.agent(PROJECT, "sub", "codex", "working");
+    fixture.agent(PROJECT, "sub", "codex", "working");
+    for status in ["idle", "starting", "stopped"] {
+        fixture.agent(PROJECT, "sub", "codex", status);
+    }
+    research_job(&fixture, PROJECT, "running");
+    for status in ["queued", "needs_pool", "done"] {
+        research_job(&fixture, PROJECT, status);
+    }
+    research_job(&fixture, OTHER, "running");
+    fixture.agent("team-quiet", "sub", "codex", "idle");
+
+    let view = app(&fixture.connection).unwrap();
+
+    assert_eq!(view.working, [at_work(PROJECT, 4), at_work(OTHER, 1)]);
+}
+
+#[test]
+fn working_list_stops_at_its_bound_and_fits_one_reply_beside_a_full_unseen_list() {
+    let fixture = Fixture::new();
+    let long = |at: i64| format!("{}-{at:03}", "p".repeat(124));
+    assert_eq!(long(0).len(), 128);
+    assert!(
+        ProjectId::new("p".repeat(129)).is_err(),
+        "128 bytes is the longest legal id"
+    );
+    for at in 0..=WORKING_PROJECTS_MAX {
+        fixture.agent(&long(at), "sub", "codex", "working");
+    }
+    for at in 0..=UNSEEN_PROJECTS_MAX {
+        let team = ProjectId::new(long(at)).unwrap();
+        escalate(
+            &fixture.connection,
+            &team,
+            "Spend on a new provider?",
+            at + 1,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    let view =
+        app(&fixture.connection).expect("both full lists fit one reply at the longest legal ids");
+
+    assert_eq!(view.working.len() as i64, WORKING_PROJECTS_MAX);
+    assert_eq!(view.projects.len() as i64, UNSEEN_PROJECTS_MAX);
+    assert!(super::super::encoded_len(&view).unwrap() <= super::super::STATUS_REPLY_BYTES_MAX);
+}
+
+#[test]
+fn working_list_missing_from_an_older_engines_reply_reads_as_none_at_work() {
+    let mut reply = serde_json::to_value(AppEvents::default()).unwrap();
+    reply.as_object_mut().unwrap().remove("working");
+    let read: AppEvents = serde_json::from_value(reply).unwrap();
+    assert!(read.working.is_empty());
+}
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line r2: each of the seven line breaks opens
+/// a quoted line, in the whole quote and in the quote after a first line.
+#[test]
+fn each_of_the_seven_breaks_opens_a_quoted_line() {
+    for line_break in [
+        '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ] {
+        let text = format!("a{line_break}b");
+        assert_eq!(quoted_lines(&text), format!("> a{line_break}> b"));
+        assert_eq!(quoted_after_first_line(&text), format!("a{line_break}> b"));
+    }
 }

@@ -6,7 +6,7 @@ import { Button, Notice, Select, StatusBadge, Switch, TextField, formatRoute } f
 import { displayText } from "../conversation";
 import { ago } from "../project/research";
 import { changeNote } from "./controls";
-import { WAKE_KINDS, capInput, eventLine, eventState, ruleSource, wakeRuleView, wakeSaveBlocked, withKind } from "./wake";
+import { WAKE_KINDS, agentRuleVersion, capInput, eventLine, eventState, ruleSource, wakeRuleView, wakeSaveBlocked, withKind } from "./wake";
 
 const RECENT_SHOWN = 10;
 
@@ -18,10 +18,12 @@ function targetKey(target: WakeRuleTarget): string {
 /** Edits the wake rule of one level: which sub-agent events wake the master and how many wakes
  * an hour it may take before auto-wake pauses. A switch or a new limit saves this level's own
  * rule; Reset clears it so the level above applies. Inputs: the level, its own rule or null,
- * the rule in effect, the level it falls back to and a reload. Output: the editor. */
-export function WakeRuleEditor({ target, own, effective, fallback, reload }: {
+ * the version the last read showed, the rule in effect, the level it falls back to and a reload.
+ * Output: the editor. */
+export function WakeRuleEditor({ target, own, version, effective, fallback, reload }: {
   target: WakeRuleTarget;
   own: WakeRule | null;
+  version: number;
   effective: WakeRule;
   fallback: WakeRuleLevel;
   reload: () => void;
@@ -40,7 +42,7 @@ export function WakeRuleEditor({ target, own, effective, fallback, reload }: {
   async function save(rule: WakeRule | null) {
     if (busy) return;
     setSaving(true);
-    const message = changeNote(await setWakeRule(target, rule, nextGeneration()), "wake rules");
+    const message = changeNote(await setWakeRule(target, rule, version, nextGeneration()), "wake rules");
     setSavedFrom(message === "" ? view : null);
     setSaving(false);
     setNote(message);
@@ -97,21 +99,17 @@ export function NotificationList({ projectId, notifications, reload, now = Date.
   </section>;
 }
 
-/** What the team's sub-agents told the master and how they wake it, on the Agents tab: the
- * paused auto-wake notice, agents waiting for an answer, the owner's notifications, the latest
- * events and the project and agent wake rules. Inputs: the project id, the team status and a
- * reload. Output: the panel. */
+function agentName(status: TeamStatus, id: number): string {
+  const found = status.agents.find((item) => item.id === id);
+  return found ? found.label : `Agent ${id}`;
+}
+
+/** What the team's sub-agents told the master, in the drawer the Agents toolbar opens: the
+ * paused auto-wake notice, agents waiting for an answer, the owner's notifications and the
+ * latest events. Inputs: the project id, the team status and a reload. Output: the panel. */
 export function TeamEventsPanel({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const { events } = status;
-  const subs = status.agents.filter((agent) => agent.role === "sub");
-  const [agent, setAgent] = useState("");
-  const chosen = subs.find((item) => String(item.id) === agent);
-  const label = (id: number) => {
-    const found = status.agents.find((item) => item.id === id);
-    return found ? found.label : `Agent ${id}`;
-  };
-  const own = chosen ? events.wake.agents.find((item) => item.agent === chosen.id)?.rule ?? null : null;
-  const above: WakeRuleLevel = events.wake.project ? "project" : events.wake.app ? "app" : "shipped";
+  const label = (id: number) => agentName(status, id);
   return <section className="tg-events" aria-label="Sub-agent events">
     <h3>Sub-agent events</h3>
     {events.paused && <Notice tone="warn" alert>Auto-wake of the master is paused: the hourly limit was reached. Events wait in the queue.</Notice>}
@@ -122,14 +120,30 @@ export function TeamEventsPanel({ projectId, status, reload }: { projectId: stri
     {events.recent.length > 0 ? <ul className="pj-rows" aria-label="Latest events">{events.recent.slice(0, RECENT_SHOWN).map((item) => <li key={item.id} className="pj-row">
       <span className="grow">{displayText(eventLine(item))}</span><span className="pj-secondary">{eventState(item.state)}</span>
     </li>)}</ul> : <p className="tg-terminal-note">No sub-agent events yet.</p>}
+  </section>;
+}
+
+/** How sub-agent events wake the master, in the Agents tab's Agents and tasks fold: the
+ * project's wake rule and, for a picked sub-agent, its own. Inputs: the project id, the team
+ * status and a reload. Output: the panel. */
+export function WakeRulesPanel({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { events } = status;
+  const subs = status.agents.filter((agent) => agent.role === "sub");
+  const [agent, setAgent] = useState("");
+  const chosen = subs.find((item) => String(item.id) === agent);
+  const own = chosen ? events.wake.agents.find((item) => item.agent === chosen.id)?.rule ?? null : null;
+  const above: WakeRuleLevel = events.wake.project ? "project" : events.wake.app ? "app" : "shipped";
+  const label = (id: number) => agentName(status, id);
+  return <section className="tg-events" aria-label="Wake rules">
+    <h3>Wake rules</h3>
     <h4>Wake the master for this project</h4>
-    <WakeRuleEditor target={{ level: "project", project_id: projectId }} own={events.wake.project}
+    <WakeRuleEditor target={{ level: "project", project_id: projectId }} own={events.wake.project} version={events.wake.project_version}
       effective={events.wake.effective} fallback={events.wake.app ? "app" : "shipped"} reload={reload} />
     {subs.length > 0 && <>
       <h4>Wake rule of one agent</h4>
       <Select id={`tg-wake-agent-${projectId}`} label="Agent" value={agent} onValue={setAgent}
         options={[{ value: "", label: "Pick an agent" }, ...subs.map((item) => ({ value: String(item.id), label: label(item.id) }))]} />
-      {chosen && <WakeRuleEditor target={{ level: "agent", project_id: projectId, agent: chosen.id }} own={own}
+      {chosen && <WakeRuleEditor target={{ level: "agent", project_id: projectId, agent: chosen.id }} own={own} version={agentRuleVersion(events.wake, chosen.id)}
         effective={own ?? events.wake.effective} fallback={above} reload={reload} />}
     </>}
   </section>;

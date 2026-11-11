@@ -214,6 +214,20 @@ fn rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
+/// The rows a legacy database holds after an engine start: every row it had, plus the mark
+/// that the start brought the fixture project's activity history in, which every engine
+/// start does once per project (Task 10 backfill, 581da0a23). Input: the rows before the
+/// start. Output: the rows the start must leave.
+fn started(mut rows: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    let marks = rows.get_mut("project_activity_backfill").unwrap();
+    assert!(marks.is_empty());
+    marks.push(format!(
+        "{:?}",
+        rusqlite::types::Value::Text("configured-project".into())
+    ));
+    rows
+}
+
 fn mode(path: &Path) -> u32 {
     std::fs::symlink_metadata(path).unwrap().mode() & 0o777
 }
@@ -281,7 +295,7 @@ async fn v1_database_upgrades_in_place_and_keeps_every_row() {
 
     let db = root.connection();
     assert_eq!(version(&db).unwrap(), latest(STEPS));
-    assert_eq!(rows(&db), before);
+    assert_eq!(rows(&db), started(before.clone()));
     drop(db);
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
@@ -540,7 +554,7 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
 
     close(root.open().await.unwrap()).await;
     assert_eq!(version(&root.connection()).unwrap(), latest(STEPS));
-    assert_eq!(rows(&root.connection()), before);
+    assert_eq!(rows(&root.connection()), started(before));
 }
 
 #[tokio::test]
@@ -812,7 +826,7 @@ fn an_upgrade_sweeps_plugins_left_by_projects_that_are_gone() {
         "the orphaned skill folder is queued for the sweep"
     );
 
-    crate::storage::trash::sweep(&db, root.path()).unwrap();
+    crate::storage::trash::sweep(&db, root.path(), None).unwrap();
     assert!(
         !ghost_folder.exists(),
         "the orphaned skill folder is reclaimed"
@@ -820,5 +834,254 @@ fn an_upgrade_sweeps_plugins_left_by_projects_that_are_gone() {
     assert!(
         live_folder.exists(),
         "a live project keeps its skill folder"
+    );
+}
+
+#[test]
+fn an_upgrade_from_six_lets_items_hold_hooks_and_the_trash_hold_hook_folders_keeping_every_row() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE plugin_items (
+             id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
+             kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+             scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
+             body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
+             UNIQUE(kind, scope, name));
+         CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+    for row in [
+        ["sk-guide", "skill", "global", "guide", "{\"on\":true}"],
+        ["sv-notes", "server", "project:live", "notes", "{}"],
+    ] {
+        db.execute("INSERT INTO plugin_items VALUES (?1,?2,?3,?4,?5)", row)
+            .unwrap();
+    }
+    db.execute(
+        "INSERT INTO file_trash VALUES ('skill_folder','pending-folder')",
+        [],
+    )
+    .unwrap();
+    let hook = "INSERT INTO plugin_items VALUES ('hk-start','hook','global','start','{}')";
+    let hook_folder = "INSERT INTO file_trash VALUES ('hook_folder','hk-start')";
+    assert!(db.execute(hook, []).is_err(), "version 6 refuses a hook");
+    assert!(db.execute(hook_folder, []).is_err());
+    let before = rows(&db);
+    db.execute_batch("PRAGMA user_version = 6").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let after = rows(&db);
+    for table in ["plugin_items", "file_trash"] {
+        assert_eq!(after[table], before[table], "{table} keeps every row");
+    }
+    db.execute(hook, []).unwrap();
+    db.execute(hook_folder, []).unwrap();
+    let hooks: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE kind='hook'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hooks, 1);
+    assert!(
+        db.execute(
+            "INSERT INTO plugin_items VALUES ('xx','widget','global','x','{}')",
+            [],
+        )
+        .is_err(),
+        "the widened check still refuses an unknown kind"
+    );
+}
+
+/// Step 8 (N1) gives the team tables of a version 7 database a `parent` column, keeping each
+/// row with no lead; a database with no team tables upgrades with none made, and a second
+/// engine start adds nothing.
+#[test]
+fn migration_8_adds_parent_to_team_tasks_and_agents() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE team_tasks (id INTEGER PRIMARY KEY, project TEXT NOT NULL, prompt TEXT NOT NULL);
+         CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL);
+         INSERT INTO team_tasks(id,project,prompt) VALUES (3,'notes','Write the notes page');
+         INSERT INTO team_agents(id,project,role) VALUES (5,'notes','sub');
+         PRAGMA user_version = 7;",
+    )
+    .unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    for (table, id) in [("team_tasks", 3), ("team_agents", 5)] {
+        let parent: Option<i64> = db
+            .query_row(
+                &format!("SELECT parent FROM {table} WHERE id=?1"),
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None, "{table} keeps its row with no lead");
+    }
+    db.execute("UPDATE team_agents SET parent=5 WHERE id=5", [])
+        .unwrap();
+    db.execute_batch("PRAGMA user_version = 7").unwrap();
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+    let columns: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('team_agents') WHERE name='parent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 1, "the step adds the column once");
+    let parent: Option<i64> = db
+        .query_row("SELECT parent FROM team_agents WHERE id=5", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(parent, Some(5), "a second run keeps the recorded lead");
+
+    let bare = Root::new();
+    let mut empty = bare.connection();
+    empty.execute_batch("PRAGMA user_version = 7").unwrap();
+    upgrade(&mut empty, &bare.database(), None, STEPS).unwrap();
+    assert_eq!(version(&empty).unwrap(), latest(STEPS));
+    let tables: i64 = empty
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('team_tasks','team_agents')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "the step makes no team table of its own");
+}
+
+/// Step 10 through the real upgrade: an old usage store keeps every total under the new shape,
+/// and a database that never opened the usage store is stamped with no usage table made.
+#[test]
+fn step_10_gives_usage_rows_a_model_through_the_upgrade() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE usage_tokens (
+            hour_ms INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),
+            project TEXT NOT NULL,
+            pool TEXT NOT NULL,
+            account TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            harness TEXT NOT NULL,
+            session TEXT NOT NULL,
+            input INTEGER NOT NULL,
+            output INTEGER NOT NULL,
+            cache_read INTEGER NOT NULL,
+            cache_write INTEGER NOT NULL,
+            PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session)
+         );
+         CREATE TABLE usage_files (path TEXT PRIMARY KEY, progress TEXT NOT NULL);
+         INSERT INTO usage_tokens VALUES
+            (3600000,'agent','alpha','','acct','team-7','claude','s1',10,1,100,2),
+            (3600000,'agent','alpha','','acct','team-7','claude-code','s1',5,1,50,2),
+            (3600000,'agent','alpha','','acct','team-7','codex','s2',7,1,70,2);
+         PRAGMA user_version = 8;",
+    )
+    .unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let shaped: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_tokens') WHERE name='model')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(shaped, "step 10 gave the rows a model");
+    let totals: Vec<(String, String, [i64; 4])> = db
+        .prepare(
+            "SELECT harness,model,input,output,cache_read,cache_write FROM usage_tokens ORDER BY harness",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?],
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        totals,
+        vec![
+            ("claude-code".to_owned(), String::new(), [15, 2, 150, 4]),
+            ("codex".to_owned(), String::new(), [7, 1, 70, 2]),
+        ]
+    );
+
+    let bare = Root::new();
+    let mut other = bare.connection();
+    other
+        .execute_batch("CREATE TABLE unrelated (id INTEGER); PRAGMA user_version = 8;")
+        .unwrap();
+    upgrade(&mut other, &bare.database(), None, STEPS).unwrap();
+    assert_eq!(version(&other).unwrap(), latest(STEPS));
+    let tables: i64 = other
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name='usage_tokens'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tables, 0,
+        "no usage table is made for a store that had none"
+    );
+}
+
+/// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
+/// still refuses a kind it does not know.
+#[test]
+fn an_upgrade_from_eight_lets_the_trash_hold_account_files_keeping_every_note() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO file_trash VALUES ('account_key','pending-key')",
+        [],
+    )
+    .unwrap();
+    let home = "INSERT INTO file_trash VALUES ('generated_home','lab-key')";
+    let sign_in = "INSERT INTO file_trash VALUES ('native_sign_in','lab-key')";
+    assert!(db.execute(home, []).is_err());
+    assert!(db.execute(sign_in, []).is_err());
+    let before = rows(&db);
+    db.execute_batch("PRAGMA user_version = 8").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    assert_eq!(rows(&db)["file_trash"], before["file_trash"]);
+    db.execute(home, []).unwrap();
+    db.execute(sign_in, []).unwrap();
+    assert!(
+        db.execute("INSERT INTO file_trash VALUES ('widget','x')", [])
+            .is_err()
     );
 }

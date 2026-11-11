@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -48,15 +49,16 @@ test("deleting accounts in pools names the pools they leave and the pools delete
   assert.equal(many.confirmLabel, "Remove from pools and delete");
   assert.deepEqual(many.lines, [
     "Claude a, Claude b and Claude c and their saved sign-ins or keys are removed from CrazyAgent. A running sign-in is cancelled first.",
+    "An agent using one of these accounts keeps running. Its sign-in goes after that agent stops and the app restarts.",
     "They leave pools Main and Spare. Main has no other account, so it is deleted too and its projects have no pool.",
   ]);
   const one = deleteDialog([accounts[1]], [pool("Spare", ["b", "x"])]);
   assert.equal(one.title, "Delete Claude b?");
   assert.equal(one.confirmLabel, "Remove from pools and delete");
-  assert.deepEqual(one.lines.slice(1), ["It leaves pool Spare."]);
+  assert.deepEqual(one.lines.slice(1), ["An agent using this account keeps running. Its sign-in goes after that agent stops and the app restarts.", "It leaves pool Spare."]);
   assert.equal(deleteDialog([accounts[0]], pools).confirmLabel, "Delete account");
   assert.equal(deleteDialog(accounts, undefined).confirmLabel, "Delete 3 accounts");
-  assert.equal(deleteDialog(accounts, undefined).lines.length, 1);
+  assert.equal(deleteDialog(accounts, undefined).lines.length, 2);
   assert.equal(poolEffect(["a"], pools), undefined);
   assert.equal(poolEffect(["b", "x"], pools), "They leave pools Main and Spare. Main and Spare have no other account, so they are deleted too and their projects have no pool.");
   assert.equal(api.knownError("account_in_pool"), undefined, "account_in_pool is no longer a refusal, so it has no sentence of its own");
@@ -78,10 +80,10 @@ test("cancelling a sign-in reaches the engine and says plainly when the engine c
   const result = await cancelSignIn("acct-1");
   assert.equal(result.kind, "error");
   assert.equal(result.code, "engine_unreachable");
-  for (const code of ["native_auth_operation_missing", "native_profile_source_conflict"]) {
+  for (const code of ["native_auth_operation_missing"]) {
     assert.equal(cancelError(code), "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.", code);
   }
-  for (const code of ["native_auth_operation_scope_conflict", "native_auth_recovery_required"]) {
+  for (const code of ["native_auth_operation_scope_conflict", "native_auth_recovery_required", "native_profile_source_conflict"]) {
     assert.equal(cancelError(code), "CrazyAgent can't stop this sign-in from here. Use Clear stuck sign-in at the top of the window.", code);
   }
   assert.equal(cancelError("native_auth_not_active"), undefined);
@@ -113,4 +115,17 @@ test("rows carry an actions menu and a selection offers Delete selected and Canc
     onCancelSelected: forbidden, initialSelection: ["a"] }));
   assert.doesNotMatch(idle, />Cancel sign-in<\/button>/);
   assert.match(idle, />Delete selected<\/button>/);
+});
+
+test("Sign in and Try again start from a fresh sign-in record, since the open drawer's ticket only reads or cancels its own attempt once other reads ran", () => {
+  const source = readFileSync(new URL("../src/screens/settings/sign-in.tsx", import.meta.url), "utf8");
+  assert.match(source, /const start = useCallback\(async \(method: NativeAuthMethod\) => \{\s*await open\(\);\s*await act\(method\);\s*\}, \[act, open\]\);/);
+});
+
+test("a sign-in started in the drawer reloads the account list, so its row reads Signing in and the page polls it", () => {
+  const source = readFileSync(new URL("../src/screens/settings/account-drawer.tsx", import.meta.url), "utf8");
+  assert.match(source, /function SignInAgain\(\{ account, onSignedIn, onStarted \}/);
+  assert.match(source, /const attempt = signInRunning\(signIn\.state\) \? signIn\.state\?\.operation\?\.operation_id : undefined;/);
+  assert.match(source, /if \(!attempt \|\| started\.current === attempt\) return;\s*started\.current = attempt;\s*onStarted\(\);/);
+  assert.match(source, /<SignInAgain account=\{account\} onStarted=\{\(\) => onChanged\(\)\}/);
 });

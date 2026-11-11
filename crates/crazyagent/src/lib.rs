@@ -1,26 +1,37 @@
 #![forbid(unsafe_code)]
 
 pub mod accounts;
+pub mod activity;
 pub mod adapters;
 pub mod agent_git;
 pub mod agent_home;
 pub mod agents;
 pub mod assets;
+pub mod cleanup_settings;
 pub mod client_controller;
 pub mod config;
+#[cfg(unix)]
+pub mod context_mode;
 pub mod conversation;
+pub mod coord;
 pub mod coordination;
 pub mod credentials;
 pub mod engine;
 pub mod file_identity;
+#[cfg(unix)]
+pub mod file_lock;
 pub mod github;
 pub mod harnesses;
+/// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
+/// and environment.
+pub mod ide;
 pub mod instruction_files;
 #[cfg(unix)]
 pub mod isolation;
 pub mod landing;
-pub(crate) mod landing_turns;
+pub mod landing_turns;
 pub mod launch_context;
+pub mod ledger;
 pub mod master_session;
 pub mod master_sessions;
 pub mod memory;
@@ -28,6 +39,7 @@ pub mod model_gateway;
 pub mod onboarding;
 pub mod owner_profile;
 pub mod paths;
+pub mod planning;
 pub mod platform;
 pub mod plugins;
 pub mod pools;
@@ -36,10 +48,14 @@ pub mod project_setup;
 pub mod projects_home;
 pub mod protocol;
 pub mod qualification;
+pub mod questions;
+pub mod quit_settings;
 pub mod rcli_host;
+pub mod recovery;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod sandbox_settings;
 pub mod scheduling;
 pub mod service;
 pub mod setup;

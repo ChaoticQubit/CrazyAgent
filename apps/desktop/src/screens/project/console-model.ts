@@ -29,7 +29,7 @@ export const CONSOLE_COMMANDS: readonly ConsoleCommand[] = [
   { name: "clear", help: "Clear this view; the conversation stays", action: { kind: "clear" } },
   { name: "agents", help: "Open the Agents tab", action: { kind: "navigate", target: "agents" } },
   { name: "changes", help: "Open the Changes tab", action: { kind: "navigate", target: "changes" } },
-  { name: "usage", help: "Open Usage in Settings", action: { kind: "navigate", target: "usage" } },
+  { name: "usage", help: "Open Metrics", action: { kind: "navigate", target: "usage" } },
   { name: "process", help: "Open the project's Process tab", action: { kind: "navigate", target: "process" } },
   { name: "stop", help: "Stop the master's turn", action: { kind: "stop" } },
 ];
@@ -87,7 +87,7 @@ export function helpLines(commands: readonly ConsoleCommand[] = CONSOLE_COMMANDS
 
 /** The page a navigating command opens. Inputs: the target and the project id. Output: the route. */
 export function commandRoute(target: ConsoleTarget, projectId: string): Route {
-  if (target === "usage") return { name: "settings", tab: "usage" };
+  if (target === "usage") return { name: "metrics" };
   return { name: "project", id: projectId, tab: target };
 }
 
@@ -159,13 +159,14 @@ export function toHandle(text: string): string | null {
   return kept ? kept : null;
 }
 
-/** The agents `@` completes: the master, then each sub-agent by its role handle from a label
- * such as "Ada (@onboarding-fix)", or by its name made into a handle; a handle shared by two
- * agents is offered once. Input: the team graph's nodes. Output: the mentions. */
+/** The agents `@` completes: the master, then each lead, sub-agent and teammate with its own
+ * agent row by its role handle from a label such as "Ada (@onboarding-fix)", or by its name
+ * made into a handle; a handle shared by two agents is offered once, and a native teammate
+ * known only by its pane is left out. Input: the team graph's nodes. Output: the mentions. */
 export function agentMentions(nodes: readonly GraphNode[]): Mention[] {
   const mentions: Mention[] = [{ handle: MASTER_HANDLE, label: "Master", kind: "agent" }];
   for (const node of nodes) {
-    if (node.kind !== "agent") continue;
+    if (node.kind === "master" || (node.kind === "teammate" && typeof node.agent !== "number")) continue;
     const handle = /\(@([a-z0-9-]+)\)\s*$/.exec(node.label)?.[1] ?? toHandle(node.label);
     if (handle && !mentions.some((mention) => mention.handle === handle)) mentions.push({ handle, label: node.label, kind: "agent" });
   }

@@ -30,6 +30,7 @@ pub struct RcliMasterObservation {
     pub sequence: u64,
     pub event: Event,
     pub completion: Option<RcliMasterCompletion>,
+    pub usage: crate::usage::capture::Tokens,
 }
 
 impl RcliMasterObservation {
@@ -138,11 +139,14 @@ impl RcliMasterHost {
         let frame_bytes = bytes.len();
         let event = super::read_event(&mut Cursor::new(bytes))?;
         self.sequence.accept(&event)?;
+        let mut usage = crate::usage::capture::Tokens::default();
         let completion = if matches!(event.0.event, EventBody::Ready {}) {
             self.ready = true;
             None
         } else if let Some(turn) = self.active.as_mut() {
-            turn.accept(&event, frame_bytes)?
+            let completion = turn.accept(&event, frame_bytes)?;
+            usage = turn.take_usage();
+            completion
         } else if has_turn(&event) {
             return Err(error("rcli_master_turn_scope"));
         } else {
@@ -157,6 +161,7 @@ impl RcliMasterHost {
             sequence: event.0.sequence,
             event,
             completion,
+            usage,
         }))
     }
 

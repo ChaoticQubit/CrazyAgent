@@ -3,10 +3,14 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
+use super::planning_line::{Planning, planning, planning_key};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::questions::ProjectQuestions;
+use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
 use crate::project_setup::{
@@ -20,7 +24,7 @@ use crate::tui::ctx::Load;
 use crate::tui::seam::PoolScope;
 use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
@@ -32,8 +36,10 @@ const NAME_BYTES_MAX: usize = 256;
 const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
+const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
+const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
 
-/// Names the six tabs of a project.
+/// Names the seven tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
 /// The order is the tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,16 +48,18 @@ pub(in crate::tui) enum Tab {
     Conversation,
     Agents,
     Changes,
+    Questions,
     Context,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
+        Self::Questions,
         Self::Context,
         Self::Settings,
     ];
@@ -65,6 +73,7 @@ impl Tab {
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
             Self::Changes => "Changes",
+            Self::Questions => "Questions",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }
@@ -79,6 +88,7 @@ impl Tab {
             Self::Conversation => "\u{00bb}",
             Self::Agents => "\u{229b}",
             Self::Changes => "\u{2213}",
+            Self::Questions => "\u{225f}",
             Self::Context => "\u{29c9}",
             Self::Settings => "\u{2630}",
         }
@@ -147,6 +157,14 @@ pub(in crate::tui) enum Speaker {
     Master,
     Notice,
     Task,
+}
+
+/// How the remove ask removes the project: Remove from dashboard keeps every file, and
+/// Delete everything also moves its folders to the Trash (DEC-118).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveChoice {
+    Dashboard,
+    Everything,
 }
 
 /// What the prompt's inline menu offers at the cursor: the commands matching a `/` word, or
@@ -236,6 +254,13 @@ pub(in crate::tui) struct Preview {
 }
 
 impl Preview {
+    /// The offset of the chunk this preview reads next: 0 before its first chunk, then the
+    /// engine's next offset, so a chunk read for an earlier preview of the same file is
+    /// told apart. Takes the preview. Returns the offset, or none once it is complete.
+    fn wanted(&self) -> Option<u64> {
+        if self.loaded { self.next } else { Some(0) }
+    }
+
     /// Gives the report rendered for a width, rendering once per width.
     /// Takes the width in cells.
     /// Returns the wrapped lines.
@@ -331,7 +356,9 @@ impl Field {
 
 /// The General form on the Settings tab: the project's name, description,
 /// tech stack, platforms and research, saved as one engine edit.
-/// Holds the setup revision it started from, so a change made elsewhere is refused.
+/// Holds the setup revision it started from, so a change made elsewhere is refused; after
+/// such a refusal it keeps the draft, takes the revision of the setup read next and names the
+/// fields changed since the owner last saw them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct GeneralEdit {
     pub name: TextInput,
@@ -343,6 +370,51 @@ pub(in crate::tui) struct GeneralEdit {
     pub revision: u64,
     pub busy: bool,
     pub error: Option<String>,
+    pub stale: bool,
+    seen: GeneralSeen,
+}
+
+/// The General form's fields in the setup last shown to the owner: the one the form opened
+/// at, or the one read after a stale refusal. Platforms and research are sorted, and research
+/// leaves out roadmap planning, which the form has no switch for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeneralSeen {
+    name: String,
+    about: String,
+    tech_stack: Vec<String>,
+    platforms: Vec<Platform>,
+    research: Vec<ResearchKind>,
+}
+
+impl GeneralSeen {
+    fn of(setup: &StoredSetup) -> Self {
+        Self {
+            name: setup.name.clone(),
+            about: setup.about.clone(),
+            tech_stack: setup.tech_stack.clone(),
+            platforms: sorted(&setup.platforms),
+            research: sorted(&setup.research)
+                .into_iter()
+                .filter(|kind| *kind != ResearchKind::RoadmapPlanning)
+                .collect(),
+        }
+    }
+
+    /// Names the fields that differ between two readings of the setup.
+    /// Takes the earlier reading and the later one.
+    /// Returns the field names as the form labels them, in form order.
+    fn changed(&self, now: &Self) -> Vec<&'static str> {
+        [
+            ("name", self.name != now.name),
+            ("description", self.about != now.about),
+            ("tech stack", self.tech_stack != now.tech_stack),
+            ("platforms", self.platforms != now.platforms),
+            ("research", self.research != now.research),
+        ]
+        .into_iter()
+        .filter_map(|(field, differs)| differs.then_some(field))
+        .collect()
+    }
 }
 
 impl GeneralEdit {
@@ -366,6 +438,8 @@ impl GeneralEdit {
             revision: setup.revision,
             busy: false,
             error: None,
+            stale: false,
+            seen: GeneralSeen::of(setup),
         }
     }
 
@@ -399,27 +473,27 @@ impl GeneralEdit {
         }
     }
 
-    /// Builds the engine edit from the form.
-    /// Takes the form and the setup it edits.
+    /// Builds the engine edit from the form, with the stack read by [`stack_entries`]. The
+    /// form has no roadmap switch, so the roadmap planning choice comes from the setup as it
+    /// is now, not as the form opened. Takes the form and the current setup.
     /// Returns the edit with the name only when it changed, or none when nothing changed.
     pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
         let name = self.name.value().trim();
         let about = self.about.value().trim().to_owned();
-        let tech_stack: Vec<String> = self
-            .stack
-            .value()
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let tech_stack = stack_entries(self.stack.value(), &setup.tech_stack);
         let platforms: Vec<Platform> = Platform::ALL
             .into_iter()
             .filter(|platform| self.platforms.contains(platform))
             .collect();
-        let research: Vec<ResearchKind> = ResearchKind::ALL
+        let research: Vec<ResearchKind> = ResearchKind::CHOICES
             .into_iter()
-            .filter(|kind| self.research.contains(kind))
+            .filter(|kind| {
+                if *kind == ResearchKind::RoadmapPlanning {
+                    setup.research.contains(kind)
+                } else {
+                    self.research.contains(kind)
+                }
+            })
             .collect();
         let unchanged = name == setup.name
             && about == setup.about
@@ -444,6 +518,47 @@ impl GeneralEdit {
             },
         })
     }
+}
+
+/// Reads the stack field: entries split by commas, where a saved entry that holds a comma
+/// and still shows whole between separators stays one entry, so editing the field never
+/// splits an entry the owner did not touch. Inputs: the field text and the saved entries.
+/// Output: the trimmed entries without empty ones, or the saved entries themselves while
+/// the field still shows them as the form wrote them.
+fn stack_entries(text: &str, saved: &[String]) -> Vec<String> {
+    if text == saved.join(", ") {
+        return saved.to_vec();
+    }
+    let mut whole: Vec<&str> = saved
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| entry.contains(','))
+        .collect();
+    whole.sort_by_key(|entry| std::cmp::Reverse(entry.len()));
+    let mut entries = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        if rest.is_empty() {
+            break;
+        }
+        let kept = whole.iter().copied().find(|entry| {
+            rest.strip_prefix(*entry).is_some_and(|after| {
+                let after = after.trim_start();
+                after.is_empty() || after.starts_with(',')
+            })
+        });
+        let (entry, after) = match kept {
+            Some(entry) => (entry, &rest[entry.len()..]),
+            None => rest.split_once(',').unwrap_or((rest, "")),
+        };
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            entries.push(entry.to_owned());
+        }
+        rest = after;
+    }
+    entries
 }
 
 fn sorted<T: Ord + Copy>(list: &[T]) -> Vec<T> {
@@ -495,6 +610,8 @@ pub(in crate::tui) enum ProjectReply {
         decision: ReviewDecision,
     },
     Open(OpenRequest),
+    Edit(OpenRequest),
+    Reveal(RevealTarget),
     PickPool,
     Assign(Option<crate::protocol::CredentialRef>),
     Send(String),
@@ -502,6 +619,7 @@ pub(in crate::tui) enum ProjectReply {
     EndConversation,
     Retry,
     Team,
+    TeamSettings,
     Master,
     Process,
     Usage,
@@ -547,9 +665,15 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
+    pub removal: Option<crate::team::cleanup::RemovalPreview>,
+    pub remove_choice: RemoveChoice,
+    pub remove_typed: String,
+    pub confirm_plan: Option<SetupAction>,
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
-    pub read_paths: Option<Vec<String>>,
+    pub read_paths: Option<crate::project_setup::ReadPaths>,
+    pub hidden: Option<AddFile>,
+    pub hidden_paths: Option<Vec<String>>,
     pub access: Option<AccessEdit>,
     pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
     pub schedule: Option<crate::scheduling::Schedule>,
@@ -559,16 +683,23 @@ pub(in crate::tui) struct ProjectScreen {
     pub problem: Option<String>,
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
+    pub questions: ProjectQuestions,
+    pub recovery: ProjectRecovery,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
     read_paths_read_ms: Option<i64>,
+    folders_version: u64,
+    folders_stale: bool,
+    hidden_paths_read_ms: Option<i64>,
     agent_policy_read_ms: Option<i64>,
+    access_stale: bool,
     memories_read_ms: Option<i64>,
+    removal_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
-    setup_due: bool,
+    pub setup_due: bool,
     waiting: Option<SetupQuery>,
 }
 
@@ -580,6 +711,8 @@ impl ProjectScreen {
         Self {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
+            questions: ProjectQuestions::new(project.clone()),
+            recovery: ProjectRecovery::new(project.clone()),
             sessions: Sessions::default(),
             project,
             name,
@@ -615,9 +748,15 @@ impl ProjectScreen {
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
+            removal: None,
+            remove_choice: RemoveChoice::Dashboard,
+            remove_typed: String::new(),
+            confirm_plan: None,
             adding: None,
             folders: None,
             read_paths: None,
+            hidden: None,
+            hidden_paths: None,
             access: None,
             agent_policy: None,
             schedule: None,
@@ -630,8 +769,13 @@ impl ProjectScreen {
             jobs_read_ms: None,
             context_read_ms: None,
             read_paths_read_ms: None,
+            folders_version: 0,
+            folders_stale: false,
+            hidden_paths_read_ms: None,
             agent_policy_read_ms: None,
+            access_stale: false,
             memories_read_ms: None,
+            removal_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
             waiting: None,
@@ -646,7 +790,8 @@ impl ProjectScreen {
         self.reading = false;
         self.confirm_delete = None;
         self.confirm_stop = None;
-        self.confirm_remove = false;
+        self.close_remove();
+        self.confirm_plan = None;
         self.adding = None;
         self.folders = None;
         self.access = None;
@@ -654,6 +799,9 @@ impl ProjectScreen {
         self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
             self.changes.refresh();
+        }
+        if tab == Tab::Questions {
+            self.questions.refresh();
         }
     }
 
@@ -668,7 +816,9 @@ impl ProjectScreen {
         let project = self.project.clone();
         let due = |last: Option<i64>| last.is_none_or(|last| now_ms - last >= REFRESH_MS);
         let setup_wanted = (self.setup.is_none() || self.setup_due) && !self.setup_missing;
-        let query = if setup_wanted && due(self.setup_failed_ms) {
+        let query = if self.confirm_remove && self.removal.is_none() && due(self.removal_read_ms) {
+            SetupQuery::Removal { project }
+        } else if setup_wanted && due(self.setup_failed_ms) {
             SetupQuery::Setup { project }
         } else if self.setup_missing || self.setup.is_none() {
             return None;
@@ -685,6 +835,11 @@ impl ProjectScreen {
             && due(self.read_paths_read_ms)
         {
             SetupQuery::ReadPaths { project }
+        } else if self.hidden_paths.is_none()
+            && self.tab == Tab::Settings
+            && due(self.hidden_paths_read_ms)
+        {
+            SetupQuery::HiddenPaths { project }
         } else if self.agent_policy.is_none()
             && self.tab == Tab::Settings
             && due(self.agent_policy_read_ms)
@@ -811,12 +966,18 @@ impl ProjectScreen {
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
                     SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
+                    SetupQuery::HiddenPaths { .. } => self.hidden_paths_read_ms = Some(self.now_ms),
                     SetupQuery::AgentPolicy { .. } => {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
-                    SetupQuery::Item { path, .. } => {
-                        if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
+                    SetupQuery::Removal { .. } => self.removal_read_ms = Some(self.now_ms),
+                    SetupQuery::Item { path, offset, .. } => {
+                        if let Some(preview) = self
+                            .preview
+                            .as_mut()
+                            .filter(|p| &p.path == path && p.wanted() == Some(*offset))
+                        {
                             preview.next = None;
                             preview.problem = Some(plain_problem(&problem));
                             preview.cache = None;
@@ -825,7 +986,9 @@ impl ProjectScreen {
                     SetupQuery::Log { job, .. } => self.log_read(*job, None),
                     SetupQuery::Change {
                         action:
-                            SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                            SetupAction::CancelResearch { .. }
+                            | SetupAction::RetryResearch { .. }
+                            | SetupAction::PlanRoadmap { .. },
                         ..
                     } => self.jobs_read_ms = None,
                     _ => {}
@@ -836,6 +999,18 @@ impl ProjectScreen {
         };
         match view {
             SetupView::Setup(Some(setup)) => {
+                if let Some(general) = self.general.as_mut().filter(|general| general.stale) {
+                    let now = GeneralSeen::of(&setup);
+                    let changed = general.seen.changed(&now);
+                    general.seen = now;
+                    general.revision = setup.revision;
+                    general.stale = false;
+                    general.error = Some(if changed.is_empty() {
+                        "This project changed elsewhere, but not on this form. Enter saves your edit; Esc keeps the saved one.".to_owned()
+                    } else {
+                        format!("Changed elsewhere: {}. {KEEP_MINE}", changed.join(", "))
+                    });
+                }
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
                 self.setup_due = false;
@@ -856,16 +1031,44 @@ impl ProjectScreen {
                 self.memories = Some(memories);
                 self.memories_read_ms = Some(self.now_ms);
             }
-            SetupView::ReadPaths(paths) => {
-                self.read_paths = Some(paths);
+            SetupView::ReadPaths(saved) => {
+                if std::mem::take(&mut self.folders_stale)
+                    && let Some(folders) = self.folders.as_mut()
+                {
+                    self.folders_version = saved.version;
+                    let now = if saved.paths.is_empty() {
+                        "no extra folders".to_owned()
+                    } else {
+                        saved.paths.join(":")
+                    };
+                    folders.error = Some(format!("Saved now: {now}. {KEEP_MINE}"));
+                }
+                self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
+            SetupView::HiddenPaths(paths) => {
+                self.hidden_paths = Some(paths);
+                self.hidden_paths_read_ms = Some(self.now_ms);
+            }
             SetupView::AgentPolicy(view) => {
+                if std::mem::take(&mut self.access_stale)
+                    && let Some(access) = self.access.as_mut()
+                {
+                    access.view.version = view.version;
+                    access.error = Some(format!(
+                        "Saved now: {}. {KEEP_MINE}",
+                        super::project_access::summary(Some(&view))
+                    ));
+                }
                 self.agent_policy = Some(view);
                 self.agent_policy_read_ms = Some(self.now_ms);
             }
             SetupView::Item(chunk) => {
-                if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
+                if let Some(preview) = self
+                    .preview
+                    .as_mut()
+                    .filter(|p| p.path == chunk.path && p.wanted() == Some(chunk.offset))
+                {
                     preview.loaded = true;
                     match chunk.text {
                         Some(text) => {
@@ -886,19 +1089,47 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
-            SetupView::Catalog(_) | SetupView::Team(_) | SetupView::Library(_) => {}
+            SetupView::LiveWithoutSession(why) => {
+                self.changed(query, crate::engine::owner::OwnerResult::Applied);
+                self.problem = Some(format!(
+                    "{} {}",
+                    crate::tui::screens::team::MASTER_NO_SESSION,
+                    crate::tui::screens::team::unopened(&why)
+                ));
+            }
+            SetupView::Removal(preview) => {
+                self.removal_read_ms = Some(self.now_ms);
+                if self.confirm_remove {
+                    if !preview.can_delete {
+                        self.remove_choice = RemoveChoice::Dashboard;
+                    }
+                    self.removal = Some(*preview);
+                }
+            }
+            SetupView::Catalog(_)
+            | SetupView::Team(_)
+            | SetupView::TeamMessages(_)
+            | SetupView::CoordQuestions(_)
+            | SetupView::Library(_) => {}
         }
         self.assert_consistent();
     }
 
-    /// Puts a refused add, edit or remove back in its box with the reason.
+    /// Puts a refused add, edit or remove back in its box with the reason. A General,
+    /// read-only folders or Agent access edit refused as stale keeps its draft and reads the
+    /// saved value again.
     /// Takes the change query and the plain problem code.
     /// Returns true when an open box took the refusal.
     fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
         let SetupQuery::Change { action, .. } = query else {
             return false;
         };
-        let reason = Some(plain_problem(code));
+        let stale = code == crate::storage::versioned::STALE_CODE;
+        let reason = Some(if stale {
+            STALE_READING.to_owned()
+        } else {
+            plain_problem(code)
+        });
         match action {
             SetupAction::AddDocuments { .. } if self.adding.is_some() => {
                 if let Some(adding) = self.adding.as_mut() {
@@ -912,6 +1143,18 @@ impl ProjectScreen {
                     folders.busy = false;
                     folders.error = reason;
                 }
+                if stale {
+                    self.folders_stale = true;
+                    self.read_paths = None;
+                    self.read_paths_read_ms = None;
+                }
+                true
+            }
+            SetupAction::SetHiddenPaths { .. } if self.hidden.is_some() => {
+                if let Some(hidden) = self.hidden.as_mut() {
+                    hidden.busy = false;
+                    hidden.error = reason;
+                }
                 true
             }
             SetupAction::SetAgentPolicy { .. } if self.access.is_some() => {
@@ -919,13 +1162,20 @@ impl ProjectScreen {
                     access.busy = false;
                     access.error = reason;
                 }
+                if stale {
+                    self.access_stale = true;
+                    self.agent_policy = None;
+                    self.agent_policy_read_ms = None;
+                }
                 true
             }
             SetupAction::Update { .. } if self.general.is_some() => {
                 if let Some(general) = self.general.as_mut() {
                     general.busy = false;
                     general.error = reason;
+                    general.stale |= stale;
                 }
+                self.setup_due |= stale;
                 true
             }
             _ => false,
@@ -966,7 +1216,7 @@ impl ProjectScreen {
                 }
             }
             SetupQuery::Change {
-                action: SetupAction::Remove { .. },
+                action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
             SetupQuery::Change {
@@ -977,6 +1227,16 @@ impl ProjectScreen {
                 self.read_paths_read_ms = None;
                 if applied {
                     self.folders = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::SetHiddenPaths { .. },
+                ..
+            } => {
+                self.hidden_paths = None;
+                self.hidden_paths_read_ms = None;
+                if applied {
+                    self.hidden = None;
                 }
             }
             SetupQuery::Change {
@@ -1001,13 +1261,22 @@ impl ProjectScreen {
                 self.context = None;
             }
             SetupQuery::Change {
-                action: SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                action:
+                    action @ (SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. }),
                 ..
             } => {
                 self.jobs_read_ms = None;
+                self.setup_due |= applied && matches!(action, SetupAction::RetryResearch { .. });
                 if applied {
                     self.log = None;
                 }
+            }
+            SetupQuery::Change {
+                action: SetupAction::PlanRoadmap { .. },
+                ..
+            } => {
+                self.jobs_read_ms = None;
+                self.setup_due = true;
             }
             SetupQuery::Change { .. } | SetupQuery::ReviewMemory { .. } => {
                 self.memories_read_ms = None;
@@ -1045,7 +1314,7 @@ impl ProjectScreen {
         items.sort_by_key(|item| {
             (
                 match item.kind {
-                    ContextKind::Brief => 0,
+                    ContextKind::Brief | ContextKind::Plan => 0,
                     ContextKind::Research => 1,
                     ContextKind::Document => 2,
                 },
@@ -1083,19 +1352,46 @@ impl ProjectScreen {
         counts
     }
 
-    /// Names one context file to open: the folder its context paths start from and the
-    /// path inside it. Takes the path inside the project folder.
+    /// Names one context file for the desktop IDE by its path inside the project folder.
+    /// Takes the path the context tree lists. Returns the target, or none before the
+    /// project folder is read or when the context folder is outside it.
+    pub fn ide_target(&self, path: &str) -> Option<RevealTarget> {
+        let setup = self.setup.as_ref()?;
+        let Some(OpenRequest::Context { folder, path }) = self.context_request(path) else {
+            return None;
+        };
+        let inside = Path::new(&folder)
+            .strip_prefix(setup.project_folder())
+            .ok()?
+            .join(path);
+        Some(RevealTarget::Project {
+            path: inside.to_str()?.to_owned(),
+        })
+    }
+
+    /// Names one context file to open: the folder its context paths start from, as the
+    /// engine listed them, and the path inside it. Takes the path inside that folder.
     /// Returns the request, or none before the folder is known.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
         let folder = self
-            .setup
+            .context
             .as_ref()
-            .map(|setup| setup.folder.clone())
-            .or_else(|| self.context.as_ref().map(|context| context.folder.clone()))?;
+            .map(|context| context.folder.clone())
+            .or_else(|| {
+                self.setup
+                    .as_ref()
+                    .map(|setup| setup.state_folder().to_string_lossy().into_owned())
+            })?;
         Some(OpenRequest::Context {
             folder,
             path: path.to_owned(),
         })
+    }
+
+    /// The project's own folder, where the owner's copies of changed files live.
+    /// Takes the screen. Returns the folder, or none before the setup is read.
+    pub fn project_folder(&self) -> Option<PathBuf> {
+        self.setup.as_ref().map(StoredSetup::project_folder)
     }
 
     /// True while a box or question is open: `key` gives it every key before any tab or
@@ -1107,6 +1403,7 @@ impl ProjectScreen {
             || self.review.is_some()
             || self.adding.is_some()
             || self.folders.is_some()
+            || self.hidden.is_some()
             || self.access.is_some()
             || self.general.is_some()
             || self.confirm_remove
@@ -1132,6 +1429,9 @@ impl ProjectScreen {
         if self.folders.is_some() {
             return self.folders_key(key);
         }
+        if self.hidden.is_some() {
+            return self.hidden_key(key);
+        }
         if self.access.is_some() {
             return self.access_key(key);
         }
@@ -1139,19 +1439,7 @@ impl ProjectScreen {
             return self.general_key(key);
         }
         if self.confirm_remove {
-            return match key.code {
-                KeyCode::Char('y') => {
-                    self.confirm_remove = false;
-                    ProjectReply::Change(Box::new(SetupAction::Remove {
-                        project_id: self.project.clone(),
-                    }))
-                }
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    self.confirm_remove = false;
-                    ProjectReply::Handled
-                }
-                _ => ProjectReply::Handled,
-            };
+            return self.remove_key(key);
         }
         if let Some(cursor) = self.pool_picker {
             return self.picker_key(key, cursor);
@@ -1167,6 +1455,19 @@ impl ProjectScreen {
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.confirm_delete = None;
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            };
+        }
+        if let Some(action) = self.confirm_plan.clone() {
+            return match key.code {
+                KeyCode::Char('y') => {
+                    self.confirm_plan = None;
+                    ProjectReply::Change(Box::new(action))
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.confirm_plan = None;
                     ProjectReply::Handled
                 }
                 _ => ProjectReply::Handled,
@@ -1216,6 +1517,7 @@ impl ProjectScreen {
             Tab::Conversation => self.conversation_key(key),
             Tab::Agents => self.agents_key(key),
             Tab::Changes => ProjectReply::Ignored,
+            Tab::Questions => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
@@ -1247,6 +1549,11 @@ impl ProjectScreen {
             folders.error = None;
             return ProjectReply::Handled;
         }
+        if let Some(hidden) = self.hidden.as_mut().filter(|hidden| !hidden.busy) {
+            hidden.input.insert_str(text);
+            hidden.error = None;
+            return ProjectReply::Handled;
+        }
         if let Some(general) = self.general.as_mut().filter(|general| !general.busy) {
             if let Some(field) = general.text() {
                 field.insert_str(text);
@@ -1259,6 +1566,9 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         }
         if self.tab == Tab::Changes && self.changes.paste(text) {
+            return ProjectReply::Handled;
+        }
+        if self.tab == Tab::Questions && self.questions.paste(text) {
             return ProjectReply::Handled;
         }
         ProjectReply::Ignored
@@ -1329,6 +1639,7 @@ impl ProjectScreen {
                 ProjectReply::Send(text)
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('t') if control => ProjectReply::Team,
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             _ => {
@@ -1619,9 +1930,12 @@ impl ProjectScreen {
             .iter()
             .map(|m| (m.id.clone(), m.version, m.text.clone()))
             .collect();
-        let work = self.setup.as_ref().map_or(0, |s| s.research.len());
+        let work = self.work_kinds().len();
         let rows = suggested.len() + work;
         let focused = suggested.get(self.overview_cursor).cloned();
+        if let Some(reply) = self.planning_reply(key.code) {
+            return reply;
+        }
         match key.code {
             KeyCode::Up => self.overview_cursor = self.overview_cursor.saturating_sub(1),
             KeyCode::Down => {
@@ -1642,7 +1956,7 @@ impl ProjectScreen {
             }
             KeyCode::Enter => {
                 let index = self.overview_cursor.checked_sub(suggested.len());
-                let kind = index.and_then(|i| self.setup.as_ref()?.research.get(i).copied());
+                let kind = index.and_then(|i| self.work_kinds().get(i).copied());
                 if let Some(kind) = kind {
                     self.read(&kind.report_path());
                 }
@@ -1720,6 +2034,7 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('t') => return ProjectReply::Team,
+            KeyCode::Char('s') => return ProjectReply::TeamSettings,
             KeyCode::Char('r') => {
                 let Some((job, status)) = self.focused_job().map(|job| (job.id, job.status)) else {
                     return ProjectReply::Handled;
@@ -1812,6 +2127,27 @@ impl ProjectScreen {
                     return ProjectReply::Open(request);
                 }
             }
+            KeyCode::Char('v') => {
+                if let Some(request) = item.and_then(|item| self.context_request(&item.path)) {
+                    return ProjectReply::Edit(request);
+                }
+            }
+            KeyCode::Char('O') => {
+                if let Some(item) = item {
+                    match self.ide_target(&item.path) {
+                        Some(target) => return ProjectReply::Reveal(target),
+                        None if self.setup.is_none() => {
+                            self.problem = Some("Still loading the project. Try again.".into());
+                        }
+                        None => {
+                            self.problem = Some(
+                                "This file is outside the project folder, so the IDE can't open it."
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
             KeyCode::Char('a') => {
                 self.adding = Some(AddFile {
                     input: TextInput::single(DOCUMENT_PATH_BYTES_MAX),
@@ -1820,6 +2156,9 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Char('d') => match item {
+                Some(item) if item.kind == ContextKind::Plan => {
+                    self.problem = Some("The roadmap and release process can't be deleted.".into());
+                }
                 Some(item) if item.kind != ContextKind::Brief => {
                     self.confirm_delete = Some(item.path);
                 }
@@ -1886,6 +2225,90 @@ impl ProjectScreen {
         }
     }
 
+    /// Answers one key in the remove ask. Remove from dashboard sends on y; Delete everything
+    /// is offered only when the preview allows it and sends on Enter once the typed text is the
+    /// project's exact name. Takes the key. Returns the change to send, or Handled.
+    fn remove_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let can_delete = self
+            .removal
+            .as_ref()
+            .is_some_and(|removal| removal.can_delete);
+        if key.code == KeyCode::Esc {
+            self.close_remove();
+            return ProjectReply::Handled;
+        }
+        if can_delete
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab
+            )
+        {
+            self.remove_choice = match self.remove_choice {
+                RemoveChoice::Dashboard => RemoveChoice::Everything,
+                RemoveChoice::Everything => RemoveChoice::Dashboard,
+            };
+            return ProjectReply::Handled;
+        }
+        match self.remove_choice {
+            RemoveChoice::Dashboard => match key.code {
+                KeyCode::Char('y') => {
+                    self.close_remove();
+                    ProjectReply::Change(Box::new(SetupAction::Remove {
+                        project_id: self.project.clone(),
+                    }))
+                }
+                KeyCode::Char('n') => {
+                    self.close_remove();
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            },
+            RemoveChoice::Everything => {
+                match key.code {
+                    KeyCode::Enter => {
+                        let name = self
+                            .removal
+                            .as_ref()
+                            .filter(|removal| {
+                                removal.can_delete && removal.name == self.remove_typed
+                            })
+                            .map(|removal| removal.name.clone());
+                        let Some(name) = name else {
+                            self.problem =
+                                Some("Type the project's exact name to delete everything.".into());
+                            return ProjectReply::Handled;
+                        };
+                        self.close_remove();
+                        return ProjectReply::Change(Box::new(SetupAction::Delete {
+                            project_id: self.project.clone(),
+                            name,
+                        }));
+                    }
+                    KeyCode::Backspace => {
+                        self.remove_typed.pop();
+                    }
+                    KeyCode::Char(letter)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.remove_typed.len() + letter.len_utf8() <= NAME_BYTES_MAX =>
+                    {
+                        self.remove_typed.push(letter);
+                    }
+                    _ => {}
+                }
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    /// Closes the remove ask and forgets its preview, choice and typed name.
+    /// Takes the screen. Returns nothing.
+    fn close_remove(&mut self) {
+        self.confirm_remove = false;
+        self.removal = None;
+        self.remove_choice = RemoveChoice::Dashboard;
+        self.remove_typed.clear();
+    }
+
     /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
     /// Takes the key and the cursor. Returns the chosen pool, None for "No pool", or Handled.
     fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
@@ -1923,6 +2346,9 @@ impl ProjectScreen {
     }
 
     fn settings_key(&mut self, key: KeyEvent) -> ProjectReply {
+        if let Some(reply) = self.planning_reply(key.code) {
+            return reply;
+        }
         match key.code {
             KeyCode::Enter => self.pool_reply(),
             KeyCode::Char('o') => self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
@@ -1941,14 +2367,18 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('x') => {
+                self.close_remove();
                 self.confirm_remove = true;
+                self.removal_read_ms = None;
                 ProjectReply::Handled
             }
             KeyCode::Char('f') => {
                 match &self.read_paths {
-                    Some(paths) => {
+                    Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
-                        input.set(&paths.join(":"));
+                        input.set(&saved.paths.join(":"));
+                        self.folders_version = saved.version;
+                        self.folders_stale = false;
                         self.folders = Some(AddFile {
                             input,
                             busy: false,
@@ -1962,9 +2392,29 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('k') => {
+                match &self.hidden_paths {
+                    Some(paths) => {
+                        let mut input = TextInput::single(FOLDERS_BYTES_MAX);
+                        input.set(&paths.join(":"));
+                        self.hidden = Some(AddFile {
+                            input,
+                            busy: false,
+                            error: None,
+                        });
+                    }
+                    None => {
+                        self.problem = Some("Still loading the hidden folders. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
             KeyCode::Char('c') => {
                 match &self.agent_policy {
-                    Some(view) => self.access = Some(AccessEdit::of(view)),
+                    Some(view) => {
+                        self.access = Some(AccessEdit::of(view));
+                        self.access_stale = false;
+                    }
                     None => {
                         self.problem = Some("Still loading the agent access. Try again.".into());
                     }
@@ -1986,6 +2436,49 @@ impl ProjectScreen {
                 }
             },
             _ => ProjectReply::Ignored,
+        }
+    }
+
+    /// Whether a planning run can replace roadmap documents the owner may have edited: a plan
+    /// ran before, the context lists one of them, or the context is not read yet.
+    /// Takes the planning state. Returns true when the owner must confirm first.
+    fn plan_replaces(&self, state: &Planning) -> bool {
+        *state != Planning::Idle
+            || self.context.as_ref().is_none_or(|context| {
+                context
+                    .items
+                    .iter()
+                    .any(|item| item.kind == ContextKind::Plan)
+            })
+    }
+
+    /// The research the Overview lists as work rows: the setup's research without roadmap
+    /// planning, which has its own Roadmap line. Takes the screen.
+    /// Returns the kinds in setup order, none before the setup is read.
+    pub(in crate::tui) fn work_kinds(&self) -> Vec<ResearchKind> {
+        self.setup
+            .iter()
+            .flat_map(|setup| setup.research.iter().copied())
+            .filter(|kind| *kind != ResearchKind::RoadmapPlanning)
+            .collect()
+    }
+
+    /// Answers Plan roadmap now and Retry for the roadmap planning line once the jobs are
+    /// read. Either one asks first when it can replace the roadmap documents.
+    /// Takes the key. Returns the change, the handled reply with its confirm or plain line, or
+    /// none for a key the planning line does not use.
+    fn planning_reply(&mut self, key: KeyCode) -> Option<ProjectReply> {
+        let state = planning(self.jobs.as_ref()?);
+        match planning_key(&state, &self.project, key)? {
+            Ok(action) if self.plan_replaces(&state) => {
+                self.confirm_plan = Some(action);
+                Some(ProjectReply::Handled)
+            }
+            Ok(action) => Some(ProjectReply::Change(Box::new(action))),
+            Err(line) => {
+                self.problem = Some(line.into());
+                Some(ProjectReply::Handled)
+            }
         }
     }
 
@@ -2045,6 +2538,7 @@ impl ProjectScreen {
                     .collect();
                 let action = SetupAction::SetReadPaths {
                     project_id: self.project.clone(),
+                    version: self.folders_version,
                     paths,
                 };
                 if let Err(error) = action.validate() {
@@ -2058,6 +2552,50 @@ impl ProjectScreen {
             _ => {
                 if folders.input.handle(key) {
                     folders.error = None;
+                }
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    /// Handles one key in the hidden folders box: Enter saves the folders typed between colons,
+    /// an empty box clears them, Esc closes it.
+    /// Takes the key event.
+    /// Returns the change to send, or what the box did with the key.
+    fn hidden_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(hidden) = self.hidden.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.hidden = None;
+                ProjectReply::Handled
+            }
+            _ if hidden.busy => ProjectReply::Handled,
+            KeyCode::Enter => {
+                let paths: Vec<String> = hidden
+                    .input
+                    .value()
+                    .split(':')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                let action = SetupAction::SetHiddenPaths {
+                    project_id: self.project.clone(),
+                    paths,
+                };
+                if let Err(error) = action.validate() {
+                    hidden.error = Some(plain_problem(&error.0));
+                    return ProjectReply::Handled;
+                }
+                hidden.busy = true;
+                hidden.error = None;
+                ProjectReply::Change(Box::new(action))
+            }
+            _ => {
+                if hidden.input.handle(key) {
+                    hidden.error = None;
                 }
                 ProjectReply::Handled
             }
@@ -2081,6 +2619,7 @@ impl ProjectScreen {
             AccessKey::Save(policy) => {
                 let action = SetupAction::SetAgentPolicy {
                     project_id: self.project.clone(),
+                    version: access.view.version,
                     policy,
                 };
                 if let Err(error) = action.validate() {
@@ -2200,11 +2739,22 @@ impl ProjectScreen {
             self.review.is_some(),
             self.adding.is_some(),
             self.folders.is_some(),
+            self.hidden.is_some(),
             self.access.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if self.remove_choice == RemoveChoice::Everything {
+            assert!(self.confirm_remove);
+            assert!(
+                self.removal
+                    .as_ref()
+                    .is_some_and(|removal| removal.can_delete)
+            );
+        }
+        assert!(self.confirm_remove || (self.removal.is_none() && self.remove_typed.is_empty()));
+        assert!(self.remove_typed.len() <= NAME_BYTES_MAX);
         if let Some(review) = &self.review {
             assert!(review.scroll < review.lines().len().max(1));
         }
@@ -2217,6 +2767,7 @@ impl ProjectScreen {
         if self.general.is_some()
             || self.confirm_remove
             || self.folders.is_some()
+            || self.hidden.is_some()
             || self.access.is_some()
         {
             assert_eq!(self.tab, Tab::Settings);
@@ -2224,6 +2775,13 @@ impl ProjectScreen {
         if let Some(job) = self.confirm_stop {
             assert_eq!(self.tab, Tab::Agents);
             assert!(job > 0);
+        }
+        if let Some(action) = &self.confirm_plan {
+            assert!(matches!(self.tab, Tab::Overview | Tab::Settings));
+            assert!(matches!(
+                action,
+                SetupAction::PlanRoadmap { .. } | SetupAction::RetryResearch { .. }
+            ));
         }
         if let Some(log) = &self.log {
             assert!(log.job > 0);
@@ -2286,8 +2844,21 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
+        crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
         "agent_policy_invalid" => "Each toolchain can be listed once.",
-        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
+        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access. Try again.",
+        "agent_access_lowered" => {
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it."
+        }
+        "agent_network_narrowed" => {
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network."
+        }
+        "agent_toolchain_lowered" => {
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it."
+        }
+        "agent_project_unreadable" => {
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again."
+        }
         "read_path_missing" => "One of those folders doesn't exist on this computer.",
         "read_path_not_folder" => "One of those paths is a file. Add folders only.",
         "read_path_holds_home" => {
@@ -2301,6 +2872,22 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "read_paths_too_many" | "read_paths_invalid" => {
             "Share at most 8 folders, each one plain path of up to 1024 characters."
         }
+        "hidden_paths_too_many" => "Hide at most 8 folders.",
+        "hidden_paths_invalid" | "hidden_path_not_absolute" => {
+            "Each folder must be one plain path of up to 1024 characters."
+        }
+        "hidden_path_missing" => "That folder can't be found. Pick a folder that exists.",
+        "hidden_path_not_folder" => "That path isn't a folder. Pick a folder.",
+        "hidden_path_outside_project" => {
+            "A hidden folder must sit inside the project. Pick a folder within it."
+        }
+        "hidden_path_not_plain" => {
+            "A folder path can't hold quotes, backslashes or control characters."
+        }
+        "hidden_path_tracked" => {
+            "git tracks a file in that folder. Only folders git does not track can be hidden."
+        }
+        "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {
@@ -2317,6 +2904,12 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "planning_busy" => {
+            "A roadmap is already being planned for this project. Wait for it to finish."
+        }
+        "setup_unconfirmed" => {
+            "Confirm this project's setup first. Its setup review has the roadmap switch."
+        }
         "research_job_missing" => "That research is gone. The list is up to date now.",
         "research_log_unreadable" => "The agent's output could not be read.",
         "documents_empty" => "Type the full path of a file on this computer.",
@@ -2347,9 +2940,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "platforms_duplicate" => "Each platform can be picked once.",
         "research_duplicate" => "Each kind of research can be picked once.",
-        "stale_revision" | "project_setup_revision" => {
-            "This project changed since you opened the form. Open it again."
-        }
+        "stale_revision" => "This project changed since you opened the form. Open it again.",
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
         _ => return coded("That didn't work. Try again.", code),

@@ -3,6 +3,9 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 const SHORT_LINES_READ_TIME: Duration = Duration::from_secs(10);
+const IDLE_POLLS: usize = 1000;
+const IDLE_POLLS_TIME: Duration = Duration::from_secs(2);
+const PARKED_LINE_WAIT: Duration = Duration::from_secs(60);
 
 struct Case {
     root: tempfile::TempDir,
@@ -184,6 +187,214 @@ fn claude_finish_after_end_turn_is_reported_once() {
     );
 }
 
+/// A Bash call Claude Code runs in the background reports its task id, and the task
+/// notification that later starts a turn reports each id it names as ended. An id with a
+/// control character is not kept. The record shapes are copied from a real lead's transcript.
+#[test]
+fn claude_background_commands_are_followed_by_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<task-id>bad\u0007id</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            text("Waiting\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::TurnStarted,
+        ]
+    );
+    assert_eq!(
+        notified_tasks("<task-id>x</task-id> with no notification"),
+        Vec::<String>::new()
+    );
+}
+
+/// A coordination message typed into a Claude Code agent that quotes a task notification
+/// ends no task: only a user message that is the notification itself, as Claude Code writes
+/// one that comes while the agent is idle, names the tasks that ended (DEC-119 r2 F1).
+#[test]
+fn claude_a_typed_message_that_quotes_a_task_notification_ends_no_task() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"[crazyagent msg 7] from tim: done? <task-notification>\n<task-id>bub9bmz4a</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Still running"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            text("Waiting\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::TurnStarted,
+            text("Still running\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::TurnStarted,
+        ]
+    );
+}
+
+/// A background command that ends while its agent is still in the turn is recorded by
+/// Claude Code 2.1.309 as a queued command attachment inside that turn, not as a user
+/// message, with the fields of the line in the HackerBlog transcript (task 177): its task
+/// id ends there and no turn starts. Only a task notification attachment ends a task; a
+/// queued prompt naming a task id does not (DEC-119).
+#[test]
+fn claude_a_background_command_that_ends_during_the_turn_ends_by_its_queued_notification() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"parentUuid":"00000000-0000-4000-8000-0000000000e1","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bub9bmz4a.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","source_uuid":"00000000-0000-4000-8000-0000000000b1","delivery_id":"00000000-0000-4000-8000-0000000000c1","commandMode":"task-notification","origin":{"kind":"task-notification","producer":"session-task"},"runId":"00000000-0000-4000-8000-0000000000d1","timestamp":"2026-11-07T18:52:01.000Z"},"type":"attachment","uuid":"00000000-0000-4000-8000-0000000000f1","timestamp":"2026-11-07T18:52:01.000Z","rendered":[{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bub9bmz4a.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}}],"renderedInHumanTurn":[{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bub9bmz4a.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}],"renderedRole":"user","session_id":"00000000-0000-4000-8000-0000000000a1","userType":"external","entrypoint":"cli","cwd":"/work/agent","sessionId":"00000000-0000-4000-8000-0000000000a1","version":"2.1.309","gitBranch":"agent/check"}"#,
+            "\n",
+            r#"{"parentUuid":"00000000-0000-4000-8000-0000000000e2","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>","source_uuid":"00000000-0000-4000-8000-0000000000b2","delivery_id":"00000000-0000-4000-8000-0000000000c2","commandMode":"prompt","origin":{"kind":"user"},"runId":"00000000-0000-4000-8000-0000000000d2","timestamp":"2026-11-07T18:52:02.000Z"},"type":"attachment","uuid":"00000000-0000-4000-8000-0000000000f2","timestamp":"2026-11-07T18:52:02.000Z","rendered":[{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>"}}],"renderedInHumanTurn":[{"content":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>"}],"renderedRole":"user","session_id":"00000000-0000-4000-8000-0000000000a1","userType":"external","entrypoint":"cli","cwd":"/work/agent","sessionId":"00000000-0000-4000-8000-0000000000a1","version":"2.1.309","gitBranch":"agent/check"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            text("Check passed\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// A background command the agent stops itself with TaskStop gets no task notification, so
+/// the stop's tool result, which names the task, ends it (w-review LTK-H1, the record shape
+/// a real Claude Code session wrote on 2026-10-29).
+#[test]
+fn claude_a_background_command_the_agent_stops_ends_by_its_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b20nv1bx6."}]},"toolUseResult":{"backgroundTaskId":"b20nv1bx6"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Successfully stopped task: b20nv1bx6 (npm run dev)"}]},"toolUseResult":{"message":"Successfully stopped task: b20nv1bx6 (npm run dev)","task_id":"b20nv1bx6","task_type":"local_bash"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::BackgroundStarted {
+                id: "b20nv1bx6".into()
+            },
+            TranscriptEvent::BackgroundEnded {
+                id: "b20nv1bx6".into()
+            },
+        ]
+    );
+}
+
+/// A background command Claude Code ends with its caller's final response sends no
+/// notification, so it is not followed: an id waited on would never end (HB-BEFR).
+#[test]
+fn claude_a_background_command_that_ends_with_the_final_response_is_not_followed() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b30aa."}]},"toolUseResult":{"backgroundTaskId":"b30aa","backgroundEndsWithFinalResponse":true}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Command running in background with ID: b30ab."}]},"toolUseResult":{"backgroundTaskId":"b30ab","backgroundEndsWithFinalResponse":false}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![TranscriptEvent::BackgroundStarted { id: "b30ab".into() }]
+    );
+}
+
+/// A background command the agent read as settled with GetTask ends by that snapshot, since
+/// Claude Code then withdraws its notification; a snapshot still working ends nothing
+/// (HB-TASKGET).
+#[test]
+fn claude_a_get_task_snapshot_of_a_settled_command_ends_it() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b40aa."}]},"toolUseResult":{"backgroundTaskId":"b40aa"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Command running in background with ID: b40ab."}]},"toolUseResult":{"backgroundTaskId":"b40ab"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","content":"{\"taskId\":\"b40aa\"}"}]},"toolUseResult":{"taskId":"b40aa","status":"working","statusMessage":"Still running.","createdAt":"2026-11-10T04:00:00Z","lastUpdatedAt":"2026-11-10T04:00:00Z"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t4","content":"{\"taskId\":\"b40aa\"}"}]},"toolUseResult":{"taskId":"b40aa","status":"completed","statusMessage":"Done.","createdAt":"2026-11-10T04:00:00Z","lastUpdatedAt":"2026-11-10T04:01:00Z"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t5","content":"{\"taskId\":\"b40ab\"}"}]},"toolUseResult":{"taskId":"b40ab","status":"cancelled","statusMessage":"Stopped.","createdAt":"2026-11-10T04:00:00Z","lastUpdatedAt":"2026-11-10T04:01:00Z"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::BackgroundStarted { id: "b40aa".into() },
+            TranscriptEvent::BackgroundStarted { id: "b40ab".into() },
+            TranscriptEvent::BackgroundEnded { id: "b40aa".into() },
+            TranscriptEvent::BackgroundEnded { id: "b40ab".into() },
+        ]
+    );
+}
+
 #[test]
 fn claude_transcript_behind_a_symlink_is_not_followed() {
     let case = Case::new();
@@ -211,7 +422,10 @@ fn line_above_the_limit_is_refused() {
     }
     assert_eq!(
         outcome,
-        Err(LaunchError("launch_transcript_line_too_long".to_owned()))
+        Err(LaunchError(
+            "launch_transcript_line_too_long".to_owned(),
+            None
+        ))
     );
 }
 
@@ -436,7 +650,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
     ] {
         assert_eq!(
             TranscriptReader::resumed(source.clone(), &case.work(), &refused, None).err(),
-            Some(LaunchError("launch_resume_unavailable".to_owned())),
+            Some(LaunchError("launch_resume_unavailable".to_owned(), None)),
             "{}",
             refused.display()
         );
@@ -464,7 +678,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
             None
         )
         .err(),
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
     let middle = resumed.start();
     assert!(middle > 0);
@@ -475,7 +689,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
     let past = std::fs::metadata(&file).unwrap().len() + 1;
     assert_eq!(
         TranscriptReader::resumed(claude, &case.work(), &file, Some(past)).err(),
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
 }
 
@@ -571,7 +785,7 @@ fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
     assert_eq!(named, None);
     assert_eq!(
         resumed,
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
     assert!(messages.is_empty());
 }
@@ -597,4 +811,78 @@ fn a_read_of_a_million_short_lines_drains_them_in_one_pass() {
         .expect("a read of short lines stalls the engine thread");
     assert_eq!(events.unwrap(), vec![TranscriptEvent::TurnStarted]);
     assert!(took < SHORT_LINES_READ_TIME, "{took:?}");
+}
+
+/// A long line the harness has not finished is scanned once: a poll that finds no new
+/// bytes does not rescan it, so a thousand idle polls of a 15 MiB partial line cost the
+/// engine thread almost nothing, and the line still ends where the next newline arrives.
+#[test]
+fn a_parked_partial_line_is_not_rescanned_by_polls_without_new_bytes() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    let parked = LINE_BYTES_MAX - READ_BYTES_MAX;
+    append(&file, &"x".repeat(parked));
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while reader.bytes() < parked as u64 {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..IDLE_POLLS {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let _ = sent.send((reader, started.elapsed()));
+    });
+    let (mut reader, took) = read
+        .recv_timeout(PARKED_LINE_WAIT)
+        .expect("idle polls rescan the parked line");
+    assert!(
+        took < IDLE_POLLS_TIME,
+        "{IDLE_POLLS} idle polls took {took:?}"
+    );
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    append(&file, &format!("\n{prompt}\n"));
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+}
+/// OP-25 OP25-2: a tool input nested as deep as a record line allows is formatted only up
+/// to the bound the session search keeps, so it costs about what a flat input of the same
+/// size costs, and its text is cut at that bound.
+#[test]
+fn a_deeply_nested_tool_input_is_formatted_only_up_to_its_bound() {
+    let filler = "word ".repeat(200 * 1024);
+    let line = |depth: usize| {
+        let mut input = Value::String(filler.clone());
+        for _ in 0..depth {
+            input = serde_json::json!({ "a": input });
+        }
+        serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_0D", "name": "Deep", "input": input}]}})
+        .to_string()
+    };
+    let fastest = |line: &str| {
+        (0..7)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let (speaker, text) = record_message("claude-code", line.as_bytes()).unwrap();
+                let took = started.elapsed();
+                assert_eq!(speaker, "agent");
+                assert!(text.len() <= TOOL_TEXT_BYTES_MAX + 64, "{}", text.len());
+                assert!(text.ends_with("..."), "{}", &text[text.len() - 20..]);
+                took
+            })
+            .min()
+            .unwrap()
+    };
+    let flat = line(1);
+    let deep = line(120);
+    assert!(
+        deep.len() <= crate::team::history::LINE_BYTES_MAX,
+        "{}",
+        deep.len()
+    );
+    let (flat_took, deep_took) = (fastest(&flat), fastest(&deep));
+    assert!(
+        deep_took <= flat_took * 3 + Duration::from_millis(1),
+        "deep {deep_took:?}, flat {flat_took:?}"
+    );
 }

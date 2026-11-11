@@ -1,4 +1,5 @@
-import type { AppTeamEvents, TeamEvent, TeamEventKind, TeamNotification, WakeRule, WakeRuleLevel } from "../../engine-client";
+import type { AppTeamEvents, TeamEvent, TeamEventKind, TeamEventsView, TeamNotification, WakeRule, WakeRuleLevel } from "../../engine-client";
+import type { Route } from "../../ui";
 
 export const HOURLY_CAP_MAX = 500;
 
@@ -65,6 +66,13 @@ export function wakeSaveBlocked(savedFrom: string | null, view: string, saving: 
   return saving || (savedFrom !== null && savedFrom === view);
 }
 
+/** The version a change of one agent's wake rule sends: its own rule's, else the version the
+ * owner's Reset left on that level, else 0 for a level never set. Inputs: the project's wake
+ * view and the agent. Output: the version. */
+export function agentRuleVersion(wake: Pick<TeamEventsView["wake"], "agents" | "cleared">, agent: number): number {
+  return wake.agents.find((item) => item.agent === agent)?.version ?? wake.cleared.find((item) => item.agent === agent)?.version ?? 0;
+}
+
 /** Where the rule shown at one level comes from, for the line under its title. Inputs: whether
  * this level has its own rule and the level it falls back to. Output: one sentence. */
 export function ruleSource(own: boolean, fallback: WakeRuleLevel): string {
@@ -89,13 +97,35 @@ export function unseenByProject(events: Pick<AppTeamEvents, "projects">): Map<st
   return new Map(events.projects.filter((item) => item.unseen > 0).map((item) => [item.project_id, item.unseen]));
 }
 
-/** Finds the notifications that arrived since the window last looked. The first read only
- * remembers where it is, so an app start never alerts for old notifications. Inputs: the
- * newest id seen before, or null before the first read, and the app events. Output: the newest
- * id now and the unseen notifications newer than the old one, newest first. */
+/** The agents at work in each project for its sidebar dot, as the engine counts them in one
+ * read. A reply from an engine without the list counts nothing. Input: the app events.
+ * Output: a map from project id to its count, without projects at zero. */
+export function workingByProject(events: Pick<AppTeamEvents, "working">): Map<string, number> {
+  return new Map((events.working ?? []).filter((item) => item.agents > 0).map((item) => [item.project_id, item.agents]));
+}
+
+const BADGE_ONLY: ReadonlySet<TeamNotification["kind"]> = new Set(["question"]);
+
+/** Finds the notifications that arrived since the window last looked and should alert. The
+ * first read only remembers where it is, so an app start never alerts for old notifications;
+ * a Normal question only counts toward the badge (Q14b). Inputs: the newest id seen before, or
+ * null before the first read, and the app events. Output: the newest id now and the unseen
+ * alerting notifications newer than the old one, newest first. */
 export function freshAlerts(last: number | null, events: Pick<AppTeamEvents, "notifications">): { last: number; fresh: TeamNotification[] } {
   const newest = events.notifications.reduce((max, item) => Math.max(max, item.id), last ?? 0);
   if (last === null) return { last: newest, fresh: [] };
-  const fresh = events.notifications.filter((item) => item.id > last && item.seen_ms === null).sort((a, b) => b.id - a.id);
+  const fresh = events.notifications
+    .filter((item) => item.id > last && item.seen_ms === null && !BADGE_ONLY.has(item.kind))
+    .sort((a, b) => b.id - a.id);
   return { last: newest, fresh };
+}
+
+/** Where the toast for one notification leads: an urgent question opens the project's Agents
+ * tab with Questions for you open on the question, and an agent waiting in its terminal opens
+ * it on Waiting on you (Q14, Q14b). Input: the notification. Output: the route, or undefined
+ * for one that only informs. */
+export function alertRoute(item: Pick<TeamNotification, "kind" | "project_id">): Route | undefined {
+  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "agents", section: "questions" };
+  if (item.kind === "waiting_on_you") return { name: "project", id: item.project_id, tab: "agents", section: "waiting" };
+  return undefined;
 }

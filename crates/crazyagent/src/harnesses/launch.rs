@@ -1,4 +1,5 @@
 use super::interactive::KEY_FILE;
+use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
@@ -30,7 +31,7 @@ pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
 /// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
 /// for the JSON-RPC envelope around it.
-const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
+pub(crate) const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -42,6 +43,8 @@ pub const DURABLE_OUTPUT: &str = "output.log";
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
+#[cfg(unix)]
+const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 /// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
 /// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
 /// web search tool and no MCP server.
@@ -60,6 +63,9 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+/// The Codex 0.164 setting that removes `request_user_input`, the one tool a tools-off
+/// research agent or pane agent is still offered after [`CODEX_TOOLS_OFF`].
+pub(crate) const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
@@ -80,10 +86,18 @@ pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
 /// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
 /// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
 pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+/// The Claude Code team tools a native-team lead keeps (DEC-104 Q10): `TeamCreate` starts
+/// its agent team and `Agent` starts each teammate. `Workflow` stays denied, and every
+/// teammate is denied both again.
+pub(crate) const CLAUDE_NATIVE_TEAM_TOOLS: [&str; 2] = ["Agent", "TeamCreate"];
 /// Turns off Claude Code's background Bash commands and background agents for a tools-on
 /// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+/// Gives a tools-on Claude Code agent 60 s, not its own 30 s, to connect its MCP servers.
+/// context-mode from the engine's shared install answers in about 1 s; the margin covers a
+/// machine busy with builds, and a server that never answers delays the start by 60 s only.
+pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
@@ -100,6 +114,20 @@ const CLAUDE_COMMON: [&str; 12] = [
     CLAUDE_NO_TRANSCRIPT,
 ];
 const CLAUDE_NO_TRANSCRIPT: &str = "--no-session-persistence";
+/// The system prompt of every tools-off Claude Code launch, in place of Claude Code's own
+/// agent prompt. That prompt describes Bash and other tools such a launch does not offer;
+/// under it a Claude Code 2.1.309 mapping run wrote tool calls as plain text until its
+/// output limit and kept going, so onboarding hung for its whole step time.
+pub(crate) const CLAUDE_NO_TOOLS_PROMPT: &str = "You are Claude, answering inside CrazyAgent with no tools. You cannot run commands, read or write files, browse or call any tool, and no tool results will ever come back. Never write tool calls, function call markup or commands for yourself to run. Answer directly in plain text from the conversation and the text you are given.";
+/// Claude Code's arguments for a launch with tools off: no tools, no slash commands and
+/// [`CLAUDE_NO_TOOLS_PROMPT`] as the whole system prompt.
+pub(crate) const CLAUDE_TOOLS_OFF: [&str; 5] = [
+    "--tools",
+    "",
+    "--disable-slash-commands",
+    "--system-prompt",
+    CLAUDE_NO_TOOLS_PROMPT,
+];
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
 /// serialization, arguments or reports and is handed to the child only as an environment value.
@@ -336,12 +364,190 @@ fn claude_limit_line(line: &str) -> bool {
         })
 }
 
-/// A plain failure code from a launch adapter. It never carries secrets or raw output.
+/// A plain failure code from a launch adapter. It never carries secrets or raw output; a
+/// `launch_secret_in_command` refusal also names the MCP server and secret, never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaunchError(pub String);
+pub struct LaunchError(pub String, pub Option<Box<SecretInCommand>>);
+
+/// The owner-given names of the MCP server and secret whose value a refused launch command
+/// would have held. Names are validated when saved, so they are plain text to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretInCommand {
+    pub server: String,
+    pub secret: String,
+}
 
 pub(super) fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
+}
+
+/// Sends SIGKILL to every process of an agent's process group. Takes the group id, which
+/// names the group's leader and is above 1; an id that names no process does nothing.
+#[cfg(unix)]
+pub(crate) fn kill_group(group: u32) {
+    let Ok(raw) = i32::try_from(group) else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return;
+    };
+    assert!(pid.as_raw_nonzero().get() > 1);
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+/// How long a group its holder saw end stays refused to every later claim: past
+/// `GROUP_FRESH` and the keeper's wait, so a session that saw its pane alive just before
+/// another path ended the group finds the number refused and only watches it (CB-2 r1 F1).
+const ENDED_REFUSED: Duration = Duration::from_secs(10);
+
+/// The process groups some path is ending now, with no time, and those a holder saw end,
+/// with the time it saw that, so a pane's stop and the terminal host's close never both
+/// signal one group (CB-2 one signal) and no later path claims a number that may lead a
+/// new group by then (CB-2 r1 F1).
+static ENDING: std::sync::Mutex<std::collections::BTreeMap<u32, Option<Instant>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One path's hold on ending a process group: while it lives every other path leaves the
+/// group alone. Dropping it frees the number, or, once its holder saw the group answer
+/// ESRCH, keeps it refused for `ENDED_REFUSED`, as it may lead a new group by then.
+pub(crate) struct Ending {
+    group: u32,
+    gone: bool,
+}
+
+impl Ending {
+    /// Takes the hold on a process group. Input: the group id, a pid above 1. Output: the
+    /// hold, or none while another path holds that group or a holder saw it end within
+    /// `ENDED_REFUSED`.
+    pub(crate) fn claim(group: u32) -> Option<Self> {
+        assert!(group > 1 && i32::try_from(group).is_ok());
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ending.retain(|_, ended| ended.is_none_or(|at| at.elapsed() < ENDED_REFUSED));
+        if ending.contains_key(&group) {
+            return None;
+        }
+        ending.insert(group, None);
+        Some(Self { group, gone: false })
+    }
+
+    /// The group this hold names. Output: its id as a pid.
+    #[cfg(unix)]
+    pub(crate) fn pid(&self) -> rustix::process::Pid {
+        i32::try_from(self.group)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("a held group id is a pid above 1")
+    }
+
+    /// Records that the group answered ESRCH, so dropping this hold keeps its number
+    /// refused for `ENDED_REFUSED` instead of freeing it.
+    #[cfg(unix)]
+    pub(crate) fn gone(&mut self) {
+        self.gone = true;
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.gone {
+            ending.insert(self.group, Some(Instant::now()));
+        } else {
+            ending.remove(&self.group);
+        }
+    }
+}
+
+/// Ends a pane's process group once its pane is gone, from the one path that holds it
+/// (CB-2 one signal): KILL every 10 ms while the group answers, for at most
+/// `GROUP_EXIT_WAIT`, testing it before each KILL, so a group that answered ESRCH is never
+/// signalled again, as its number may lead a new group by then. macOS answers EPERM for a
+/// group whose last member it just reaped, so only ESRCH ends it. A group another path
+/// holds or a holder just saw end, as the terminal host's close of that pane, is only
+/// watched and never claimed here (CB-2 r1 F1). Inputs: the group id and this path's hold,
+/// none to only watch. Output: whether the group is gone.
+#[cfg(unix)]
+pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    end_pane_group_with(
+        held,
+        GROUP_EXIT_WAIT,
+        || rustix::process::test_kill_process_group(pid) != Err(rustix::io::Errno::SRCH),
+        || {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        },
+    )
+}
+
+/// Ends a group as `end_pane_group` describes, through `left`, which tells whether the
+/// group still answers, and `kill`, which sends it KILL, called only with a hold. The hold
+/// is dropped on return, marked gone when the group answered ESRCH. Inputs: the hold, the
+/// longest wait and both calls. Output: whether the group is gone.
+#[cfg(unix)]
+fn end_pane_group_with(
+    mut held: Option<Ending>,
+    wait: Duration,
+    mut left: impl FnMut() -> bool,
+    mut kill: impl FnMut(),
+) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if !left() {
+            if let Some(held) = held.as_mut() {
+                held.gone();
+            }
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if held.is_some() {
+            kill();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Waits until no process of a killed agent's group is left, killing again
+/// any member that is still there. Takes the group id; returns once the group
+/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
+/// stopped while one of its processes still lingers unnoticed. Output: whether
+/// the group is empty.
+#[cfg(unix)]
+pub(crate) fn await_group_exit(group: u32) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    let started = Instant::now();
+    while rustix::process::test_kill_process_group(pid).is_ok()
+        && started.elapsed() < GROUP_EXIT_WAIT
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    !group_alive(group)
+}
+
+/// Tells whether a process of a group is still there, without signalling it. Takes the
+/// group id. Output: false for an id that names no process.
+#[cfg(unix)]
+pub(crate) fn group_alive(group: u32) -> bool {
+    i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process_group(pid).is_ok())
 }
 
 /// Routes a launch that carries a real provider key through an engine-owned key relay on
@@ -367,7 +573,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
         .map_err(|_| failure("launch_secret_invalid"))?;
-    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0))?;
+    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0, None))?;
     let home = request.account.home().to_path_buf();
     request.account = AccountBinding::Url {
         home,
@@ -427,7 +633,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref()),
+        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref())?,
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
@@ -435,11 +641,14 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
-    let path = if request.tools {
-        toolchains::agent_path(&homes, TOOLS_ON_PATH)
-    } else {
-        TOOLS_OFF_PATH.to_owned()
-    };
+    let path = toolchains::with_agent_git(
+        home,
+        if request.tools {
+            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+        } else {
+            TOOLS_OFF_PATH.to_owned()
+        },
+    );
     let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
     let tools = if request.tools {
         toolchains::agent_env(home, &homes)
@@ -454,6 +663,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         ("LC_ALL", OsStr::new("C")),
     ];
     base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
+    let proxy = installed
+        .and_then(Installed::model_proxy)
+        .map(crate::sandbox::model_proxy::variables);
+    base.extend(
+        proxy
+            .iter()
+            .flatten()
+            .map(|(name, value)| (*name, OsStr::new(value))),
+    );
     if let Some(identity) = &request.git_identity {
         base.extend(
             identity
@@ -494,16 +712,31 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
-fn codex_invocation(request: &LaunchRequest, context: bool, key_file: Option<&str>) -> Invocation {
+/// The Codex app-server command line. Every folder of the working folder's walk is recorded
+/// untrusted, so the app server neither loads a repository's `.codex` nor trusts a folder by
+/// itself. Inputs: the request, whether context is on and the key file. Output: the
+/// arguments and variables, or `launch_working_dir_unavailable`.
+fn codex_invocation(
+    request: &LaunchRequest,
+    context: bool,
+    key_file: Option<&str>,
+) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
     let environment = vec![("CODEX_HOME", home)];
+    let folder = request
+        .working_dir
+        .canonicalize()
+        .map_err(|_| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file) {
+    for setting in codex_configuration(request, context, key_file)
+        .into_iter()
+        .chain([super::codex_folder::untrusted(&folder)?])
+    {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
     arguments.extend(["app-server", "--listen", "stdio://"].map(OsString::from));
-    (arguments, environment)
+    Ok((arguments, environment))
 }
 
 /// Checks the path of an account's key file before a harness is told to read it: an
@@ -592,6 +825,44 @@ fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
     settings.to_string()
 }
 
+/// Tells whether Claude Code starts `--bare` on an account: every account but a signed-in
+/// subscription, so a key or endpoint account never authenticates through an OAuth login or
+/// the keychain. Claude Code 2.1.309 fires no settings or plugin hooks under `--bare`
+/// (DEC-104 bare-hooks). Input: the account. Output: the answer.
+pub fn claude_bare(account: &AccountBinding) -> bool {
+    !matches!(account, AccountBinding::Subscription { .. })
+}
+
+/// Lists what a Claude Code launch passes after `--disallowedTools`: with tools on, Claude
+/// Code's own sub-agent tools, less `CLAUDE_NATIVE_TEAM_TOOLS` for a native-team lead, then
+/// every MCP tool the owner switched off. Input: the tools switch, whether the launch is a
+/// native-team lead and what it installed. Output: the names, empty when none is denied.
+pub(crate) fn claude_denied(
+    tools: bool,
+    native: bool,
+    installed: Option<&Installed>,
+) -> Vec<String> {
+    assert!(!native || tools);
+    let mut denied: Vec<String> = Vec::new();
+    if tools {
+        denied.extend(
+            CLAUDE_BUILT_IN_AGENTS
+                .iter()
+                .filter(|tool| !(native && CLAUDE_NATIVE_TEAM_TOOLS.contains(tool)))
+                .map(|tool| (*tool).to_owned()),
+        );
+    }
+    if let Some(installed) = installed {
+        denied.extend(installed.denied_tools().iter().cloned());
+    }
+    assert!(
+        denied
+            .iter()
+            .all(|name| !name.is_empty() && !name.starts_with('-'))
+    );
+    denied
+}
+
 fn claude_invocation(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -626,13 +897,16 @@ fn claude_invocation(
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
-                CLAUDE_DENY_FLAG,
             ]
             .map(OsString::from),
         );
-        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(OsString::from));
     } else {
-        arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
+        arguments.extend(CLAUDE_TOOLS_OFF.map(OsString::from));
+    }
+    let denied = claude_denied(request.tools, false, installed);
+    if !denied.is_empty() {
+        arguments.push(OsString::from(CLAUDE_DENY_FLAG));
+        arguments.extend(denied.into_iter().map(OsString::from));
     }
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR", home.clone()),
@@ -651,8 +925,12 @@ fn claude_invocation(
             CLAUDE_BACKGROUND_TASKS_OFF.0,
             OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
         ));
+        environment.push((
+            CLAUDE_MCP_CONNECT_LIMIT.0,
+            OsString::from(CLAUDE_MCP_CONNECT_LIMIT.1),
+        ));
     }
-    if !matches!(request.account, AccountBinding::Subscription { .. }) {
+    if claude_bare(&request.account) {
         arguments.push(OsString::from("--bare"));
         if key_file.is_none() {
             environment.push(("ANTHROPIC_API_KEY", OsString::from(LOCAL_PLACEHOLDER_KEY)));
@@ -1092,11 +1370,13 @@ impl Driver {
 /// A running harness process driven through its headless interface.
 /// The process leads its own process group, and a harness on pipes has a warden in its
 /// sandbox, so stop reaches every descendant, those in their own sessions included.
-/// `uncertain` is set once its warden did not confirm that sandbox empty.
+/// `uncertain` is set once its warden did not confirm that sandbox empty; `follower` follows a
+/// Full access run's processes, which no warden reaches, from its start to its stop.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
+    follower: Option<Follower>,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1131,9 +1411,9 @@ impl Session {
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
@@ -1148,16 +1428,20 @@ impl Session {
         state: &Path,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = match &context {
             Some(context) => {
                 let (command, installed) = command_with_context(&request, context)?;
                 (command, Some(installed))
             }
-            None => (command(&request)?, None),
+            None => {
+                let installed =
+                    crate::launch_context::lock_only(request.account.home(), &request.harness)?;
+                (command(&request)?, Some(installed))
+            }
         };
         drop(context);
         let io = DurableIo::create(state)?;
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, installed, Some(io), (relay, key))
     }
 
@@ -1169,6 +1453,8 @@ impl Session {
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
         let (driver, startup) = Driver::new(&request)?;
+        let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
+        command.env(LINEAGE_VARIABLE, token.as_str());
         let output_bytes = request.limits.output_bytes;
         let (sender, lines) = channel();
         let mut child;
@@ -1216,10 +1502,14 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
+        let follower = request
+            .unconfined
+            .then(|| Follower::start(child.id(), Some(token)));
         let mut session = Self {
             child,
             warden,
             uncertain: false,
+            follower,
             stdin,
             lines,
             driver,
@@ -1318,14 +1608,21 @@ impl Session {
     }
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
-    /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally, or
-    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
-    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+    /// run's warden, when it has one, stop every process left in its sandbox. A Full access
+    /// run has no warden, so the processes its lineage followed from the start up to the kill,
+    /// and those carrying its launch's token, are checked after it. Output: the leader's exit
+    /// code when it exited normally, [`Unstopped::Uncertain`] when a warden did not confirm
+    /// that its sandbox is empty, or [`Unstopped::Left`] naming what a Full access run left
+    /// running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.follower.take().map(Follower::stop);
         let code = self.stop_group();
         assert!(self.stopped && self.warden.is_none());
         if self.uncertain {
-            return Err(failure("harness_cleanup_uncertain"));
+            return Err(Unstopped::Uncertain);
+        }
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
         }
         Ok(code)
     }

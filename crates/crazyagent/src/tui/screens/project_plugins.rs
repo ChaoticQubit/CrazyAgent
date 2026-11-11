@@ -18,8 +18,8 @@ const PANEL_TEXT_LINES: usize = 2;
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
 /// to queue, whose reply comes back through `apply`; AddSkill, AddServer,
-/// AddHooks, Edit and OpenSkill ask the host to open the add form, the server's
-/// edit page or the skill's page for this project.
+/// AddHooks, Edit, OpenSkill and Tools ask the host to open the add form, the
+/// server's edit page, the skill's page or the tool switches for this project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
@@ -29,7 +29,14 @@ pub(in crate::tui) enum PluginsReply {
     AddServer,
     AddHooks,
     Edit(Box<ServerView>),
-    OpenSkill { id: String, name: String },
+    OpenSkill {
+        id: String,
+        name: String,
+    },
+    Tools {
+        servers: Vec<(String, String)>,
+        at: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,19 +255,20 @@ impl ProjectPlugins {
 
     fn removed(&self) -> Option<(&str, bool)> {
         self.local(self.removing.as_deref()?)
+            .map(|(name, skill, _)| (name, skill))
     }
 
-    fn local(&self, id: &str) -> Option<(&str, bool)> {
+    fn local(&self, id: &str) -> Option<(&str, bool, u64)> {
         let local = |scope: &Scope| *scope != Scope::Global;
         self.skills
             .iter()
             .find(|skill| skill.id == id && local(&skill.scope))
-            .map(|skill| (skill.name.as_str(), true))
+            .map(|skill| (skill.name.as_str(), true, skill.version))
             .or_else(|| {
                 self.servers
                     .iter()
                     .find(|server| server.id == id && local(&server.scope))
-                    .map(|server| (server.name.as_str(), false))
+                    .map(|server| (server.name.as_str(), false, server.version))
             })
     }
 
@@ -337,6 +345,17 @@ impl ProjectPlugins {
             KeyCode::Char('h') => PluginsReply::AddHooks,
             KeyCode::Char('d') => self.ask_remove(),
             KeyCode::Char('e') => self.edit(),
+            KeyCode::Char('l') => PluginsReply::Tools {
+                servers: self
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.clone(), server.name.clone()))
+                    .collect(),
+                at: match self.item() {
+                    Some(Item::Server(index)) => index + 1,
+                    _ => 0,
+                },
+            },
             KeyCode::Enter => match self.item() {
                 Some(Item::Skill(index)) => PluginsReply::OpenSkill {
                     id: self.skills[index].id.clone(),
@@ -374,7 +393,7 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let (id, name, enabled, on_here) = match item {
+        let (id, name, enabled, on_here, version) = match item {
             Item::Skill(index) => {
                 let skill = &self.skills[index];
                 (
@@ -382,6 +401,7 @@ impl ProjectPlugins {
                     skill.name.clone(),
                     skill.enabled,
                     skill.on_here,
+                    skill.version,
                 )
             }
             Item::Server(index) => {
@@ -391,6 +411,7 @@ impl ProjectPlugins {
                     server.name.clone(),
                     server.enabled,
                     server.on_here,
+                    server.version,
                 )
             }
             Item::Hook(index) => {
@@ -400,6 +421,7 @@ impl ProjectPlugins {
                     hook.name.clone(),
                     hook.enabled,
                     hook.on_here,
+                    hook.version,
                 )
             }
         };
@@ -415,6 +437,7 @@ impl ProjectPlugins {
                     project: self.project.clone(),
                     id,
                     on: !on,
+                    version,
                 },
                 if on {
                     format!("{name} is off for this project.")
@@ -426,6 +449,7 @@ impl ProjectPlugins {
                 PluginChange::SetSkill {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
@@ -433,6 +457,7 @@ impl ProjectPlugins {
                 PluginChange::SetServer {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
@@ -450,7 +475,7 @@ impl ProjectPlugins {
 
     fn ask_remove(&mut self) -> PluginsReply {
         let Some((id, name, global)) = self.chosen() else {
-            return PluginsReply::Handled;
+            return PluginsReply::Ignored;
         };
         if matches!(self.item(), Some(Item::Hook(_))) {
             self.notice = Some(Notice::plain(format!(
@@ -470,16 +495,21 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let Some((name, skill)) = self.local(id).map(|(name, skill)| (name.to_owned(), skill))
+        let Some((name, skill, version)) = self
+            .local(id)
+            .map(|(name, skill, version)| (name.to_owned(), skill, version))
         else {
             return PluginsReply::Handled;
         };
         let id = id.to_owned();
         let (change, done) = if skill {
-            (PluginChange::RemoveSkill { id }, format!("Removed {name}."))
+            (
+                PluginChange::RemoveSkill { id, version },
+                format!("Removed {name}."),
+            )
         } else {
             (
-                PluginChange::RemoveServer { id },
+                PluginChange::RemoveServer { id, version },
                 format!("Removed {name} and its secrets."),
             )
         };
@@ -543,9 +573,12 @@ impl ProjectPlugins {
             return (self.approval(server, content, room, look), self.help());
         }
         let footer = self.footer(look);
+        let floor = 6 + footer.len();
+        let spaced = room > 9 + footer.len();
+        let reserve = if spaced { 9 } else { 6 };
         let mut panel = self.panel(content, look);
-        panel.truncate(room.saturating_sub(8 + footer.len()));
-        let fixed = 8 + panel.len() + footer.len();
+        panel.truncate(room.saturating_sub(reserve + footer.len()));
+        let fixed = reserve + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(3);
         let hook_rows = self.hooks.len().max(1).min((free / 3).max(1));
         let free = free.saturating_sub(hook_rows).max(2);
@@ -601,7 +634,9 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
 
         lines.push(self.heading("MCP servers", self.servers.len(), content, look));
         if self.servers.is_empty() {
@@ -638,7 +673,9 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
 
         lines.push(self.heading("Hooks", self.hooks.len(), content, look));
         if self.hooks.is_empty() {
@@ -669,9 +706,15 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
         lines.extend(panel);
+        if !footer.is_empty() {
+            lines.truncate(room.saturating_sub(footer.len()));
+        }
         lines.extend(footer);
+        assert!(lines.len() <= room.max(floor));
         (lines, self.help())
     }
 
@@ -750,6 +793,22 @@ impl ProjectPlugins {
             }
         }
         rows
+    }
+
+    /// The fewest body rows the plugins section needs: a heading, a row of content and
+    /// its footer. The footer is the two-row remove question while one is open, otherwise
+    /// the one-row notice, otherwise nothing. Callers reserve this many rows so the footer
+    /// stays on screen.
+    pub fn floor(&self) -> usize {
+        6 + self.footer_len()
+    }
+
+    fn footer_len(&self) -> usize {
+        if self.removed().is_some() {
+            2
+        } else {
+            usize::from(self.notice.is_some())
+        }
     }
 
     fn footer(&self, look: &Look) -> Vec<Row> {
@@ -867,6 +926,7 @@ impl ProjectPlugins {
             ("a", "Add skill"),
             ("m", "Add MCP server"),
             ("h", "Add hooks"),
+            ("l", "Tools"),
             TABS,
             ("Esc", "Home"),
         ]);

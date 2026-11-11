@@ -89,18 +89,37 @@ export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErr
   </>;
 }
 
-/** The research switches shared by New Project, Work and Project Settings, General: one switch
- * per research kind with its icon and plain description. Inputs: an id prefix, the engine catalog,
- * the chosen kinds and their change handler. Output: the switch list. */
-export function ResearchSwitches({ prefix, catalog, value, onChange }: {
+/** The label of the roadmap planning toggle on New Project and on the import and clone setup review. */
+export const ROADMAP_LABEL = "Plan a roadmap after research";
+
+/** The roadmap planning switch shared by New Project, Work and the import and clone setup review:
+ * when on, a planning job writes context/roadmap.md and context/release-process.md once research
+ * finishes. Inputs: an id prefix, whether it is on and its change handler. Output: the switch row. */
+export function RoadmapSwitch({ prefix, value, onChange }: { prefix: string; value: boolean; onChange: (roadmap: boolean) => void }) {
+  return <div className="pj-switch-list"><div className="pj-switch-item">
+    <Icon name="list-checks" size={18} />
+    <span><strong>{ROADMAP_LABEL}</strong><span className="pj-secondary">Versions with time and scope for each, and how a release ships. Unclear points come to you as questions.</span></span>
+    <Switch id={`${prefix}-roadmap`} label={ROADMAP_LABEL} hideLabel checked={value} onChecked={() => onChange(!value)} />
+  </div></div>;
+}
+
+/** The research switches shared by New Project, Work, Project Settings, General and the setup
+ * review: one switch per research kind with its icon and plain description, and the repository
+ * files that already hold that research when the mapping found any. Inputs: an id prefix, the
+ * engine catalog, the chosen kinds, their change handler and the files per kind. Output: the
+ * switch list. */
+export function ResearchSwitches({ prefix, catalog, value, onChange, found = {} }: {
   prefix: string; catalog: Result<ProjectCatalog> | undefined; value: ResearchKind[]; onChange: (research: ResearchKind[]) => void;
+  found?: Partial<Record<ResearchKind, string[]>>;
 }) {
   const research = catalog?.kind === "ok" ? catalog.value.research : (Object.keys(RESEARCH_LABELS) as ResearchKind[]).map((kind) => ({ kind, label: RESEARCH_LABELS[kind] }));
   return <div className="pj-switch-list">{research.map((item) => {
     const on = value.includes(item.kind);
+    const files = found[item.kind] ?? [];
     return <div className="pj-switch-item" key={item.kind}>
       <Icon name={RESEARCH_ICONS[item.kind]} size={18} />
-      <span><strong>{item.label}</strong><span className="pj-secondary">{RESEARCH_COPY[item.kind]}</span></span>
+      <span><strong>{item.label}</strong><span className="pj-secondary">{RESEARCH_COPY[item.kind]}</span>
+        {files.length > 0 && <span className="pj-secondary">Already in the repo: {files.join(", ")}</span>}</span>
       <Switch id={`${prefix}-research-${item.kind}`} label={item.label} hideLabel checked={on} onChecked={() => onChange(toggle(value, item.kind))} />
     </div>;
   })}</div>;

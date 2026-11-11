@@ -48,6 +48,19 @@ test("a refused sign-out names a master conversation and a research job with the
     { label: "Stop agents, end conversation and sign out", pending: "Ending..." });
 });
 
+test("a refused sign-out names what a Full access agent left running and offers to sign out anyway", () => {
+  const report = "Full access cannot stop what the agent started outside its terminal; still running: 4242 node. Its account stays held until they end or you sign it out";
+  const leftover = { kind: "leftover", report };
+  assert.equal(inUseLine(used([], [leftover]), projects), `${report}.`);
+  assert.equal(inUseLine(used([agent("3", "p-alpha")], [leftover]), projects),
+    `Team sub-agent 3 in Alpha is using this account. ${report}.`);
+  assert.deepEqual(releaseLabels(used([], [leftover])), { label: "Sign out anyway", pending: "Signing out..." });
+  assert.deepEqual(releaseLabels(used([agent("3", "p-alpha")], [leftover])), { label: "Stop agents and sign out", pending: "Stopping agents..." });
+  const markup = renderToStaticMarkup(createElement(InUseNotice, { used: used([], [leftover]), projects, pending: false, onStop: forbidden }));
+  assert.match(markup, /still running: 4242 node\. Its account stays held until they end or you sign it out\./);
+  assert.match(markup, />Sign out anyway<\/button>/);
+});
+
 test("the in-use notice offers one action that stops those agents and signs out", () => {
   const markup = renderToStaticMarkup(createElement(InUseNotice, { used: used([agent("3", "p-alpha")]), projects, pending: false, onStop: forbidden }));
   assert.match(markup, /Team sub-agent 3 in Alpha is using this account\./);

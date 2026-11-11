@@ -14,3 +14,7 @@ pub fn same_files(pinned: &[(u64, u64)], live: &[(u64, u64)]) -> bool {
         .all(|(pinned, live)| pinned.1 == live.1)
         && (pinned == live || (one_device(pinned) && one_device(live)))
 }
+
+#[cfg(all(test, unix))]
+#[path = "file_identity/tests.rs"]
+mod tests;

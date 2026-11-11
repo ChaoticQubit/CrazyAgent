@@ -1,8 +1,9 @@
 use super::{AgentRole, error, failure};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::terminal::PANES_PER_PROJECT_MAX;
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::storage::versioned;
+use crate::terminal::{AgentId, PANES_PER_PROJECT_MAX};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -141,7 +142,7 @@ pub(crate) fn numbered(name: &str) -> bool {
 pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
     match (role, name) {
         (
-            AgentRole::Sub,
+            AgentRole::Sub | AgentRole::Teammate,
             Some(AgentName {
                 persona,
                 handle: Some(handle),
@@ -150,13 +151,15 @@ pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
             format!("{persona} (@{handle})")
         }
         (
-            AgentRole::Sub,
+            AgentRole::Sub | AgentRole::Teammate,
             Some(AgentName {
                 persona,
                 handle: None,
             }),
         ) => persona.clone(),
-        (AgentRole::Master, _) | (AgentRole::Sub, None) => role.agent_label(id),
+        (AgentRole::Master, _) | (AgentRole::Sub | AgentRole::Teammate, None) => {
+            role.agent_label(id)
+        }
     }
 }
 
@@ -187,7 +190,7 @@ fn sub_agent(
 ) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            "SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role IN ('sub','teammate')",
             params![agent, project.as_str()],
             |_| Ok(()),
         )
@@ -296,6 +299,53 @@ pub fn assign_persona(
     Ok(persona.to_owned())
 }
 
+/// Reads a name in one of a sub-agent's id forms, `team-7`, `<harness>-7` or a bare `7`,
+/// the id a positive number written without leading zeros. Takes the name with no `@`.
+/// Returns the prefix, None for bare digits, and the id, or None for any other name.
+pub fn id_form(name: &str) -> Option<(Option<&str>, i64)> {
+    let (prefix, digits) = match name.rsplit_once('-') {
+        Some((prefix, digits)) => (Some(prefix), digits),
+        None => (None, name),
+    };
+    let id = digits
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0 && id.to_string() == digits)?;
+    Some((prefix, id))
+}
+
+/// The prefixes that make `<prefix>-<n>` an id form for some agent of a project: `team`,
+/// every catalog harness and every harness the project's agents run, all lower case.
+/// Takes the connection and project. Returns the prefixes.
+fn id_prefixes(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<BTreeSet<String>, EngineError> {
+    let mut statement = connection
+        .prepare("SELECT DISTINCT lower(harness) FROM team_agents WHERE project=?1")
+        .map_err(error)?;
+    let mut prefixes = statement
+        .query_map([project.as_str()], |row| row.get::<_, String>(0))
+        .map_err(error)?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(error)?;
+    prefixes.insert("team".to_owned());
+    prefixes.extend(
+        crate::harnesses::specs()
+            .iter()
+            .map(|spec| spec.id.to_ascii_lowercase()),
+    );
+    Ok(prefixes)
+}
+
+/// Whether a handle reads as an agent's id form, so `events::resolve` would take it for
+/// another agent's id. Takes the id prefixes and the handle. Returns true for such a handle.
+fn id_shaped(prefixes: &BTreeSet<String>, handle: &str) -> bool {
+    id_form(handle).is_some_and(|(prefix, _)| {
+        prefix.is_none_or(|prefix| prefixes.contains(&prefix.to_ascii_lowercase()))
+    })
+}
+
 fn suffixed(base: &str, attempt: usize) -> String {
     assert!(attempt >= 1 && !base.is_empty() && base.len() <= HANDLE_CHARS_MAX);
     if attempt == 1 {
@@ -322,9 +372,16 @@ fn store_handle(
     if name(connection, agent)?.is_none() {
         assign_persona(connection, project, agent)?;
     }
+    let prefixes = id_prefixes(connection, project)?;
+    if id_shaped(&prefixes, wanted) {
+        return Ok(Err("team_handle_invalid"));
+    }
     let taken = held(connection, project, agent, "handle")?;
     let free = |candidate: &str| {
-        candidate != MASTER_HANDLE && !numbered(candidate) && !taken.contains(candidate)
+        candidate != MASTER_HANDLE
+            && !numbered(candidate)
+            && !taken.contains(candidate)
+            && !id_shaped(&prefixes, candidate)
     };
     let attempts = if suffix { SUFFIXES_MAX } else { 1 };
     let Some(chosen) = (1..=attempts)
@@ -377,8 +434,9 @@ pub fn reclaim(
 
 /// Sets the role handle of a sub-agent's current job, as the master asked for it; a handle
 /// another live agent of the project holds, or `@master`, gets the first free `-2`, `-3`
-/// suffix. Takes the connection, project, team agent id and the role in free text.
-/// Returns the handle, or a plain refusal code for an unusable role or unknown agent.
+/// suffix that is no agent's id form. Takes the connection, project, team agent id and the
+/// role in free text. Returns the handle, or a plain refusal code for an unusable role, one
+/// shaped like an agent's id form such as `team-7`, a taken one or an unknown agent.
 pub fn assign_role(
     connection: &Connection,
     project: &ProjectId,
@@ -392,35 +450,82 @@ pub fn assign_role(
 }
 
 /// Keeps the role the master gave a task when it delegated it, for the agent that later
-/// takes the task; roles of tasks that no longer exist are dropped. Takes the connection,
-/// project, task id and role text. Returns any SQLite failure.
+/// takes the task, when the role's version is the one the master read: 0 for a task it has
+/// just created. Roles of tasks that no longer exist are dropped with their versions. The
+/// writer is the project's newest team master, or the owner whose message started the turn
+/// when no master agent is recorded. Takes the transaction, project, task id, role text and
+/// that version. Returns the role's new version, the stale refusal, or any SQLite failure.
 pub fn set_task_role(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     project: &ProjectId,
     task: i64,
     role: &str,
-) -> Result<(), EngineError> {
+    expected: u64,
+) -> Result<Result<u64, versioned::Stale>, EngineError> {
     assert!(task > 0);
-    connection
-        .execute(
-            "DELETE FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks)",
+    let gone: Vec<i64> = tx
+        .prepare(
+            "SELECT task FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks)",
+        )
+        .map_err(error)?
+        .query_map([project.as_str()], |row| row.get(0))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    for old in &gone {
+        versioned::forget(tx, &versioned::task_role_item(*old))?;
+    }
+    tx.execute(
+        "DELETE FROM team_task_roles WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    let writer = master_writer(tx, project)?;
+    let version = match versioned::write_if(tx, &versioned::task_role_item(task), expected, &writer)
+    {
+        Ok(version) => version,
+        Err(versioned::Refusal::Stale(stale)) => return Ok(Err(stale)),
+        Err(versioned::Refusal::Failed(failed)) => return Err(failed),
+    };
+    tx.execute(
+        "INSERT INTO team_task_roles(task,project,role) VALUES (?1,?2,?3)
+         ON CONFLICT(task) DO UPDATE SET role=excluded.role",
+        params![task, project.as_str(), role],
+    )
+    .map_err(error)?;
+    assert!(version > expected);
+    Ok(Ok(version))
+}
+
+/// Names who writes a task role for a project: its newest team master agent, or the owner
+/// when no master agent is recorded. Takes the connection and project.
+fn master_writer(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<versioned::Writer, EngineError> {
+    let master: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM team_agents WHERE project=?1 AND role='master' ORDER BY id DESC LIMIT 1",
             [project.as_str()],
+            |row| row.get(0),
         )
+        .optional()
         .map_err(error)?;
-    connection
-        .execute(
-            "INSERT INTO team_task_roles(task,project,role) VALUES (?1,?2,?3)
-             ON CONFLICT(task) DO UPDATE SET role=excluded.role",
-            params![task, project.as_str(), role],
-        )
-        .map_err(error)?;
-    Ok(())
+    Ok(match master {
+        Some(id) => {
+            versioned::Writer::Agent(AgentId::team(id).map_err(|_| failure("team_agent_invalid"))?)
+        }
+        None => versioned::Writer::Owner {
+            force_after_conflict: false,
+        },
+    })
 }
 
 /// Gives a sub-agent the handle for the task it takes: the task's role, or for a task pinned
 /// to it the handle it already has, or else `task-<id>`, so a reused agent never keeps the
-/// handle of an earlier job. Takes the connection, project, team agent and task ids.
-/// Returns the handle, or None when the agent is unknown or every candidate is taken.
+/// handle of an earlier job and no handle reads as an agent's id form. Takes the
+/// connection, project, team agent and task ids. Returns the handle, or None when the agent
+/// is unknown or every candidate is taken.
 pub fn assign_task_role(
     connection: &Connection,
     project: &ProjectId,
@@ -446,17 +551,21 @@ pub fn assign_task_role(
         .map_err(error)?
         .is_some();
     let current = name(connection, agent)?.and_then(|name| name.handle);
+    let prefixes = id_prefixes(connection, project)?;
+    let usable = |wanted: &String| !id_shaped(&prefixes, wanted);
     let wanted = role
         .as_deref()
         .and_then(handle)
-        .or(current.filter(|_| pinned))
+        .filter(|wanted| usable(wanted))
+        .or(current.filter(|current| pinned && usable(current)))
         .unwrap_or_else(|| format!("task-{task}"));
     Ok(store_handle(connection, project, agent, &wanted, true)?.ok())
 }
 
 /// The owner's rename of a live sub-agent's role handle. Takes the connection, project,
 /// team agent id and the new handle, already kebab case, a leading `@` allowed. Returns the
-/// handle, or `team_handle_invalid`, `team_handle_taken` or `team_agent_unknown`.
+/// handle, or `team_handle_invalid` (also for an id form such as `team-7`, `codex-7` or
+/// `7`), `team_handle_taken` or `team_agent_unknown`.
 pub fn rename(
     connection: &Connection,
     project: &ProjectId,

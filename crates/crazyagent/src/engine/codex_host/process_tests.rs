@@ -123,10 +123,27 @@ async fn stand_in_host(
     fixture: &mut crate::engine::master_host_fixture::MasterFixture,
     body: &str,
 ) -> CodexHostProcess {
+    stand_in_host_at(fixture, body, false).await
+}
+
+/// Starts a stand-in Codex host process running `body` under custody with a real lease,
+/// at Full access when `unconfined`. Takes the fixture, the script body and the access.
+/// Returns the process.
+#[cfg(unix)]
+async fn stand_in_host_at(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    unconfined: bool,
+) -> CodexHostProcess {
     let profile = fixture.lease("codex-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("codex", body);
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let sandbox = if unconfined {
+        sandbox.unconfined()
+    } else {
+        sandbox
+    };
     let mut command = Command::new(&harness);
     command.current_dir(std::fs::canonicalize(&fixture.project).unwrap());
     let command = sandbox.wrap(&command).unwrap();
@@ -134,7 +151,7 @@ async fn stand_in_host(
         wall_time_ms: 20_000,
         ..budget()
     };
-    CodexHostProcess::spawn_guarded(command, &limits, Some(profile))
+    CodexHostProcess::spawn_guarded(command, &limits, Some(profile), unconfined)
         .await
         .unwrap()
 }
@@ -335,6 +352,85 @@ async fn closing_a_codex_host_stops_what_its_commands_detached() {
     assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     processes.assert_gone();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closing_a_full_access_codex_host_names_what_it_left_running_and_keeps_the_lease_until_it_ends()
+ {
+    use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
+    use crate::harnesses::leftovers;
+
+    let mut fixture = MasterFixture::new("codex");
+    let body = format!("{DETACHING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host_at(&mut fixture, &body, true).await;
+    let processes = DetachedProcesses::wait(&fixture.project);
+    let closed = process.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned()),
+        "a Full access Codex host ended clean while what it started outside its terminal ran"
+    );
+    let named = format!("{} perl", processes.session.as_raw_nonzero());
+    let reports = leftovers::held_by(&fixture.connection.id);
+    assert!(
+        reports.iter().any(|report| report.contains(&named)),
+        "{reports:?}"
+    );
+    assert_eq!(
+        fixture
+            .sign_in("codex-full-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use"),
+        "the account lease was released while the host's leftover ran"
+    );
+    let _ = rustix::process::kill_process(processes.session, rustix::process::Signal::KILL);
+    let started = Instant::now();
+    while fixture.sign_in("codex-full-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the account lease stayed held after the leftover ended"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// SETSID-L2: a Full access Codex host's process that left its session and lost its parent
+/// before the close, running a program whose environment macOS hides, is still named: the
+/// follow from the start kept it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closing_a_full_access_codex_host_names_what_left_its_session_and_parent() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers;
+
+    let mut fixture = MasterFixture::new("codex");
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let closed = process.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned()),
+        "a Full access Codex host ended clean while the orphan it started ran"
+    );
+    let named = format!("{} perl", orphan.0.as_raw_nonzero());
+    let reports = leftovers::held_by(&fixture.connection.id);
+    assert!(
+        reports.iter().any(|report| report.contains(&named)),
+        "{reports:?}"
+    );
+    drop(orphan);
+    let started = Instant::now();
+    while fixture.sign_in("codex-orphan-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the account lease stayed held after the orphan ended"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[cfg(unix)]

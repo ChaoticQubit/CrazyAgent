@@ -46,13 +46,25 @@ impl OwnerRuntimeHandle {
 
     /// Starts the engine-start re-proof of every earlier sign-in as its own task, after
     /// every executable is registered. Input: none. Output: the task, which the engine
-    /// aborts when it stops.
+    /// aborts when it stops; the `reproving` flag clears once it ends, however it ends.
     pub(in crate::engine) fn reprove_in_background(&self) -> tokio::task::JoinHandle<()> {
         let handle = OwnerRuntimeHandle {
             engine: self.engine.clone(),
             authority: self.authority.clone(),
         };
-        tokio::spawn(async move { handle.reprove_sign_ins(None).await })
+        let ended = ReproofEnded(self.authority.reproving.clone());
+        tokio::spawn(async move {
+            let _ended = ended;
+            handle.reprove_sign_ins(None).await
+        })
+    }
+
+    /// Shares whether this engine run's engine-start re-proof still runs, so the team
+    /// runtime waits for an account whose re-check has not settled instead of refusing it
+    /// (DEC-108). Input: none. Output: the flag, true until that re-proof ends, including a
+    /// give-up at its deadline, an abort or a panic.
+    pub fn reproving(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.authority.reproving.clone()
     }
 
     fn reprovable(&self, method: NativeAuthMethod) -> bool {
@@ -164,6 +176,16 @@ fn unrun(settled: &Result<NativeAuthPhase, EngineError>) -> bool {
             "native_auth_host_busy" | "native_auth_host_unavailable" | "native_profile_in_use"
         )
     })
+}
+
+/// Clears the engine-start re-proof flag when its task ends or is dropped unpolled, so no
+/// account waits on a re-check that no longer runs.
+struct ReproofEnded(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ReproofEnded {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Authority {

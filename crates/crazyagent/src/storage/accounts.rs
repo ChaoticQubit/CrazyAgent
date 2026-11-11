@@ -24,6 +24,7 @@ pub(crate) enum Command {
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
     KeyReplaced(CredentialRef),
+    Held,
 }
 
 pub(crate) struct Listed {
@@ -38,6 +39,7 @@ pub(crate) enum ResultValue {
     Account(Box<Listed>),
     Removed(Box<ModelConnection>),
     Page(Vec<Listed>, Option<CredentialRef>),
+    Held(Vec<CredentialRef>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +51,7 @@ struct Record {
 
 /// The folder beside the engine database that holds account keys, one 0600 file per key
 /// named by its credential reference.
+#[cfg(unix)]
 pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
@@ -83,14 +86,6 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(_) => Err(error("account_key_store_unavailable")),
     }
-}
-
-/// Refuses to delete an account key where the Unix owner-only key folder does not exist.
-/// Takes the engine root and the reference, both unused. Returns
-/// `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn remove_key_file(_root: &Path, _name: &str) -> Result<(), EngineError> {
-    Err(error("account_key_store_unavailable"))
 }
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
@@ -178,6 +173,17 @@ pub(super) fn execute(
     initialize(db)?;
     match command {
         Command::List(after, limit) => list(db, config, admission, after.as_ref(), limit),
+        Command::Held => {
+            let tx = db.transaction().map_err(error)?;
+            check_owner_admission(&tx, admission)?;
+            let held = config
+                .settings
+                .model_access
+                .as_ref()
+                .map(|catalog| catalog.connections.iter().map(|c| c.id.clone()).collect())
+                .unwrap_or_default();
+            Ok(ResultValue::Held(held))
+        }
         Command::Get(id) => {
             let tx = db.transaction().map_err(error)?;
             check_owner_admission(&tx, admission)?;
@@ -288,12 +294,59 @@ pub(super) fn execute(
             check_owner_admission(&tx, admission)?;
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
+            crate::usage::forget_limits(&tx, &id)?;
             if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
                 super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
             }
+            #[cfg(unix)]
+            let left = account_files(&connection.auth);
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                super::trash::put(&tx, kind, name)?;
+            }
             tx.commit().map_err(error)?;
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
+            }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
+    }
+}
+
+/// Names the files a removed account leaves to delete beside its key: a native account's
+/// sign-in or an API key account's generated SDK home. Input: the account's authentication.
+/// Output: the trash kind and reference, none for an account with neither.
+#[cfg(unix)]
+fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
+    match auth {
+        ModelAuthentication::ApiKey { credential_ref } => {
+            Some((super::trash::GENERATED_HOME, credential_ref.as_str()))
+        }
+        ModelAuthentication::NativeManaged { profile_ref } => {
+            Some((super::trash::NATIVE_SIGN_IN, profile_ref.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Deletes a removed account's files straight after its removal commits; what cannot go
+/// now stays noted for the next start. Inputs: the connection, the catalog left after the
+/// removal, the kind and the reference.
+#[cfg(unix)]
+fn settle_removed(
+    db: &Connection,
+    catalog: Option<&crate::config::ModelAccess>,
+    kind: &str,
+    name: &str,
+) {
+    let settled = db
+        .path()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .ok_or_else(|| error("account_file_root_unknown"))
+        .and_then(|root| super::trash::settle(db, root, catalog, kind, name));
+    if let Err(problem) = settled {
+        eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0);
     }
 }
 

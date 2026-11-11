@@ -80,7 +80,7 @@ async fn selected_project(case: &Case, ui: &mut Ui) -> ProjectId {
         owner.send_pending().await.unwrap(),
         OwnerResponse::Applied { .. }
     ));
-    let client = Client::new(case.root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let client = Client::new(case.root.path().join("e.sock"), ENGINE_WAIT).unwrap();
     let snapshot = client
         .request(WireRequest {
             protocol_version: PROTOCOL_VERSION,

@@ -178,8 +178,9 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 });
 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
-  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"],
-    ["release.yml", "build", "Install pinned Node on the owner's runner"], ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
+  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
+    ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
+    ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
     assert(step, `${job}: ${title}`);
     assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
@@ -187,6 +188,24 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
     assert.match(step, /\n\s+cp "\$work\/([a-z.]+)" "\$prefix\/\1\.\$\$"\n\s+mv "\$prefix\/\1\.\$\$" "\$prefix\/\1"\n/, `${job}: ${title} replaces the cached archive in one rename`);
     assert.match(step, /"\$work\/bin" >> "\$GITHUB_PATH"|bun-path=\$work\/bin\/bun/, `${job}: ${title} runs the copy it just checked`);
   }
+});
+
+test("macOS CI runs a Codex release in codex::VERSIONS, from the pinned, checksum-checked release archive", async () => {
+  const ci = await workflow("ci.yml");
+  const pinned = ci.match(/^ {2}CODEX_VERSION: "(\d+)\.(\d+)\.(\d+)"$/m);
+  assert(pinned, "CI pins an exact Codex version");
+  const source = await readFile(new URL("../../crates/crazyagent/src/coord/delivery/codex.rs", import.meta.url), "utf8");
+  const versions = source.match(/^pub const VERSIONS: \[\(u64, u64\); \d+\] = \[(.+)\];$/m);
+  assert(versions, "codex::VERSIONS is one line");
+  const supported = [...versions[1].matchAll(/\((\d+), (\d+)\)/g)].map((pair) => `${pair[1]}.${pair[2]}`);
+  assert(supported.length > 0, "codex::VERSIONS names a release");
+  assert(supported.includes(`${pinned[1]}.${pinned[2]}`), `CI Codex ${pinned[0]} is one of codex::VERSIONS ${supported.join(", ")}`);
+  const step = steps(ci, "macos").find((text) => text.includes("name: Install Codex"));
+  assert(step, "macOS CI installs Codex");
+  assert.match(step, /\n\s+CODEX_SHA256: [0-9a-f]{64}\n/);
+  assert.match(step, /"https:\/\/github\.com\/openai\/codex\/releases\/download\/rust-v\$CODEX_VERSION\/\$CODEX_PACKAGE"/);
+  assert.match(step, /\n\s+test "\$\("\$work\/bin\/codex" --version\)" = "codex-cli \$CODEX_VERSION"\n/);
+  assert.doesNotMatch(ci, /codex[^\n]*latest/i, "no unpinned Codex");
 });
 
 test("a release on the owner's runner signs with pinned, checksum-checked Node, bun and Rust, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
@@ -300,4 +319,85 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", asyn
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
     assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
   }
+});
+
+test("macOS CI provisions the pinned VSCodium build the IDE server tests need from builds.json, checked on every use, before the Rust tests", async () => {
+  const root = new URL("../../", import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL("crates/crazyagent/src/ide/builds.json", root), "utf8"));
+  const server = await readFile(new URL("crates/crazyagent/src/ide/server/tests.rs", root), "utf8");
+  assert(server.includes(`const BUILD: &str = "vscodium-${manifest.version}";`), "the server tests read the build that builds.json pins");
+  const all = steps(await workflow("ci.yml"), "macos");
+  const at = (found) => all.findIndex(found);
+  const read = at((step) => step.includes("name: Read the pinned IDE build"));
+  const cache = at((step) => step.includes("uses: actions/cache@") && step.includes("vscodium-reh-web"));
+  const provision = at((step) => step.includes("name: Provision the pinned IDE build"));
+  const tests = at((step) => step.includes("name: Test engine and desktop crates"));
+  assert(read >= 0 && read < cache && cache < provision && provision < tests, `${read} ${cache} ${provision} ${tests}`);
+  assert.match(all[read], /^ {6}- id: ide\n/);
+  assert.match(all[read], /readFileSync\("crates\/crazyagent\/src\/ide\/builds\.json", "utf8"\)/);
+  assert.match(all[read], /manifest\.builds\["aarch64-apple-darwin"\]/);
+  assert.match(all[read], /build\?\.url === url/, "only the official release URL is fetched");
+  assert.match(all[cache], /^ {6}- if: runner\.environment == 'github-hosted'\n/);
+  assert.match(all[cache], /key: ci-macos-vscodium-reh-web-darwin-arm64-\$\{\{ steps\.ide\.outputs\.version \}\}\n?$/);
+  const step = all[provision];
+  for (const name of ["VERSION", "URL", "SHA256", "BYTES"]) {
+    assert.match(step, new RegExp(`IDE_${name}: \\$\\{\\{ steps\\.ide\\.outputs\\.${name.toLowerCase()} \\}\\}`), name);
+  }
+  assert.match(step, /prefix="\$RUNNER_TOOL_CACHE\/vscodium-reh-web\/\$IDE_VERSION\/arm64"/);
+  assert.match(step, /\n\s+if ! echo "\$IDE_SHA256  \$work\/vscodium\.tgz" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n/, "the cached archive is checked on every use");
+  assert.match(step, /--proto '=https' --proto-redir '=https'/);
+  assert.match(step, /--max-filesize "\$IDE_BYTES"/);
+  assert.match(step, /\n\s+test "\$\(stat -f %z "\$work\/vscodium\.tgz"\)" = "\$IDE_BYTES"\n/);
+  assert.match(step, /\n\s+echo "\$IDE_SHA256  \$work\/vscodium\.tgz" \| shasum -a 256 -c -\n/, "a download that does not match fails the job");
+  assert(step.indexOf("| shasum -a 256 -c -\n") < step.indexOf('cp "$work/vscodium.tgz" "$prefix/'), "only a checked archive reaches the tool cache");
+  assert.match(step, /\n\s+cp "\$work\/vscodium\.tgz" "\$prefix\/vscodium\.tgz\.\$\$"\n\s+mv "\$prefix\/vscodium\.tgz\.\$\$" "\$prefix\/vscodium\.tgz"\n/);
+  assert.match(step, /build="\.local-state\/ide-cache\/vscodium-\$IDE_VERSION"/);
+  assert.match(step, /\n\s+tar -xzf "\$work\/vscodium\.tgz" -C "\$build"\n\s+test -f "\$build\/out\/server-main\.js"/);
+  assert.match(step, /\n\s+test -f "\$build\/out\/server-main\.js"\n\s+find "\$RUNNER_TOOL_CACHE\/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "\$IDE_VERSION" -exec rm -rf \{\} \+$/, "once the pinned build is provisioned, the tool cache drops the archives of every other version");
+});
+
+/**
+ * Reads one test exclusion list of the CI workflow's top-level env.
+ * Inputs: the workflow text and the list's name. Output: the set of excluded target names,
+ * from the key's own line and every following line indented deeper than the key.
+ */
+function excluded(text, name) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => line.startsWith(`  ${name}:`));
+  assert(start >= 0, `no ${name} in the CI env`);
+  const end = lines.findIndex((line, index) => index > start && line.length - line.trimStart().length <= 2);
+  return new Set([lines[start].slice(lines[start].indexOf(":") + 1), ...lines.slice(start + 1, end)].join(" ").split(/\s+/).filter((word) => word && word !== ">-"));
+}
+
+test("every Rust test target that needs the staged RCLI host is left out of CI, which stages none", async () => {
+  const ci = await workflow("ci.yml");
+  const root = new URL("../../", import.meta.url);
+  let needing = 0;
+  for (const [folder, list] of [["crates/crazyagent/tests/", "ENGINE_TESTS_EXCLUDE"], ["apps/desktop/src-tauri/tests/", "DESKTOP_TESTS_EXCLUDE"]]) {
+    const skipped = excluded(ci, list);
+    for (const name of (await readdir(new URL(folder, root))).filter((name) => name.endsWith(".rs"))) {
+      if (!(await readFile(new URL(folder + name, root), "utf8")).includes("CRAZYAGENT_RCLI")) continue;
+      needing += 1;
+      assert(skipped.has(name.slice(0, -3)), `${folder}${name} reads CRAZYAGENT_RCLI but is not in ${list}`);
+    }
+  }
+  assert(needing > 0, "the check found the tests that need the RCLI host");
+});
+
+test("every live Rust test target, named *_live, is left out of CI, which has no live accounts, harnesses or local models", async () => {
+  const skipped = excluded(await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE");
+  const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
+  const live = (await readdir(folder)).filter((name) => name.endsWith("_live.rs")).map((name) => name.slice(0, -3));
+  assert(live.includes("codex_bridge_live"), "the check found the live targets");
+  for (const name of live) {
+    assert(skipped.has(name), `crates/crazyagent/tests/${name}.rs is a live target but is not in ENGINE_TESTS_EXCLUDE`);
+  }
+});
+
+test("CI runs the price snapshot script's check on Linux, so a bad refresh fails a pull request", async () => {
+  const linux = steps(await workflow("ci.yml"), "linux");
+  assert(
+    linux.some((step) => /^ {8}run: make test-price-script$/m.test(step)),
+    "the linux job runs make test-price-script",
+  );
 });

@@ -9,7 +9,8 @@ const intake = await import("../src/screens/intake/intake.ts");
 const router = await import("../src/ui/router.ts");
 const { HomeFolderView } = await import("../src/screens/intake/home-folder.tsx");
 const { FoundProjectsView, SetUpDialogBody } = await import("../src/screens/intake/found.tsx");
-const { AddFolderView } = await import("../src/screens/intake/add-folder.tsx");
+const { AddFolderView, AnywayDialog, MoveConfirmDialog } = await import("../src/screens/intake/add-folder.tsx");
+const intakeApi = await import("../src/api-intake.ts");
 const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/clone.tsx");
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
 const { ToolsSetupView } = await import("../src/screens/intake/setup-step.tsx");
@@ -131,20 +132,21 @@ test("the device sign-in polls only while its code works and the owner isn't sig
 test("each folder chooser names what the folder is for, and adding a project never asks for a skill folder", () => {
   const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
   assert.match(source("../src/api.ts"), /export function pickFolder\(purpose: FolderPurpose\)[^{]*\{\s*return call<string \| null>\("desktop_pick_folder", \{ purpose \}\);/);
-  for (const [file, purpose, count] of [
-    ["../src/screens/intake/add-folder.tsx", "project", 1],
-    ["../src/screens/intake/home-folder.tsx", "projects_home", 1],
-    ["../src/screens/settings/projects-home.tsx", "projects_home", 1],
-    ["../src/screens/settings/plugins.tsx", "skill", 2],
+  for (const [file, expected] of [
+    ["../src/screens/intake/add-folder.tsx", ['"project"']],
+    ["../src/screens/intake/home-folder.tsx", ['"projects_home"']],
+    ["../src/screens/settings/projects-home.tsx", ['"projects_home"']],
+    ["../src/screens/settings/memory.tsx", ['"memory"']],
+    ["../src/screens/settings/plugins.tsx", ['"skill"', '"skill"', '"plugin"']],
   ]) {
     const calls = [...source(file).matchAll(/\bpickFolder\(([^)]*)\)/g)].map((call) => call[1]);
-    assert.deepEqual(calls, Array(count).fill(`"${purpose}"`), file);
+    assert.deepEqual(calls, expected, file);
   }
   const lib = source("../src-tauri/src/lib.rs");
-  assert.match(lib, /async fn desktop_pick_folder\(\s*window: WebviewWindow,\s*purpose: FolderPurpose,\s*\)/);
+  assert.match(lib, /async fn desktop_pick_folder\(\s*webview: Webview,\s*purpose: FolderPurpose,\s*\)/);
   assert.match(lib, /bridge::picker::choose\(purpose\.script\(\)\)/);
   const picker = source("../src-tauri/src/bridge/picker.rs");
-  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*\}/,
+  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*Memory,\s*Plugin,\s*\}/,
     "the web view's purpose names are the engine's");
 });
 
@@ -200,6 +202,13 @@ test("repositories filter by name and read their size and branch", () => {
 test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
+  const started = Date.UTC(2026, 10, 4, 22, 0, 0);
+  const first = { number: 1, tries: 3, started_ms: started, earlier: null };
+  assert.deepEqual(intake.stepView({ kind: "running" }, false, first, started + 20000), { word: "Working", tone: "info", line: "Mapping, try 1 of 3, under 1 min." });
+  const second = { number: 2, tries: 3, started_ms: started, earlier: "Mapping agent ran out of time" };
+  assert.deepEqual(intake.stepView({ kind: "running" }, false, second, started + 150000), { word: "Working", tone: "info", line: "Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time" });
+  assert.equal(intake.stepView({ kind: "running" }, false, first, started - 5000).line, "Mapping, try 1 of 3, under 1 min.");
+  assert.deepEqual(intake.stepView({ kind: "done" }, false, second, started), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
   assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." });
@@ -328,6 +337,10 @@ test("pack states read in plain words and only on or off entries count as instal
   assert.deepEqual(intake.packStateView({ state: "on" }), { word: "On", tone: "ok", line: null });
   assert.deepEqual(intake.packStateView({ state: "off" }), { word: "Off", tone: "neutral", line: null });
   assert.deepEqual(intake.packStateView({ state: "failed", reason: "Checksum didn't match." }), { word: "Failed", tone: "danger", line: "Checksum didn't match." });
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  assert.deepEqual(intake.packStateView({ state: "on" }, refused), { word: "On", tone: "ok", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "off" }, refused), { word: "Off", tone: "neutral", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "on" }, null), { word: "On", tone: "ok", line: null });
   assert.deepEqual(pack.filter(intake.installed).map((item) => item.id), ["headroom"]);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "off" })), true);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "failed", reason: "no" })), false);
@@ -422,24 +435,24 @@ test("adding an existing folder uses it where it is by default, shows the target
   assert.match(none, /<h1>Add an existing folder<\/h1>/);
   assert.match(none, />Choose folder<\/button>/);
   assert.doesNotMatch(none, /Set up here|Move into projects folder/);
-  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "here" });
+  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, movable: true }), mode: "here" });
   assert.match(here, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</);
   assert.match(here, /role="radio" aria-checked="false"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
   assert.match(here, /~\/Code\/shop<\/span> stays where it is\./);
   assert.match(here, /Nothing is moved or copied\./);
   assert.match(here, />Set up here<\/button>/);
   assert.doesNotMatch(here, /goes to|into projects folder/);
-  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "move" });
+  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, movable: true }), mode: "move" });
   assert.match(move, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
   assert.match(move, /goes to <span class="pj-mono">~\/Projects\/shop<\/span>/);
   assert.match(move, /Moves the folder into ~\/Projects\./);
   assert.match(move, />Move into projects folder<\/button>/);
-  const big = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 3 * GB }), mode: "copy" });
+  const big = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 3 * GB, copyable: true }), mode: "copy" });
   assert.match(big, /This copies 3 GB/);
   assert.match(big, /class="notice"/);
   assert.match(big, />Copy into projects folder<\/button>/);
   assert.doesNotMatch(big, /linked git worktree/);
-  const linked = (worktrees, mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees }), mode });
+  const linked = (worktrees, mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees, copyable: true }), mode });
   assert.match(linked(3, "copy"), /This folder has 3 linked git worktrees\. They stay with the original folder; the copy gets the main checkout and every branch\./);
   assert.match(linked(1, "copy"), /This folder has 1 linked git worktree\. It stays with the original folder; the copy gets the main checkout and every branch\./);
   assert.doesNotMatch(linked(0, "copy"), /linked git worktree/);
@@ -449,6 +462,173 @@ test("adding an existing folder uses it where it is by default, shows the target
   assert.match(hosted, />Clone instead<\/button>/);
   assert.match(html(AddFolderView, { ...base, home: ok({ path: null, watching: false }), source: null, size: null, mode: "move" }), /Choose your projects folder first/);
   assert.match(html(AddFolderView, { ...base, home: notReady, source: null, size: null, mode: "move" }), /Not ready yet/);
+});
+
+test("Move and Copy are offered for every folder once it is read, and only checking the folder holds them back", () => {
+  const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const radio = (label) => new RegExp(`role="radio"[^>]*>(<svg[\\s\\S]*?<\\/svg>)?${label}<`);
+  const read = (value) => ok({ bytes: 10, worktrees: 0, worktree_paths: [], movable: true, copyable: true, git: true, same_volume: true, ...value });
+  for (const size of [
+    read({ movable: false, worktrees: 1 }), read({ movable: false, copyable: false }), read({ git: false }),
+    read({ bytes: null, size_problem: "folder_size_timeout" }), read({ bytes: null, size_problem: "folder_size_too_large" }),
+    read({ bytes: null, size_problem: "folder_size_unreadable" }), failed("folder_size_failed"), notReady, ok({ bytes: 10 }),
+  ]) {
+    for (const mode of ["move", "copy"]) {
+      const markup = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size, mode });
+      const label = `${JSON.stringify(size)} ${mode}`;
+      assert.match(markup, radio("Move"), label);
+      assert.match(markup, radio("Copy"), label);
+      assert.match(markup, new RegExp(`role="radio" aria-checked="true"[^>]*>(<svg[\\s\\S]*?<\\/svg>)?${mode === "move" ? "Move" : "Copy"}<`), label);
+      assert.match(markup, new RegExp(`>${mode === "move" ? "Move" : "Copy"} into projects folder</button>`), label);
+      assert.doesNotMatch(markup, /isn(&#x27;|')t offered/, label);
+      assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>[\s\S]{0,400}into projects folder/, label);
+    }
+  }
+  const measuring = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "copy" });
+  assert.doesNotMatch(measuring, radio("Copy"));
+  assert.match(measuring, /Move and Copy are offered once CrazyAgent has checked this folder(&#x27;|')s git links\./);
+  const unmeasured = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: read({ bytes: null, size_problem: "folder_size_timeout" }), mode: "copy" });
+  assert.match(unmeasured, /CrazyAgent couldn(&#x27;|')t measure this folder\./);
+  assert.doesNotMatch(unmeasured, /Checking the folder size/);
+});
+
+test("each issue a folder read or an engine refusal shows names exactly one question issue for that way", () => {
+  const read = (value) => ok({ bytes: 10, worktrees: 0, worktree_paths: [], movable: true, copyable: true, git: true, same_volume: true, ...value });
+  const issues = (way, size, refused = null) => intake.anywayIssues(way, size, refused);
+  assert.deepEqual(issues("move", read({})), []);
+  assert.deepEqual(issues("copy", read({})), []);
+  assert.deepEqual(issues("move", null), []);
+  assert.deepEqual(issues("move", { kind: "loading" }), []);
+  assert.deepEqual(issues("move", read({ movable: false })), ["worktrees"]);
+  assert.deepEqual(issues("copy", read({ movable: false })), []);
+  assert.deepEqual(issues("copy", read({ copyable: false })), ["linked_checkout"]);
+  assert.deepEqual(issues("move", read({ copyable: false })), []);
+  assert.deepEqual(issues("move", read({ git: false })), ["no_git"]);
+  assert.deepEqual(issues("copy", read({ git: false })), ["no_git"]);
+  assert.deepEqual(issues("move", read({ bytes: null, size_problem: "folder_size_unreadable" })), ["unreadable"]);
+  assert.deepEqual(issues("copy", read({ bytes: null, size_problem: "folder_size_timeout" })), ["large"]);
+  assert.deepEqual(issues("move", read({ bytes: null, size_problem: "folder_size_timeout", same_volume: false })), ["large"]);
+  assert.deepEqual(issues("move", read({ bytes: null, size_problem: "folder_size_timeout", same_volume: true })), []);
+  assert.deepEqual(issues("copy", read({ bytes: null, size_problem: "folder_size_too_large" })), ["large", "too_many"]);
+  assert.deepEqual(issues("move", read({ bytes: null, size_problem: "folder_size_too_large", same_volume: null })), ["large", "too_many"]);
+  assert.deepEqual(issues("copy", read({ bytes: 3 * GB })), ["large"]);
+  assert.deepEqual(issues("move", read({ bytes: 3 * GB, same_volume: false })), ["large"]);
+  assert.deepEqual(issues("move", read({ bytes: 3 * GB, same_volume: true })), []);
+  assert.deepEqual(issues("copy", read({ bytes: GB })), []);
+  for (const size of [failed("folder_size_failed"), notReady, ok({ bytes: 10 })]) {
+    assert.deepEqual(issues("move", size), ["git_unread"], size.kind);
+    assert.deepEqual(issues("copy", size), ["git_unread"], size.kind);
+  }
+  assert.deepEqual(issues("move", read({}), "home_move_worktrees"), ["worktrees"]);
+  for (const [link, issue] of [["worktrees", "worktrees"], ["linked_worktree", "linked_worktree"], ["submodule", "submodule"], ["unreadable", "git_data_unread"]]) {
+    assert.deepEqual(issues("move", read({ movable: false, git_link: link })), [issue], link);
+    assert.deepEqual(issues("move", read({ movable: false, git_link: link }), "home_move_worktrees"), [issue], `${link} refused`);
+    assert.deepEqual(issues("copy", read({ movable: false, git_link: link })), [], `${link} copy`);
+  }
+  assert.deepEqual(issues("copy", read({}), "home_copy_linked_checkout"), ["linked_checkout"]);
+  assert.deepEqual(issues("move", read({}), "home_copy_too_large"), ["too_many"]);
+  assert.deepEqual(issues("copy", read({}), "home_copy_too_large"), ["too_many"]);
+  assert.deepEqual(issues("move", read({}), "home_destination_exists"), []);
+  assert.deepEqual(issues("move", ok({ bytes: 10 }), "home_move_worktrees"), ["worktrees", "git_unread"]);
+  assert.deepEqual(issues("copy", read({ git: false, copyable: false, bytes: null, size_problem: "folder_size_unreadable" })), ["unreadable", "linked_checkout", "no_git"]);
+});
+
+test("Move anyway sends an override only for an issue the engine checks and the owner was shown", () => {
+  const read = (value) => ok({ bytes: 10, worktrees: 0, worktree_paths: [], movable: true, copyable: true, git: true, same_volume: false, ...value });
+  const overrides = (way, size, refused = null) => intake.anywayOverrides(way, intake.anywayIssues(way, size, refused), size);
+  assert.deepEqual(overrides("move", read({})), []);
+  assert.deepEqual(overrides("move", read({ movable: false })), ["worktrees"]);
+  assert.deepEqual(overrides("copy", read({ copyable: false })), ["linked_checkout"]);
+  assert.deepEqual(overrides("copy", read({ bytes: null, size_problem: "folder_size_timeout" })), ["too_large"]);
+  assert.deepEqual(overrides("copy", read({ bytes: null, size_problem: "folder_size_too_large" })), ["too_large"]);
+  assert.deepEqual(overrides("move", read({}), "home_copy_too_large"), ["too_large"]);
+  assert.deepEqual(overrides("copy", read({ bytes: 3 * GB })), []);
+  assert.deepEqual(overrides("move", read({ git: false })), []);
+  assert.deepEqual(overrides("move", read({ bytes: null, size_problem: "folder_size_unreadable" })), []);
+  assert.deepEqual(overrides("move", failed("folder_size_failed")), []);
+  assert.deepEqual(overrides("move", read({ movable: false, bytes: null, size_problem: "folder_size_too_large" })), ["worktrees", "too_large"]);
+  assert.deepEqual(overrides("move", read({}), "home_move_worktrees"), ["worktrees"]);
+  for (const link of ["linked_worktree", "submodule", "unreadable"]) assert.deepEqual(overrides("move", read({ movable: false, git_link: link })), ["worktrees"], link);
+});
+
+test("the Move anyway warnings put every data loss case first, each in the owner's exact words", () => {
+  const W = intakeApi.ADD_WARNINGS;
+  const read = (value) => ok({ bytes: 10, worktrees: 0, worktree_paths: [], movable: true, copyable: true, git: true, same_volume: true, ...value });
+  const warnings = (way, size, refused = null) => intake.anywayWarnings(way, intake.anywayIssues(way, size, refused), size);
+  const flat = (blocks) => blocks.flatMap((block) => block.lines);
+  assert.deepEqual(flat(warnings("move", read({}))), [W.close_apps, W.old_place, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", read({ same_volume: false }))), [W.close_apps, W.across_disks, W.old_place]);
+  assert.deepEqual(flat(warnings("move", read({ same_volume: null }))), [W.close_apps, W.old_place]);
+  assert.deepEqual(flat(warnings("move", read({ git: false }))), [W.close_apps, W.old_place, W.no_git, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", read({ bytes: 42 * GB, same_volume: false }))), [W.close_apps, W.large, "It is about 42 GB.", W.across_disks, W.old_place]);
+  assert.deepEqual(flat(warnings("move", read({ bytes: null, size_problem: "folder_size_timeout", same_volume: false }))), [W.close_apps, W.large, W.unmeasured, W.across_disks, W.old_place]);
+  assert.deepEqual(flat(warnings("move", read({ bytes: null, size_problem: "folder_size_too_large", same_volume: false }))), [W.close_apps, W.large, W.unmeasured, W.across_disks, W.too_many, W.old_place]);
+  assert.deepEqual(flat(warnings("move", read({}), "home_copy_too_large")), [W.close_apps, W.across_disks, W.too_many, W.old_place]);
+  assert.deepEqual(flat(warnings("move", read({ bytes: null, size_problem: "folder_size_unreadable" }))), [W.close_apps, W.unreadable, W.old_place, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", ok({ bytes: 10 }))), [W.close_apps, W.old_place, W.git_unread]);
+  const linked = warnings("move", read({ movable: false, worktrees: 2, worktree_paths: ["/Users/mira/Code/shop-a", "/Users/mira/Code/shop-b"] }));
+  assert.deepEqual(flat(linked), [W.close_apps, W.old_place, W.worktrees, W.same_disk]);
+  assert.deepEqual(linked.find((block) => block.lines.includes(W.worktrees)).paths, ["/Users/mira/Code/shop-a", "/Users/mira/Code/shop-b"]);
+  assert.deepEqual(flat(warnings("copy", read({ copyable: false, git: false }))), [W.linked_checkout, W.no_git]);
+  const worktree = warnings("move", read({ movable: false, git_link: "linked_worktree" }));
+  assert.deepEqual(worktree[0], { loss: true, lines: [W.linked_worktree], paths: [] }, "a moved linked worktree can lose its staged changes and branch link, so it leads the loss blocks");
+  assert.deepEqual(flat(worktree), [W.linked_worktree, W.close_apps, W.old_place, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "submodule" }))), [W.close_apps, W.old_place, W.submodule, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "unreadable" }))), [W.close_apps, W.old_place, W.git_data_unread, W.same_disk]);
+  const shared = warnings("copy", read({ copyable: false, git: false, bytes: 42 * GB }));
+  assert.deepEqual(shared[0], { loss: true, lines: [W.linked_checkout], paths: [] }, "a shared checkout is a data loss line, shown first");
+  assert.deepEqual(flat(shared), [W.linked_checkout, W.large, "It is about 42 GB.", W.copy_all, W.no_git]);
+  assert.deepEqual(flat(warnings("copy", read({ bytes: 42 * GB }))), [W.large, "It is about 42 GB.", W.copy_all]);
+  assert.deepEqual(flat(warnings("copy", read({ bytes: null, size_problem: "folder_size_unreadable" }))), [W.unreadable_copy]);
+  for (const [way, size, refused] of [
+    ["move", read({ movable: false, git: false, bytes: null, size_problem: "folder_size_too_large", same_volume: false }), null],
+    ["move", read({ bytes: null, size_problem: "folder_size_unreadable", same_volume: false }), null],
+    ["copy", read({ copyable: false, bytes: 42 * GB }), null],
+  ]) {
+    const blocks = warnings(way, size, refused);
+    const firstEffect = blocks.findIndex((block) => !block.loss);
+    assert.ok(blocks.slice(firstEffect === -1 ? blocks.length : firstEffect).every((block) => !block.loss), `${way} loss blocks come first`);
+  }
+});
+
+test("the Move anyway question lists each warning, starts on Use where it is and makes Move anyway the danger button", () => {
+  const W = intakeApi.ADD_WARNINGS;
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/'/g, "(&#x27;|')");
+  const read = { kind: "ok", value: { bytes: null, size_problem: "folder_size_too_large", worktrees: 1, worktree_paths: ["/Users/mira/Code/shop-side"], movable: false, copyable: true, git: false, same_volume: false } };
+  const props = (way, extra = {}) => ({ open: true, way, name: "shop", size: read, refused: null, busy: false, onUseHere: noop, onAnyway: noop, ...extra });
+  const move = html(AnywayDialog, props("move"));
+  assert.match(move, /<h2[^>]*>Move shop anyway\?<\/h2>/);
+  for (const line of [W.close_apps, W.old_place, W.across_disks, W.large, W.unmeasured, W.too_many, W.worktrees, W.no_git]) assert.match(move, new RegExp(escape(line)), line);
+  assert.match(move, /\/Users\/mira\/Code\/shop-side/);
+  const loss = move.indexOf("Close editors, terminals and apps");
+  assert.ok(loss >= 0 && loss < move.indexOf("Git worktrees linked"), "the data loss line comes before the git effects");
+  assert.match(move, /<button[^>]*data-autofocus[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is<\/button>/);
+  assert.match(move, /<button[^>]*class="[^"]*danger[^"]*"[^>]*>(<svg[\s\S]*?<\/svg>)?Move anyway<\/button>/);
+  assert.ok(move.indexOf(">Use where it is<") < move.indexOf(">Move anyway<"));
+  const copy = html(AnywayDialog, props("copy", { size: { kind: "ok", value: { ...read.value, copyable: false, size_problem: null, bytes: 10 } } }));
+  assert.match(copy, /<h2[^>]*>Copy shop anyway\?<\/h2>/);
+  assert.match(copy, new RegExp(escape(W.linked_checkout)));
+  assert.doesNotMatch(copy, new RegExp(escape(W.close_apps)));
+  assert.match(copy, /<button[^>]*class="[^"]*danger[^"]*"[^>]*>(<svg[\s\S]*?<\/svg>)?Copy anyway<\/button>/);
+  assert.doesNotMatch(html(AnywayDialog, props("move", { open: false })), /anyway\?/);
+  const refused = html(AnywayDialog, props("move", { size: { kind: "ok", value: { ...read.value, movable: true, git: true, size_problem: null, bytes: 10, same_volume: true } }, refused: "home_move_worktrees" }));
+  assert.match(refused, new RegExp(escape(W.worktrees)));
+});
+
+test("the Move confirm only opens while Move is the way, and says what a move can lose", () => {
+  assert.equal(typeof MoveConfirmDialog, "function", "add-folder.tsx exports MoveConfirmDialog");
+  const W = intakeApi.ADD_WARNINGS;
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/'/g, "(&#x27;|')");
+  const props = (way, sameVolume = true) => ({ open: true, way, name: "shop", source: "/Users/mira/Code/shop", root: "/Users/mira/Projects", sameVolume, busy: false, onCancel: noop, onConfirm: noop });
+  const title = /Move shop into your projects folder\?/;
+  assert.match(html(MoveConfirmDialog, props("move")), title);
+  assert.match(html(MoveConfirmDialog, props("move")), />Move folder<\/button>/);
+  for (const line of [W.close_apps, W.old_place, W.same_disk]) assert.match(html(MoveConfirmDialog, props("move")), new RegExp(escape(line)), line);
+  assert.match(html(MoveConfirmDialog, props("move", false)), new RegExp(escape(W.across_disks)));
+  assert.doesNotMatch(html(MoveConfirmDialog, props("move", false)), new RegExp(escape(W.same_disk)));
+  for (const way of ["here", "copy"]) assert.doesNotMatch(html(MoveConfirmDialog, props(way)), title, way);
+  assert.doesNotMatch(html(MoveConfirmDialog, { ...props("move"), open: false }), title);
+  assert.doesNotMatch(html(MoveConfirmDialog, { ...props("move"), root: null }), title);
 });
 
 test("GitHub sign-in shows the three ways, then the device code, and the token field never holds a value", () => {
@@ -497,6 +677,22 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.match(found, /The mapping agent did not write this: it came with the folder or was changed since\./);
   assert.match(found, /From the repository\./);
   assert.doesNotMatch(found, />Overview</);
+});
+
+test("the setup review shows each research toggle the repo already covers and the documents found", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [{ kind: "market_research", label: "Market research" }, { kind: "competitor_research", label: "Competitor research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const facts = { ...view().facts, research: [{ kind: "competitor_research", files: ["research/landscape-2026.md", "notes/rivals.txt"] }], documents: ["docs/q3-plan.md"] };
+  const mapped = view({ facts });
+  const markup = html(OnboardingReviewView, { ...base, view: ok(mapped), draft: intake.onboardingDraft(mapped, stored()) });
+  const research = markup.slice(markup.indexOf("<legend>Research</legend>"), markup.indexOf("</fieldset>", markup.indexOf("<legend>Research</legend>")));
+  const items = research.split('class="pj-switch-item"').slice(1);
+  assert.equal(items.length, 2, "one switch per research kind; the roadmap switch sits outside the Research fieldset");
+  assert.doesNotMatch(items[0], /Already in the repo/);
+  assert.match(items[1], /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.match(markup, /Project documents found[\s\S]*<li>docs\/q3-plan\.md<\/li>/);
+  const plain = html(OnboardingReviewView, { ...base, view: ok(view()), draft: intake.onboardingDraft(view(), stored()) });
+  assert.doesNotMatch(plain, /Already in the repo|Project documents found/);
 });
 
 test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {
@@ -589,6 +785,17 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
 });
 
+test("the tools step says why an installed entry's hooks were not added, on that entry only", () => {
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  const listed = pack.map((item) => item.id === "headroom" ? { ...item, hooks_refused: refused } : item);
+  const markup = html(ToolsSetupView, { status: ok({ dependencies: [], pack: listed, running: false }), ticks: intake.packTicks(listed), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop });
+  const rows = markup.split('<li class="in-row">').filter((row) => row.includes("headroom"));
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /Already installed/);
+  assert.ok(rows[0].includes(`<span class="pj-small pj-error">Hooks not added: ${refused}</span>`), rows[0]);
+  assert.equal(markup.split("Hooks not added").length - 1, 1, "only the refused entry says so");
+});
+
 test("a failed setup read keeps the shown setup, says so, backs off, and a newer read clears it", () => {
   const installing = { dependencies: [dep("uv", { state: "installing" })], pack, running: true };
   const shown = intake.foldSetupRead(intake.SETUP_READS, ok(installing));
@@ -645,10 +852,10 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
   const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "here" });
   assert.ok(here.includes(`${svg("list-checks", 15)}Set up here</button>`), here);
-  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
+  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop", movable: true }), mode: "move" });
   assert.ok(move.includes(`${svg("folder-input", 15)}Move into projects folder</button>`), move);
   assert.ok(move.includes(`${svg("git-branch", 15)}Clone instead</button>`), move);
-  const copy = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "copy" });
+  const copy = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, copyable: true }), mode: "copy" });
   assert.ok(copy.includes(`${svg("copy", 15)}Copy into projects folder</button>`), copy);
 
   const repos = [{ full_name: "mira/plant-shop", private: true, default_branch: "main", size_kb: 2048 }, { full_name: "mira/notes", private: false, default_branch: "main", size_kb: 12 }];
@@ -667,4 +874,16 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   assert.ok(started.includes(`${svg("arrow-right", 15)}Continue</button>`), started);
   assert.equal(intake.entryIcon(pack[1]), "blocks");
   assert.equal(intake.entryIcon(pack[2]), "server");
+});
+
+test("a soft engine refusal asks again only when the override for it was not sent", () => {
+  assert.equal(intake.asksAgain("home_move_worktrees", []), true);
+  assert.equal(intake.asksAgain("home_move_worktrees", ["worktrees"]), false);
+  assert.equal(intake.asksAgain("home_copy_linked_checkout", ["too_large"]), true);
+  assert.equal(intake.asksAgain("home_copy_linked_checkout", ["linked_checkout"]), false);
+  assert.equal(intake.asksAgain("home_copy_too_large", []), true);
+  assert.equal(intake.asksAgain("home_copy_too_large", ["too_large"]), false);
+  assert.equal(intake.asksAgain("home_destination_exists", []), false);
+  assert.equal(intake.asksAgain("home_move_project", ["worktrees", "too_large"]), false);
+  assert.equal(intake.asksAgain("constructor", []), false);
 });

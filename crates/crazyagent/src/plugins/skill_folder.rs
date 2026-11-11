@@ -32,7 +32,7 @@ const STORED_READ_MAX: u64 = 64 * 1024;
 #[cfg(unix)]
 const ENTRIES_MAX: usize = 4096;
 #[cfg(unix)]
-const FOLDER: OFlags = OFlags::RDONLY
+pub(super) const FOLDER: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
@@ -88,6 +88,19 @@ pub struct PlannedFile {
     pub bytes: u64,
 }
 
+/// Says whether a skill name follows the SKILL.md rule: 1 to `NAME_BYTES_MAX` bytes of
+/// lowercase letters, digits and `-`, not starting or ending with `-`.
+/// Input: the name. Output: true when it is a valid skill name.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
 /// Says whether a file or folder name looks private: a dotfile such as `.env`, a key or
 /// certificate file, or a name holding key, secret, credential, password or token.
 /// Input: one name, not a path. Output: true when an import leaves it out.
@@ -122,14 +135,7 @@ pub fn frontmatter(text: &str) -> Result<(String, String), &'static str> {
         return Err("skill_frontmatter_missing");
     }
     let name = field(&header, "name").unwrap_or_default();
-    let name_valid = !name.is_empty()
-        && name.len() <= NAME_BYTES_MAX
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !name.starts_with('-')
-        && !name.ends_with('-');
-    if !name_valid {
+    if !valid_name(&name) {
         return Err("skill_name_invalid");
     }
     let description = field(&header, "description").unwrap_or_default();
@@ -500,7 +506,7 @@ fn copy_tree(
 /// ([`crate::platform::open_beneath`]). Inputs: the path and the flags for its last part.
 /// Output: the descriptor, or the error.
 #[cfg(unix)]
-fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd> {
+pub(super) fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd> {
     let below = path
         .strip_prefix("/")
         .map_err(|_| rustix::io::Errno::INVAL)?;

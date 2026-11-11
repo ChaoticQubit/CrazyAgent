@@ -295,6 +295,83 @@ fn denied_device_sign_in_reports_a_plain_problem_and_saves_nothing() {
     assert_eq!(scratch.state(), None);
 }
 
+/// How long a test waits for GitHub work to reach the point where it holds it.
+const PAUSE_WAIT: Duration = Duration::from_secs(30);
+
+/// A GitHub stand-in that grants one device sign-in at its first poll. Input: the token
+/// it grants. Output: the running stand-in.
+fn granting_server(granted: String) -> Server {
+    Server::start(move |seen, _| match seen.path.as_str() {
+        "/login/device/code" => {
+            let host = seen.header("host").unwrap().to_owned();
+            Answer::json(
+                200,
+                serde_json::json!({
+                    "device_code": "device-test-code",
+                    "user_code": "WDJB-MJHT",
+                    "verification_uri": format!("http://{host}/login/device"),
+                    "expires_in": 900,
+                    "interval": 1,
+                }),
+            )
+        }
+        "/login/oauth/access_token" => Answer::json(
+            200,
+            serde_json::json!({
+                "access_token": granted,
+                "token_type": "bearer",
+                "scope": "repo,read:user",
+            }),
+        ),
+        "/user" => user(seen, &granted),
+        _ => Answer::json(404, serde_json::json!({})),
+    })
+}
+
+#[test]
+fn a_device_sign_in_that_saved_its_token_never_reads_as_still_waiting() {
+    let scratch = Scratch::new();
+    let server = granting_server(token());
+    let account = scratch.account(&server);
+    let (saved, go_on) = pause_at(&account.root, Pause::AfterKeep);
+    account.sign_in().unwrap();
+    saved
+        .recv_timeout(PAUSE_WAIT)
+        .expect("the device sign-in never reached its save");
+    let status = account.status();
+    go_on.send(()).unwrap();
+    assert!(status.signed_in, "{status:?}");
+    assert_eq!(status.method, GitHubMethod::Device);
+    assert!(
+        !status.waiting,
+        "a device sign-in that saved its token still reads as waiting: {status:?}"
+    );
+    assert_eq!(status.problem, None);
+    let status = wait_for(&account, |status| status.signed_in && !status.waiting);
+    assert_eq!(status.problem, None);
+    assert!(!account.sign_out().unwrap().signed_in);
+}
+
+#[test]
+fn a_status_read_holds_off_every_save_until_it_has_read_the_saved_sign_in() {
+    let scratch = Scratch::new();
+    let server = Server::start(|_, _| Answer::json(404, serde_json::json!({})));
+    let account = scratch.account(&server);
+    let (read, finish) = pause_at(&account.root, Pause::InStatus);
+    let reader = account.clone();
+    let reading = std::thread::spawn(move || reader.status());
+    read.recv_timeout(PAUSE_WAIT)
+        .expect("the status read never reached the waiting flag");
+    let saves_could_land = PENDING.try_lock().is_ok();
+    finish.send(()).unwrap();
+    let status = reading.join().unwrap();
+    assert!(
+        !saves_could_land,
+        "a save could land between the status read of the waiting flag and of the saved sign-in"
+    );
+    assert!(!status.signed_in && !status.waiting, "{status:?}");
+}
+
 /// How long a test watches for a save that must never come: a sign-in thread that saves
 /// does so within milliseconds of GitHub's answer.
 const LATE_SAVE_WINDOW: Duration = Duration::from_secs(3);

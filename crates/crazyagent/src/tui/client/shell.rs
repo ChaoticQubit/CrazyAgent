@@ -227,20 +227,6 @@ impl NativeOwner {
     }
 }
 
-/// A fresh pool id from its name: `pool-<letters>-<random hex>`.
-/// Input: the pool name. Output: the id, or the plain problem code.
-fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
-    let stem: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(24)
-        .flat_map(|character| character.to_lowercase())
-        .collect();
-    let nonce = crate::engine::owner::random_id().map_err(|error| bounded_problem(&error.0))?;
-    CredentialRef::new(format!("pool-{stem}-{nonce}"))
-        .map_err(|error| bounded_problem(&error.to_string()))
-}
-
 /// Reads every saved pool, following engine pages.
 /// Inputs: the owner controller and the lost-connection flag. Output: the
 /// pools with the settings version of the last page, or the problem code.
@@ -300,12 +286,13 @@ async fn pool_basis(
 fn pool_edit(change: PoolChange, pools: &[AccountPool]) -> Result<ModelAccessEdit, String> {
     Ok(match change {
         PoolChange::Create {
+            id,
             name,
             members,
             quota,
         } => ModelAccessEdit::CreatePool {
             pool: AccountPool {
-                id: new_pool_id(&name)?,
+                id,
                 name: Some(name),
                 members,
                 projects: Vec::new(),

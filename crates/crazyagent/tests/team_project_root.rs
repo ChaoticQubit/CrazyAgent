@@ -5,6 +5,7 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::onboarding::project_id_for;
 use crazyagent::protocol::CredentialRef;
+use crazyagent::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crazyagent::team::TeamAction;
 use crazyagent::team::runtime::{TeamLimits, TeamRuntime};
 use rusqlite::OptionalExtension;
@@ -83,12 +84,22 @@ fn git_entries(folder: &Path) -> Vec<(PathBuf, bool)> {
     found
 }
 
-/// Wiring test: a codex stand-in that exits at once fills the harness slot, so no agent
-/// runs; this checks only that the team agent of an onboarded repo gets a worktree of the
-/// owner's committed code at HEAD. A real codex team run: team_engine.rs
-/// the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wiring_a_team_agent_of_an_onboarded_repo_gets_a_worktree_at_the_owners_head() {
+/// What one wired team agent left on disk: the owner's repository, the agent's copy of it
+/// at the owner's HEAD and the access level the project held when the agent started, with
+/// the folders kept until the checks end.
+struct Wired {
+    repo: PathBuf,
+    copy: PathBuf,
+    access: AgentAccess,
+    _folders: (tempfile::TempDir, tempfile::TempDir),
+}
+
+/// Onboards a committed repository, optionally sets its agent access as the owner would,
+/// and lets the team start its first agent. A codex stand-in that exits at once fills the
+/// harness slot, so no agent runs; only the agent's copy is made. A real codex team run:
+/// team_engine.rs the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results.
+/// Takes the level to choose, or None to keep the one onboarding saved. Returns what it left.
+async fn wire(chosen: Option<AgentAccess>) -> Wired {
     let runtime = tempfile::Builder::new()
         .prefix("ca-root-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -123,23 +134,51 @@ async fn wiring_a_team_agent_of_an_onboarded_repo_gets_a_worktree_at_the_owners_
     let mut owner = OwnerController::attach(&root, OwnerClientKind::Tui, Duration::from_secs(5))
         .await
         .unwrap();
+    let mut generation = 1;
     let started = owner
         .start_onboarding(
             repo.to_str().unwrap().to_owned(),
             CredentialRef::new(POOL).unwrap(),
-            1,
+            generation,
         )
         .await
         .unwrap();
     assert_eq!(rejection(&started), None, "{started:?}");
     let project = project_id_for(&repo).unwrap();
+    if let Some(access) = chosen {
+        generation += 1;
+        let policy = AgentPolicy {
+            access,
+            toolchains: Vec::new(),
+            network: AgentNetwork::Open,
+            ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
+        };
+        let version = owner
+            .project_agent_policy(project.clone())
+            .await
+            .unwrap()
+            .version;
+        let set = owner
+            .set_project_agent_policy(project.clone(), version, policy, generation)
+            .await
+            .unwrap();
+        assert_eq!(rejection(&set), None, "{set:?}");
+    }
+    let access = owner
+        .project_agent_policy(project.clone())
+        .await
+        .unwrap()
+        .access;
+    generation += 1;
     let message = owner
         .team_action(
             TeamAction::Message {
                 project_id: project.clone(),
                 text: "Read the README and say what the project is.".into(),
             },
-            2,
+            generation,
         )
         .await
         .unwrap();
@@ -197,28 +236,18 @@ async fn wiring_a_team_agent_of_an_onboarded_repo_gets_a_worktree_at_the_owners_
     assert_eq!(
         fs::read_to_string(copy.join("README.md")).unwrap(),
         README,
-        "the agent's worktree holds the owner's committed files"
+        "the agent's copy holds the owner's committed files"
     );
     assert!(copy.join("src/main.rs").is_file());
     assert_eq!(
         git(&copy, &["rev-parse", "HEAD"]),
         head,
-        "the worktree starts at the owner's HEAD"
+        "the agent's copy starts at the owner's HEAD"
     );
-    assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains(copy.to_str().unwrap()));
-    let state = repo.join(".crazyagent");
-    let worktrees = state.join("worktrees");
     assert!(
-        !state.join(".git").exists(),
+        !repo.join(".crazyagent/.git").exists(),
         "no repository inside .crazyagent"
     );
-    for (path, folder) in git_entries(&state) {
-        assert!(
-            !folder && path.parent().and_then(Path::parent) == Some(worktrees.as_path()),
-            "only a worktree's .git file may sit under .crazyagent: {}",
-            path.display()
-        );
-    }
     assert!(
         repo.join(".git").is_dir(),
         "the owner's repository is untouched"
@@ -232,4 +261,80 @@ async fn wiring_a_team_agent_of_an_onboarded_repo_gets_a_worktree_at_the_owners_
         .await
         .unwrap()
         .unwrap();
+    Wired {
+        repo,
+        copy,
+        access,
+        _folders: (runtime, repos),
+    }
+}
+
+/// Checks that the agent got a linked worktree of the owner's repository: git lists it,
+/// its `.git` is a file, and only worktree `.git` files sit under `.crazyagent`.
+/// Takes what the wiring left.
+fn assert_linked_worktree(wired: &Wired) {
+    assert!(
+        git(&wired.repo, &["worktree", "list", "--porcelain"])
+            .contains(wired.copy.to_str().unwrap()),
+        "the owner's repository lists the agent's worktree"
+    );
+    assert!(crazyagent::agent_git::git_dir(&wired.copy).is_file());
+    let worktrees = wired.repo.join(".crazyagent/worktrees");
+    for (path, folder) in git_entries(&wired.repo.join(".crazyagent")) {
+        assert!(
+            !folder && path.parent().and_then(Path::parent) == Some(worktrees.as_path()),
+            "only a worktree's .git file may sit under .crazyagent: {}",
+            path.display()
+        );
+    }
+}
+
+/// Checks that the agent got its own clone: its `.git` is a folder, the owner's repository
+/// lists no worktree for it, and only clone `.git` folders sit under `.crazyagent`.
+/// Takes what the wiring left.
+fn assert_own_clone(wired: &Wired) {
+    assert!(
+        crazyagent::agent_git::git_dir(&wired.copy).is_dir(),
+        "the agent's copy has its own git folder"
+    );
+    assert!(
+        !git(&wired.repo, &["worktree", "list", "--porcelain"])
+            .contains(wired.copy.to_str().unwrap()),
+        "the owner's repository lists no worktree for the clone"
+    );
+    let worktrees = wired.repo.join(".crazyagent/worktrees");
+    for (path, folder) in git_entries(&wired.repo.join(".crazyagent")) {
+        assert!(
+            folder && path.parent().and_then(Path::parent) == Some(worktrees.as_path()),
+            "only a clone's .git folder may sit under .crazyagent: {}",
+            path.display()
+        );
+    }
+}
+
+/// An onboarded repository gets the New Project access, Own branch, so its team agent works
+/// in its own clone of the owner's committed code at HEAD (6e60b198, DEC-102).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_a_team_agent_of_an_onboarded_repo_gets_its_own_clone_at_the_owners_head() {
+    let wired = wire(None).await;
+    assert_eq!(wired.access, AgentAccess::NEW_PROJECT);
+    assert_own_clone(&wired);
+}
+
+/// An onboarded repository the owner sets to Sandboxed gives its team agent a linked
+/// worktree of the owner's repository at HEAD.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_a_team_agent_of_a_sandboxed_repo_gets_a_worktree_at_the_owners_head() {
+    let wired = wire(Some(AgentAccess::Sandboxed)).await;
+    assert_eq!(wired.access, AgentAccess::Sandboxed);
+    assert_linked_worktree(&wired);
+}
+
+/// An onboarded repository the owner sets to Full access gives its team agent its own clone
+/// at HEAD, as Own branch does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wiring_a_team_agent_of_a_full_access_repo_gets_its_own_clone_at_the_owners_head() {
+    let wired = wire(Some(AgentAccess::Full)).await;
+    assert_eq!(wired.access, AgentAccess::Full);
+    assert_own_clone(&wired);
 }

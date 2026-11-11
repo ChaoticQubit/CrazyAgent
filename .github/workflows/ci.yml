@@ -20,12 +20,13 @@ env:
   TMUX_VERSION: "3.8"
   TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
   CLAUDE_CODE_VERSION: "2.1.309"
+  CODEX_VERSION: "0.164.0"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
-    e2e_tui research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
-    qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network
-  DESKTOP_TESTS_EXCLUDE: conversation_native picker_windows
+    e2e_tui research_engine team_engine onboarding research_runner research_service tui_v1_e2e codex_app_server_live launch_context_live codex_bridge_live agents_live
+    qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network harness_catalog_bundled_rcli acceptance_v2_rcli_usage
+  DESKTOP_TESTS_EXCLUDE: picker_windows
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
 
@@ -159,6 +160,8 @@ jobs:
           echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: Check Rust formatting
         run: make fmt-check
+      - name: Check the price snapshot script
+        run: make test-price-script
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -180,7 +183,7 @@ jobs:
     runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
-      PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal
+      PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to
     steps:
       - name: Refuse to run under Rosetta
         run: |
@@ -263,6 +266,28 @@ jobs:
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+      - name: Install Codex
+        env:
+          CODEX_PACKAGE: codex-package-aarch64-apple-darwin.tar.gz
+          CODEX_SHA256: dd99e9092270691a67bdde7be04ac283dea9da8e86cbde356c2cc851a79205fa
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/codex/$CODEX_VERSION/arm64"
+          work="$RUNNER_TEMP/codex"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          if [ -f "$prefix/codex.tgz" ]; then
+            cp "$prefix/codex.tgz" "$work/codex.tgz"
+          fi
+          if ! echo "$CODEX_SHA256  $work/codex.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/codex.tgz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_PACKAGE"
+            echo "$CODEX_SHA256  $work/codex.tgz" | shasum -a 256 -c -
+            cp "$work/codex.tgz" "$prefix/codex.tgz.$$"
+            mv "$prefix/codex.tgz.$$" "$prefix/codex.tgz"
+          fi
+          tar -xzf "$work/codex.tgz" -C "$work"
+          test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -288,6 +313,9 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install IDE extension dependencies
+        working-directory: apps/ide-extension
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install rcli source dependencies
         working-directory: .local-state/tools/rcli-source
         run: bun install --frozen-lockfile --ignore-scripts
@@ -298,6 +326,53 @@ jobs:
         run: cargo fetch --locked
       - name: Lint workspace
         run: make lint
+      - id: ide
+        name: Read the pinned IDE build
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { appendFileSync, readFileSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
+            const { version } = manifest;
+            const build = manifest.builds["aarch64-apple-darwin"];
+            const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
+            const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
+              && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
+            if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
+            appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
+          '
+      - if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.tool_cache }}/vscodium-reh-web/${{ steps.ide.outputs.version }}/arm64
+          key: ci-macos-vscodium-reh-web-darwin-arm64-${{ steps.ide.outputs.version }}
+      - name: Provision the pinned IDE build
+        env:
+          IDE_VERSION: ${{ steps.ide.outputs.version }}
+          IDE_URL: ${{ steps.ide.outputs.url }}
+          IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
+          IDE_BYTES: ${{ steps.ide.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/vscodium-reh-web/$IDE_VERSION/arm64"
+          work="$RUNNER_TEMP/vscodium-reh-web"
+          build=".local-state/ide-cache/vscodium-$IDE_VERSION"
+          rm -rf "$work" "$build"
+          mkdir -p "$prefix" "$work" "$build"
+          if [ -f "$prefix/vscodium.tgz" ]; then
+            cp "$prefix/vscodium.tgz" "$work/vscodium.tgz"
+          fi
+          if ! echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
+            rm -f "$work/vscodium.tgz"
+            curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
+            test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
+            echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
+            cp "$work/vscodium.tgz" "$prefix/vscodium.tgz.$$"
+            mv "$prefix/vscodium.tgz.$$" "$prefix/vscodium.tgz"
+          fi
+          tar -xzf "$work/vscodium.tgz" -C "$build"
+          test -f "$build/out/server-main.js"
+          find "$RUNNER_TOOL_CACHE/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "$IDE_VERSION" -exec rm -rf {} +
       - name: Test engine and desktop crates
         run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
       - name: Test Node suites

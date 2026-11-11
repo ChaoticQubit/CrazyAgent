@@ -3,8 +3,13 @@ mod layout;
 mod platform;
 mod watch;
 
-pub use intake::{AddPlan, MovePlan, copy_tree, folder_size, move_by_copy, verify_tree};
-pub use layout::{CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_from_git, prepare_layout};
+pub use intake::{
+    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, MovePlan, copy_tree, folder_size,
+    move_by_copy, verify_tree,
+};
+pub use layout::{
+    CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
+};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
 use crate::engine::EngineError;
@@ -16,10 +21,6 @@ pub const PATH_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
 pub const LINKED_WORKTREES_MAX: usize = 4096;
-const RESERVED_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
 
 #[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
@@ -33,6 +34,13 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
+);
+CREATE TABLE IF NOT EXISTS projects_delete_pending (
+    exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
+);
+CREATE TABLE IF NOT EXISTS projects_delete_files (
+    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
+    inode INTEGER NOT NULL
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -81,27 +89,81 @@ pub enum AddMode {
     Copy,
 }
 
+/// A soft refusal of one add that the owner was shown and chose to go past for
+/// that add only: a Move that breaks linked git worktrees, a Copy of a folder
+/// that is itself a linked checkout, or a copy past the usual entry and level
+/// bounds. Every other refusal stays; an add without one keeps its refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddOverride {
+    Worktrees,
+    LinkedCheckout,
+    TooLarge,
+}
+
+pub const ADD_OVERRIDES_MAX: usize = 3;
+
+/// Checks the overrides of one add: at most one of each, `worktrees` only with a Move
+/// and `linked_checkout` only with a Copy. Inputs: the mode and the overrides.
+/// Output: Ok, or `home_override_invalid`.
+fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), EngineError> {
+    let repeated = overrides
+        .iter()
+        .enumerate()
+        .any(|(at, item)| overrides[..at].contains(item));
+    let wrong_mode = overrides.iter().any(|item| match item {
+        AddOverride::Worktrees => mode != AddMode::Move,
+        AddOverride::LinkedCheckout => mode != AddMode::Copy,
+        AddOverride::TooLarge => false,
+    });
+    if overrides.len() > ADD_OVERRIDES_MAX || repeated || wrong_mode {
+        return Err(refused("home_override_invalid"));
+    }
+    assert!(overrides.len() <= ADD_OVERRIDES_MAX);
+    Ok(())
+}
+
 /// An owner change to the projects home recorded by the engine: picking the
 /// home folder, switching to a new one and optionally moving every project
 /// folder there, or recording a folder the transport moved or copied in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HomeAction {
-    SetHome { path: String },
-    MoveHome { path: String, move_projects: bool },
-    Added { source: String, mode: AddMode },
-    Trash { path: String },
+    SetHome {
+        path: String,
+    },
+    MoveHome {
+        path: String,
+        move_projects: bool,
+    },
+    Added {
+        source: String,
+        mode: AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<AddOverride>,
+    },
+    Trash {
+        path: String,
+    },
 }
 
 impl HomeAction {
-    /// Checks the owner-supplied path text before anything touches the disk.
-    /// Input: an untrusted action. Output: Ok, or the code of the bad path.
+    /// Checks the owner-supplied path text and an add's overrides before anything
+    /// touches the disk. Input: an untrusted action. Output: Ok, or the code of the
+    /// bad path or `home_override_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::SetHome { path } | Self::MoveHome { path, .. } => {
                 path_text(path, "projects_home_path_invalid")
             }
-            Self::Added { source, .. } => path_text(source, "home_source_invalid"),
+            Self::Added {
+                source,
+                mode,
+                overrides,
+            } => {
+                path_text(source, "home_source_invalid")?;
+                check_overrides(*mode, overrides)
+            }
             Self::Trash { path } => path_text(path, "home_trash_invalid"),
         }
     }
@@ -190,7 +252,7 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 /// or a repository it declares, each compared as recorded and, when it
 /// resolves, at its canonical path, so one declared through a link counts.
 /// Input: a canonical folder and the project. Output: whether it is in use.
-fn in_use(real: &Path, project: &Registered) -> bool {
+pub(crate) fn in_use(real: &Path, project: &Registered) -> bool {
     assert!(real.is_absolute());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
@@ -215,25 +277,86 @@ pub fn check_home(path: &Path, engine_root: &Path) -> Result<PathBuf, EngineErro
     Ok(home)
 }
 
-/// True when moving `folder` would break git links kept outside it: the
-/// folder is a linked worktree or submodule (its `.git` is a file or a link),
-/// or its repository has linked worktrees. An unreadable `.git` counts.
-fn git_links(folder: &Path) -> bool {
+/// What ties a folder's git to places outside it, which a Move breaks: linked worktrees
+/// of its repository, the folder being itself a linked worktree or a submodule checkout,
+/// or a `.git` that cannot be read or told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitLink {
+    None,
+    Worktrees,
+    LinkedWorktree,
+    Submodule,
+    Unreadable,
+}
+
+/// Tells which git link a Move of `folder` would break. Input: the folder. Output: the
+/// link, or `None` when its git, if any, is all inside it.
+pub fn git_link(folder: &Path) -> GitLink {
     let git = folder.join(".git");
-    match std::fs::symlink_metadata(&git) {
-        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        Ok(metadata) if !metadata.is_dir() => true,
-        Ok(_) => match std::fs::read_dir(git.join("worktrees")) {
-            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-            Ok(mut entries) => entries.next().is_some(),
+    let metadata = match std::fs::symlink_metadata(&git) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return GitLink::None,
+        Err(_) => return GitLink::Unreadable,
+        Ok(metadata) => metadata,
+    };
+    if metadata.file_type().is_symlink() {
+        return GitLink::Unreadable;
+    }
+    if metadata.is_file() {
+        return checkout_link(folder, &git);
+    }
+    if !metadata.is_dir() {
+        return GitLink::Unreadable;
+    }
+    match std::fs::read_dir(git.join("worktrees")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GitLink::None,
+        Err(_) => GitLink::Unreadable,
+        Ok(mut entries) => match entries.next() {
+            Some(_) => GitLink::Worktrees,
+            None => GitLink::None,
         },
     }
+}
+
+/// Tells a checkout apart by the git data its `.git` file names, read from `folder` as git
+/// reads a relative path: a linked worktree's holds a `commondir` file, a submodule's is a
+/// folder without one under a `modules` folder of its parent's git data. Inputs: the folder
+/// and its `.git` file. Output: the link, `Unreadable` for any other, missing or unread data.
+fn checkout_link(folder: &Path, git: &Path) -> GitLink {
+    let Some(text) = crate::platform::read_plain_file(git, PATH_BYTES_MAX as u64 + 16) else {
+        return GitLink::Unreadable;
+    };
+    let Some(named) = text.trim_end_matches(['\n', '\r']).strip_prefix("gitdir: ") else {
+        return GitLink::Unreadable;
+    };
+    let data = folder.join(named);
+    match std::fs::symlink_metadata(data.join("commondir")) {
+        Ok(metadata) if metadata.is_file() => return GitLink::LinkedWorktree,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return GitLink::Unreadable,
+    }
+    let modules = Path::new(named)
+        .components()
+        .any(|part| part.as_os_str() == std::ffi::OsStr::new("modules"));
+    if modules && std::fs::metadata(&data).is_ok_and(|metadata| metadata.is_dir()) {
+        GitLink::Submodule
+    } else {
+        GitLink::Unreadable
+    }
+}
+
+/// True when moving `folder` would break git links kept outside it: any [`GitLink`] other
+/// than `None`, an unreadable `.git` included. [`plan_add`] refuses such a Move unless the
+/// owner chose to go past it.
+pub fn git_links(folder: &Path) -> bool {
+    git_link(folder) != GitLink::None
 }
 
 /// True when `folder` is itself a checkout whose git data lives in another repository:
 /// its `.git` is a file (a linked worktree or submodule checkout) or a link. A copy of it
 /// would still use that repository's data. An unreadable `.git` counts.
-fn linked_checkout(folder: &Path) -> bool {
+/// [`plan_add`] refuses such a Copy, and the windows offer no Copy for it.
+pub fn linked_checkout(folder: &Path) -> bool {
     match std::fs::symlink_metadata(folder.join(".git")) {
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         Ok(metadata) => !metadata.is_dir() || metadata.file_type().is_symlink(),
@@ -260,6 +383,55 @@ pub fn linked_worktrees(folder: &Path) -> usize {
         .count()
 }
 
+/// The folders of the git worktrees linked to the repository in `folder`, which a Move
+/// leaves pointing at its old place. Input: the folder and how many to read. Output: each
+/// worktree folder its `.git/worktrees/<name>/gitdir` names, in name order; none without a
+/// plain `.git` folder, and unreadable entries left out.
+pub fn linked_worktree_paths(folder: &Path, max: usize) -> Vec<PathBuf> {
+    let git = folder.join(".git");
+    let plain = std::fs::symlink_metadata(&git)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !plain || max == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(git.join("worktrees")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<std::ffi::OsString> = entries
+        .flatten()
+        .take(LINKED_WORKTREES_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name())
+        .collect();
+    names.sort();
+    let paths: Vec<PathBuf> = names
+        .iter()
+        .filter_map(|name| {
+            let text = crate::platform::read_plain_file(
+                &git.join("worktrees").join(name).join("gitdir"),
+                PATH_BYTES_MAX as u64 + 1,
+            )?;
+            let named = PathBuf::from(text.trim_end_matches(['\n', '\r']));
+            let worktree = if named.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                named.parent()?.to_path_buf()
+            } else {
+                named
+            };
+            worktree.is_absolute().then_some(worktree)
+        })
+        .take(max)
+        .collect();
+    assert!(paths.len() <= max);
+    paths
+}
+
+/// Whether a folder and the projects home are on the same disk, so a Move is a quick
+/// rename rather than a copy, a check and a removal. Input: the two folders. Output: the
+/// answer, or None when either cannot be read or the platform cannot tell.
+pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
+    Some(platform::volume(folder)? == platform::volume(home)?)
+}
+
 /// Plans bringing an existing folder into the projects home.
 /// Input: the canonical home, the engine data folder, the owner's source
 /// text, the mode and the set-up projects. Output: the real source and the
@@ -268,15 +440,19 @@ pub fn linked_worktrees(folder: &Path) -> usize {
 /// or engine data, hidden folders, names already taken in the home, a Move
 /// of a folder with git worktree links or nested with a folder or repository
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
-/// submodule checkout.
+/// submodule checkout. Each override lifts exactly one soft refusal for this add:
+/// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`].
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
     mode: AddMode,
+    overrides: &[AddOverride],
     registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
     path_text(source, "home_source_invalid")?;
+    check_overrides(mode, overrides)?;
     let real = real_folder(
         Path::new(source),
         "home_source_missing",
@@ -298,18 +474,26 @@ pub fn plan_add(
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
     if mode == AddMode::Move {
-        if git_links(&real) {
+        if !overrides.contains(&AddOverride::Worktrees) && git_links(&real) {
             return Err(refused("home_move_worktrees"));
         }
         if registered.iter().any(|project| in_use(&real, project)) {
             return Err(refused("home_move_project"));
         }
     }
-    if mode == AddMode::Copy && linked_checkout(&real) {
+    if mode == AddMode::Copy
+        && !overrides.contains(&AddOverride::LinkedCheckout)
+        && linked_checkout(&real)
+    {
         return Err(refused("home_copy_linked_checkout"));
     }
+    let bounds = if overrides.contains(&AddOverride::TooLarge) {
+        FORCED_COPY_BOUNDS
+    } else {
+        COPY_BOUNDS
+    };
     let destination = destination(home, name)?;
-    Ok(AddPlan::new(real, destination, mode))
+    Ok(AddPlan::new(real, destination, mode, bounds))
 }
 
 /// Checks a name for a folder directly inside the projects home. This one rule
@@ -318,7 +502,6 @@ pub fn plan_add(
 /// bytes with no path separators, control characters, trailing dot or space,
 /// or Windows device name; otherwise `home_folder_name_invalid`.
 pub fn folder_name(name: &str) -> Result<(), EngineError> {
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
     if name.is_empty()
         || name.len() > NAME_BYTES_MAX
         || name.starts_with('.')
@@ -327,7 +510,7 @@ pub fn folder_name(name: &str) -> Result<(), EngineError> {
         || name.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
-        || RESERVED_NAMES.contains(&stem.as_str())
+        || crate::protocol::windows_device(name)
     {
         return Err(refused("home_folder_name_invalid"));
     }
@@ -358,7 +541,7 @@ pub fn slug(name: &str) -> Option<String> {
         }
         slug.push(c.to_ascii_lowercase());
     }
-    if slug.is_empty() || RESERVED_NAMES.contains(&slug.as_str()) {
+    if slug.is_empty() || crate::protocol::windows_device(&slug) {
         return None;
     }
     assert!(slug.len() <= SLUG_BYTES_MAX && !slug.ends_with('-'));
@@ -431,6 +614,325 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
         return Err(refused("home_trash_failed"));
     }
     Ok(())
+}
+
+/// Checks the folders a Delete everything would move to the Trash: the project folder and
+/// every repository it declares. Inputs: the canonical home and the stored folders. Output:
+/// the fewest real folders to move, one holding another counted once and one already
+/// missing skipped, or `delete_outside_home` for any that is a link, not a folder, or not
+/// strictly below the home.
+pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
+    assert!(home.is_absolute());
+    let mut real = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let climbs = folder
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir));
+        if !folder.is_absolute() || climbs {
+            return Err(refused("delete_outside_home"));
+        }
+        match real_folder(folder, "delete_folder_missing", "delete_outside_home") {
+            Ok(path) if path.starts_with(home) && path != home => real.push(path),
+            Ok(_) => return Err(refused("delete_outside_home")),
+            Err(missing) if missing.0 == "delete_folder_missing" => {}
+            Err(refusal) => return Err(refusal),
+        }
+    }
+    let mut moved: Vec<PathBuf> = Vec::with_capacity(real.len());
+    for path in &real {
+        let held = real
+            .iter()
+            .any(|other| other != path && path.starts_with(other));
+        if !held && !moved.contains(path) {
+            moved.push(path.clone());
+        }
+    }
+    assert!(
+        moved
+            .iter()
+            .all(|path| path.starts_with(home) && path != home)
+    );
+    Ok(moved)
+}
+
+/// Tells whether Delete everything is offered on a platform: only where a move to the Trash
+/// is proven, which in V2 is macOS (DEC-118 addendum). Windows and Linux offer Remove from
+/// dashboard only until a qualification row per platform exists. Input: the platform name as
+/// `std::env::consts::OS` gives it. Output: the answer.
+pub fn delete_qualified_on(os: &str) -> bool {
+    os == "macos"
+}
+
+/// Tells whether Delete everything is offered on the platform this engine runs on.
+/// Output: the answer for `std::env::consts::OS`.
+pub fn delete_offered() -> bool {
+    delete_qualified_on(std::env::consts::OS)
+}
+
+/// How long a Delete everything waits for the project's agents to stop after Stop all,
+/// before it refuses with nothing moved.
+pub const DELETE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const DELETE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const RESEARCH_RUNS_MAX: usize = 100_000;
+
+/// A checked Delete everything, after Stop all was recorded: the engine database, the
+/// project, the canonical home, the folders `plan_delete` gave and the project's agents,
+/// whose engine folders go once the records are removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletePlan {
+    pub database: PathBuf,
+    pub project: ProjectId,
+    pub home: PathBuf,
+    pub folders: Vec<PathBuf>,
+    pub agents: Vec<i64>,
+}
+
+impl DeletePlan {
+    /// Waits for the project's agents to stop, then moves its folders to the system Trash
+    /// in order. Output: Ok once every folder is gone from the home, or the refusal code.
+    pub fn run(&self) -> Result<(), String> {
+        self.run_with(DELETE_STOP_WAIT, &trash)
+    }
+
+    /// Runs the plan with a bounded wait and a mover: no folder moves while an agent of the
+    /// project runs (`delete_agents_running` past the wait), the folders are checked again
+    /// just before the first move, with any other project using one of them, research of the
+    /// project not finished or a pending home move refusing as the plan did, and a later
+    /// folder that fails leaves the earlier ones moved (`delete_trash_partial`). Inputs: the
+    /// wait and the mover. Output: the outcome.
+    pub(crate) fn run_with(
+        &self,
+        wait: std::time::Duration,
+        mover: &dyn Fn(&Path) -> Result<(), EngineError>,
+    ) -> Result<(), String> {
+        let unavailable = |_| "delete_unavailable".to_owned();
+        let mut db = rusqlite::Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(unavailable)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(unavailable)?;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let running: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status NOT IN ('stopped','failed')",
+                    [self.project.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if running == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("delete_agents_running".into());
+            }
+            std::thread::sleep(DELETE_POLL);
+        }
+        let folders = plan_delete(&self.home, &self.folders).map_err(|refusal| refusal.0)?;
+        if let Some(code) = crate::storage::delete_recheck(&mut db, &self.project, &folders)
+            .map_err(|_| "delete_unavailable".to_owned())?
+        {
+            return Err(code);
+        }
+        for (moved, folder) in folders.iter().enumerate() {
+            if mover(folder).is_err() {
+                return Err(if moved == 0 {
+                    "home_trash_failed"
+                } else {
+                    "delete_trash_partial"
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Names the engine's own files of this deleted project for the record its row removal
+    /// writes: each agent, each research run of its jobs and, on macOS, the tool caches of
+    /// its folders (T8), with the identity of the folder that holds it. A folder that is no
+    /// real run, or that is not there, is left out. Input: the project's research jobs.
+    /// Output: the records.
+    pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
+        let Some(root) = self.database.parent() else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = self
+            .agents
+            .iter()
+            .map(|agent| format!("agent-{agent}"))
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(root.join("research").join("agents")) {
+            for entry in entries.flatten().take(RESEARCH_RUNS_MAX) {
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                if research
+                    .iter()
+                    .any(|job| name.starts_with(&format!("job-{job}-")))
+                {
+                    names.push(name);
+                }
+            }
+        }
+        let mut files = recorded(root, names);
+        files.extend(tool_cache_files(&self.database, &self.folders));
+        files
+    }
+}
+
+/// The records of the tool caches (T8) the engine keeps for these project folders, each
+/// with the identity of its folder, for a delete or a Remove from dashboard to remove; a
+/// cache that is not there is left out. Inputs: the engine database path and the project's
+/// folders. Output: the records.
+#[cfg(target_os = "macos")]
+pub fn tool_cache_files(database: &Path, folders: &[PathBuf]) -> Vec<RecordedFile> {
+    let Some(root) = database.parent() else {
+        return Vec::new();
+    };
+    let names = folders
+        .iter()
+        .filter_map(|folder| {
+            let cache = crate::sandbox::tool_cache::project_folder(root, folder.to_str()?);
+            assert_eq!(cache.parent(), Some(root.join(TOOL_CACHE_FOLDER).as_path()));
+            Some(format!(
+                "{TOOL_CACHE_PREFIX}{}",
+                cache.file_name()?.to_str()?
+            ))
+        })
+        .collect();
+    recorded(root, names)
+}
+
+/// Off macOS no project has a tool cache. Inputs: unused. Output: none.
+#[cfg(not(target_os = "macos"))]
+pub fn tool_cache_files(_: &Path, _: &[PathBuf]) -> Vec<RecordedFile> {
+    Vec::new()
+}
+
+/// Pairs each engine file name with the identity of the folder it names, leaving out a
+/// name that is no engine file or whose folder is not there. Inputs: the engine root and
+/// the names. Output: the records.
+fn recorded(root: &Path, names: Vec<String>) -> Vec<RecordedFile> {
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
+            Some((name, inode))
+        })
+        .collect()
+}
+
+/// One engine file a delete recorded: its exact name and the identity of the folder that held
+/// it when the project's rows were dropped.
+pub type RecordedFile = (String, i64);
+
+/// The folder under the engine root that holds every project's tool caches (T8).
+const TOOL_CACHE_FOLDER: &str = "tool-cache";
+
+/// The start of the name a delete records for one project's tool caches (T8).
+pub(crate) const TOOL_CACHE_PREFIX: &str = "tool-cache-";
+
+/// The length of the hex digest that names one project's tool cache folder (T8).
+const TOOL_CACHE_DIGEST_BYTES: usize = 32;
+
+/// One engine file a delete's record can name.
+enum EngineFile {
+    Agent(i64),
+    Run,
+    ToolCache,
+}
+
+impl EngineFile {
+    /// Gives the folder a recorded name holds. Inputs: the engine root and the exact name.
+    /// Output: the path under the team or research state.
+    fn folder(&self, root: &Path, name: &str) -> PathBuf {
+        match self {
+            Self::Agent(_) => root.join("team").join("agents").join(name),
+            Self::Run => root.join("research").join("agents").join(name),
+            Self::ToolCache => root
+                .join(TOOL_CACHE_FOLDER)
+                .join(&name[TOOL_CACHE_PREFIX.len()..]),
+        }
+    }
+}
+
+/// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
+/// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
+/// or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input: the name. Output: what
+/// it names, or None for anything else.
+fn engine_file(name: &str) -> Option<EngineFile> {
+    if let Some(digest) = name.strip_prefix(TOOL_CACHE_PREFIX) {
+        let plain = digest.len() == TOOL_CACHE_DIGEST_BYTES
+            && digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        return plain.then_some(EngineFile::ToolCache);
+    }
+    if let Some(id) = name.strip_prefix("agent-") {
+        return plain_number(id).map(EngineFile::Agent);
+    }
+    let parts: Vec<&str> = name.strip_prefix("job-")?.split('-').collect();
+    (matches!(parts.len(), 2 | 3) && parts.iter().all(|part| plain_number(part).is_some()))
+        .then_some(EngineFile::Run)
+}
+
+fn plain_number(text: &str) -> Option<i64> {
+    text.parse::<i64>()
+        .ok()
+        .filter(|number| *number >= 0 && number.to_string() == text)
+}
+
+/// Gives the number that ties a record to the folder it was written for: the inode alone,
+/// since macOS renumbers a volume across reboots, or the creation time on Windows, which has
+/// no inode in stable Rust. Input: the folder. Output: the number, or None when it is unread.
+fn folder_inode(folder: &Path) -> Option<i64> {
+    let metadata = std::fs::symlink_metadata(folder).ok()?;
+    #[cfg(unix)]
+    let number = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(windows)]
+    let number = std::os::windows::fs::MetadataExt::creation_time(&metadata);
+    i64::try_from(number).ok()
+}
+
+/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
+/// and teammates' records, a research run's folder, or a project's tool caches, which an
+/// agent may have closed or pinned inside and are cleared of that first. Only the
+/// folder the record was written for goes: under any other identity it stays, logged as
+/// `project_files_kept`, and the record is finished. A name that is no engine file removes
+/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
+/// Inputs: the engine database path and the records. Output: the names that are finished.
+pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
+    let Some(root) = database.parent() else {
+        return Vec::new();
+    };
+    let mut done = Vec::with_capacity(files.len());
+    for (name, inode) in files {
+        let removed = match engine_file(name) {
+            None => Ok(()),
+            Some(file) => {
+                let folder = file.folder(root, name);
+                if folder_inode(&folder) != Some(*inode) {
+                    eprintln!("project_files_kept name={name} kind=engine_folder");
+                    Ok(())
+                } else if let EngineFile::Agent(id) = file {
+                    crate::team::cleanup::remove_agent_files(&root.join("team"), id)
+                } else if matches!(file, EngineFile::ToolCache) {
+                    crate::team::cleanup::remove_agent_tree(&folder)
+                } else {
+                    crate::team::cleanup::remove_tree(&folder)
+                }
+            }
+        };
+        if removed.is_ok() {
+            done.push(name.clone());
+        } else {
+            eprintln!("project_files_left name={name} kind=engine_folder");
+        }
+    }
+    done
 }
 
 /// The sentence shown after the owner removes a project from CrazyAgent.
@@ -542,8 +1044,9 @@ pub fn found(
     entries
 }
 
-/// Creates the projects home table, and the table that holds a home move
-/// recorded before its folders move, when the engine database opens.
+/// Creates the projects home table, the table that holds a home move recorded
+/// before its folders move and the table that holds each Delete everything planned
+/// and not yet settled, when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
@@ -585,6 +1088,40 @@ pub(crate) fn save(connection: &rusqlite::Connection, home: &Path) -> Result<(),
     Ok(())
 }
 
+/// Tells whether a projects home move recorded before its folders move holds `folder`: one
+/// is pending and the folder is inside its old home, as given or as it resolves now. No
+/// agent or research run starts there until the move is finished or forgotten.
+/// Input: an engine connection and the folder. Output: the answer, or any SQLite failure.
+pub(crate) fn move_holds(
+    connection: &rusqlite::Connection,
+    folder: &Path,
+) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let present = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects_home_move'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !present {
+        return Ok(false);
+    }
+    let origin: Option<String> = connection
+        .query_row(
+            "SELECT origin FROM projects_home_move WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(origin.is_some_and(|origin| {
+        let origin = Path::new(&origin);
+        folder.starts_with(origin)
+            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+    }))
+}
+
 /// Turns a projects home refusal code into the sentence shown to the owner.
 /// Input: an engine rejection code. Output: the plain sentence, or None for
 /// codes that are not about the projects home.
@@ -609,6 +1146,31 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_trash_still_set_up" => "Remove the project from CrazyAgent first.",
         "home_trash_failed" => "The folder could not be moved to the Trash. Nothing was deleted.",
+        "delete_outside_home" => {
+            "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead."
+        }
+        "delete_name_mismatch" => "Type the project's name exactly as shown to delete it.",
+        "delete_shared_folder" => {
+            "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+        }
+        "delete_research_running" => {
+            "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted."
+        }
+        "delete_platform_unqualified" => {
+            "Delete everything is only on macOS for now. Remove the project from the dashboard instead."
+        }
+        "delete_unavailable" => {
+            "The engine could not check the project's agents. Nothing was deleted."
+        }
+        "delete_agents_running" => {
+            "Its agents did not stop in time, so nothing was deleted. They stay stopped; try again."
+        }
+        "delete_trash_partial" => {
+            "Some of its folders are in the Trash and the rest could not be moved. The project stays listed; try again."
+        }
+        "project_delete_requires_transport" => {
+            "This engine cannot delete projects. Remove it from the dashboard instead."
+        }
         "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",
@@ -631,6 +1193,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that cannot be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
+        "home_override_invalid" => {
+            "That add asked to go past a check it cannot go past. Choose the folder again."
+        }
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed."
         }
@@ -649,6 +1214,18 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_in_progress" => {
             "Your projects folder is still being moved. Try again when it finishes."
+        }
+        "home_move_delete_in_progress" => {
+            "A project in your projects folder is being deleted. Try again when it finishes. Nothing was moved."
+        }
+        "home_move_agent_work" => {
+            "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved."
+        }
+        "home_move_changes_restorable" => {
+            "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved."
+        }
+        "home_move_research_running" => {
+            "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",

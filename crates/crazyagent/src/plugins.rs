@@ -233,6 +233,7 @@ pub struct SkillView {
     pub on_here: Option<bool>,
     pub source: String,
     pub folder: String,
+    pub version: u64,
     pub refused: Option<String>,
 }
 
@@ -260,6 +261,7 @@ pub struct ServerView {
     pub checks: u64,
     pub secrets: Vec<SecretView>,
     pub on_here: Option<bool>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,9 +286,27 @@ pub struct EffectiveServer {
     pub secrets: Vec<EffectiveSecret>,
 }
 
+/// One tool with its switches, as Settings lists it: a CrazyAgent built-in tool (`server_id`
+/// none, `server` the CrazyAgent server name) or one checked tool of an MCP server, keyed by
+/// the server's name as agents see it. `global` is the every-project switch, On when never
+/// set; `here` is the project's own stored switch, none in global settings or when the project
+/// follows the global one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolView {
+    pub server: String,
+    pub server_id: Option<String>,
+    pub tool: String,
+    pub description: String,
+    pub builtin: bool,
+    pub global: crate::coord::tool_switches::Switch,
+    pub here: Option<crate::coord::tool_switches::Switch>,
+}
+
 /// One hook as Settings lists it: the plugin it came from, the Claude Code event and
 /// matcher it runs on, its command, where it applies and whether it is on. `follows` names
 /// the skill or MCP server the hook came with; the hook runs only while that item is on.
+/// `version` is the hook's owner change version a project switch names, as for skills.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookView {
@@ -302,6 +322,7 @@ pub struct HookView {
     pub on_here: Option<bool>,
     pub follows: Option<String>,
     pub source: String,
+    pub version: u64,
 }
 
 /// One hook an agent launch writes into its generated plugin: the plugin's stored folder
@@ -478,6 +499,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Enter the secret on one line, up to 8192 characters.",
     ),
     (
+        "server_secret_too_short",
+        "Use a secret of at least 8 characters. A shorter one is part of an agent's launch command, so CrazyAgent cannot keep it hidden.",
+    ),
+    (
         "server_changed",
         "This server changed. Review it again before approving.",
     ),
@@ -498,6 +523,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Can't start: this file can't be run.",
     ),
     ("server_cant_start", "The server can't start."),
+    (
+        crate::sandbox::OWNER_PORTS_UNREADABLE,
+        "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
+    ),
     (
         "server_cleanup_uncertain",
         "The server's processes could not be confirmed stopped.",
@@ -521,6 +550,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "plugin_switch_global_only",
         "Only items from global settings can be switched here.",
+    ),
+    (
+        "stale_revision",
+        "This changed in another window, so yours was not saved. The list shows it now.",
     ),
     (
         "plugin_store_unavailable",
@@ -549,10 +582,26 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The plugin name must be 1 to 32 letters, digits, ., - or _.",
     ),
     (
+        "hooks_plugin_manifest_missing",
+        "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
+    ),
+    (
         "hooks_already_added",
         "These hooks were already added here.",
     ),
     ("hook_limit", "There are already 100 hooks here."),
+    (
+        "tool_unknown",
+        "That tool is not on this server. Check the server again to list its tools.",
+    ),
+    (
+        "tool_delete_builtin_only",
+        "Only a CrazyAgent tool can be deleted. Turn an MCP server's tool off instead.",
+    ),
+    (
+        "coord_tool_invalid",
+        "This tool's name has characters a switch can't hold. Only letters, digits, _, - and . work.",
+    ),
 ];
 
 /// Turns a plugins refusal code into the sentence shown to the owner.

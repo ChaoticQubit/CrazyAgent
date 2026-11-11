@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { App, AppView, EngineOutdatedView } = await import("../src/app.tsx");
+const { App, AppView, EngineOutdatedView, ideFocusRoute } = await import("../src/app.tsx");
+const { formatRoute, parseRoute } = await import("../src/ui/router.ts");
 const state = await import("../src/state.ts");
 const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
 
@@ -21,6 +22,17 @@ function session(patch = {}) {
 }
 
 const render = (patch, route = { name: "home" }) => renderToStaticMarkup(createElement(AppView, { session: session(patch), route }));
+
+test("a reply this app could not read shows the restart sentence", async () => {
+  const { classifyFailure } = await import("../src/api.ts");
+  const failed = classifyFailure({ code: "engine_version_mismatch" });
+  assert.deepEqual(failed, {
+    kind: "error",
+    code: "engine_version_mismatch",
+    message: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  });
+  assert.equal(state.engineState(failed), "outdated");
+});
 
 test("the real App first renders the launch skeleton without calling the engine during render", () => {
   const markup = renderToStaticMarkup(createElement(App));
@@ -115,9 +127,9 @@ test("an unconfirmed account set-up for agents shows its own banner whose Check 
 test("routes reach Settings tabs and the project screens", () => {
   const settings = render({}, { name: "settings", tab: "pools" });
   assert.match(settings, /<h1>Settings<\/h1>/);
-  assert.match(settings, /role="tablist" aria-label="Settings sections"/);
-  assert.match(settings, /<a id="tab-pools" role="tab" class="tab" href="#\/settings\/pools" aria-selected="true" tabindex="0">/);
-  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`</svg>${label}</a>`));
+  assert.match(settings, /<nav class="settings-nav" aria-label="Settings sections">/);
+  assert.match(settings, /<a class="settings-nav-item" href="#\/settings\/pools" aria-current="page">Pools<\/a>/);
+  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`>${label}</a>`));
   const project = render({ projects: { kind: "ok", value: [{ id: "p-1", name: "Harbor Notes", repository_count: 1 }] } }, { name: "project", id: "p-1", tab: "overview" });
   assert.match(project, /<h1>Harbor Notes<\/h1>/);
   assert.match(project, /role="tablist" aria-label="Project"/);
@@ -173,6 +185,27 @@ test("Get set up stays hidden until every read it uses has settled, so Home neve
   const settled = renderToStaticMarkup(createElement(HomeView, { ...props, accounts: ok([]), pools: ok([]), tools: toolsReady }));
   assert.match(settled, /class="home with-setup"/);
   assert.match(settled, /<h2>Get set up<\/h2>/);
+});
+
+test("OP-35: Home never shows Get set up beside the projects only to drop it when the first tools check ends", () => {
+  const harnesses = ok([harness("codex", "ready")]);
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const checking = toolsRead({ state: "checking" }, { state: "checking" }, { state: "checking" });
+  const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), harnesses, onRetryProjects: () => {} };
+  const home = (accounts, pools, tools) => renderToStaticMarkup(createElement(HomeView, { ...props, accounts, pools, tools }));
+  const frames = [{ kind: "loading" }, checking, toolsRead(found, { state: "checking" }, found), toolsReady]
+    .map((tools) => home(ok([account({})]), ok([pool]), tools));
+  for (const [index, frame] of frames.entries()) {
+    assert.match(frame, /Harbor/, `frame ${index}`);
+    assert.match(frame, /class="home"/, `frame ${index}: the project cards take the full width`);
+    assert.doesNotMatch(frame, /Get set up|with-setup|Checking tmux/, `frame ${index}: no side panel while the tools check runs`);
+  }
+  const unset = [checking, toolsReady].map((tools) => home(ok([]), ok([]), tools));
+  for (const [index, frame] of unset.entries()) {
+    assert.match(frame, /class="home with-setup"/, `frame ${index}: with no account the panel shows and stays`);
+    assert.match(frame, /<h2>Get set up<\/h2>/, `frame ${index}`);
+  }
+  assert.match(unset[0], /Checking tmux, uv and graphify on this computer\./);
 });
 
 test("Add an account is done only when an account is ready for agents, and says which; otherwise it links to Accounts", () => {
@@ -235,7 +268,7 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
     const checking = item(tools);
     assert.equal(checking.done, false);
     assert.equal(checking.body, "Checking tmux, uv and graphify on this computer.");
-    assert.equal(steps(tools).visible, tools.kind !== "loading", "a read still loading hides the panel; tools still being checked keep it");
+    assert.equal(steps(tools).visible, false, "with an account and a pool ready, the panel waits for the tools check instead of showing only to vanish");
   }
   assert.equal(item(toolsRead({ state: "installing" }, found, missing)).body, "Setup is installing the tools. This updates when it finishes.");
   assert.equal(item(toolsRead(found, found, found, { running: true })).done, true);
@@ -450,4 +483,25 @@ test("project names show direction and hidden characters as escapes in the sideb
   assert.ok(!needs.includes("‮"), needs);
   const plain = render({ projects: ok([{ id: "p-2", name: "Harbor Notes 👩‍💻", repository_count: 0 }]) });
   assert.match(plain, /<span class="name">Harbor Notes 👩‍💻<\/span>/);
+});
+
+test("a TUI open in IDE focus opens that project's IDE tab, which the router keeps", () => {
+  const route = ideFocusRoute({ project: "harbor-notes", request: "reveal-0123456789abcdef01234567" });
+  assert.deepEqual(route, { name: "project", id: "harbor-notes", tab: "ide" });
+  assert.equal(formatRoute(route), "#/projects/harbor-notes/ide");
+  assert.deepEqual(parseRoute(formatRoute(route)), route);
+});
+
+test("each sidebar row gets its project's working count, beside its unseen count", () => {
+  const value = [{ id: "a", name: "Alpha", repository_count: 0 }, { id: "b", name: "Beta", repository_count: 0 }];
+  const markup = renderToStaticMarkup(createElement(AppView, {
+    session: session({ projects: { kind: "ok", value } }), route: { name: "home" },
+    alerts: new Map([["a", 4], ["b", 1]]), working: new Map([["a", 2]]),
+  }));
+  const rows = markup.slice(markup.indexOf('<div class="nav-group">'), markup.indexOf("</nav>"));
+  const [alpha, beta] = rows.split('<a class="nav-item"').slice(1);
+  assert.match(alpha, /title="2 agents working"/u);
+  assert.match(alpha, /<span class="nav-flag">4<\/span>/u);
+  assert.doesNotMatch(beta, /nav-live/u);
+  assert.match(beta, /<span class="nav-flag">1<\/span>/u);
 });

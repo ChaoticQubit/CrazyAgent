@@ -132,6 +132,17 @@ fn kind(line: &[u8]) -> String {
 /// folder that is a link, shared or not this user's is refused. Input: the engine logs
 /// folder and the entry. Output: an error code for an unsafe path or a failed write.
 pub(in crate::engine) fn append(logs: &Path, entry: &serde_json::Value) -> Result<(), EngineError> {
+    append_to(logs, LOG_FILE, entry)
+}
+
+/// Appends one entry to a named log in the engine logs folder, with the folder checks,
+/// file checks and rotation of the master stream log. Inputs: the folder, the log's file
+/// name and the entry. Output: an error code for an unsafe path or a failed write.
+pub(in crate::engine) fn append_to(
+    logs: &Path,
+    name: &str,
+    entry: &serde_json::Value,
+) -> Result<(), EngineError> {
     let mut line = serde_json::to_vec(entry).map_err(|_| failure("master_stream_log_entry"))?;
     line.push(b'\n');
     let length = u64::try_from(line.len()).map_err(|_| failure("master_stream_log_entry"))?;
@@ -139,12 +150,12 @@ pub(in crate::engine) fn append(logs: &Path, entry: &serde_json::Value) -> Resul
         return Err(failure("master_stream_log_entry"));
     }
     private_folder(logs)?;
-    let log = logs.join(LOG_FILE);
+    let log = logs.join(name);
     if let Ok(metadata) = std::fs::symlink_metadata(&log)
         && metadata.is_file()
         && metadata.len().saturating_add(length) > ROTATE_BYTES
     {
-        std::fs::rename(&log, logs.join(format!("{LOG_FILE}.1")))
+        std::fs::rename(&log, logs.join(format!("{name}.1")))
             .map_err(|_| failure("master_stream_log_unavailable"))?;
     }
     let mut file = open(&log)?;

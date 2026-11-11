@@ -25,6 +25,29 @@ impl OwnerController {
         }
     }
 
+    /// Reads one page of a project sub-agent's Messages timeline, newest first: its tasks,
+    /// what the master and the owner said to it and its events. Takes the project id, the
+    /// agent, the cursor of the newest entry not wanted and the page size, none for the
+    /// project's setting. Returns the page, or the engine's plain rejection code.
+    pub async fn team_agent_messages(
+        &mut self,
+        project_id: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+        limit: Option<u16>,
+    ) -> Result<crate::team::agent_messages::AgentMessages, EngineError> {
+        let query = OwnerRead::TeamAgentMessages {
+            project_id,
+            agent,
+            before,
+            limit,
+        };
+        match self.read(query).await?.data {
+            OwnerData::TeamAgentMessages { messages } => Ok(*messages),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Reads what the app shows across projects: the app wake rule and every project's
     /// newest owner notifications with the unseen count for the badge.
     /// Returns the view, or the engine's plain rejection code.
@@ -46,6 +69,21 @@ impl OwnerController {
             .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
             .terminal_attach(agent)
+            .await
+    }
+
+    /// Opens a live view of one pane of an agent terminal's window, such as a native
+    /// teammate's `pane` under its lead's `terminal`. Takes the terminal name and pane id.
+    /// Returns the session, or a plain code such as `terminal_pane_unknown`.
+    pub async fn terminal_attach_pane(
+        &mut self,
+        agent: AgentId,
+        pane: String,
+    ) -> Result<TerminalSession, EngineError> {
+        self.client
+            .as_deref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .terminal_attach_pane(agent, pane)
             .await
     }
 

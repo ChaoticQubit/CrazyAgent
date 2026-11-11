@@ -770,11 +770,23 @@ fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Turns a pool or approval-limit refusal code into the sentence shown to the owner.
-/// Input: an engine rejection code. Output: the plain sentence for a pool or
-/// approval-limit refusal, or None for any other code.
+/// The sentence for `owner_busy`: a request the owner made was not sent because too many
+/// were already waiting, so nothing changed.
+pub const OWNER_BUSY_LINE: &str =
+    "CrazyAgent is busy with other requests. Nothing changed; try again in a moment.";
+
+/// The sentence for `engine_version_mismatch`: the running engine and this app speak
+/// different versions, read from a version check or from a reply the app could not read.
+pub const ENGINE_VERSION_LINE: &str =
+    "CrazyAgent's engine is a different version from this app. Restart the engine.";
+
+/// Turns a pool, approval-limit, busy-owner or version-mismatch code into the sentence shown
+/// to the owner. Input: an engine rejection code. Output: the plain sentence for such a refusal,
+/// or None for any other code.
 pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
+        "owner_busy" => Some(OWNER_BUSY_LINE),
+        "engine_version_mismatch" => Some(ENGINE_VERSION_LINE),
         "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
         "pool_needs_account" => Some(
             "A pool needs at least one account. Add another account first, or delete the pool.",
@@ -787,6 +799,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "pool_exists" => Some("A pool with this id already exists."),
         "pool_not_found" => Some("This pool no longer exists. Refresh and try again."),
+        "project_not_found" => Some("This project no longer exists. Refresh and try again."),
         "pool_users_changed" => {
             Some("The projects using this pool changed. Review them, then delete again.")
         }
@@ -803,9 +816,21 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "model_access_edit_bounds" => {
             Some("This change is too large to save at once. Make it in smaller steps.")
         }
+        "linux_limited_network_off" => Some(
+            "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+        ),
+        "linux_resolver_needs_udp" => Some(
+            "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+        ),
+        "linux_harness_unchecked" => Some(
+            "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+        ),
         "team_master_no_terminal" => Some(
             "This master harness has no terminal app. Its conversation stays on the Conversation tab.",
         ),
+        "stale_revision" => {
+            Some("This changed in another window, so yours was not saved. The saved one shows now.")
+        }
         _ => None,
     }
 }
@@ -1526,6 +1551,7 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         );
         for code in [
             "account_not_found",
+            "project_not_found",
             "model_access_read_only",
             "model_access_edit_bounds",
         ] {

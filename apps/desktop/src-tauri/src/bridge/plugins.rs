@@ -1,12 +1,18 @@
-use super::{BridgeError, NativeBridge, Unlocked, failure};
+use super::{BridgeError, NativeBridge, Unlocked, failure, uncaused};
 use crazyagent::client_controller::OwnerController;
+use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::AccountSecret;
-use crazyagent::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
+};
 use crazyagent::protocol::ProjectId;
 
-fn plugin_failure(error: EngineError) -> BridgeError {
-    failure(crazyagent::plugins::known_code(&error.0).unwrap_or("plugins_failed"))
+pub(super) fn plugin_failure(error: EngineError) -> BridgeError {
+    uncaused(
+        crazyagent::plugins::known_code(&error.0).unwrap_or("plugins_failed"),
+        &error.0,
+    )
 }
 
 fn project(id: Option<String>) -> Result<Option<ProjectId>, BridgeError> {
@@ -117,15 +123,17 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Turns a skill on or off where it was added. Output: the skill.
+    /// Turns a skill on or off where it was added, when the screen showed its current
+    /// version. Output: the skill, or `stale_revision` after another change.
     pub async fn set_skill_enabled(
         &mut self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<SkillView, BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .set_skill_enabled(id, enabled)
+            .set_skill_enabled(id, enabled, version)
             .await
             .map_err(plugin_failure)
     }
@@ -177,11 +185,12 @@ impl NativeBridge {
         }))
     }
 
-    /// Removes a skill and the engine's copy of its folder.
-    pub async fn remove_skill(&mut self, id: String) -> Result<(), BridgeError> {
+    /// Removes a skill and the engine's copy of its folder, when the screen showed the
+    /// skill's current version.
+    pub async fn remove_skill(&mut self, id: String, version: u64) -> Result<(), BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .remove_skill(id)
+            .remove_skill(id, version)
             .await
             .map_err(plugin_failure)
     }
@@ -212,15 +221,17 @@ impl NativeBridge {
         }))
     }
 
-    /// Changes how an MCP server runs; it then waits for approval again.
+    /// Changes how an MCP server runs; it then waits for approval again. Inputs: id, the new
+    /// command or URL and the version the screen showed.
     pub async fn update_mcp_server(
         &mut self,
         id: String,
         spec: ServerSpec,
+        version: u64,
     ) -> Result<ServerView, BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .update_mcp_server(id, spec)
+            .update_mcp_server(id, spec, version)
             .await
             .map_err(plugin_failure)
     }
@@ -238,40 +249,45 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Turns an MCP server on or off where it was added.
+    /// Turns an MCP server on or off where it was added, when the screen showed its current
+    /// version.
     pub async fn set_mcp_server_enabled(
         &mut self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<ServerView, BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .set_mcp_server_enabled(id, enabled)
+            .set_mcp_server_enabled(id, enabled, version)
             .await
             .map_err(plugin_failure)
     }
 
-    /// Removes an MCP server and its saved secrets.
-    pub async fn remove_mcp_server(&mut self, id: String) -> Result<(), BridgeError> {
+    /// Removes an MCP server and its saved secrets, when the screen showed the server's
+    /// current version.
+    pub async fn remove_mcp_server(&mut self, id: String, version: u64) -> Result<(), BridgeError> {
         self.plugins_ready()?;
         self.controller()?
-            .remove_mcp_server(id)
+            .remove_mcp_server(id, version)
             .await
             .map_err(plugin_failure)
     }
 
-    /// Switches a global skill or MCP server on or off for one project.
+    /// Switches a global skill or MCP server on or off for one project, when the screen
+    /// showed the item's current version.
     pub async fn switch_plugin(
         &mut self,
         project_id: String,
         id: String,
         on: bool,
+        version: u64,
     ) -> Result<(), BridgeError> {
         self.plugins_ready()?;
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("plugin_project_unknown"))?;
         self.controller()?
-            .switch_plugin(project, id, on)
+            .switch_plugin(project, id, on, version)
             .await
             .map_err(plugin_failure)
     }
@@ -325,6 +341,53 @@ impl NativeBridge {
             project(Some(project_id))?.ok_or_else(|| failure("plugin_project_unknown"))?;
         self.controller()?
             .project_plugins(project)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Reads one server's tools with their switches: the CrazyAgent built-in tools (no server
+    /// id) or one MCP server's checked tools, for every project (no project id) or one.
+    pub async fn tool_switches(
+        &mut self,
+        project_id: Option<String>,
+        server_id: Option<String>,
+    ) -> Result<Vec<ToolView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .tool_switches(project, server_id)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Sets one tool's switch for every project or one project; Hidden deletes a built-in
+    /// tool until its defaults are restored. Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &mut self,
+        project_id: Option<String>,
+        server_id: Option<String>,
+        tool: String,
+        value: Switch,
+    ) -> Result<Vec<ToolView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .set_tool_switch(project, server_id, tool, value)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Clears one server's stored switches for every project or one project.
+    /// Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &mut self,
+        project_id: Option<String>,
+        server_id: Option<String>,
+    ) -> Result<Vec<ToolView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .restore_tool_switches(project, server_id)
             .await
             .map_err(plugin_failure)
     }

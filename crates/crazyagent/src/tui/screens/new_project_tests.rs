@@ -557,6 +557,73 @@ fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
 }
 
 #[test]
+fn a_master_only_harness_is_picked_for_the_master_but_never_for_agents() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::Builder::new()
+        .prefix("ca-tui-master-only-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for name in ["codex", "crazyagent-rcli"] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entries = crate::harnesses::catalog(&crate::harnesses::Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let choices = super::new_project_page::harness_choices_from(&entries);
+    let at = |id: &str| choices.iter().position(|choice| choice.id == id).unwrap();
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Team);
+    wizard.set_harnesses(choices.clone());
+    let rows = wizard.team.as_ref().unwrap().sub_harnesses.len();
+    assert_eq!(wizard.team.as_ref().unwrap().master, "codex");
+    assert!(rows >= 1, "the default team has an agent row");
+    wizard.key(key(KeyCode::Enter));
+    for _ in 0..at("rcli") {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(wizard.picker, None, "RCLI is picked for the master");
+    assert_eq!(wizard.team.as_ref().unwrap().master, "rcli");
+    assert!(
+        wizard.check_team().is_ok(),
+        "{:?}",
+        wizard.check_team().err()
+    );
+    for _ in 0..=rows {
+        wizard.key(key(KeyCode::Down));
+    }
+    assert_eq!(wizard.team_row, rows + 1);
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(
+        wizard.picker,
+        Some(Picker {
+            target: PickFor::NewSlot,
+            cursor: 0
+        })
+    );
+    for _ in 0..at("rcli") {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Enter));
+    assert!(
+        wizard.picker.is_some(),
+        "RCLI is listed for agents but not picked"
+    );
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses.len(), rows);
+    wizard.team.as_mut().unwrap().sub_harnesses[0].harness = "rcli".into();
+    assert_eq!(
+        wizard.check_team().unwrap_err().text,
+        "RCLI runs only as the master. Pick another harness."
+    );
+}
+
+#[test]
 fn the_default_team_moves_off_harnesses_that_are_not_installed() {
     let mut fresh = wizard();
     fresh.research = vec![
@@ -861,7 +928,11 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     assert_eq!(setup.platforms, [Platform::Website, Platform::Cli]);
     assert_eq!(
         setup.research,
-        [ResearchKind::MarketResearch, ResearchKind::FrontEndDesign]
+        [
+            ResearchKind::MarketResearch,
+            ResearchKind::FrontEndDesign,
+            ResearchKind::RoadmapPlanning
+        ]
     );
     assert_eq!(
         setup.pool.as_ref().map(CredentialRef::as_str),
@@ -1013,4 +1084,76 @@ fn sizes_paths_and_harness_names_read_plainly() {
     );
     assert_eq!(harness_name("claude", None), "Claude Code");
     assert_eq!(harness_name("mystery", None), "mystery");
+}
+
+#[test]
+fn new_project_toggle_defaults_on() {
+    let mut wizard = wizard();
+    assert!(
+        wizard.roadmap,
+        "a new project plans a roadmap after research by default"
+    );
+    for _ in 0..3 {
+        wizard.key(shift(KeyCode::Right));
+    }
+    assert_eq!(wizard.step, Step::Work);
+    assert_eq!(wizard.focused(), Control::Work);
+    for _ in 0..ResearchKind::ALL.len() + 2 {
+        wizard.key(key(KeyCode::Down));
+    }
+    let research = wizard.research.clone();
+    assert_eq!(wizard.key(key(KeyCode::Char(' '))), Reply::Handled);
+    assert!(!wizard.roadmap, "Space on the last row turns planning off");
+    assert_eq!(wizard.research, research, "no research toggle moved");
+    assert_eq!(wizard.key(key(KeyCode::Enter)), Reply::Handled);
+    assert!(wizard.roadmap, "Enter turns it on again");
+    wizard.key(key(KeyCode::Up));
+    wizard.key(key(KeyCode::Char(' ')));
+    assert!(
+        wizard.roadmap,
+        "a research row never changes the roadmap toggle"
+    );
+    assert!(
+        wizard
+            .research
+            .contains(&ResearchKind::ALL[ResearchKind::ALL.len() - 1])
+    );
+}
+
+/// The owner clears the research while its catalog read is still in flight and opens the
+/// harness picker on the team's only slot; the reply for no research replaces the team with
+/// one that has no slots. The picker closes with the team it was opened for, so Enter never
+/// picks into a slot that is gone.
+#[test]
+fn a_catalog_reply_that_replaces_the_team_closes_an_open_harness_picker() {
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["b-claude", "c-codex"]);
+    wizard.research.clear();
+    let (pool, research) = wizard
+        .catalog_request()
+        .expect("the cleared research is read");
+    wizard.go(Step::Team);
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses.len(), 1);
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(
+        wizard.picker,
+        Some(Picker {
+            target: PickFor::Slot(0),
+            cursor: 0
+        })
+    );
+
+    let signed = BTreeSet::from([CredentialRef::new("c-codex").unwrap()]);
+    let served = catalog(&config(), pool.as_ref(), &research, &signed).unwrap();
+    assert!(served.default_team.sub_harnesses.is_empty());
+    wizard.apply_catalog(pool, research, Ok(served));
+
+    assert_eq!(
+        wizard.picker, None,
+        "the picker was open for the team the reply replaced"
+    );
+    assert_eq!(wizard.key(key(KeyCode::Enter)), Reply::Handled);
+    assert!(wizard.team.as_ref().unwrap().sub_harnesses.is_empty());
 }

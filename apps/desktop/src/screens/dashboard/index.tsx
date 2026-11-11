@@ -4,7 +4,7 @@ import { loadSetupStatus } from "../../api-intake";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
-import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
@@ -54,7 +54,7 @@ export function cardActivity(team: Result<Pick<TeamStatus, "agents" | "tasks">> 
     if (!waiting && count("cancelled") > 0) line += `, ${count("cancelled")} stopped`;
   }
   const working = (crew?.agents.filter((agent) => agent.status === "working").length ?? 0) + count("running");
-  const agents = crew === null && jobs === null ? null : working === 0 ? "No agents working" : `${working} ${working === 1 ? "agent" : "agents"} working`;
+  const agents = crew === null && jobs === null ? null : working === 0 ? "No agents working" : agentsWorking(working);
   const live = Boolean(jobs?.some((job) => LIVE_RESEARCH.has(job.status)) || crew?.agents.some((agent) => LIVE_AGENT.has(agent.status)) ||
     crew?.tasks.some((task) => LIVE_TASK.has(task.status)));
   return { research: line, agents, waiting, live };
@@ -103,8 +103,9 @@ function accountStep(owned: number, usable: AccountView[]): Pick<SetupItem, "bod
  * (signed in, a saved key, or a reachable URL or local model) and names it, Create a pool when one
  * pool exists, Install tools when tmux, uv and graphify are installed; harnesses never block.
  * Accounts that exist but none ready send the owner to Accounts. The panel shows until those
- * three are done, and never while one of the four reads is still loading, so it cannot flash in
- * and out. Inputs: the four engine reads. Output: items and whether the panel shows. */
+ * three are done, and never while one of the four reads is still loading or, once an account and
+ * a pool are ready, while the tools are still being checked, so it cannot flash in and out beside
+ * the projects (OP-35). Inputs: the four engine reads. Output: items and whether the panel shows. */
 export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
   tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
   const owned = accounts.kind === "ok" ? accounts.value : [];
@@ -124,7 +125,8 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
       action: "Set up tools", href: formatRoute({ name: "settings", tab: "pack" }) },
   ];
   const settled = [accounts, pools, harnesses, tools].every((read) => read.kind !== "loading");
-  return { items, visible: settled && !(accountsDone && poolsDone && installTools.done) };
+  const checking = tools.kind === "ok" && toolsChecking(tools.value);
+  return { items, visible: settled && !(accountsDone && poolsDone && (installTools.done || checking)) };
 }
 
 /** One Needs you row: the project it is about (none for an account), one sentence and one link. */

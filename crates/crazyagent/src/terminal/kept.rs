@@ -1,12 +1,12 @@
 use super::buffer::buffer;
-use super::{AgentId, Host, HostError, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
+use super::{AgentId, Host, HostError, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// How many ended terminals keep their last screen: two full projects of agents. Past it the
 /// screen kept longest ago is forgotten first.
-const KEPT_MAX: usize = 32;
+pub(crate) const KEPT_MAX: usize = 32;
 /// The largest last screen, label included, a host keeps; a larger screen is not kept.
 const KEPT_BYTES_MAX: usize = VIEWER_BUFFER_BYTES_MAX;
 
@@ -57,6 +57,11 @@ impl LastScreens {
         self.kept.retain(|kept| kept.agent != *agent);
     }
 
+    /// Tells whether an agent's last screen is kept. Input: the agent. Output: the answer.
+    fn holds(&self, agent: &AgentId) -> bool {
+        self.kept.iter().any(|kept| kept.agent == *agent)
+    }
+
     /// Opens a finished view of an agent's kept screen: its size, the screen and no output
     /// after it. Input: the agent. Output: the view, or none when nothing is kept.
     fn view(&self, agent: &AgentId) -> Option<TerminalStream> {
@@ -74,11 +79,18 @@ impl LastScreens {
     }
 }
 
+/// The label over a kept screen: the local time its terminal ended. Output: the label.
+fn finished_label() -> String {
+    use crate::tui::clock::{clock, local_offset, now_ms};
+    format!(" Finished at {} ", clock(now_ms(), local_offset()))
+}
+
 /// A terminal host that keeps the last screen of each terminal it ends, so a viewer opening
 /// an agent between runs sees how its last run finished, labeled with the local time it
-/// ended, instead of a refusal; a new run of the agent forgets it. A kill and a spawn each
-/// hold the kept screens while they act, so a respawn never lands between a kill and the
-/// screen it keeps. Screens live only in the engine's memory: a terminal that exits on its
+/// ended, instead of a refusal; a new run of the agent forgets it. A kill keeps no newer
+/// screen over one already kept for the run, as before a keeper ends it. A kill and a spawn
+/// each hold the kept screens while they act, so a respawn never lands between a kill and
+/// the screen it keeps. Screens live only in the engine's memory: a terminal that exits on its
 /// own, or an engine restart, keeps none.
 pub(super) struct LastScreenHost<H> {
     inner: H,
@@ -120,8 +132,19 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.screen(agent)
     }
 
+    fn kept(&self, agent: &AgentId) -> bool {
+        self.screens().holds(agent)
+    }
+
     fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
         self.inner.snapshot(agent)
+    }
+
+    fn keep_last(&self, agent: &AgentId) {
+        let mut screens = self.screens();
+        if let Ok(last) = self.inner.snapshot(agent) {
+            screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
+        }
     }
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
@@ -132,20 +155,76 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_live(agent)
     }
 
+    fn quiet(&self, agent: &AgentId) -> Result<Option<std::time::Duration>, HostError> {
+        self.inner.quiet(agent)
+    }
+
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
         self.inner.resize(agent, cols, rows)
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
         let mut screens = self.screens();
-        let last = self.inner.snapshot(agent).ok();
+        let last = if screens.holds(agent) {
+            None
+        } else {
+            self.inner.snapshot(agent).ok()
+        };
         self.inner.kill(agent)?;
         if let Some(last) = last {
-            use crate::tui::clock::{clock, local_offset, now_ms};
-            let label = format!(" Finished at {} ", clock(now_ms(), local_offset()));
-            screens.keep(agent, &last.screen, last.cols, last.rows, &label);
+            screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
         }
         Ok(())
+    }
+
+    fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        self.inner.panes(agent)
+    }
+
+    fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.kill_pane(agent, pane)
+    }
+
+    fn attach_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
+        self.inner.attach_pane(agent, pane)
+    }
+
+    fn snapshot_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
+        self.inner.snapshot_pane(agent, pane)
+    }
+
+    fn input_pane(&self, agent: &AgentId, pane: &str, bytes: &[u8]) -> Result<(), HostError> {
+        self.inner.input_pane(agent, pane, bytes)
+    }
+
+    fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
+        self.inner.input_live_pane(agent, pane)
+    }
+
+    fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.adopt_pane(agent, lead, pane)
+    }
+
+    fn spawn_own_server(
+        &self,
+        agent: &AgentId,
+        command: &InteractiveCommand,
+    ) -> Result<PaneRef, HostError> {
+        let mut screens = self.screens();
+        let pane = self.inner.spawn_own_server(agent, command)?;
+        screens.forget(agent);
+        Ok(pane)
+    }
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.inner.pane_pid(agent)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.inner.unkept(agent)
+    }
+
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        self.inner.end_kept_server(agent)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -154,6 +233,10 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
         self.inner.close(keep)
+    }
+
+    fn renew(&self, until: std::time::SystemTime) -> Result<(), HostError> {
+        self.inner.renew(until)
     }
 }
 
@@ -303,5 +386,104 @@ mod tests {
         assert_eq!(host.alive().unwrap(), vec![named.clone()]);
         assert!(host.screens().view(&named).is_none());
         host.kill(&named).unwrap();
+    }
+
+    /// The host says it keeps an agent's screen only between that agent's kill and its next
+    /// run, never for a live terminal or an agent that never ran (N-D21).
+    #[cfg(unix)]
+    #[test]
+    fn a_host_keeps_a_screen_only_between_a_kill_and_the_next_run() {
+        use crate::terminal::tmux::{SOCKET, Tmux, installed};
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("terminal");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = installed(home.path()).expect("tmux is required for this test");
+        let _server = Server(program.clone(), folder.join(SOCKET));
+        let host = LastScreenHost::new(Tmux::open(Some(program), &folder));
+        let (named, never) = (agent(9), agent(10));
+        let run = |text: &str| InteractiveCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("printf '{text}\\n'; exec /bin/sleep 30"),
+            ],
+            cwd: home.path().to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        assert!(!host.kept(&named), "nothing is kept before a run");
+        host.spawn(&named, &run("first run")).unwrap();
+        assert!(!host.kept(&named), "a live terminal keeps no last screen");
+        host.kill(&named).unwrap();
+        assert!(host.kept(&named), "an ended terminal keeps its last screen");
+        assert!(!host.kept(&never), "an agent that never ran keeps nothing");
+        host.spawn(&named, &run("second run")).unwrap();
+        assert!(!host.kept(&named), "a new run forgets the screen kept");
+        host.kill(&named).unwrap();
+        assert!(host.kept(&named));
+    }
+
+    /// KEPT-L1: when a terminal outlives the stop that kept its last screen, as when its
+    /// keeper does not end it in time, and its screen then changes, as when the harness clears
+    /// it on the way out, the kill that follows keeps the screen kept before, not the cleared
+    /// one.
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_after_the_last_screen_was_kept_never_replaces_it_with_a_later_screen() {
+        use crate::terminal::tmux::{SOCKET, Tmux, installed};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("terminal");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = installed(home.path()).expect("tmux is required for this test");
+        let _server = Server(program.clone(), folder.join(SOCKET));
+        let host = LastScreenHost::new(Tmux::open(Some(program), &folder));
+        let named = agent(11);
+        let run = InteractiveCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'harness answer 3825\\n'; read line; printf '\\033[2J\\033[H'; exec /bin/sleep 30"
+                    .into(),
+            ],
+            cwd: home.path().to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        let shows = |wanted: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let screen = host.snapshot(&named).unwrap().screen;
+                if contains(&screen, b"harness answer 3825") == wanted {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        host.spawn(&named, &run).unwrap();
+        assert!(shows(true), "the terminal never showed its answer");
+        host.keep_last(&named);
+        assert!(host.kept(&named));
+        host.input(&named, b"\r").unwrap();
+        assert!(shows(false), "the terminal never cleared its screen");
+
+        host.kill(&named).unwrap();
+        assert!(host.alive().unwrap().is_empty());
+        let finished = host.attach(&named).unwrap();
+        assert!(
+            contains(&finished.screen, b"harness answer 3825"),
+            "the kill replaced the kept last screen with the cleared one: {}",
+            String::from_utf8_lossy(&finished.screen)
+        );
+        assert!(contains(&finished.screen, b" Finished at "));
     }
 }

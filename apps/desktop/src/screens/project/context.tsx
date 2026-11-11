@@ -10,7 +10,7 @@ import { useLinkOpener } from "./links";
 import { MarkdownView, headings, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
 import { ProjectMemory } from "./memory";
-import { deletable, deleteQuestion, fileIcon, retryPath } from "./research";
+import { deletable, deleteQuestion, fileIcon, researchJobs, retryPath } from "./research";
 import { NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -112,7 +112,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const item = items.find((entry) => entry.path === chosen) ?? null;
   const running = new Set(jobs.filter((job) => job.status === "running").map((job) => job.report_path));
   const writing = chosen !== null && running.has(chosen);
-  const kind = chosen ? researchKindOf(chosen, jobs) : null;
+  const kind = chosen ? researchKindOf(chosen, researchJobs(jobs)) : null;
 
   useEffect(() => {
     setFile(undefined);
@@ -231,6 +231,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
             {items.filter((entry) => entry.kind === "brief").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="file-text" size={14} />brief.md</button></li>)}
             <Group title="documents/" items={items.filter((entry) => entry.kind === "document")} selected={chosen} onSelect={select} running={running} />
             <Group title="research/" items={items.filter((entry) => entry.kind === "research")} selected={chosen} onSelect={select} running={running} />
+            {items.filter((entry) => entry.kind === "plan").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="list-checks" size={14} />{displayText(entry.path.slice(entry.path.lastIndexOf("/") + 1))}</button></li>)}
           </ul></li>
         </ul>
       </>}

@@ -1,5 +1,5 @@
 use super::agent_copy::{Harness, Record, account_record, place};
-use super::{HeldLock, NativeProfileUse, failure};
+use super::{HeldLock, Manifest, NativeProfileUse, failure, take_lock};
 use crate::adapters::claude::{REFRESH_WINDOW, RENEWAL_TURN};
 use crate::adapters::codex::CodexProtocol;
 use crate::engine::EngineError;
@@ -77,13 +77,16 @@ fn hold_unless(
 }
 
 /// What one account renewal needs, detached from the lease so the keeper thread of a
-/// running turn can renew while the caller still holds that lease.
+/// running turn can renew while the caller still holds that lease. Holds its own shared
+/// lease on the profile (CA-SEC-003), so once the caller's lease ended a sign-out or
+/// sign-in still waits for every renewal that could write the account's record.
 pub(super) struct Renewal {
     harness: Harness,
     executable: PathBuf,
     managed: PathBuf,
     home: File,
     profile: File,
+    _lease: Option<HeldLock>,
 }
 
 impl NativeProfileUse {
@@ -109,12 +112,20 @@ impl NativeProfileUse {
             file.try_clone()
                 .map_err(|_| failure("native_profile_credential_unavailable"))
         };
+        let unavailable = |_| failure("native_profile_credential_unavailable");
+        let lease = Manifest::open(&self.profile.file, false).map_err(unavailable)?;
+        if lease.identity != self.manifest.identity {
+            return Err(failure("native_profile_credential_unavailable"));
+        }
+        take_lock(&lease.file, FlockOperation::NonBlockingLockShared).map_err(unavailable)?;
+        let lease = HeldLock(lease.file);
         Ok(Renewal {
             harness,
             executable: executable.to_path_buf(),
             managed: self.profile_path()?,
             home: clone(&self.home.file)?,
             profile: clone(&self.profile.file)?,
+            _lease: Some(lease),
         })
     }
 }
@@ -141,6 +152,7 @@ impl Renewal {
             managed: profile.join("home"),
             home: open(&profile.join("home")),
             profile: open(profile),
+            _lease: None,
         }
     }
 

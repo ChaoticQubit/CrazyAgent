@@ -21,6 +21,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         on_here: None,
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
+        version: 2,
         refused: None,
     }
 }
@@ -41,6 +42,7 @@ fn server(name: &str, spec: ServerSpec, status: ServerStatus) -> ServerView {
         checks: 0,
         secrets: Vec::new(),
         on_here: None,
+        version: 2,
     }
 }
 
@@ -121,7 +123,7 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     match ctx.next_request() {
         Some(Request::Settings(job)) => {
             assert!(
-                matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design")
+                matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false, version: 2 }) if id == "skill-frontend-design")
             );
         }
         other => panic!("change expected, got {other:?}"),
@@ -134,7 +136,11 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     screen.arrive(&done, &mut ctx);
     assert_eq!(ctx.message().unwrap().lead, "frontend-design is off.");
     assert!(
-        matches!(ctx.next_request(), Some(Request::Settings(_))),
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Hooks { project: None })),
+        "the hooks reload"
+    );
+    assert!(
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Plugins)),
         "the lists reload"
     );
     for _ in 0..4 {
@@ -145,7 +151,7 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     match ctx.next_request() {
         Some(Request::Settings(job)) => {
             assert!(
-                matches!(*job, SettingsJob::Plugin(PluginChange::SetServer { ref id, enabled: false }) if id == "server-github")
+                matches!(*job, SettingsJob::Plugin(PluginChange::SetServer { ref id, enabled: false, version: 2 }) if id == "server-github")
             );
         }
         other => panic!("change expected, got {other:?}"),
@@ -222,7 +228,7 @@ fn remove_asks_first() {
     screen.key(&Key::Enter, &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id }) if id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id, version: 2 }) if id == "skill-frontend-design")
         ),
         other => panic!("a remove expected, got {other:?}"),
     }
@@ -269,7 +275,7 @@ fn the_server_form_checks_locally_and_hides_secret_values() {
             .any(|row| row.contains("Use the full path of the command")),
         "a command without a path is refused before the engine sees it"
     );
-    assert_eq!(shell.ctx.queued(), 0);
+    assert!(shell.ctx.next_screen_request().is_none());
 }
 
 #[test]
@@ -385,7 +391,7 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let rows = render(&mut shell, 80, 24);
     assert!(rows.iter().all(|row| !row.contains("tidewater42")));
     shell.key(Key::Enter);
-    match shell.ctx.next_request() {
+    match shell.ctx.next_screen_request() {
         Some(Request::Settings(job)) => {
             assert!(!format!("{job:?}").contains("tidewater42"));
             match *job {
@@ -401,7 +407,10 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let rows = render(&mut shell, 80, 24);
     assert!(rows.iter().all(|row| !row.contains("tidewater42")));
     shell.key(Key::Enter);
-    assert_eq!(shell.ctx.queued(), 0, "one change at a time");
+    assert!(
+        shell.ctx.next_screen_request().is_none(),
+        "one change at a time"
+    );
 }
 
 #[test]
@@ -574,9 +583,10 @@ fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
     );
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
-            SettingsJob::Plugin(PluginChange::Update { id, spec }) => {
+            SettingsJob::Plugin(PluginChange::Update { id, spec, version }) => {
                 assert_eq!(id, "server-github");
                 assert_eq!(spec, wanted);
+                assert_eq!(version, 2, "the edit names the version the list showed");
             }
             other => panic!("update expected, got {other:?}"),
         },
@@ -813,7 +823,7 @@ fn a_project_opens_the_skill_page_for_its_own_switch_and_goes_back_to_its_settin
     page.key(&Key::Char(' '), &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::Switch { ref project, ref id, on: false }) if project.as_str() == "tidepool" && id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::Switch { ref project, ref id, on: false, version: 2 }) if project.as_str() == "tidepool" && id == "skill-frontend-design")
         ),
         other => panic!("a project switch expected, got {other:?}"),
     }
@@ -878,7 +888,7 @@ fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
     page.key(&Key::Char(' '), &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false, version: 2 }) if id == "skill-frontend-design")
         ),
         other => panic!("a switch expected, got {other:?}"),
     }
@@ -1014,7 +1024,7 @@ fn a_skill_read_for_another_scope_is_ignored_and_space_on_a_project_page_never_s
     own_page.key(&Key::Char(' '), &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design"),
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false, .. }) if id == "skill-frontend-design"),
             "the project's own skill is switched where it lives: {job:?}"
         ),
         other => panic!("a switch expected, got {other:?}"),
@@ -1356,4 +1366,42 @@ fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
     );
     let shown = texts(&SkillDetailPage::with(detail(true)).lines(70, &ctx));
     assert!(shown.iter().all(|line| !line.contains("Agents don't get")));
+}
+
+#[test]
+fn l_opens_tools_on_the_selected_server_or_on_the_crazyagent_tools() {
+    for (downs, header) in [
+        (0, "CrazyAgent tools  1 of 4"),
+        (4, "github  2 of 4"),
+        (5, "postgres-local  3 of 4"),
+    ] {
+        let (skills, servers) = lists();
+        let mut shell = Shell::with(
+            plugin_ctx(120, 36),
+            Box::new(Plugins::with(skills, servers)),
+        );
+        let shown = render(&mut shell, 120, 36).join("\n");
+        assert!(shown.contains("l Tools"), "{shown}");
+        for _ in 0..downs {
+            shell.key(Key::Down);
+        }
+        shell.key(Key::Char('l'));
+        let shown = render(&mut shell, 120, 36).join("\n");
+        assert!(shown.contains(header), "{header} missing in\n{shown}");
+        assert!(shown.contains("Reading the tools..."), "{shown}");
+        assert!(
+            matches!(
+                shell.ctx.next_screen_request(),
+                Some(Request::Settings(job)) if matches!(*job, SettingsJob::Tools { project: None, .. })
+            ),
+            "the page reads the tools it opened on"
+        );
+    }
+}
+
+#[test]
+fn a_secret_too_short_to_keep_out_of_launch_commands_says_why_it_was_refused() {
+    let reason = plugin_plain("server_secret_too_short");
+    assert!(reason.contains("at least 8 characters"), "{reason}");
+    assert!(reason.contains("launch command"), "{reason}");
 }

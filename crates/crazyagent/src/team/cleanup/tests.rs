@@ -1,4 +1,5 @@
 use super::*;
+use crate::cleanup_settings::{CleanupMode, CleanupSettings};
 use crate::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use std::process::{Command, Stdio};
 
@@ -68,6 +69,8 @@ impl Case {
         git_in(&home, &repo, &["commit", "-q", "-m", "Start"]);
         let db = crate::landing::open(&engine).unwrap();
         super::super::initialize(&db).unwrap();
+        crate::storage::initialize_authority_schemas(&db).unwrap();
+        crate::ide::workspace::tests::add_project(&db, "project-1", &repo);
         Self {
             _tmp: tmp,
             home,
@@ -159,6 +162,26 @@ impl Case {
             .unwrap();
     }
 
+    /// Points an agent's worktree record somewhere else, as a database row an older engine
+    /// or a tamper wrote would, with that worktree's start recorded so nothing but where it
+    /// sits keeps it. Inputs: the agent, the repository, the worktree and its git folder.
+    fn repoint(&self, id: i64, repository: &Path, worktree: &Path, git_dir: &Path) {
+        crate::landing::record_worktree_start(&self.db, repository, worktree, git_dir).unwrap();
+        let changed = self
+            .db
+            .execute(
+                "UPDATE team_worktrees SET repository=?2, worktree=?3, git_dir=?4 WHERE agent=?1",
+                params![
+                    id,
+                    repository.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
     fn in_agent(&self, id: i64, args: &[&str]) -> String {
         git_in(&self.home, &self.worktree(id), args)
     }
@@ -197,7 +220,15 @@ impl Case {
     /// Lands an agent's change set the way the owner's Accept does. Input: the set.
     fn accept(&self, id: &crate::landing::ChangeSetId) {
         let head = self.head_of(id);
-        let outcome = crate::landing::accept(&self.db, &self.home, id, &head, None).unwrap();
+        let outcome = crate::landing::accept(
+            &self.db,
+            &self.home,
+            id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .unwrap();
         assert!(matches!(
             outcome,
             crate::landing::AcceptOutcome::Landed { .. }
@@ -249,11 +280,93 @@ impl Case {
     }
 
     fn listed(&self) -> Vec<i64> {
-        finished(&self.db, &self.team, &self.project, NOW)
+        finished(&self.db, &self.project, NOW)
             .unwrap()
             .iter()
+            .filter(|agent| agent.kept.is_none())
             .map(|agent| agent.id)
             .collect()
+    }
+
+    /// The agents a check keeps, newest first, with the code it keeps each with.
+    fn held(&self) -> Vec<(i64, String)> {
+        finished(&self.db, &self.project, NOW)
+            .unwrap()
+            .into_iter()
+            .filter_map(|agent| agent.kept.map(|code| (agent.id, code)))
+            .collect()
+    }
+
+    /// Says whether an agent's history is all still there: its row, its folder with its
+    /// harness conversation and its sandbox profile.
+    fn history_kept(&self, id: i64) -> bool {
+        let row: i64 = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM team_agents WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        row == 1
+            && self
+                .folder(id)
+                .join("home/projects/x/session.jsonl")
+                .is_file()
+            && self.profile(id).is_file()
+    }
+
+    fn stopped_at(&self, id: i64, stopped_ms: Option<i64>) {
+        let changed = self
+            .db
+            .execute(
+                "UPDATE team_agents SET stopped_ms=?2 WHERE id=?1",
+                params![id, stopped_ms],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    /// Records a finished agent with a task waiting for it, which every check keeps before it
+    /// reads any worktree, so it needs no git. Input: the id.
+    fn waiting_on_a_task(&self, id: i64) {
+        self.db
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,connection,status,created_ms,heartbeat_ms,stopped_ms)
+                 VALUES (?1,?2,'sub','claude-code',0,'claude-main','stopped',?3,?3,?3)",
+                params![id, self.project.as_str(), NOW - 5000],
+            )
+            .unwrap();
+        self.db
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    id,
+                    self.project.as_str(),
+                    self.repo.to_str().unwrap(),
+                    self.worktree(id).to_str().unwrap(),
+                    self.git_dir(id).to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        self.db
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms)
+                 VALUES (?1,'master','claude-code',0,'Resolve','queued',?2,?3)",
+                params![self.project.as_str(), id, NOW],
+            )
+            .unwrap();
+    }
+
+    fn sweep(&self, mode: CleanupMode, days: u16, after: i64, now_ms: i64) -> Swept {
+        sweep(
+            &self.db,
+            self.team.parent().unwrap(),
+            &CleanupSettings { mode, days },
+            after,
+            now_ms,
+        )
+        .unwrap()
     }
 
     fn known(&self, id: i64) -> bool {
@@ -272,7 +385,14 @@ impl Case {
     }
 
     fn remove(&self, agents: &[i64]) -> Removal {
-        remove(&self.db, &self.team, &self.project, agents, NOW).unwrap()
+        remove(
+            &self.db,
+            self.team.parent().unwrap(),
+            &self.project,
+            agents,
+            NOW,
+        )
+        .unwrap()
     }
 
     fn retiring(&self) -> Vec<i64> {
@@ -299,16 +419,42 @@ fn refused(code: &str) -> Removal {
     Removal::refused(code)
 }
 
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn swept(removed: &[i64], after: i64) -> Swept {
+    Swept {
+        removed: removed.to_vec(),
+        after,
+        failures: Vec::new(),
+        kept: Vec::new(),
+    }
+}
+
+/// DEC-123: a removal takes only the worktree, the code checkout and its build files, and
+/// its size is the worktree's alone; the agent's folder with its conversations, its sandbox
+/// profile, its rows and its kept conversation stay as history.
 #[test]
-fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders() {
+fn a_clean_finished_agent_is_listed_with_its_worktree_size_and_loses_only_its_worktree() {
     let case = Case::new();
     case.agent(1, "sub", "stopped");
     write(&case.worktree(1).join("target/build.bin"), &[7; 64 * 1024]);
+    write(
+        &case.folder(1).join("home/transcript.bin"),
+        &[7; 512 * 1024],
+    );
     case.agent(2, "master", "failed");
     write(&case.worktree(2).join("README"), b"one\ntwo\n");
     let landed = case.turn_end(2);
     let head = case.head_of(&landed);
-    let outcome = crate::landing::accept(&case.db, &case.home, &landed, &head, None).unwrap();
+    let outcome = crate::landing::accept(
+        &case.db,
+        &case.home,
+        &landed,
+        &head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
     assert!(matches!(
         outcome,
         crate::landing::AcceptOutcome::Landed { .. }
@@ -323,14 +469,22 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
             )
             .unwrap();
     }
-    let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
+    let listed = finished(&case.db, &case.project, NOW).unwrap();
     assert_eq!(
-        listed.iter().map(|agent| agent.id).collect::<Vec<_>>(),
-        [2, 1]
+        listed
+            .iter()
+            .map(|agent| (agent.id, agent.kept.as_deref()))
+            .collect::<Vec<_>>(),
+        [(3, Some("cleanup_agent_running")), (2, None), (1, None)]
     );
-    assert!(listed[1].bytes >= 64 * 1024 && listed[1].counted_all);
-    assert_eq!(listed[0].role, AgentRole::Master);
-    assert!(!listed[1].label.is_empty());
+    assert!(listed[2].bytes >= 64 * 1024 && listed[2].counted_all);
+    assert!(
+        listed[2].bytes < 512 * 1024,
+        "the size counts the worktree alone, never the agent's folder: {}",
+        listed[2].bytes
+    );
+    assert_eq!(listed[1].role, AgentRole::Master);
+    assert!(!listed[2].label.is_empty());
     assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
     assert_eq!(
         case.remove(&[3]),
@@ -343,14 +497,10 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         assert!(!case.worktree(id).exists());
         assert!(!case.git_dir(id).exists());
         assert!(!listing.contains(&format!("agent-{id}")));
-        assert!(!case.folder(id).exists() && !case.profile(id).exists());
+        assert!(case.history_kept(id), "agent {id} keeps its history");
         assert!(!case.known(id));
     }
-    let rows: i64 = case
-        .db
-        .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(rows, 3);
+    assert!(case.folder(1).join("home/transcript.bin").is_file());
     let conversations: Vec<i64> = case
         .db
         .prepare("SELECT agent FROM team_agent_conversations ORDER BY agent")
@@ -361,8 +511,8 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         .unwrap();
     assert_eq!(
         conversations,
-        [3],
-        "a removed agent's kept conversation goes with it, a kept agent keeps its own"
+        [1, 3],
+        "a removed agent keeps its kept conversation"
     );
     assert!(case.retiring().is_empty());
     assert_eq!(
@@ -370,6 +520,365 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         ""
     );
     assert!(case.listed().is_empty());
+}
+
+/// DEC-123: an agent a check keeps stays listed with the code the Clean up button would
+/// answer for it, and counts no size, while an agent still working is not listed at all.
+#[test]
+fn an_agent_a_check_keeps_is_listed_with_the_code_the_button_answers() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    write(&case.worktree(1).join("README"), b"edited\n");
+    case.agent(2, "sub", "stopped");
+    case.agent_commit(2, "unlanded.txt");
+    case.agent(3, "sub", "failed");
+    write(&case.worktree(3).join("README"), b"pending\n");
+    case.turn_end(3);
+    case.agent(4, "sub", "stopped");
+    case.agent(5, "master", "stopped");
+    case.agent(6, "sub", "working");
+    let listed = finished(&case.db, &case.project, NOW).unwrap();
+    let codes: Vec<(i64, Option<&str>)> = listed
+        .iter()
+        .map(|agent| (agent.id, agent.kept.as_deref()))
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            (5, Some("cleanup_agent_running")),
+            (4, None),
+            (3, Some("cleanup_changes_open")),
+            (2, Some("cleanup_commits_unlanded")),
+            (1, Some("cleanup_worktree_dirty")),
+        ]
+    );
+    for agent in listed.iter().filter(|agent| agent.kept.is_some()) {
+        assert_eq!((agent.bytes, agent.counted_all), (0, true), "{}", agent.id);
+    }
+    for (id, code) in case.held() {
+        assert_eq!(case.remove(&[id]), refused(&code), "agent {id}");
+        assert!(case.kept(id), "agent {id}");
+    }
+}
+
+/// DEC-123: a removed agent keeps its history but can never be woken into a worktree that is
+/// gone: its worktree record goes, which every revive reads first, and the master's list of
+/// finished agents it may wake no longer offers it.
+#[test]
+fn a_removed_agent_keeps_its_history_and_is_never_offered_to_wake() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    let wakeable = || -> Vec<i64> {
+        crate::team::events::finished_agents(&case.db, &case.project, NOW)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+    assert_eq!(wakeable(), [2, 1]);
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(case.history_kept(1) && !case.known(1));
+    assert_eq!(wakeable(), [2], "a removed agent is not offered to wake");
+    assert!(case.kept(2));
+}
+
+/// DEC-123, After N days: the sweep removes the worktree of each finished agent past its wait,
+/// an agent with no finish time counting as past it, and keeps the rest, a check keeping one
+/// never stopping the others; once the wait is over the next pass takes the one that waited.
+#[test]
+fn the_sweep_after_n_days_removes_only_agents_past_their_wait() {
+    let case = Case::new();
+    for id in 1..=4 {
+        case.agent(id, "sub", "stopped");
+    }
+    case.stopped_at(1, Some(NOW - 3 * DAY_MS - 1));
+    case.stopped_at(2, Some(NOW - 3 * DAY_MS + 60_000));
+    case.stopped_at(3, None);
+    case.stopped_at(4, Some(NOW - 10 * DAY_MS));
+    write(&case.worktree(4).join("notes.txt"), b"never added\n");
+    assert_eq!(
+        case.sweep(CleanupMode::AfterDays, 3, 0, NOW),
+        swept(&[1, 3], 0)
+    );
+    for id in [1, 3] {
+        assert!(!case.worktree(id).exists() && !case.known(id), "agent {id}");
+        assert!(case.history_kept(id), "agent {id} keeps its history");
+    }
+    assert!(case.kept(2), "agent 2 has not waited 3 days");
+    assert!(case.kept(4), "a check keeps agent 4");
+    assert_eq!(case.held(), [(4, "cleanup_worktree_dirty".to_owned())]);
+    assert_eq!(
+        case.sweep(CleanupMode::AfterDays, 3, 0, NOW + DAY_MS),
+        swept(&[2], 0)
+    );
+    assert!(case.kept(4));
+}
+
+/// DEC-123, Once its work lands: the sweep removes a finished agent's worktree as soon as
+/// nothing in it is unlanded, with no wait, and keeps one whose commits never landed.
+#[test]
+fn the_sweep_once_landed_removes_a_landed_agent_at_once() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    case.agent_commit(2, "unlanded.txt");
+    case.agent(3, "sub", "stopped");
+    write(&case.worktree(3).join("README"), b"landed\n");
+    let landed = case.turn_end(3);
+    case.accept(&landed);
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 30, 0, NOW),
+        swept(&[1, 3], 0)
+    );
+    assert!(case.kept(2));
+    assert_eq!(case.held(), [(2, "cleanup_commits_unlanded".to_owned())]);
+    assert!(case.history_kept(1) && case.history_kept(3));
+}
+
+/// DEC-123, Only when I click Clean up: the sweep removes nothing, however long an agent
+/// finished, and the button still does.
+#[test]
+fn the_sweep_set_to_manual_removes_nothing() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.stopped_at(1, Some(NOW - 400 * DAY_MS));
+    case.agent(2, "sub", "stopped");
+    case.stopped_at(2, None);
+    assert_eq!(case.sweep(CleanupMode::Manual, 1, 0, NOW), swept(&[], 0));
+    assert!(case.kept(1) && case.kept(2));
+    assert_eq!(case.listed(), [2, 1]);
+    assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
+}
+
+/// A sweep pass removes at most `RECLAIMABLE_MAX` worktrees and says where it stopped, and
+/// the next pass, starting there, takes the rest and starts over.
+#[test]
+fn a_sweep_pass_removes_at_most_its_bound_and_the_next_pass_takes_the_rest() {
+    let case = Case::new();
+    let last = i64::try_from(RECLAIMABLE_MAX).unwrap() + 1;
+    for id in 1..=last {
+        case.agent(id, "sub", "stopped");
+    }
+    let first = case.sweep(CleanupMode::OnceLanded, 1, 0, NOW);
+    let bound: Vec<i64> = (1..last).collect();
+    assert_eq!(first, swept(&bound, last - 1));
+    assert!(case.kept(last));
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 1, first.after, NOW),
+        swept(&[last], 0)
+    );
+    assert!(!case.worktree(last).exists());
+}
+
+/// A sweep pass reads at most `CANDIDATES_MAX` agents, so agents a check keeps fill a pass
+/// without starving a newer one: the next pass starts after them and removes it.
+#[test]
+fn agents_a_check_keeps_never_hold_the_sweep_back_from_a_newer_one() {
+    let case = Case::new();
+    let held = i64::try_from(CANDIDATES_MAX).unwrap();
+    for id in 1..=held {
+        case.waiting_on_a_task(id);
+    }
+    case.agent(held + 1, "sub", "stopped");
+    let first = case.sweep(CleanupMode::OnceLanded, 1, 0, NOW);
+    assert_eq!(first, swept(&[], held));
+    assert!(
+        case.kept(held + 1),
+        "the newer agent waits for the next pass"
+    );
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 1, first.after, NOW),
+        swept(&[held + 1], 0)
+    );
+    assert!(!case.worktree(held + 1).exists());
+}
+
+/// DEC-123: the code graph's copy at the top of a linked worktree is never the agent's work,
+/// so the agent is listed and its worktree removed with the copy in it, while any other
+/// untracked file still keeps it as dirty with the copy left in place.
+#[test]
+fn a_graph_copy_never_keeps_a_linked_worktree_but_another_untracked_file_does() {
+    let case = Case::new();
+    for id in [1, 2] {
+        case.agent(id, "sub", "stopped");
+        write(
+            &case.worktree(id).join("graphify-out/graph.json"),
+            b"{\"nodes\": []}\n",
+        );
+    }
+    write(&case.worktree(2).join("notes.txt"), b"never added\n");
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.held(), [(2, "cleanup_worktree_dirty".to_owned())]);
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && !case.git_dir(1).exists());
+    assert!(case.history_kept(1));
+    assert_eq!(case.remove(&[2]), refused("cleanup_worktree_dirty"));
+    assert!(case.worktree(2).join("graphify-out/graph.json").is_file());
+    assert!(case.kept(2));
+}
+
+/// DEC-123: the code graph's copy in an agent's own clone is never its work either: the
+/// owner repository's git leaves it out of the clone's untracked files and the size check
+/// reads only the landed tip's files, so the clone is removed with it.
+#[test]
+fn a_graph_copy_never_keeps_an_own_clone() {
+    let case = Case::new();
+    case.clone_agent(1, "stopped");
+    write(
+        &case.worktree(1).join("graphify-out/graph.json"),
+        b"{\"nodes\": []}\n",
+    );
+    write(
+        &case.worktree(1).join("graphify-out/cache/big.bin"),
+        &[7; 4096],
+    );
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && !case.base_known(1));
+    assert!(case.history_kept(1));
+}
+
+/// DEC-123 rv-code L2: when the project tracks its graph folder, a file left inside it is the
+/// agent's work like any other untracked file, so the list, the removal and the sweep all
+/// keep the agent as dirty, and no list offers an agent a removal then refuses.
+#[test]
+fn a_file_left_inside_a_tracked_graph_folder_keeps_the_agent_in_the_list_the_removal_and_the_sweep()
+{
+    let case = Case::new();
+    write(
+        &case.repo.join("graphify-out/graph.json"),
+        b"{\"nodes\": []}\n",
+    );
+    git_in(&case.home, &case.repo, &["add", "graphify-out/graph.json"]);
+    git_in(
+        &case.home,
+        &case.repo,
+        &["commit", "-q", "-m", "Track the graph"],
+    );
+    for id in [1, 2] {
+        case.agent(id, "sub", "stopped");
+    }
+    write(
+        &case.worktree(2).join("graphify-out/extra.json"),
+        b"left behind\n",
+    );
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.held(), [(2, "cleanup_worktree_dirty".to_owned())]);
+    assert_eq!(case.remove(&[2]), refused("cleanup_worktree_dirty"));
+    assert!(case.kept(2));
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 1, 0, NOW),
+        swept(&[1], 0)
+    );
+    assert!(case.worktree(2).join("graphify-out/extra.json").is_file());
+    assert!(case.kept(2));
+}
+
+/// DEC-123 rv-secreview L1: a worktree record the database points anywhere but straight
+/// inside the project's own worktrees folder, or at another repository, is never removed:
+/// the list keeps it, a removal refuses it and the sweep leaves it, its folder untouched.
+#[test]
+fn a_record_pointing_outside_the_projects_worktrees_folder_or_repository_is_never_removed() {
+    let case = Case::new();
+    for id in [1, 2, 3] {
+        case.agent(id, "sub", "stopped");
+    }
+    let outside = case.repo.parent().unwrap().join("outside").join("agent-2");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    git_in(
+        &case.home,
+        &case.repo,
+        &[
+            "worktree",
+            "move",
+            case.worktree(2).to_str().unwrap(),
+            outside.to_str().unwrap(),
+        ],
+    );
+    case.repoint(2, &case.repo, &outside, &case.git_dir(2));
+    let other = case.repo.parent().unwrap().join("other");
+    std::fs::create_dir(&other).unwrap();
+    git_in(
+        &case.home,
+        &other,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(
+        &case.home,
+        &other,
+        &[
+            "-c",
+            "user.name=Other Owner",
+            "-c",
+            "user.email=other@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Start",
+        ],
+    );
+    let foreign = crate::projects_home::state_folder(&other)
+        .join("worktrees")
+        .join("agent-3");
+    git_in(
+        &case.home,
+        &other,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            foreign.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    case.repoint(3, &other, &foreign, &other.join(".git/worktrees/agent-3"));
+    let invalid = "cleanup_worktree_invalid".to_owned();
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.held(), [(3, invalid.clone()), (2, invalid)]);
+    assert_eq!(case.remove(&[2]), refused("cleanup_worktree_invalid"));
+    assert_eq!(case.remove(&[3]), refused("cleanup_worktree_invalid"));
+    assert_eq!(
+        case.sweep(CleanupMode::OnceLanded, 1, 0, NOW),
+        swept(&[1], 0)
+    );
+    assert!(outside.join("README").is_file());
+    assert!(foreign.join(".git").is_file());
+    assert!(case.known(2) && case.known(3));
+    assert!(case.retiring().is_empty());
+}
+
+/// The owner's list of finished agents to remove names one whose name a running sub-agent
+/// shares by its number only (DEC-111 Q19), since that name reaches the running one; an
+/// unshared name shows as the engine names the agent everywhere else.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_is_offered_by_number_only() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    case.agent(3, "sub", "working");
+    for (id, persona, handle) in [
+        (1, "Ada", None),
+        (2, "Bo", Some("docs")),
+        (3, "ada", Some("charts")),
+    ] {
+        case.db
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![id, case.project.as_str(), persona, handle],
+            )
+            .unwrap();
+    }
+    let listed = finished(&case.db, &case.project, NOW).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|agent| (agent.id, agent.label.as_str()))
+            .collect::<Vec<_>>(),
+        [(2, "Bo (@docs)"), (1, "Sub-agent 1")]
+    );
 }
 
 #[test]
@@ -438,7 +947,7 @@ fn a_change_after_the_read_is_caught_inside_the_removal_and_nothing_is_removed()
     assert!(case.kept(1) && case.kept(3));
     let other = ProjectId::new("project-2").unwrap();
     assert_eq!(
-        remove(&case.db, &case.team, &other, &[1], NOW).unwrap(),
+        remove(&case.db, case.team.parent().unwrap(), &other, &[1], NOW).unwrap(),
         refused("cleanup_agent_not_found")
     );
     let over = i64::try_from(RECLAIMABLE_MAX).unwrap() + 1;
@@ -471,26 +980,31 @@ fn an_older_master_is_listed_but_the_one_the_runtime_starts_again_is_not() {
     assert!(case.kept(1) && case.kept(3));
 }
 
+/// A worktree file the engine cannot delete, here one pinned at mode 000, which Clean up
+/// cannot open to clear its flags (T8-R2-F1), stops a removal part way: it says what it
+/// removed, and offers the rest again.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again() {
+    use std::os::unix::fs::PermissionsExt;
     let case = Case::new();
     for id in [1, 2, 3] {
         case.agent(id, "sub", "stopped");
     }
-    std::fs::remove_file(case.profile(2)).unwrap();
-    write(
-        &case.profile(2).join("held"),
-        b"a folder where the profile was\n",
-    );
+    let stuck = case.worktree(2).join("target/stuck.bin");
+    write(&stuck, b"locked\n");
+    let unlocked = Unlocked(stuck.clone());
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(chflags("uchg", &stuck));
     assert_eq!(
         case.remove(&[1, 2, 3]),
         Removal {
             agents: vec![1],
-            kept: Some("cleanup_folder_failed".into()),
+            kept: Some("cleanup_worktree_leftover".into()),
         }
     );
-    assert!(!case.worktree(1).exists() && !case.folder(1).exists());
-    assert!(!case.worktree(2).exists() && !case.git_dir(2).exists());
+    assert!(!case.worktree(1).exists() && case.history_kept(1));
+    assert!(stuck.exists() && !case.git_dir(2).exists());
     assert!(!case.known(2), "no revive finds the removed worktree");
     assert_eq!(
         case.retiring(),
@@ -499,11 +1013,34 @@ fn a_removal_that_stops_part_way_says_what_it_removed_and_offers_the_rest_again(
     );
     assert!(case.kept(3), "the agent not reached keeps its record");
     assert_eq!(case.listed(), [3, 2]);
-    std::fs::remove_dir_all(case.profile(2)).unwrap();
+    assert!(chflags("nouchg", &stuck));
     assert_eq!(case.remove(&[2]), removed(&[2]));
-    assert!(!case.folder(2).exists() && !case.profile(2).exists());
+    assert!(!case.worktree(2).exists() && case.history_kept(2));
     assert!(case.retiring().is_empty());
     assert_eq!(case.listed(), [3]);
+    drop(unlocked);
+}
+
+/// T8-R2-N4: a file an agent pinned (`chflags uchg`) and a folder it made append only in
+/// its worktree keep neither the worktree nor the agent from Clean up, as in its tool cache
+/// (T8 r1 L3).
+#[cfg(target_os = "macos")]
+#[test]
+fn clean_up_takes_a_worktree_its_agent_pinned_inside() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    let pinned = case.worktree(1).join("target/pinned.bin");
+    write(&pinned, b"pinned\n");
+    let _unlocked = Unlocked(pinned.clone());
+    assert!(chflags("uchg", &pinned));
+    let appending = case.worktree(1).join("target/appending");
+    write(&appending.join("log"), b"kept\n");
+    let _appending = Unappended(appending.clone());
+    assert!(chflags("uappnd", &appending));
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && case.history_kept(1));
+    assert!(case.retiring().is_empty());
+    assert_eq!(case.listed(), Vec::<i64>::new());
 }
 
 #[test]
@@ -527,11 +1064,13 @@ fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_ch
     assert!(case.known(2), "a changed worktree gets its record back");
     assert_eq!(case.retiring(), [1]);
     assert_eq!(case.remove(&[1]), removed(&[1]));
-    assert!(!case.worktree(1).exists() && !case.folder(1).exists());
+    assert!(!case.worktree(1).exists() && case.history_kept(1));
     assert!(case.retiring().is_empty());
     assert!(case.kept(2));
 }
 
+/// A removal leaves the agent's folder alone, read-only folders and links in it included;
+/// deleting its project then removes those folders without following a link out.
 #[test]
 fn read_only_folders_are_removed_without_following_a_link_out() {
     use std::os::unix::fs::PermissionsExt;
@@ -553,6 +1092,11 @@ fn read_only_folders_are_removed_without_following_a_link_out() {
     write(&closed.join("inner/file"), b"x\n");
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
     assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(
+        cache.join("lib.go").is_file(),
+        "a removal keeps the agent's folder"
+    );
+    remove_agent_files(&case.team, 1).unwrap();
     assert!(!case.folder(1).exists());
     let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o755, "the link's target keeps its mode");
@@ -633,7 +1177,7 @@ fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out
     for id in [1, 2] {
         assert!(!case.worktree(id).exists() && !case.git_dir(id).exists());
         assert!(!listing.contains(&format!("agent-{id}")));
-        assert!(!case.folder(id).exists() && !case.known(id));
+        assert!(case.history_kept(id) && !case.known(id));
     }
     let bases: i64 = case
         .db
@@ -650,6 +1194,39 @@ fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out
     );
     assert!(case.retiring().is_empty());
     assert!(case.listed().is_empty());
+}
+
+/// CEIL-L1: an older-layout project's cleanup of agent 7 is cut off after its claim, so the
+/// record waits in `team_retiring` while the worktree and its `gitdir:` `.git` stay in
+/// `<project>/worktrees`. Once the project gains a `.crazyagent` folder, the IDE's git
+/// ceiling must still keep that older root, as it does for the live record.
+#[test]
+fn an_agent_whose_cleanup_stopped_after_its_claim_keeps_the_older_root_in_the_git_ceiling() {
+    let case = Case::new();
+    let engine = case.team.parent().unwrap().to_path_buf();
+    let state = case.repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    std::fs::remove_dir(&state).unwrap();
+    let older = || crate::ide::workspace::older_agents(&engine, &case.project, &case.repo);
+    assert!(!older().unwrap(), "no engine-made worktree yet");
+    case.agent(7, "sub", "stopped");
+    let worktree = case.repo.join("worktrees").join("agent-7");
+    assert!(worktree.join(".git").is_file());
+    std::fs::create_dir(&state).unwrap();
+    assert_eq!(crate::projects_home::state_folder(&case.repo), state);
+    assert!(older().unwrap(), "the live record in the older root counts");
+
+    initialize(&case.db).unwrap();
+    assert!(claim(&case.db, &case.project, &[7], NOW).unwrap().is_ok());
+    assert_eq!(case.retiring(), [7]);
+    assert!(!case.known(7));
+    assert!(
+        worktree.join(".git").is_file(),
+        "the claim alone removes nothing"
+    );
+    assert!(
+        older().unwrap(),
+        "a record waiting in team_retiring keeps the older root in the ceiling"
+    );
 }
 
 /// A finished Own branch agent whose commits all landed, or that made none, is listed and
@@ -678,10 +1255,26 @@ fn a_finished_clone_agent_with_everything_landed_is_removed_without_git_in_its_c
     let mut listed = case.listed();
     listed.sort_unstable();
     assert_eq!(listed, [1, 2]);
+    let base_refs = || {
+        git_in(
+            &case.home,
+            &case.repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/crazyagent/base",
+            ],
+        )
+    };
+    assert_eq!(
+        base_refs(),
+        "refs/crazyagent/base/agent-1\nrefs/crazyagent/base/agent-2\n"
+    );
     assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
+    assert_eq!(base_refs(), "", "each removed clone's base ref is gone");
     for id in [1, 2] {
         assert!(!case.worktree(id).exists(), "agent {id}'s clone is gone");
-        assert!(!case.folder(id).exists() && !case.profile(id).exists());
+        assert!(case.history_kept(id), "agent {id} keeps its history");
         assert!(!case.known(id) && !case.base_known(id));
     }
     assert!(!marker.exists(), "git ran in an agent's clone");
@@ -902,4 +1495,289 @@ fn a_clone_with_a_huge_file_at_a_tracked_path_is_kept_as_dirty_without_hashing_i
         "{elapsed:?}"
     );
     assert!(case.kept(1) && case.base_known(1));
+}
+
+/// A removed native lead keeps its own and its teammates' profile and the records of its
+/// teammates' socket name and server pid, as history (DEC-123); deleting its project takes
+/// them all (rv-audit TTDL F2, PLC c PC-L1), and an agent left in place keeps its own.
+#[test]
+fn a_removed_native_lead_keeps_its_teammates_records_until_its_project_is_deleted() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    let teammates = |id: i64| {
+        [
+            crate::team::runtime::agent_teammates_profile(&case.team, id),
+            crate::team::runtime::agent_teammates_socket_name(&case.team, id),
+            crate::team::runtime::agent_teammates_server_pid(&case.team, id),
+        ]
+    };
+    for id in [1, 2] {
+        for file in teammates(id) {
+            write(&file, b"written by the engine\n");
+        }
+    }
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    for file in teammates(1).into_iter().chain([case.profile(1)]) {
+        assert!(file.exists(), "{} went with the worktree", file.display());
+    }
+    remove_agent_files(&case.team, 1).unwrap();
+    assert!(!case.profile(1).exists() && !case.folder(1).exists());
+    for file in teammates(1) {
+        assert!(!file.exists(), "{} was left behind", file.display());
+    }
+    for file in teammates(2).into_iter().chain([case.profile(2)]) {
+        assert!(file.exists(), "{} went with another agent", file.display());
+    }
+}
+
+/// Sets or clears the user immutable flag on one file with the system's `chflags`.
+/// Inputs: the flag name and the file. Output: whether `chflags` succeeded.
+#[cfg(target_os = "macos")]
+fn chflags(flag: &str, file: &Path) -> bool {
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/chflags")
+            .arg(flag)
+            .arg(file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|done| done.success())
+}
+
+/// Clears the user immutable flag on a test file when dropped, so the temporary folder
+/// can always be deleted, whatever the test asserted. Holds the file's path.
+#[cfg(target_os = "macos")]
+struct Unlocked(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unlocked {
+    fn drop(&mut self) {
+        let _ = chflags("nouchg", &self.0);
+    }
+}
+
+/// Clears the user append-only flag on a test folder when dropped, so the temporary folder
+/// can always be deleted, whatever the test asserted. Holds the folder's path.
+#[cfg(target_os = "macos")]
+struct Unappended(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unappended {
+    fn drop(&mut self) {
+        let _ = chflags("nouappnd", &self.0);
+    }
+}
+
+/// T8 r2 L1: a folder an agent's leftover process swaps for a link to an owner folder while
+/// Clean up clears a pinned file of its cache sends no flag change there, since the flags go
+/// through the open entry and never a path. The owner's file keeps its flag and the cache
+/// still goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn clearing_a_pinned_cache_file_never_changes_an_owner_file_a_swapped_folder_points_to() {
+    use std::os::macos::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    write(&owner.join("pinned"), b"the owner's\n");
+    assert!(chflags("uchg", &owner.join("pinned")));
+    let _owner = Unlocked(owner.join("pinned"));
+    let cache = root.join("cache");
+    write(&cache.join("sub/pinned"), b"the agent's\n");
+    assert!(chflags("uchg", &cache.join("sub/pinned")));
+    let _agent = Unlocked(cache.join("moved/pinned"));
+    let (sub, moved, target) = (cache.join("sub"), cache.join("moved"), owner.clone());
+    AFTER_UNPIN_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&sub, &moved).unwrap();
+            std::os::unix::fs::symlink(&target, &sub).unwrap();
+        }));
+    });
+    remove_agent_tree(&cache).unwrap();
+    assert!(
+        AFTER_UNPIN_OPEN.with(|step| step.borrow().is_none()),
+        "no pinned entry was opened"
+    );
+    assert!(!cache.exists());
+    let flags = std::fs::symlink_metadata(owner.join("pinned"))
+        .unwrap()
+        .st_flags();
+    assert_eq!(
+        flags & nix::sys::stat::FileFlag::UF_IMMUTABLE.bits(),
+        nix::sys::stat::FileFlag::UF_IMMUTABLE.bits(),
+        "the owner's file lost its flag"
+    );
+    assert_eq!(
+        std::fs::read(owner.join("pinned")).unwrap(),
+        b"the owner's\n"
+    );
+}
+
+/// When git drops an agent's worktree record but leaves a file the engine cannot delete,
+/// the agent stays offered for removal with its record waiting, and a later removal
+/// finishes once the file can go, instead of refusing it as an invalid worktree for good
+/// (RVD-C-N1). The file is pinned at mode 000, which Clean up cannot open to unpin
+/// (T8-R2-F1); a pinned file it can open goes at once (T8-R2-N4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_leftover_the_engine_cannot_delete_keeps_the_agent_offered_and_a_later_removal_finishes_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    let stuck = case.worktree(1).join("target/stuck.bin");
+    write(&stuck, b"locked\n");
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlocked = Unlocked(stuck.clone());
+    assert!(chflags("uchg", &stuck));
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.remove(&[1]), refused("cleanup_worktree_leftover"));
+    assert!(!case.git_dir(1).exists() && stuck.exists());
+    assert_eq!(case.listed(), [1], "the agent stays offered for removal");
+    assert_eq!(
+        case.retiring(),
+        [1],
+        "its record waits instead of going back"
+    );
+    assert_eq!(
+        case.remove(&[1]),
+        refused("cleanup_worktree_leftover"),
+        "the file is still locked"
+    );
+    assert_eq!(case.retiring(), [1]);
+    assert!(chflags("nouchg", &stuck));
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && case.history_kept(1) && !case.known(1));
+    assert!(case.retiring().is_empty() && case.listed().is_empty());
+    drop(unlocked);
+}
+
+/// What a Delete everything would lose, read before anything stops: uncommitted edits,
+/// unlanded commits and an open change set each keep their plain reason, a running agent's
+/// edits count too, a clean agent is not listed, and an agent's own clone whose git config
+/// names an fsmonitor and a filter never runs either while it is read (DEC-118).
+#[test]
+fn a_removal_preview_names_each_agent_s_unlanded_work_without_running_git_in_a_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    write(&case.worktree(1).join("README"), b"edited\n");
+    case.agent(2, "sub", "stopped");
+    write(&case.worktree(2).join("README"), b"committed\n");
+    case.in_agent(2, &["commit", "-q", "-am", "Agent commit"]);
+    case.agent(3, "sub", "stopped");
+    write(&case.worktree(3).join("README"), b"pending\n");
+    case.turn_end(3);
+    case.agent(4, "sub", "working");
+    write(&case.worktree(4).join("notes.txt"), b"new\n");
+    case.agent(5, "sub", "stopped");
+    case.clone_agent(6, "stopped");
+    let marker = case.home.join("hook-ran");
+    let hook = case.home.join("hook.sh");
+    write(
+        &hook,
+        format!("#!/bin/sh\necho ran >> '{}'\nexit 1\n", marker.display()).as_bytes(),
+    );
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    case.in_agent(6, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+    case.in_agent(6, &["config", "filter.mark.clean", hook.to_str().unwrap()]);
+    write(&case.worktree(6).join(".gitattributes"), b"* filter=mark\n");
+    write(&case.worktree(6).join("README"), b"edited in the clone\n");
+
+    let losses = removal_loss(&case.db, &case.project, NOW).unwrap();
+    let got: Vec<(i64, &str)> = losses
+        .iter()
+        .map(|loss| (loss.id, loss.code.as_str()))
+        .collect();
+    assert_eq!(
+        got[..got.len().min(4)],
+        [
+            (1, "cleanup_worktree_dirty"),
+            (2, "cleanup_commits_unlanded"),
+            (3, "cleanup_changes_open"),
+            (4, "cleanup_worktree_dirty"),
+        ],
+        "{got:?}"
+    );
+    assert!(
+        matches!(
+            got.get(4),
+            Some((6, "cleanup_worktree_dirty" | "cleanup_worktree_unreadable"))
+        ),
+        "the clone's edits are named or said to be unreadable: {got:?}"
+    );
+    assert_eq!(got.len(), 5, "a clean agent loses nothing: {got:?}");
+    assert!(losses.iter().all(|loss| !loss.label.is_empty()));
+    assert!(
+        !marker.exists(),
+        "no fsmonitor or filter ran in an agent's clone"
+    );
+    for id in [1, 2, 3, 4, 6] {
+        assert!(case.kept(id), "a preview changes nothing for agent {id}");
+    }
+}
+
+/// T8 design 9: Clean up takes the tool caches One per agent gave the agent whose worktree
+/// it removes, at each level, with its native teammates' and their priming records, and
+/// keeps another agent's and the shared caches, since a removed agent never runs again.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_ones() {
+    use crate::sandbox::policy::{AgentAccess, ToolCacheScope};
+    use crate::sandbox::tool_cache::{CacheShape, key, prepare, project_folder};
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    let runtime = case.team.parent().unwrap();
+    let project = case.repo.to_str().unwrap();
+    let names: Vec<String> = [
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            "1",
+        ),
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::OwnBranch,
+            CacheShape::Clone,
+            "1",
+        ),
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Teammate,
+            "1-teammates",
+        ),
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            "2",
+        ),
+        (
+            ToolCacheScope::Shared,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            "1",
+        ),
+    ]
+    .into_iter()
+    .map(|(scope, access, shape, agent)| key(scope, access, shape, agent).unwrap())
+    .collect();
+    let folder = project_folder(runtime, project);
+    for name in &names {
+        prepare(runtime, project, name, None).unwrap();
+        write(&folder.join(format!("{name}.primed")), b"record\n");
+    }
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    let left = |name: &str| std::fs::symlink_metadata(folder.join(name)).is_ok();
+    for name in &names[..3] {
+        assert!(!left(name) && !left(&format!("{name}.primed")), "{name}");
+    }
+    for name in &names[3..] {
+        assert!(left(name) && left(&format!("{name}.primed")), "{name}");
+    }
+    assert!(case.history_kept(1) && case.kept(2));
 }

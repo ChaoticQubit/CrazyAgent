@@ -1,30 +1,76 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Button } from "./button";
 import { Icon, type IconName } from "./icon";
 
-function useModal(open: boolean) {
+let covering = 0;
+const watchers = new Set<() => void>();
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+/** Counts one open dialog, drawer or menu over the page, so a native view above the page,
+ * the IDE webview, steps aside until the last one closes. Output: the release, which counts
+ * once however often it is called. */
+export function cover(): () => void {
+  let held = true;
+  covering += 1;
+  if (covering === 1) for (const watcher of watchers) watcher();
+  return () => {
+    if (!held) return;
+    held = false;
+    covering -= 1;
+    assert(covering >= 0, "an overlay released more often than it covered");
+    if (covering === 0) for (const watcher of watchers) watcher();
+  };
+}
+
+/** Whether any dialog, drawer or menu is open over the page now. Output: true while one is. */
+export function overlayShown(): boolean {
+  return covering > 0;
+}
+
+function watch(watcher: () => void): () => void {
+  watchers.add(watcher);
+  return () => { watchers.delete(watcher); };
+}
+
+/** Follows whether any dialog, drawer or menu is open over the page. Output: true while one
+ * is, and the component renders again when that changes. */
+export function useOverlayShown(): boolean {
+  return useSyncExternalStore(watch, overlayShown, overlayShown);
+}
+
+function useCover(open: boolean) {
+  useEffect(() => (open ? cover() : undefined), [open]);
+}
+
+function useModal(open: boolean, returnFocus?: () => HTMLElement | null) {
   const ref = useRef<HTMLDialogElement>(null);
+  useCover(open);
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog || !open) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active = document.activeElement;
+    const opener = active instanceof HTMLElement && active !== document.body ? active : null;
     if (!dialog.open) dialog.showModal();
     const first = dialog.querySelector<HTMLElement>("[data-autofocus], input:not([type=hidden]), textarea, select");
     first?.focus();
     return () => {
       if (dialog.open) dialog.close();
-      opener?.focus();
+      (opener?.isConnected ? opener : returnFocus?.())?.focus();
     };
   }, [open]);
   return ref;
 }
 
 /** A modal dialog on the native dialog element: traps focus, starts on the first field, Esc
- * asks onClose, and focus returns to the opener. While busy, Back, Close and Esc do nothing.
+ * asks this dialog's onClose alone, and focus returns to the opener. While busy, Back, Close and
+ * Esc do nothing.
  * Inputs: open, title, close handler, optional Back handler, body, footer, wide layout, busy. */
 export function Dialog({ open, title, onClose, onBack, children, footer, wide = false, busy = false }: {
   open: boolean;
-  title: string;
+  title: ReactNode;
   onClose: () => void;
   onBack?: () => void;
   children: ReactNode;
@@ -36,7 +82,7 @@ export function Dialog({ open, title, onClose, onBack, children, footer, wide = 
   const titleId = useId();
   if (!open) return null;
   return <dialog ref={ref} className={`dialog${wide ? " wide" : ""}`} aria-labelledby={titleId} aria-busy={busy || undefined}
-    onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
+    onCancel={(event) => { event.preventDefault(); event.stopPropagation(); if (!busy) onClose(); }}>
     <div className="dialog-head">
       {onBack && <Button iconOnly="Back" icon="arrow-left" disabled={busy} onClick={onBack} />}
       <h2 id={titleId}>{title}</h2>
@@ -48,15 +94,17 @@ export function Dialog({ open, title, onClose, onBack, children, footer, wide = 
 }
 
 /** A right-side drawer (480 px) on the native dialog element; Esc closes it.
- * Inputs: open, title, close handler, body, footer. */
-export function Drawer({ open, title, onClose, children, footer }: {
+ * Inputs: open, title, close handler, body, footer, and where focus goes when the element
+ * that opened the drawer has left the page. */
+export function Drawer({ open, title, onClose, children, footer, returnFocus }: {
   open: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  returnFocus?: () => HTMLElement | null;
 }) {
-  const ref = useModal(open);
+  const ref = useModal(open, returnFocus);
   const titleId = useId();
   if (!open) return null;
   return <dialog ref={ref} className="drawer" aria-labelledby={titleId} onCancel={(event) => { event.preventDefault(); onClose(); }}>
@@ -103,6 +151,7 @@ function focusLeftMenu(menu: Node, next: Node | null): boolean {
  * pointerdown or focus outside closes it. Inputs: accessible label for the button and the items. */
 export function Menu({ label, items }: { label: string; items: MenuItem[] }) {
   const [open, setOpen] = useState(false);
+  useCover(open);
   const root = useRef<HTMLSpanElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);

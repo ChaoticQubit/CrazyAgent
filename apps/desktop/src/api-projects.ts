@@ -1,4 +1,4 @@
-import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
@@ -11,6 +11,7 @@ import type {
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
 export type ResearchKind = "market_research" | "competitor_research" | "design_research" | "front_end_design" | "tech_stack_research";
 export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+export type JobKind = ResearchKind | "roadmap_planning";
 
 export interface HarnessSlot {
   harness: string;
@@ -35,7 +36,7 @@ export interface ProjectSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan | null;
   documents: string[];
@@ -64,7 +65,7 @@ export interface StoredSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan;
   documents: { name: string; bytes: number }[];
@@ -76,7 +77,7 @@ export interface StoredSetup {
 export interface ResearchJob {
   id: number;
   project_id: string;
-  kind: ResearchKind;
+  kind: JobKind;
   kind_label: string;
   status: ResearchStatus;
   status_label: string;
@@ -94,9 +95,47 @@ export interface ResearchJob {
   finished_ms: number | null;
 }
 
+export type ActivityKind =
+  | "created"
+  | "research_started"
+  | "research_saved"
+  | "research_stopped"
+  | "research_waiting"
+  | "task_started"
+  | "task_finished"
+  | "task_failed"
+  | "task_stopped"
+  | "changes_ready"
+  | "accepted"
+  | "discarded"
+  | "conflict"
+  | "sent_back"
+  | "lead_merged"
+  | "merged_into_main"
+  | "undone"
+  | "work_started"
+  | "work_review_ready"
+  | "work_complete"
+  | "work_closed"
+  | "phase"
+  | "test";
+
+export interface ActivityItem {
+  id: number;
+  at_ms: number;
+  kind: ActivityKind;
+  actor: string;
+  goal: string | null;
+  text: string;
+  change_set: string | null;
+  undone: boolean;
+  branch?: string | null;
+  place?: "changes" | "ide" | null;
+}
+
 export interface ContextItem {
   path: string;
-  kind: "brief" | "document" | "research";
+  kind: "brief" | "document" | "research" | "plan";
   bytes: number;
 }
 
@@ -117,22 +156,49 @@ export interface ContextChunk {
 /** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
+/** How far a project's tools-on agents and the plugin check may reach on the network: open is
+ * the whole network, https is port 443 only, none is the model alone: a hosted model's own
+ * hosts through the engine's model proxy, or only a local model's port on loopback. It does
+ * not widen or narrow the live master, which always reaches the model's port only. */
+export type AgentNetwork = "open" | "https" | "none";
+
+/** What the IDE may change in agent folders at Sandboxed and Own branch (DEC-124). */
+export type IdeAgentFiles = "allow_all" | "no_delete_or_rename" | "read_only";
+
 /** A toolchain family the engine detects in the owner's home folder and the project. */
 export type Toolchain = "rust" | "node" | "python";
 
-/** A project's saved agent policy: the level and the toolchain switches that differ from the
- * project's own use. */
+/** Who shares the uv cache and pnpm store a project's sandboxed agents write (T8): shared is
+ * one per access level and kind of folder, per_agent one per agent. */
+export type ToolCacheScope = "shared" | "per_agent";
+
+/** A project's saved agent policy: the level, the network choice, the toolchain switches
+ * that differ from the project's own use, whether git in the IDE runs the project's own
+ * hooks, what the IDE may change in agent folders, and who shares the agents' tool cache,
+ * shared when it is left out. */
 export interface AgentPolicy {
   access: AgentAccess;
+  network: AgentNetwork;
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
+  ide_git_hooks: boolean;
+  tool_cache?: ToolCacheScope;
+  ide_agent_files: IdeAgentFiles;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
- * with the reason one can't run, and every detected toolchain. */
+ * with the reason one can't run, the network choices, every detected toolchain, the IDE
+ * hooks switch, the IDE agent folders choice and the tool cache choice with every choice. */
 export interface PolicyView {
   access: AgentAccess;
+  network: AgentNetwork;
   levels: { access: AgentAccess; label: string; unavailable: string | null }[];
+  networks: { network: AgentNetwork; label: string }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
+  ide_git_hooks: boolean;
+  tool_cache: ToolCacheScope;
+  tool_caches: { scope: ToolCacheScope; label: string }[];
+  ide_agent_files: IdeAgentFiles;
+  version: number;
 }
 
 export interface PoolChoice {
@@ -160,6 +226,8 @@ const copy: Record<string, string> = {
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
+  planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
+  setup_unconfirmed: "Confirm this project's setup first. Its setup review has the roadmap switch.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
   project_spec_bounds: "Enter a project name of at most 80 characters.",
@@ -209,10 +277,29 @@ const copy: Record<string, string> = {
   team_plan_step_handed: "That step was handed off already.",
   team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
+  team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
+  team_land_on_invalid: "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.",
+  team_background_grace_invalid: "Pick a grace time from 10 to 3600 seconds.",
+  coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
+  coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
+  coord_project_unknown: "This project was not found.",
   team_agent_unknown: "That agent is not running anymore.",
   team_agent_running: "That agent is already running.",
   team_agent_no_worktree: "That agent's worktree was cleaned up, so it can't be woken. Hand its work to a new agent.",
   team_agents_unavailable: "Team agents can't run on this system in this version.",
+  team_stop_master: "The master stops with Stop all.",
+  team_teammate_not_found: "That teammate has already ended.",
+  team_agent_message_invalid: "Write a message of up to 4000 bytes, with no hidden characters.",
+  coord_agent_unknown: "That agent is not on this project's team any more.",
+  coord_text_invalid: "Write a message of up to 4000 bytes, with no hidden characters.",
+  coord_message_self: "An agent cannot be sent its own message.",
+  coord_recipient_invalid: "That message has no agent to go to.",
+  team_cap_invalid: "Pick a listed limit, or No limit.",
+  team_budget_invalid: "Pick a listed token budget, or Off.",
+  team_answer_invalid: "Write an answer of at most 4000 bytes.",
+  coord_question_missing: "That question is no longer there.",
+  coord_question_closed: "That question was already answered or has ended.",
+  coord_questions_bounds: "The questions are too long to show. Answer them in the agents' terminals.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
   team_state_not_canonical: "The engine cannot read the team safely right now.",
   team_state_not_private: "The engine cannot read the team safely right now.",
@@ -254,6 +341,17 @@ const copy: Record<string, string> = {
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
   unavailable: "The engine couldn't do this right now. Try again.",
   rejected: "The engine refused this change.",
+  delete_shared_folder: "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead.",
+  delete_research_running: "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted.",
+  delete_platform_unqualified: "Delete everything is only on macOS for now. Remove the project from the dashboard instead.",
+  delete_outside_home: "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead.",
+  delete_name_mismatch: "Type the project's name exactly as shown to delete it.",
+  delete_agents_running: "Its agents didn't stop in time, so nothing was deleted. They stay stopped; try again.",
+  delete_trash_partial: "Some of its folders are in the Trash and the rest couldn't be moved. The project stays listed; try again.",
+  delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
+  home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
+  home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
 };
 
 /** Plain sentence for one engine failure, never opaque.
@@ -324,6 +422,10 @@ export function loadResearch(id: string): Promise<Result<{ project_id: string; j
   return call<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
 }
 
+export function loadActivity(id: string, limit: number): Promise<Result<{ project_id: string; items: ActivityItem[]; more: boolean }>> {
+  return call<{ project_id: string; items: ActivityItem[]; more: boolean }>("desktop_project_activity", { id, limit });
+}
+
 export function loadContext(id: string): Promise<Result<ProjectContext>> {
   return call<ProjectContext>("desktop_project_context", { id });
 }
@@ -363,9 +465,10 @@ export function loadTeamEvents(): Promise<Result<AppTeamEvents>> {
 }
 
 /** Sets the wake rule of the app, a project or one agent, or clears it with null so the level
- * above applies. Inputs: the level, the rule or null and a generation. Output: the receipt. */
-export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, generation });
+ * above applies; a rule changed since the version shown is refused with `stale_revision`.
+ * Inputs: the level, the rule or null, the version shown and a generation. Output: the receipt. */
+export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, version, generation });
 }
 
 /** Marks a project's owner notifications up to one id as seen. Inputs: the project id, the
@@ -407,6 +510,28 @@ export function wakeTeamAgent(id: string, agent: number, generation: number): Pr
   return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
 }
 
+/** Stops one harness with the teammates in its terminal; it stays stopped until the owner wakes
+ * it. Inputs: the project id, the team agent id and a generation. Output: the engine receipt. */
+export function stopTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
+}
+
+/** The most bytes one owner message to an agent may hold, as the coordination layer allows. */
+export const AGENT_MESSAGE_BYTES_MAX = 4000;
+
+/** Sends the owner's message to one team agent through the coordination layer, which delivers
+ * it to the agent's mailbox with a receipt. Inputs: the project id, the team agent id, the text
+ * and a generation. Output: the engine receipt. */
+export function sendAgentMessage(id: string, agent: number, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_coord_send", { id, agent, text, generation });
+}
+
+/** Stops one teammate a harness split off, and tells the harness. Inputs: the project id, the
+ * harness agent id, the teammate's pane id and a generation. Output: the engine receipt. */
+export function stopTeammate(id: string, agent: number, pane: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_stop_teammate", { id, agent, pane, generation });
+}
+
 export const RESEARCH_LOG_LINES_MAX = 200;
 
 /** Reads the latest plain lines of one research agent's log.
@@ -430,6 +555,13 @@ export function retryResearch(id: string, job: number, generation: number): Prom
   return call<IntentReceipt>("desktop_retry_research", { id, job, generation });
 }
 
+/** Asks the engine to plan a roadmap and release process for the project now, from what it knows.
+ * Inputs: the project id and a draft generation. Output: the engine receipt; `planning_busy` while
+ * a planning job of the project is queued or running. */
+export function planRoadmap(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_plan_roadmap", { id, generation });
+}
+
 export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";
 
 export interface MemoryItem {
@@ -442,6 +574,17 @@ export interface MemoryItem {
 
 export type MemoryDecision = { decision: "Keep" } | { decision: "Reject" } | { decision: "Remove" };
 
+
+/** One decision the project's IDE asked the owner to confirm: the memory at the asked
+ * version and whether to approve or reject it. */
+export type IdeAsk = MemoryItem & { decision: "approve" | "reject" };
+
+/** Reads the decisions this project's IDE asked the owner to confirm on memories still
+ * waiting at the asked version. The desktop draws the confirm, which the IDE cannot click.
+ * Input: the project id. Output: at most one engine batch of asks. */
+export function loadIdeAsks(id: string): Promise<Result<IdeAsk[]>> {
+  return call<IdeAsk[]>("desktop_ide_asks", { id });
+}
 
 /** Saves, dismisses or deletes one memory; Keep is the owner's one-click approval.
  * Inputs: project id, memory id, the version shown, the decision and a generation.
@@ -456,10 +599,13 @@ export function promoteProjectMemory(id: string, memory: string, version: number
   return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
 }
 
+/** A project's extra read-only folders in saved order and the version a change sends back. */
+export type ReadPaths = { paths: string[]; version: number };
+
 /** Reads the extra read-only folders this project's agents get beside its toolchains.
- * Input: project id. Output: the folders in saved order. */
-export function loadReadPaths(id: string): Promise<Result<string[]>> {
-  return call<string[]>("desktop_project_read_paths", { id });
+ * Input: project id. Output: the folders in saved order and their version. */
+export function loadReadPaths(id: string): Promise<Result<ReadPaths>> {
+  return call<ReadPaths>("desktop_project_read_paths", { id });
 }
 
 /** Lists this project's files for `@` tags: tracked and untracked, not ignored paths
@@ -469,10 +615,23 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
   return call<string[]>("desktop_project_files", { id, query });
 }
 
-/** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
- * Inputs: project id, the folders and a generation. Output: the receipt. */
-export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+/** Replaces this project's extra read-only folders; the engine refuses unsafe ones, and
+ * folders changed since the version shown with `stale_revision`.
+ * Inputs: project id, the folders, the version shown and a generation. Output: the receipt. */
+export function saveReadPaths(id: string, paths: string[], version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
+}
+
+/** Reads the folders this project's agents are kept out of, read, write and run.
+ * Input: project id. Output: the folders in saved order. */
+export function loadHiddenPaths(id: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_hidden_paths", { id });
+}
+
+/** Replaces the folders this project's agents are kept out of; the engine refuses a path
+ * outside the project. Inputs: project id, the folders and a generation. Output: the receipt. */
+export function saveHiddenPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_hidden_paths", { id, paths, generation });
 }
 
 /** Reads this project's agent access level and the toolchains its agents may use.
@@ -482,10 +641,11 @@ export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
 }
 
 /** Replaces this project's agent access level and toolchain switches; the engine refuses a
- * level this computer can't enforce. Inputs: project id, the policy and a generation.
- * Output: the receipt. */
-export function saveAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
+ * level this computer can't enforce, and a policy changed since the screen read it as
+ * `stale_revision`. Inputs: project id, the policy, the version the screen read and a
+ * generation. Output: the receipt. */
+export function saveAgentPolicy(id: string, policy: AgentPolicy, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, version, policy, generation });
 }
 
 /** Deletes one document or research report from the project folder.
@@ -519,10 +679,33 @@ export function updateProjectSetup(id: string, setup: ProjectSetup, generation: 
   return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
 }
 
-/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
- * Inputs: project id and a generation. Output: the receipt. */
-export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_remove_project", { id, generation });
+/** What removing a project would do, read before the owner picks how: its stored name, the folders
+ * Delete everything would move to the Trash and whether it may, its running agents, its open change
+ * sets and each agent whose work would be lost, with the plain code of what it holds. */
+export type RemovalPreview = {
+  name: string;
+  folders: string[];
+  can_delete: boolean;
+  blocked: string | null;
+  running: string[];
+  open_change_sets: number;
+  losses: { id: number; label: string; code: string }[];
+};
+
+/** Reads what removing a project would do. Input: the project id. Output: the preview. */
+export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> {
+  return call<RemovalPreview>("desktop_project_removal", { id });
+}
+
+/** Removes a project from CrazyAgent. Without a name its folder stays on disk; with the name the
+ * owner typed, the engine stops its agents and moves its folders to the Trash, only when the name
+ * is the project's exact name. Either way, once the engine applied the removal, the project's
+ * terminal wall windows close; one that fails to close leaves the removal as it is. Inputs:
+ * project id, a generation and the typed name or null. Output: the receipt. */
+export async function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
+  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
+  if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
+  return result;
 }
 
 export const PAGES_MAX = 50;

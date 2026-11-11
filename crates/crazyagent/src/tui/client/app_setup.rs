@@ -1,11 +1,15 @@
 use super::settings::{applied, problem};
 use super::*;
+use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
 use crate::projects_home::ProjectsHome;
+use crate::quit_settings::QuitSettings;
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, default-pack changes,
-/// the projects home folder and the GitHub account.
+/// the projects home folder, the GitHub account, the sandbox settings, when finished
+/// agents' worktrees go and what quitting does to team agents.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -29,13 +33,28 @@ pub(in crate::tui) enum AppSetupJob {
     },
     GitHub,
     GitHubSignOut,
+    Sandbox,
+    SetSandbox {
+        settings: SandboxSettings,
+        generation: u64,
+    },
+    Cleanup,
+    SetCleanup {
+        settings: CleanupSettings,
+        generation: u64,
+    },
+    Quit,
+    SetQuit {
+        settings: QuitSettings,
+        generation: u64,
+    },
 }
 
-/// One change to an installed default-pack entry.
+/// One change to an installed default-pack entry at the pack version the page showed.
 /// Input: built by the Settings setup page. Output: one engine change.
 pub(in crate::tui) enum PackChange {
-    Switch { id: String, on: bool },
-    Remove { id: String },
+    Switch { id: String, on: bool, version: u64 },
+    Remove { id: String, version: u64 },
 }
 
 /// The engine's reply to one setup page request.
@@ -49,6 +68,12 @@ pub(in crate::tui) enum AppSetupEvent {
     FolderSize(String, Result<u64, String>),
     GitHub(Result<GitHubStatus, String>),
     GitHubSignedOut(Result<GitHubStatus, String>),
+    Sandbox(Result<SandboxSettings, String>),
+    SandboxSet(Result<(), String>),
+    Cleanup(Result<CleanupSettings, String>),
+    CleanupSet(Result<(), String>),
+    Quit(Result<QuitSettings, String>),
+    QuitSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -64,6 +89,12 @@ impl AppSetupJob {
             Self::FolderSize { .. } => "FolderSize",
             Self::GitHub => "GitHub",
             Self::GitHubSignOut => "GitHubSignOut",
+            Self::Sandbox => "Sandbox",
+            Self::SetSandbox { .. } => "SetSandbox",
+            Self::Cleanup => "Cleanup",
+            Self::SetCleanup { .. } => "SetCleanup",
+            Self::Quit => "Quit",
+            Self::SetQuit { .. } => "SetQuit",
         }
     }
 }
@@ -81,6 +112,12 @@ impl AppSetupEvent {
             AppSetupJob::FolderSize { path } => Self::FolderSize(path.clone(), Err(problem)),
             AppSetupJob::GitHub => Self::GitHub(Err(problem)),
             AppSetupJob::GitHubSignOut => Self::GitHubSignedOut(Err(problem)),
+            AppSetupJob::Sandbox => Self::Sandbox(Err(problem)),
+            AppSetupJob::SetSandbox { .. } => Self::SandboxSet(Err(problem)),
+            AppSetupJob::Cleanup => Self::Cleanup(Err(problem)),
+            AppSetupJob::SetCleanup { .. } => Self::CleanupSet(Err(problem)),
+            AppSetupJob::Quit => Self::Quit(Err(problem)),
+            AppSetupJob::SetQuit { .. } => Self::QuitSet(Err(problem)),
         }
     }
 }
@@ -108,10 +145,12 @@ impl NativeOwner {
             )),
             AppSetupJob::Pack { change, generation } => {
                 let reply = match change {
-                    PackChange::Switch { id, on } => {
-                        controller.set_pack_entry(id, on, generation).await
+                    PackChange::Switch { id, on, version } => {
+                        controller.set_pack_entry(id, on, version, generation).await
                     }
-                    PackChange::Remove { id } => controller.remove_pack_entry(id, generation).await,
+                    PackChange::Remove { id, version } => {
+                        controller.remove_pack_entry(id, version, generation).await
+                    }
                 };
                 AppSetupEvent::PackChanged(applied(reply, "pack_outcome_unknown", lost))
             }
@@ -151,6 +190,48 @@ impl NativeOwner {
                     .await
                     .map_err(|error| problem(&error, lost)),
             ),
+            AppSetupJob::Sandbox => AppSetupEvent::Sandbox(
+                controller
+                    .sandbox_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetSandbox {
+                settings,
+                generation,
+            } => AppSetupEvent::SandboxSet(applied(
+                controller.set_sandbox_settings(settings, generation).await,
+                "sandbox_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::Cleanup => AppSetupEvent::Cleanup(
+                controller
+                    .cleanup_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetCleanup {
+                settings,
+                generation,
+            } => AppSetupEvent::CleanupSet(applied(
+                controller.set_cleanup_settings(settings, generation).await,
+                "cleanup_settings_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::Quit => AppSetupEvent::Quit(
+                controller
+                    .quit_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetQuit {
+                settings,
+                generation,
+            } => AppSetupEvent::QuitSet(applied(
+                controller.set_quit_settings(settings, generation).await,
+                "quit_settings_outcome_unknown",
+                lost,
+            )),
         }
     }
 }
@@ -264,6 +345,7 @@ mod tests {
                 change: PackChange::Switch {
                     id: status.pack[0].id.clone(),
                     on: true,
+                    version: status.version,
                 },
                 generation: 2,
             },
@@ -272,6 +354,85 @@ mod tests {
         assert!(
             matches!(&refused, AppSetupEvent::PackChanged(Err(code)) if code == "pack_not_installed"),
             "a refused pack change keeps the engine's own code"
+        );
+
+        let AppSetupEvent::Sandbox(Ok(sandbox)) = ask(&mut native, AppSetupJob::Sandbox).await
+        else {
+            panic!("sandbox settings required")
+        };
+        assert_eq!(sandbox.linux_sockets, crate::sandbox::LinuxSockets::TcpOnly);
+        for (generation, linux_sockets) in [
+            (3, crate::sandbox::LinuxSockets::TcpPorts),
+            (4, crate::sandbox::LinuxSockets::Refuse),
+            (5, crate::sandbox::LinuxSockets::TcpOnly),
+        ] {
+            let settings = SandboxSettings { linux_sockets };
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetSandbox {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::SandboxSet(Ok(()))));
+            let AppSetupEvent::Sandbox(Ok(read)) = ask(&mut native, AppSetupJob::Sandbox).await
+            else {
+                panic!("sandbox settings required")
+            };
+            assert_eq!(read, settings);
+        }
+
+        let AppSetupEvent::Quit(Ok(quit)) = ask(&mut native, AppSetupJob::Quit).await else {
+            panic!("quitting setting required")
+        };
+        assert_eq!(quit, QuitSettings::default());
+        for (generation, settings) in [
+            (
+                6,
+                QuitSettings {
+                    on_quit: crate::quit_settings::OnQuit::Stop,
+                    left_running: crate::quit_settings::LeftRunning::AfterHours,
+                    hours: 1,
+                },
+            ),
+            (
+                7,
+                QuitSettings {
+                    on_quit: crate::quit_settings::OnQuit::KeepRunning,
+                    left_running: crate::quit_settings::LeftRunning::Never,
+                    hours: 168,
+                },
+            ),
+        ] {
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetQuit {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::QuitSet(Ok(()))));
+            let AppSetupEvent::Quit(Ok(read)) = ask(&mut native, AppSetupJob::Quit).await else {
+                panic!("quitting setting required")
+            };
+            assert_eq!(read, settings);
+        }
+        let refused = ask(
+            &mut native,
+            AppSetupJob::SetQuit {
+                settings: QuitSettings {
+                    hours: 0,
+                    ..QuitSettings::default()
+                },
+                generation: 8,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&refused, AppSetupEvent::QuitSet(Err(code)) if code == "quit_settings_invalid"),
+            "hours outside 1 to 168 keep the engine's own code"
         );
 
         drop(native);

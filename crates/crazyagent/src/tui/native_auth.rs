@@ -9,7 +9,7 @@ use crate::engine::owner::{
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
     NativeAuthScope, NativeAuthStart, OwnerData, OwnerReadReply,
 };
-use crate::protocol::RequestId;
+use crate::protocol::{ConfigId, RequestId};
 use crate::tui::text::plain_code;
 use std::borrow::Cow;
 
@@ -58,6 +58,7 @@ struct Retained {
     original: Job,
     fact: Option<NativeAuthFact>,
     uncertain: bool,
+    checked: Option<ConfigId>,
 }
 
 pub(super) struct State {
@@ -79,6 +80,7 @@ pub(super) struct State {
     notice: Cow<'static, str>,
     polled: Option<std::time::Instant>,
     clearing: bool,
+    rechecking: Option<ConfigId>,
 }
 
 impl Default for State {
@@ -102,6 +104,7 @@ impl Default for State {
             notice: Cow::Borrowed("Select a managed native connection"),
             polled: None,
             clearing: false,
+            rechecking: None,
         }
     }
 }
@@ -165,6 +168,7 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        self.rechecking = None;
         self.inspected = false;
         self.context = None;
         if !basis.writable || !supported(&connection) {
@@ -191,6 +195,7 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        self.rechecking = None;
         self.inspected = false;
         self.connected = connected && identity.is_some();
         if self.hide().is_err() {
@@ -272,26 +277,63 @@ impl State {
 
     /// Names the connection of a sign-in whose outcome is still open: running, or not
     /// confirmed. Output: the connection, or None.
-    pub(super) fn stuck(&self) -> Option<&ModelConnection> {
+    pub(super) fn open_account(&self) -> Option<&ModelConnection> {
         self.retained
             .as_ref()
             .filter(|_| self.has_pending())
             .map(|retained| &retained.original.context.connection)
     }
 
+    /// Names the connection of a stuck sign-in: still open, and either its outcome is not
+    /// confirmed or the panel can no longer reach it. A sign-in the owner is still
+    /// completing is not stuck. Input: the current basis. Output: the connection, or None.
+    pub(super) fn stuck(&self, basis: Option<&Basis>) -> Option<&ModelConnection> {
+        self.retained
+            .as_ref()
+            .filter(|retained| retained.uncertain || self.moved(basis))
+            .and_then(|_| self.open_account())
+    }
+
+    /// Tells whether the owner connection moved on since the retained sign-in started, so its
+    /// panel can no longer reach it. Settings edits do not move it: the engine goes on with a
+    /// sign-in while its own account entry is unchanged, and a changed entry marks it
+    /// unconfirmed once the panel or the engine sees it. Input: the current basis, if known.
+    /// Output: false while it is unknown.
+    fn moved(&self, basis: Option<&Basis>) -> bool {
+        let Some(retained) = &self.retained else {
+            return false;
+        };
+        let original = &retained.original.context.basis;
+        basis.is_some_and(|basis| {
+            basis.identity.database_instance() != original.identity.database_instance()
+                || basis.identity.engine_epoch() != original.identity.engine_epoch()
+        })
+    }
+
+    /// The refusal of a change to the account of an open sign-in. Input: the current basis.
+    /// Output: the line, naming Clear only for a stuck sign-in.
+    pub(super) fn open_refusal(&self, basis: Option<&Basis>) -> &'static str {
+        if self.stuck(basis).is_some() {
+            "A sign-in for this account is still open; c clears a stuck sign-in"
+        } else {
+            "A sign-in for this account is still running; finish or cancel it first"
+        }
+    }
+
     /// Starts Clear stuck sign-in: reads the original operation with the scope it started
     /// with, so it works after its connection can no longer be selected. The engine's
-    /// answer ends it, or a cancel follows while the engine still runs it. Input: the
-    /// current owner identity. Output: the refusal, if any.
+    /// answer ends it, or, for an unconfirmed one it still runs, a cancel follows. Inputs:
+    /// the current owner identity and basis. Output: the refusal, if any.
     pub(super) fn clear(
         &mut self,
         identity: Option<OwnerConnectionIdentity>,
+        basis: Option<&Basis>,
     ) -> Result<(), String> {
         let identity = identity.ok_or("Owner disconnected; Ctrl-R reconnects")?;
         let retained = self
             .retained
             .as_ref()
-            .filter(|_| self.has_pending())
+            .filter(|_| self.stuck(basis).is_some())
             .ok_or("No stuck sign-in")?;
         let mut context = retained.original.context.clone();
         if context.basis.identity.database_instance() != identity.database_instance() {
@@ -345,6 +387,39 @@ impl State {
         }
         self.polled = Some(now);
         self.enqueue_query(false).is_ok()
+    }
+
+    /// Asks the engine, once per settings change, about a held sign-in whose panel is closed,
+    /// with the scope it started with. An unchanged own account entry answers it as running; a
+    /// removed or replaced one answers a conflict that marks it unconfirmed, so it shows as
+    /// stuck and c can clear it; any other failed read changes nothing, and it is not asked
+    /// again for those settings. Input: the current basis. Output: whether a read was queued;
+    /// never while the panel is open, which polls it, or another request is in flight.
+    pub(super) fn recheck(&mut self, basis: Option<&Basis>) -> bool {
+        let Some(basis) = basis.filter(|_| !self.open && self.connected && !self.loading()) else {
+            return false;
+        };
+        let Some(retained) = self.retained.as_ref().filter(|retained| {
+            !retained.uncertain
+                && retained.original.context.basis.config_id != basis.config_id
+                && retained.checked.as_ref() != Some(&basis.config_id)
+        }) else {
+            return false;
+        };
+        if !self.has_pending() || self.moved(Some(basis)) {
+            return false;
+        }
+        let mut context = retained.original.context.clone();
+        context.basis.identity = basis.identity.clone();
+        context.generation = self.generation;
+        let Ok(command) = self.query(false) else {
+            return false;
+        };
+        if self.queue(Job { context, command }).is_err() {
+            return false;
+        }
+        self.rechecking = Some(basis.config_id.clone());
+        true
     }
 
     pub(super) fn loading(&self) -> bool {
@@ -518,6 +593,7 @@ impl State {
             original: job,
             fact: None,
             uncertain: true,
+            checked: None,
         });
         self.presentation = None;
         self.notice =
@@ -566,10 +642,24 @@ impl State {
             .retained
             .as_ref()
             .ok_or("No original authentication operation")?;
-        if context.connection != retained.original.context.connection
-            || context.scope() != retained.original.context.scope()
+        let original = &retained.original.context;
+        if context.connection.id != original.connection.id
+            || context.basis.identity.database_instance()
+                != original.basis.identity.database_instance()
         {
-            return Err("Select the original connection and source to read or cancel".into());
+            return Err("Select the original connection to read or cancel".into());
+        }
+        if context.connection != original.connection {
+            let pending = self.has_pending();
+            if pending && let Some(retained) = &mut self.retained {
+                retained.uncertain = true;
+            }
+            return Err(if pending {
+                "This account changed after its sign-in started; close this panel, then c clears the stuck sign-in"
+            } else {
+                "This account changed after its sign-in started"
+            }
+            .into());
         }
         let command = self.query(cancel)?;
         self.queue(Job { context, command })?;
@@ -590,17 +680,28 @@ impl State {
                     return Ok(());
                 }
                 let running = reply.fact.phase.unfinished();
+                let unconfirmed = self
+                    .retained
+                    .as_ref()
+                    .is_some_and(|retained| retained.uncertain);
+                let reading = self.rechecking.is_some().then(|| self.notice.clone());
                 self.accept_reply(&event.job, *reply);
+                if let Some(notice) = reading.filter(|_| running) {
+                    self.notice = notice;
+                }
                 if self.clearing && !running {
                     self.retained = None;
                     self.presentation = None;
                     self.notice = Cow::Borrowed("Stuck sign-in cleared; the engine finished it");
                 } else if self.clearing {
-                    cancel_next = matches!(event.job.command, Command::Read(_));
+                    let read = matches!(event.job.command, Command::Read(_));
+                    cancel_next = read && unconfirmed;
                     if !cancel_next {
-                        self.notice = Cow::Borrowed(
-                            "The sign-in is still stopping; press c again in a moment",
-                        );
+                        self.notice = Cow::Borrowed(if read {
+                            "This sign-in is still running; finish or cancel it in its panel"
+                        } else {
+                            "The sign-in is still stopping; press c again in a moment"
+                        });
                     }
                 }
             }
@@ -610,6 +711,32 @@ impl State {
                 self.claude_code.clear();
                 self.notice = Cow::Borrowed("Stuck sign-in cleared; the engine no longer runs it");
             }
+            Err(problem) if self.clearing && problem == "native_profile_source_conflict" => {
+                self.presentation = None;
+                self.claude_code.clear();
+                self.notice = Cow::Borrowed(
+                    "Settings changed after this sign-in started; the engine ends it within 10 minutes of its start, then press c again",
+                );
+            }
+            Err(problem)
+                if self.rechecking.is_some() && crate::engine::owner::ends_operation(&problem) =>
+            {
+                self.retained = None;
+                self.presentation = None;
+                self.claude_code.clear();
+                self.notice = Cow::Borrowed("The sign-in ended; the engine no longer runs it");
+            }
+            Err(problem)
+                if self.rechecking.is_some() && problem == "native_profile_source_conflict" =>
+            {
+                if let Some(retained) = &mut self.retained {
+                    retained.uncertain = true;
+                }
+                self.notice = Cow::Borrowed(
+                    "This account changed or was removed after its sign-in started; c clears the stuck sign-in",
+                );
+            }
+            Err(_) if self.rechecking.is_some() => {}
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
                 self.notice = Cow::Borrowed(if self.inspected {
@@ -662,6 +789,11 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        if let Some(config) = self.rechecking.take()
+            && let Some(retained) = &mut self.retained
+        {
+            retained.checked = Some(config);
+        }
         if list_using {
             self.queue(Job {
                 context: event.job.context,
@@ -808,8 +940,10 @@ impl State {
         if retained.uncertain {
             lines.push("Current outcome unresolved; read or cancel the original operation".into());
         }
-        if self.has_pending() {
+        if self.stuck(basis).is_some() {
             lines.push("Sign-in still open for this account; c clears a stuck sign-in".into());
+        } else if self.has_pending() {
+            lines.push("Sign-in still running for this account; finish or cancel it".into());
         }
         lines.push("Last owner observation only; model delivery and quota remain separate".into());
         lines
@@ -877,21 +1011,23 @@ impl State {
             let agents = used
                 .agents
                 .iter()
-                .map(|agent| (agent.label.as_str(), agent.project.as_str()));
+                .map(|agent| (agent.label.as_str(), Some(agent.project.as_str())));
             let holders = used.holders.iter().map(|holder| match holder {
-                Holder::Master { project, .. } => ("Master conversation", project.as_str()),
-                Holder::Research { project, title, .. } => (title.as_str(), project.as_str()),
+                Holder::Master { project, .. } => ("Master conversation", Some(project.as_str())),
+                Holder::Research { project, title, .. } => (title.as_str(), Some(project.as_str())),
+                Holder::Leftover { report } => (report.as_str(), None),
             });
             let listed = used.agents.len() + used.holders.len();
             let mut names: Vec<String> = agents
                 .chain(holders)
                 .take(USING_SHOWN_MAX)
-                .map(|(label, project)| {
-                    format!(
+                .map(|(label, project)| match project {
+                    Some(project) => format!(
                         "{} (project {})",
                         display_text(label, 256),
                         display_text(project, 256)
-                    )
+                    ),
+                    None => display_text(label, 1024),
                 })
                 .collect();
             if listed > USING_SHOWN_MAX {
@@ -949,7 +1085,8 @@ impl State {
 }
 
 /// The one owner action that ends what holds an account and then signs it out, named by
-/// what it ends: agents and research jobs are stopped, master conversations are ended.
+/// what it ends: agents and research jobs are stopped, master conversations are ended,
+/// and what Full access agents left running is let go of while it still runs.
 /// Input: what holds the account. Output: the action's label.
 pub(super) fn release_label(used: &AccountUse) -> &'static str {
     let master = used
@@ -964,7 +1101,8 @@ pub(super) fn release_label(used: &AccountUse) -> &'static str {
     match (others, master) {
         (true, true) => "Stop agents, end conversation and sign out",
         (false, true) => "End conversation and sign out",
-        _ => "Stop agents and sign out",
+        (true, false) => "Stop agents and sign out",
+        (false, false) => "Sign out anyway",
     }
 }
 

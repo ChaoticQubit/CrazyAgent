@@ -10,12 +10,12 @@ import { Session } from "../../.local-state/tools/rcli-source/src/core/session/S
 import { SkillController } from "../../.local-state/tools/rcli-source/src/core/skills/SkillController.ts";
 import { ToolRegistry } from "../../.local-state/tools/rcli-source/src/core/tools/ToolRegistry.ts";
 
-export function assembleClosedController(input: Pick<AgentControllerDeps, "config" | "client" | "permissions"> & { sessionId: string; cwd: string; homeDir: string }): { controller: AgentController; bus: EventBus; session: Session } {
+export function assembleClosedController(input: Pick<AgentControllerDeps, "config" | "client" | "permissions" | "startupEnvironmentPrompt"> & { sessionId: string; cwd: string; homeDir: string }): { controller: AgentController; bus: EventBus; session: Session } {
   const sessionId = identifier(input.sessionId);
   const bus = new EventBus();
   const session = new Session(sessionId);
   const registry = new ToolRegistry();
   const skillController = new SkillController({ cwd: input.cwd, homeDir: input.homeDir, bus });
-  const controller = new AgentController({ config: input.config, client: input.client, permissions: input.permissions, bus, session, registry, skillController });
+  const controller = new AgentController({ config: input.config, client: input.client, permissions: input.permissions, bus, session, registry, skillController, startupEnvironmentPrompt: input.startupEnvironmentPrompt });
   return { controller, bus, session };
 }

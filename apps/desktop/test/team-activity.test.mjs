@@ -7,7 +7,7 @@ import "./load-source.mjs";
 const activity = await import("../src/screens/project/team-activity.tsx");
 
 const node = (id, kind, extra = {}) => ({
-  id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: null, ...extra,
+  id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal: null, ...extra,
 });
 const edge = (task_id, to, state, text) => ({ from: "m", to, task_id, source: "master", text, state, reply: null });
 const agent = (id, extra = {}) => ({
@@ -24,10 +24,10 @@ const graph = {
   project_id: "p-1",
   nodes: [
     node("m", "master", { label: "Master", status: "working", terminal: "team-9" }),
-    node("g-codex", "harness_group", { parent: "m", label: "codex", agents: 2 }),
-    node("team-1", "agent", { parent: "g-codex", label: "Ada (@onboarding-fix)", status: "working", status_label: "Working", terminal: "team-1" }),
-    node("team-2", "agent", { parent: "g-codex", label: "Grace (@graph-layout-redesign-for-the-desktop)", status: "idle", status_label: "Idle", terminal: "team-2", questions: 2 }),
-    node("team-3", "agent", { parent: "g-codex", label: "Linus (@usage)", status: "stopped", status_label: "Stopped" }),
+    node("teammate-1-12", "teammate", { parent: "team-1", label: "Teammate %12", status_label: "Running", terminal: "team-1", agent: null, pane: "%12" }),
+    node("team-1", "lead", { parent: "m", label: "Ada (@onboarding-fix)", status: "working", status_label: "Working", terminal: "team-1", agent: 1 }),
+    node("team-2", "sub", { parent: "team-1", label: "Grace (@graph-layout-redesign-for-the-desktop)", status: "idle", status_label: "Idle", terminal: "team-2", questions: 2, agent: 2 }),
+    node("team-3", "sub", { parent: "team-1", label: "Linus (@usage)", status: "stopped", status_label: "Stopped", agent: 3 }),
   ],
   edges: [edge(1, "team-1", "running", longTask), edge(2, "team-3", "done", "Write the usage page"), edge(3, "team-2", "sent", "Answer the question")],
 };
@@ -101,9 +101,18 @@ test("the master view keeps its content and adds the strip beside it", () => {
 });
 
 test("an agent name holding a direction override is shown without it in the activity list", () => {
-  const evil = { project_id: "p-1", nodes: [node("m", "master", { label: "Master" }), node("team-1", "agent", { parent: "m", label: "Ada\u202etxt.exe (@x)", status: "working", status_label: "Working" })], edges: [edge("t-1", "team-1", "running", "Rename \u2067a\u2069 file")] };
+  const evil = { project_id: "p-1", nodes: [node("m", "master", { label: "Master" }), node("team-1", "lead", { parent: "m", label: "Ada\u202etxt.exe (@x)", status: "working", status_label: "Working", agent: 1 })], edges: [edge("t-1", "team-1", "running", "Rename \u2067a\u2069 file")] };
   const rows = activity.activityRows(evil, null);
   const html = renderToStaticMarkup(createElement(activity.TeamActivityList, { rows, now: 10_000, open: null, onOpen() {} }));
   assert.doesNotMatch(html, /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u);
   assert.match(html, /Ada\\u202etxt\.exe/);
+});
+
+test("an Overview row of an agent waiting for a file under Wait leads its task line with the file", () => {
+  const waiting = { ...graph, nodes: graph.nodes.map((item) => item.id === "team-1" ? { ...item, waits_for: "src/a.rs" } : item) };
+  const row = activity.activityRows(waiting, status).find((item) => item.node.id === "team-1");
+  assert.equal(row.task, `Waiting for src/a.rs. ${longTask}`);
+  assert.ok(row.line.startsWith("Waiting for src/a.rs."), row.line);
+  const html = renderToStaticMarkup(createElement(activity.TeamActivityList, { rows: [row], now: 600_000, open: null, onOpen: () => {} }));
+  assert.match(html, /aria-label="Ada \(@onboarding-fix\), codex, Working\. Waiting for src\/a\.rs\. /);
 });

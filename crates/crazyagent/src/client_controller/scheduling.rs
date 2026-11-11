@@ -8,7 +8,8 @@ const SCHEDULE_ROWS_MAX: usize = SCOPED_STRATEGIES_MAX * 2 + ACCOUNT_PLANS_MAX;
 impl OwnerController {
     /// Reads the owner's account scheduling choices, following engine pages, so a schedule
     /// larger than one reply is read whole: the app strategy, pool strategies, project
-    /// overrides and account plans.
+    /// overrides and account plans, with the version of the first page, so a change made
+    /// while the later pages were read leaves the next owner change stale, never applied.
     /// Returns the stored schedule, or the engine's plain rejection code.
     pub async fn account_schedule(&mut self) -> Result<Schedule, EngineError> {
         let mut schedule = Schedule::default();
@@ -26,6 +27,9 @@ impl OwnerController {
             else {
                 return Err(EngineError("controller_read_response".into()));
             };
+            if after.is_none() {
+                schedule.version = page.version;
+            }
             schedule.strategy = page.strategy;
             schedule.pools.extend(page.pools);
             schedule.projects.extend(page.projects);
@@ -63,16 +67,21 @@ impl OwnerController {
     /// Sends one owner scheduling change, such as a pool strategy or an account's rank. Its
     /// freshness read is the small owner profile, never the whole schedule, so a schedule
     /// larger than one reply can still be changed and shrunk.
-    /// Takes the change and the client generation.
-    /// Returns the actual owner response; a refused change carries a plain code.
+    /// Takes the change, the schedule version the screen showed and the client generation.
+    /// Returns the actual owner response; a refused change carries a plain code,
+    /// `stale_revision` once the schedule changed elsewhere.
     pub async fn set_account_schedule(
         &mut self,
         change: ScheduleChange,
+        version: u64,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         change.validate()?;
         self.owner_profile().await?;
-        self.begin_mutation(OwnerMutation::AccountSchedule { change }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::AccountSchedule { change, version },
+            generation,
+        )?;
         self.send_pending().await
     }
 }

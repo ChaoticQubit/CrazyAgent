@@ -69,24 +69,44 @@ impl OwnerController {
 
     /// Reads the extra read-only folders the owner saved for a project's agents.
     /// Takes the project id.
-    /// Returns the folders in saved order, none when nothing was saved.
+    /// Returns the folders in saved order, none when nothing was saved, and their version.
     pub async fn project_read_paths(
         &mut self,
         project_id: ProjectId,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<crate::project_setup::ReadPaths, EngineError> {
         match self
             .read(OwnerRead::ProjectReadPaths { project_id })
             .await?
             .data
         {
-            OwnerData::ProjectReadPaths { paths, .. } => Ok(paths),
+            OwnerData::ProjectReadPaths { paths, version, .. } => {
+                Ok(crate::project_setup::ReadPaths { paths, version })
+            }
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Reads the folders the owner keeps this project's agents out of (DEC-111 Q7).
+    /// Takes the project id.
+    /// Returns the folders in saved order, none when nothing was saved.
+    pub async fn project_hidden_paths(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<String>, EngineError> {
+        match self
+            .read(OwnerRead::ProjectHiddenPaths { project_id })
+            .await?
+            .data
+        {
+            OwnerData::ProjectHiddenPaths { paths, .. } => Ok(paths),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
 
     /// Reads a project's agent policy (DEC-101, DEC-102): its access level, every level with
     /// its availability here, and the toolchains its agents may read. Takes the project id.
-    /// Returns the policy view, or the engine's refusal for an unknown project.
+    /// Returns the policy view, or the engine's refusal: `invalid_project` for an unknown
+    /// project, `project_setup_missing` for one made before project setup.
     pub async fn project_agent_policy(
         &mut self,
         project_id: ProjectId,
@@ -138,6 +158,27 @@ impl OwnerController {
             .data
         {
             OwnerData::ResearchJobs { jobs, .. } => Ok(jobs),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Lists what happened in a project, newest first, as the Overview shows it.
+    /// Takes the project id and the most events to return, 1 to `activity::LIST_MAX`.
+    /// Returns the events, at most one engine frame of them, and whether older ones were
+    /// left out.
+    pub async fn project_activity(
+        &mut self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<crate::activity::Listed, EngineError> {
+        match self
+            .read(OwnerRead::ProjectActivity { project_id, limit })
+            .await?
+            .data
+        {
+            OwnerData::ProjectActivity { items, more, .. } => {
+                Ok(crate::activity::Listed { items, more })
+            }
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
@@ -276,35 +317,82 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Deletes a project with its files: the engine stops its agents, moves its folders to
+    /// the Trash and removes its records, only when the typed name is the project's exact
+    /// name. Takes the project id, the name the owner typed and the client generation.
+    /// Returns the actual owner response; a refusal names its plain code.
+    pub async fn delete_project(
+        &mut self,
+        project_id: ProjectId,
+        name: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::DeleteProject { project_id, name },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
     /// Replaces a project's extra read-only folders for its agents' sandboxes.
-    /// Takes the project id, the typed folders and the client generation.
-    /// Returns the actual owner response; a refused folder is a plain rejection.
+    /// Takes the project id, the version the screen showed, the typed folders and the client
+    /// generation. Returns the actual owner response; a refused folder is a plain rejection,
+    /// and folders changed since the screen read them are `stale_revision`.
     pub async fn set_project_read_paths(
         &mut self,
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_read_paths(project_id.clone()).await?;
         self.begin_mutation(
-            OwnerMutation::SetProjectReadPaths { project_id, paths },
+            OwnerMutation::SetProjectReadPaths {
+                project_id,
+                version,
+                paths,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Replaces the folders this project's agents are kept out of (DEC-111 Q7). Takes the
+    /// project id, the typed folders and the client generation. Returns the actual owner
+    /// response; a folder outside the project is a plain rejection.
+    pub async fn set_project_hidden_paths(
+        &mut self,
+        project_id: ProjectId,
+        paths: Vec<String>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_hidden_paths(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::SetProjectHiddenPaths { project_id, paths },
             generation,
         )?;
         self.send_pending().await
     }
 
     /// Replaces a project's agent policy: access level and toolchain choices. Takes the
-    /// project id, the policy and the client generation. Returns the actual owner response;
-    /// a level this computer cannot run is a plain rejection.
+    /// project id, the version the screen showed, the policy and the client generation.
+    /// Returns the actual owner response; a level this computer cannot run is a plain
+    /// rejection, and a policy changed since the screen read it is `stale_revision`.
     pub async fn set_project_agent_policy(
         &mut self,
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_agent_policy(project_id.clone()).await?;
         self.begin_mutation(
-            OwnerMutation::SetProjectAgentPolicy { project_id, policy },
+            OwnerMutation::SetProjectAgentPolicy {
+                project_id,
+                version,
+                policy,
+            },
             generation,
         )?;
         self.send_pending().await
@@ -341,6 +429,20 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Queues the project's roadmap and release process planning job now.
+    /// Takes the project id and the client generation.
+    /// Returns the actual owner response; `planning_busy` while a planning job of the
+    /// project is queued or running.
+    pub async fn plan_roadmap(
+        &mut self,
+        project_id: ProjectId,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.research_jobs(project_id.clone()).await?;
+        self.begin_mutation(OwnerMutation::PlanRoadmap { project_id }, generation)?;
+        self.send_pending().await
+    }
+
     /// Reads the last plain lines of one research job's agent output, with secrets hidden.
     /// Takes the project id and the job id.
     /// Returns at most RESEARCH_LOG_LINES_MAX lines, oldest first.
@@ -373,6 +475,19 @@ impl OwnerController {
                 Outcome::Knowledge { entries } => Ok(entries),
                 _ => Err(EngineError("controller_read_response".into())),
             },
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Lists the decisions the project's IDE asked the owner to confirm on memories that
+    /// still wait at the asked version, oldest ask first. Takes the project id. Returns the
+    /// asks; the owner confirms each through `review_memory` with Keep or Reject.
+    pub async fn ide_asks(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<crate::ide::bridge::memory::IdeAsk>, EngineError> {
+        match self.read(OwnerRead::IdeAsks { project_id }).await?.data {
+            OwnerData::IdeAsks { asks } => Ok(asks),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }

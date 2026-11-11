@@ -3,21 +3,45 @@ use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::screens::settings_accounts::tests::{ctx, render};
 use crate::tui::shell::Shell;
 
+const READ_VERSION: u64 = 4;
+
 fn reply(query: ProcessQuery, result: Result<&str, &str>) -> Arrival {
+    let result = result
+        .map(|text| match &query {
+            ProcessQuery::Read { .. } => ProcessReply::Current(ProcessText {
+                text: text.to_owned(),
+                version: READ_VERSION,
+            }),
+            ProcessQuery::Save { version, .. } => ProcessReply::Saved(SavedText::Saved {
+                version: version + 1,
+                size: None,
+            }),
+            _ => ProcessReply::Text(text.to_owned()),
+        })
+        .map_err(str::to_owned);
+    answered(query, result)
+}
+
+fn answered(query: ProcessQuery, result: Result<ProcessReply, String>) -> Arrival {
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query,
-        result: result
-            .map(|text| ProcessReply::Text(text.to_owned()))
-            .map_err(str::to_owned),
+        result,
     }))))
 }
 
 fn saved(query: ProcessQuery, bytes: u32) -> Arrival {
+    let ProcessQuery::Save { version, .. } = &query else {
+        panic!("only a save is saved: {query:?}");
+    };
+    let version = version + 1;
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query,
-        result: Ok(ProcessReply::Saved(crate::engine::owner::ProcessSaved {
-            bytes,
-            claude_bytes_max: 28_159,
+        result: Ok(ProcessReply::Saved(SavedText::Saved {
+            version,
+            size: Some(crate::engine::owner::ProcessSaved {
+                bytes,
+                claude_bytes_max: 28_159,
+            }),
         })),
     }))))
 }
@@ -43,15 +67,46 @@ fn opened(scope: Scope, saved: &str) -> Shell {
     };
     assert_eq!(requests(&mut shell), vec![read.clone()]);
     shell.arrive(reply(read, Ok(saved)));
+    #[cfg(not(unix))]
+    assert!(
+        project.is_none(),
+        "a project page reads its adoption from the engine store, which is unix-only"
+    );
+    #[cfg(unix)]
     if let Some(project) = project {
-        let query = ProcessQuery::Settings { project };
+        let query = ProcessQuery::Settings {
+            project: project.clone(),
+        };
         assert_eq!(requests(&mut shell), vec![query.clone()]);
-        shell.arrive(settings(query, Ok(InstructionSettings::default())));
+        shell.arrive(settings(query, Ok(at(InstructionSettings::default(), 0))));
+        assert_eq!(
+            requests(&mut shell),
+            vec![ProcessQuery::Adoption {
+                project: project.clone()
+            }]
+        );
+        shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
     }
     shell
 }
 
-fn settings(query: ProcessQuery, result: Result<InstructionSettings, &str>) -> Arrival {
+fn at(settings: InstructionSettings, version: u64) -> InstructionView {
+    InstructionView { settings, version }
+}
+
+/// A project's adoption view as the real coordination store reads it before any agent ran.
+/// Input: the project. Output: the view, with no agents.
+#[cfg(unix)]
+fn no_agents(project: &ProjectId) -> Adoption {
+    let root = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let view = crate::coord::adoption::view(&db, project, &[], 1_800_000_000_000).unwrap();
+    assert!(view.agents.is_empty());
+    view
+}
+
+fn settings(query: ProcessQuery, result: Result<InstructionView, &str>) -> Arrival {
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query,
         result: result.map(ProcessReply::Settings).map_err(str::to_owned),
@@ -187,6 +242,8 @@ fn the_app_page_reads_the_saved_text_and_saves_only_on_ctrl_s() {
     let save = ProcessQuery::Save {
         project: None,
         text: "Use tdd.\nAsk the master.".into(),
+        version: READ_VERSION,
+        opened: None,
     };
     assert_eq!(requests(&mut shell), vec![save.clone()]);
     shell.key(Key::Ctrl('s'));
@@ -203,6 +260,8 @@ fn a_save_a_claude_master_may_refuse_warns_with_the_limit() {
     let save = ProcessQuery::Save {
         project: None,
         text: "Ask the master. Use tdd.\n".into(),
+        version: READ_VERSION,
+        opened: None,
     };
     assert_eq!(requests(&mut shell), vec![save.clone()]);
     shell.arrive(saved(save, 40_000));
@@ -222,6 +281,8 @@ fn a_save_a_claude_master_may_refuse_warns_with_the_limit() {
     let save = ProcessQuery::Save {
         project: None,
         text: "Ask the master. Short. Use tdd.\n".into(),
+        version: READ_VERSION + 1,
+        opened: None,
     };
     assert_eq!(requests(&mut shell), vec![save.clone()]);
     shell.arrive(saved(save, 28_159));
@@ -270,6 +331,8 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
     let save = ProcessQuery::Save {
         project: None,
         text: "Use tdd. Always.".into(),
+        version: READ_VERSION,
+        opened: None,
     };
     assert_eq!(
         requests(&mut shell),
@@ -277,6 +340,37 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
         "once the queue drains the same Ctrl-S saves"
     );
     assert!(shell.busy());
+    shell.arrive(saved(save, 16));
+    assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
+fn a_save_the_store_keeps_busy_says_nothing_was_saved_and_the_same_ctrl_s_saves_again() {
+    let mut shell = opened(Scope::App, "Use tdd.");
+    shell.key(Key::End);
+    typed(&mut shell, " Always.");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Use tdd. Always.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(reply(save.clone(), Err("process_save_unavailable")));
+    let shown = screen(&mut shell);
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("nothing was saved. Save again."), "{shown}");
+    assert!(
+        shown.contains("Not saved yet"),
+        "a refused save keeps the draft"
+    );
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![save.clone()],
+        "the same Ctrl-S saves again"
+    );
     shell.arrive(saved(save, 16));
     assert!(!screen(&mut shell).contains("Not saved yet"));
 }
@@ -360,13 +454,26 @@ fn the_owners_global_instructions_are_read_only_on_ctrl_g_and_land_only_after_a_
     );
     assert!(kept.contains("Not saved yet"), "{kept}");
 
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().canonicalize().unwrap();
+    let file = root.join("CLAUDE.md");
+    std::fs::write(&file, "OWNER-GLOBAL-RULE\n").unwrap();
     shell.key(Key::Ctrl('g'));
-    assert_eq!(requests(&mut shell), vec![ProcessQuery::ImportGlobal]);
-    shell.arrive(reply(ProcessQuery::ImportGlobal, Ok("OWNER-GLOBAL-RULE\n")));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "Ctrl-G opens a path field and reads nothing"
+    );
+    typed(&mut shell, &file.display().to_string());
+    shell.key(Key::Enter);
+    let query = ProcessQuery::ReadFile { path: file.clone() };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    let text = crate::instruction_files::read_picked(&file).unwrap();
+    shell.arrive(reply(query, Ok(text.as_str())));
     let preview = screen(&mut shell);
-    assert!(preview.contains("Your global instructions"), "{preview}");
+    assert!(preview.contains("Instructions from your file"), "{preview}");
     assert!(
-        preview.contains("Read from ~/.claude/CLAUDE.md."),
+        preview.contains("Read once from the file you named;"),
         "{preview}"
     );
     assert!(preview.contains("OWNER-GLOBAL-RULE"), "{preview}");
@@ -380,14 +487,22 @@ fn the_owners_global_instructions_are_read_only_on_ctrl_g_and_land_only_after_a_
         "putting it in the editor saves nothing"
     );
 
+    let missing = root.join("missing/CLAUDE.md");
     shell.key(Key::Ctrl('g'));
-    shell.arrive(reply(
-        ProcessQuery::ImportGlobal,
-        Err("process_import_missing"),
-    ));
-    assert!(screen(&mut shell).contains("There is no ~/.claude/CLAUDE.md to import."));
+    typed(&mut shell, &missing.display().to_string());
+    shell.key(Key::Enter);
+    let query = ProcessQuery::ReadFile {
+        path: missing.clone(),
+    };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    let code = crate::instruction_files::read_picked(&missing)
+        .unwrap_err()
+        .0;
+    shell.arrive(reply(query, Err(code.as_str())));
+    assert!(screen(&mut shell).contains("That file doesn't exist. Check the path."));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_page_has_no_seeds_and_reads_and_saves_its_own_text() {
     let project = ProjectId::new("harbor-notes").unwrap();
@@ -409,6 +524,8 @@ fn a_project_page_has_no_seeds_and_reads_and_saves_its_own_text() {
     let save = ProcessQuery::Save {
         project: Some(project.clone()),
         text: "Run the linter.".into(),
+        version: READ_VERSION,
+        opened: None,
     };
     assert_eq!(requests(&mut shell), vec![save.clone()]);
     shell.arrive(reply(save, Err("process_project_folder_missing")));
@@ -426,6 +543,142 @@ fn a_project_page_has_no_seeds_and_reads_and_saves_its_own_text() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
+    let mut shell = opened(Scope::App, "Old rule.");
+    typed(&mut shell, "Mine. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    let stale = SavedText::Stale {
+        version: READ_VERSION,
+        current: ProcessText {
+            text: "Desktop rule.".into(),
+            version: READ_VERSION + 1,
+        },
+        writer: crate::storage::versioned::LastWriter::Owner,
+    };
+    shell.arrive(answered(save.clone(), Ok(ProcessReply::Saved(stale))));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("changed since you opened"),
+        "the owner learns the text changed: {shown}"
+    );
+    assert!(
+        shown.contains("│ Mine. █ld rule."),
+        "the draft stays, the cursor after the typed words: {shown}"
+    );
+    assert!(shown.contains("Not saved yet"), "{shown}");
+    assert!(
+        !shown.contains("Instructions saved."),
+        "a stale save never reads as saved: {shown}"
+    );
+
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![save],
+        "saving again still names the version the owner read, never the newer one"
+    );
+}
+
+#[test]
+fn stale_save_shows_the_conflict_choices() {
+    let stale = |named: u64, text: &str| {
+        Ok(ProcessReply::Saved(SavedText::Stale {
+            version: named,
+            current: ProcessText {
+                text: text.into(),
+                version: named + 1,
+            },
+            writer: crate::storage::versioned::LastWriter::Agent(
+                crate::terminal::AgentId::team(3).unwrap(),
+            ),
+        }))
+    };
+    let mut shell = opened(Scope::App, "Old rule.");
+    typed(&mut shell, "Mine. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(answered(save, stale(READ_VERSION, "Agent rule.")));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Changed by Agent 3 since you opened it."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Agent rule."),
+        "the text that landed: {shown}"
+    );
+    assert!(
+        shown.contains("│ Mine. █ld rule."),
+        "the draft stays, the cursor after the typed words: {shown}"
+    );
+    assert!(
+        shown.contains("Ctrl-R Reload") && shown.contains("Ctrl-Y Keep mine"),
+        "{shown}"
+    );
+    assert!(
+        requests(&mut shell).is_empty(),
+        "nothing is written until the owner chooses"
+    );
+
+    shell.key(Key::Ctrl('y'));
+    let keep = ProcessQuery::Save {
+        project: None,
+        text: "Mine. Old rule.".into(),
+        version: READ_VERSION + 1,
+        opened: Some(READ_VERSION),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![keep.clone()],
+        "Keep mine names the version shown and the one opened, so the engine records it"
+    );
+    shell.arrive(answered(keep, stale(READ_VERSION + 1, "Newer rule.")));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Newer rule.") && !shown.contains("Agent rule."),
+        "a Keep mine refused again shows the newer text: {shown}"
+    );
+
+    shell.key(Key::Ctrl('r'));
+    assert!(requests(&mut shell).is_empty(), "Reload writes nothing");
+    let shown = screen(&mut shell);
+    assert!(
+        !shown.contains("Changed by") && !shown.contains("Keep mine"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("Mine. Old rule.") && !shown.contains("Not saved yet"),
+        "Reload puts the text that landed in the editor: {shown}"
+    );
+    typed(&mut shell, "Edit. ");
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Save {
+            project: None,
+            text: "Edit. Newer rule.".into(),
+            version: READ_VERSION + 2,
+            opened: None,
+        }],
+        "after Reload a save names the version that landed"
+    );
+}
+
 #[test]
 fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let project = ProjectId::new("harbor-notes").unwrap();
@@ -436,7 +689,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let mut shell = opened(scope, "");
     let shown = screen(&mut shell);
     assert!(
-        shown.contains("Agent instruction files: Project files"),
+        shown.contains("Agent instructions: App and project"),
         "{shown}"
     );
     assert!(
@@ -444,23 +697,32 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         "{shown}"
     );
     assert!(shown.contains("Ctrl-F changes"), "{shown}");
-    assert!(shown.contains("committed in your checkout"), "{shown}");
+    assert!(shown.contains("Instruction edits: At next task"), "{shown}");
+    assert!(shown.contains("Ctrl-R changes"), "{shown}");
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("then this project's instructions.md appended."),
+        "{shown}"
+    );
     let mut stored = InstructionSettings::default();
-    for (files, words) in [
-        (Choice::ProjectAndUser, "Project and user files"),
-        (Choice::None, "Agent instruction files: None"),
-        (Choice::Project, "Agent instruction files: Project files"),
+    let mut version = 0;
+    for (mode, words) in [
+        (Mode::ProjectOnly, "Agent instructions: Project only"),
+        (Mode::AppOnly, "Agent instructions: App only"),
+        (Mode::Both, "Agent instructions: App and project"),
     ] {
         shell.key(Key::Ctrl('f'));
-        stored.files = files;
+        stored.mode = mode;
         let save = ProcessQuery::SaveSettings {
             project: project.clone(),
             settings: stored,
+            version: Some(version),
         };
         assert_eq!(requests(&mut shell), vec![save.clone()]);
         shell.key(Key::Ctrl('f'));
         assert_eq!(requests(&mut shell), vec![], "one request at a time");
-        shell.arrive(settings(save, Ok(stored)));
+        version += 1;
+        shell.arrive(settings(save, Ok(at(stored, version))));
         let shown = screen(&mut shell);
         assert!(shown.contains(words), "{shown}");
         assert!(shown.contains("Agent settings saved."), "{shown}");
@@ -471,33 +733,77 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         let save = ProcessQuery::SaveSettings {
             project: project.clone(),
             settings: stored,
+            version: Some(version),
         };
         assert_eq!(requests(&mut shell), vec![save.clone()]);
-        shell.arrive(settings(save, Ok(stored)));
+        version += 1;
+        shell.arrive(settings(save, Ok(at(stored, version))));
         let words = if transcripts { ": On" } else { ": Off" };
         assert!(
             screen(&mut shell)
                 .contains(&format!("Keep transcripts for headless Claude runs{words}"))
         );
     }
+    for (edits, words, note) in [
+        (
+            crate::instruction_files::EditDelivery::Restart,
+            "Instruction edits: Restart when idle",
+            "restarts when it is next idle",
+        ),
+        (
+            crate::instruction_files::EditDelivery::Badge,
+            "Instruction edits: Badge only",
+            "shows Instructions changed",
+        ),
+        (
+            crate::instruction_files::EditDelivery::NextMessage,
+            "Instruction edits: At next task",
+            "next task starts with the sections you changed",
+        ),
+    ] {
+        shell.key(Key::Ctrl('r'));
+        stored.edits = edits;
+        let save = ProcessQuery::SaveSettings {
+            project: project.clone(),
+            settings: stored,
+            version: Some(version),
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        version += 1;
+        shell.arrive(settings(save, Ok(at(stored, version))));
+        let shown = screen(&mut shell);
+        let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        assert!(shown.contains(words), "{shown}");
+        assert!(flat.contains(note), "{shown}");
+    }
     shell.key(Key::Ctrl('t'));
     let refused = ProcessQuery::SaveSettings {
         project: project.clone(),
         settings: InstructionSettings {
-            files: Choice::Project,
+            mode: Mode::Both,
             transcripts: false,
+            edits: crate::instruction_files::EditDelivery::NextMessage,
         },
+        version: Some(version),
     };
     assert_eq!(requests(&mut shell), vec![refused.clone()]);
-    shell.arrive(settings(refused, Err("instruction_settings_unavailable")));
+    shell.arrive(settings(
+        refused,
+        Err("instruction_settings_save_unavailable"),
+    ));
     let shown = screen(&mut shell);
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
     assert!(
         shown.contains("Keep transcripts for headless Claude runs: On"),
         "{shown}"
     );
-    assert!(shown.contains("couldn't be read"), "{shown}");
+    assert!(
+        flat.contains("nothing was saved. Change it again."),
+        "{shown}"
+    );
 }
 
+#[cfg(unix)]
 #[test]
 fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_defaults() {
     let project = ProjectId::new("harbor-notes").unwrap();
@@ -518,6 +824,14 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
     };
     assert_eq!(requests(&mut shell), vec![query.clone()]);
     shell.arrive(settings(query, Err("instruction_settings_invalid")));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }],
+        "unreadable settings still read workflow adoption"
+    );
+    shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
     let shown = screen(&mut shell);
     assert!(shown.contains("value CrazyAgent doesn't know"), "{shown}");
     shell.key(Key::Ctrl('f'));
@@ -526,10 +840,159 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
         vec![ProcessQuery::SaveSettings {
             project,
             settings: InstructionSettings {
-                files: Choice::ProjectAndUser,
+                mode: Mode::ProjectOnly,
                 transcripts: true,
+                edits: crate::instruction_files::EditDelivery::NextMessage,
             },
+            version: None,
+        }],
+        "settings no screen could read are replaced with no version"
+    );
+}
+
+/// An agent setting saved at a version another window replaced is refused; the page reads
+/// the settings again, says so, shows the saved ones and saves the next change at the
+/// version just read (Q35).
+#[test]
+fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_names_them() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened(
+        Scope::Project {
+            id: project.clone(),
+            name: "Harbor Notes".into(),
+        },
+        "",
+    );
+    shell.key(Key::Ctrl('t'));
+    let stale = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: InstructionSettings {
+            mode: Mode::Both,
+            transcripts: false,
+            edits: EditDelivery::NextMessage,
+        },
+        version: Some(0),
+    };
+    assert_eq!(requests(&mut shell), vec![stale.clone()]);
+    shell.arrive(settings(stale, Err("stale_revision")));
+    let read = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    let shown = screen(&mut shell);
+    assert!(shown.contains("changed since you opened them"), "{shown}");
+    let saved = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        transcripts: false,
+        edits: EditDelivery::NextMessage,
+    };
+    shell.arrive(settings(read, Ok(at(saved, 3))));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }],
+        "settings read again read workflow adoption again"
+    );
+    shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Agent instructions: Project only"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::SaveSettings {
+            project,
+            settings: InstructionSettings {
+                mode: Mode::ProjectOnly,
+                transcripts: true,
+                edits: EditDelivery::NextMessage,
+            },
+            version: Some(3),
         }]
+    );
+}
+
+/// A settings save the engine could not confirm may have landed, so the page reads the
+/// settings and their version again before the next change, which then names that version.
+#[test]
+fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the_next_change() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened(
+        Scope::Project {
+            id: project.clone(),
+            name: "Harbor Notes".into(),
+        },
+        "",
+    );
+    shell.key(Key::Ctrl('t'));
+    let unconfirmed = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: InstructionSettings {
+            mode: Mode::Both,
+            transcripts: false,
+            edits: EditDelivery::NextMessage,
+        },
+        version: Some(0),
+    };
+    assert_eq!(requests(&mut shell), vec![unconfirmed.clone()]);
+    shell.arrive(settings(unconfirmed, Err("process_outcome_unknown")));
+    let read = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![read.clone()],
+        "the page reads what is really stored"
+    );
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("couldn't confirm these agent settings were saved"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "no change goes out before the settings are read again"
+    );
+    let landed = InstructionSettings {
+        mode: Mode::Both,
+        transcripts: false,
+        edits: EditDelivery::NextMessage,
+    };
+    shell.arrive(settings(read, Ok(at(landed, 1))));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }]
+    );
+    shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::SaveSettings {
+            project,
+            settings: InstructionSettings {
+                mode: Mode::Both,
+                transcripts: true,
+                edits: EditDelivery::NextMessage,
+            },
+            version: Some(1),
+        }],
+        "the next change names the stored version, so it is never refused as stale"
     );
 }
 
@@ -537,7 +1000,7 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
 fn the_app_page_has_no_agent_settings() {
     let mut shell = opened(Scope::App, "");
     let shown = screen(&mut shell);
-    assert!(!shown.contains("Agent instruction files"), "{shown}");
+    assert!(!shown.contains("Agent instructions:"), "{shown}");
     shell.key(Key::Ctrl('f'));
     shell.key(Key::Ctrl('t'));
     assert_eq!(requests(&mut shell), vec![]);
@@ -584,6 +1047,7 @@ fn skill(id: &str, name: &str, line: &str) -> crate::plugins::SkillView {
         on_here: None,
         source: String::new(),
         folder: String::new(),
+        version: 0,
         refused: None,
     }
 }
@@ -717,5 +1181,312 @@ fn a_project_page_tags_the_skills_of_its_own_catalog() {
             |job| matches!(job, SettingsJob::ProjectPlugins { project: asked } if *asked == project)
         ),
         "a project page reads that project's catalog"
+    );
+}
+
+#[test]
+fn import_from_file_reads_a_named_file_as_a_preview() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().canonicalize().unwrap().join("AGENTS.md");
+    std::fs::write(&file, "Plan first.\n").unwrap();
+    let mut shell = opened(Scope::App, "Saved rule.");
+    assert!(
+        render(&mut shell, 80, 24)[23].contains("Ctrl-G Import from file"),
+        "{}",
+        screen(&mut shell)
+    );
+
+    shell.key(Key::Ctrl('g'));
+    typed(&mut shell, "~/never");
+    let field = screen(&mut shell);
+    assert!(field.contains("Import from file"), "{field}");
+    assert!(field.contains("~/never"), "{field}");
+    assert!(
+        render(&mut shell, 80, 24)[23].contains("Enter Read file"),
+        "{field}"
+    );
+    shell.key(Key::Esc);
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "Esc closes the field and reads nothing"
+    );
+    assert!(screen(&mut shell).contains("│ █aved rule."));
+
+    shell.key(Key::Ctrl('g'));
+    typed(&mut shell, "~/notes/CLAUDE.md");
+    shell.key(Key::Enter);
+    let home_read = ProcessQuery::ReadFile {
+        path: crate::projects_home::owner_home()
+            .unwrap()
+            .join("notes/CLAUDE.md"),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![home_read.clone()],
+        "~/ is the owner's home folder"
+    );
+    let missing = crate::instruction_files::read_picked(&folder.path().join("missing.md"))
+        .unwrap_err()
+        .0;
+    shell.arrive(reply(home_read, Err(missing.as_str())));
+    assert!(
+        screen(&mut shell).contains("That file doesn't exist. Check the path."),
+        "{}",
+        screen(&mut shell)
+    );
+
+    shell.key(Key::Ctrl('g'));
+    typed(&mut shell, &format!("{}x", file.display()));
+    shell.key(Key::Backspace);
+    shell.key(Key::Enter);
+    let query = ProcessQuery::ReadFile { path: file.clone() };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    let text = crate::instruction_files::read_picked(&file).unwrap();
+    shell.arrive(reply(query, Ok(text.as_str())));
+    assert!(screen(&mut shell).contains("Instructions from your file"));
+    shell.key(Key::Enter);
+    assert!(screen(&mut shell).contains("│ █lan first."));
+    assert!(screen(&mut shell).contains("Not saved yet"));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "nothing is saved before Ctrl-S"
+    );
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Save {
+            project: None,
+            text: "Plan first.\n".into(),
+            version: READ_VERSION,
+            opened: None,
+        }]
+    );
+}
+
+#[test]
+fn each_import_from_file_refusal_reads_as_a_plain_sentence_and_keeps_the_editor() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().canonicalize().unwrap();
+    let large = root.join("large.md");
+    std::fs::write(&large, "x".repeat(crate::agent_home::TEXT_BYTES_MAX + 1)).unwrap();
+    let invalid = root.join("invalid.md");
+    std::fs::write(&invalid, b"rule\xff\xfe").unwrap();
+    let directory = root.join("folder.md");
+    std::fs::create_dir(&directory).unwrap();
+    for (path, code) in [
+        (root.join("missing.md"), "process_import_missing"),
+        (directory, "process_import_unsafe"),
+        (large, "process_text_too_large"),
+        (invalid, "process_text_invalid"),
+        (
+            std::path::PathBuf::from("relative/CLAUDE.md"),
+            "process_request_invalid",
+        ),
+    ] {
+        let mut shell = opened(Scope::App, "Saved rule.");
+        shell.key(Key::Ctrl('g'));
+        typed(&mut shell, &path.display().to_string());
+        shell.key(Key::Enter);
+        let query = ProcessQuery::ReadFile { path: path.clone() };
+        assert_eq!(requests(&mut shell), vec![query.clone()]);
+        let refused = crate::instruction_files::read_picked(&path).unwrap_err().0;
+        assert_eq!(refused, code, "{}", path.display());
+        shell.arrive(reply(query, Err(refused.as_str())));
+        let shown = screen(&mut shell);
+        let sentence: String = message(code).chars().take(40).collect();
+        assert!(shown.contains(&sentence), "{code}: {shown}");
+        assert!(
+            shown.contains("│ █aved rule."),
+            "a refusal keeps the editor: {shown}"
+        );
+    }
+}
+
+/// A project's adoption view read by the real coordination store: a master that called
+/// nothing, a Codex sub-agent that edited with no declared work, queried the graph twice,
+/// ran one context-mode call and read the tdd skill and a skill the project does not
+/// enable, and was reminded of its flag with the project's nudges turned on, and a newer
+/// agent whose launch fires no hooks that edited and read the tdd skill, reminded the same
+/// way. Input: the project. Output: the view and the master, sub-agent and hookless ids.
+#[cfg(unix)]
+fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
+    const NOW: i64 = 1_800_000_000_000;
+    let root = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let body = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: project.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Harbor Notes".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES(?1, ?2)",
+        rusqlite::params![project.as_str(), body],
+    )
+    .unwrap();
+    let agent = |role: &str, harness: &str, hookless: bool| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+             VALUES (?1,?2,?3,1,'running',?4,?4,?5)",
+            rusqlite::params![project.as_str(), role, harness, NOW, hookless],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let master = agent("master", "claude-code", false);
+    let sub = agent("sub", "codex", false);
+    let hookless = agent("sub", "claude-code", true);
+    for tool in [
+        "Edit",
+        "graphify",
+        "graphify",
+        "ctx_execute",
+        "Skill",
+        "skill:tdd",
+        "skill:other-one",
+    ] {
+        crate::coord::record_tool(&db, sub, tool, NOW).unwrap();
+    }
+    for tool in ["Edit", "Skill", "skill:tdd"] {
+        crate::coord::record_tool(&db, hookless, tool, NOW).unwrap();
+    }
+    let nudges = crate::coord::settings::CoordSettings {
+        nudges: crate::coord::settings::Nudges::TenMinutes,
+        ..Default::default()
+    };
+    crate::coord::settings::write(&db, project, &nudges).unwrap();
+    crate::coord::adoption::tick(&db, project, NOW).unwrap();
+    let skills = ["zeta".to_owned(), "tdd".to_owned()];
+    let view = crate::coord::adoption::view(&db, project, &skills, NOW).unwrap();
+    (view, master, sub, hookless)
+}
+
+fn adoption_reply(project: &ProjectId, result: Result<Adoption, &str>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
+        query: ProcessQuery::Adoption {
+            project: project.clone(),
+        },
+        result: result
+            .map(|view| ProcessReply::Adoption(Box::new(view)))
+            .map_err(str::to_owned),
+    }))))
+}
+
+/// Opens a project's Process page on a tall terminal and answers its text and settings
+/// reads, leaving the adoption read it sends next. Input: the project. Output: the shell.
+fn opened_for_adoption(project: &ProjectId) -> Shell {
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = Shell::with(ctx(140, 60), Box::new(ProcessPage::new(scope)));
+    let read = ProcessQuery::Read {
+        project: Some(project.clone()),
+    };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    shell.arrive(reply(read, Ok("")));
+    let query = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    shell.arrive(settings(query, Ok(at(InstructionSettings::default(), 0))));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }],
+        "the page reads workflow adoption once its settings arrive"
+    );
+    shell
+}
+
+#[cfg(unix)]
+#[test]
+fn a_project_page_shows_workflow_adoption_after_its_settings() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let (view, master, sub, hookless) = adoption_read(&project);
+    let mut shell = opened_for_adoption(&project);
+    shell.arrive(adoption_reply(&project, Ok(view)));
+    let rows = render(&mut shell, 140, 60);
+    let shown = rows.join("\n");
+    let at = |text: &str| {
+        rows.iter()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("{text:?} is missing:\n{shown}"))
+    };
+    let heading = at("Workflow adoption");
+    assert!(
+        rows[heading].contains("Nudges every 10 minutes: each flag sends that agent one reminder."),
+        "{shown}"
+    );
+    let hookless_row = at(&format!("#{hookless} sub claude-code"));
+    let sub_row = at(&format!("#{sub} sub codex"));
+    let master_row = at(&format!("#{master} master claude-code"));
+    assert!(heading < hookless_row && hookless_row < sub_row && sub_row < master_row);
+    assert!(
+        rows[hookless_row + 1].contains(
+            "start_work 0  inspect_work 0  update_work 0  transfer_work 0  finish_work 0  ctx_* 0  graphify 0  Skill 1"
+        ),
+        "an agent without hooks shows its counts (OQ-8):\n{shown}"
+    );
+    assert!(
+        rows[hookless_row + 2].contains("graphify 0  ctx_* 0  Skills:  tdd 1  zeta 0"),
+        "{shown}"
+    );
+    assert!(
+        rows[hookless_row + 3].contains("Edits without start_work, reminded"),
+        "an agent without hooks shows its flag, reminded under the 10-minute nudges:\n{shown}"
+    );
+    assert!(!shown.contains("unavailable"), "{shown}");
+    assert!(
+        rows[sub_row + 1].contains(
+            "start_work 0  inspect_work 0  update_work 0  transfer_work 0  finish_work 0  ctx_* 1  graphify 2  Skill 1"
+        ),
+        "{shown}"
+    );
+    assert!(
+        rows[sub_row + 2]
+            .contains("graphify 2  ctx_* 1  Skills:  tdd 1  zeta 0  other-one 1 (not enabled)"),
+        "{shown}"
+    );
+    assert!(
+        rows[sub_row + 3].contains("Edits without start_work, reminded"),
+        "{shown}"
+    );
+    assert!(
+        rows[master_row + 2].contains("graphify 0  ctx_* 0  Skills:  tdd 0  zeta 0"),
+        "{shown}"
+    );
+    assert!(
+        !rows[master_row + 3].contains("Edits without start_work"),
+        "a master that called nothing has no flag:\n{shown}"
+    );
+}
+
+#[test]
+fn an_unreadable_adoption_says_so_on_the_project_page() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened_for_adoption(&project);
+    shell.arrive(adoption_reply(
+        &project,
+        Err("process_adoption_unavailable"),
+    ));
+    let shown = render(&mut shell, 140, 60).join("\n");
+    assert!(
+        shown.contains("Workflow adoption couldn't be read. Try again."),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_save_that_would_leave_agents_no_instructions_says_so_in_one_sentence() {
+    assert_eq!(
+        message("process_instructions_would_be_empty"),
+        "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first."
     );
 }

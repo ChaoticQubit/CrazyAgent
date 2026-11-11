@@ -161,6 +161,7 @@ fn switching_an_entry_off_and_on_switches_every_item_it_added() {
     let off = SetupAction::Set {
         id: "superpowers".into(),
         on: false,
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert!(!skills(&mut connection, root)[0].enabled);
@@ -171,10 +172,183 @@ fn switching_an_entry_off_and_on_switches_every_item_it_added() {
     let on = SetupAction::Set {
         id: "superpowers".into(),
         on: true,
+        version: 1,
     };
     assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert!(skills(&mut connection, root)[0].enabled);
     assert_eq!(servers(&mut connection, root)[0].status_label, "Approved");
+}
+
+#[test]
+fn stale_pack_write_is_refused() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    assert_eq!(status_of(&mut connection, root).version, 0);
+
+    let future = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: 1,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, future)),
+        "stale_revision"
+    );
+    assert!(skills(&mut connection, root)[0].enabled);
+    assert_eq!(status_of(&mut connection, root).version, 0);
+    let missing = SetupAction::Set {
+        id: "graphify".into(),
+        on: false,
+        version: 9,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, missing)),
+        "pack_not_installed"
+    );
+
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: 0,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    let status = status_of(&mut connection, root);
+    assert_eq!(status.version, 1);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Off);
+
+    let stale_on = SetupAction::Set {
+        id: "superpowers".into(),
+        on: true,
+        version: 0,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_on)),
+        "stale_revision"
+    );
+    let stale_remove = SetupAction::Remove {
+        id: "superpowers".into(),
+        version: 0,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_remove)),
+        "stale_revision"
+    );
+    let listed = skills(&mut connection, root);
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].enabled);
+    let status = status_of(&mut connection, root);
+    assert_eq!(status.version, 1);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Off);
+
+    let remove = SetupAction::Remove {
+        id: "superpowers".into(),
+        version: 1,
+    };
+    assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
+    assert!(skills(&mut connection, root).is_empty());
+    assert_eq!(status_of(&mut connection, root).version, 2);
+}
+
+#[test]
+fn a_pack_change_and_a_plugin_screen_change_refuse_each_others_stale_saves() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    let shown = skills(&mut connection, root).remove(0);
+    let pack = status_of(&mut connection, root).version;
+
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: pack,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    let Err(stale_skill) = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: shown.id.clone(),
+            enabled: true,
+            version: shown.version,
+        },
+    ) else {
+        panic!("a refusal required");
+    };
+    assert_eq!(stale_skill.0, "stale_revision");
+    let listed = skills(&mut connection, root);
+    assert!(
+        !listed[0].enabled,
+        "the stale plugin screen changed nothing"
+    );
+    assert_eq!(listed[0].version, shown.version + 1);
+    assert_eq!(status_of(&mut connection, root).version, pack + 1);
+
+    let on = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: shown.id.clone(),
+            enabled: true,
+            version: listed[0].version,
+        },
+    );
+    assert!(on.is_ok());
+    assert_eq!(
+        status_of(&mut connection, root).version,
+        pack + 2,
+        "a plugin-screen change of a pack skill moves the pack version"
+    );
+    let stale_pack = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: pack + 1,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_pack)),
+        "stale_revision"
+    );
+    assert!(skills(&mut connection, root)[0].enabled);
+
+    let owned_elsewhere = owner_skill(&mut connection, root, work.path(), "beta");
+    let version = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.id == owned_elsewhere)
+        .unwrap()
+        .version;
+    let unrelated = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: owned_elsewhere,
+            enabled: false,
+            version,
+        },
+    );
+    assert!(unrelated.is_ok());
+    assert_eq!(
+        status_of(&mut connection, root).version,
+        pack + 2,
+        "a skill no pack entry holds leaves the pack version alone"
+    );
 }
 
 #[test]
@@ -196,6 +370,7 @@ fn removing_an_entry_removes_its_items_and_the_sweep_deletes_their_folders() {
 
     let remove = SetupAction::Remove {
         id: "superpowers".into(),
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
     assert!(skills(&mut connection, root).is_empty());
@@ -210,6 +385,7 @@ fn removing_an_entry_removes_its_items_and_the_sweep_deletes_their_folders() {
     assert_eq!(pack_state(&status, "superpowers"), PackState::Available);
     let again = SetupAction::Remove {
         id: "superpowers".into(),
+        version: 1,
     };
     assert_eq!(
         rejected_with(owner(&mut connection, root, again)),
@@ -237,6 +413,7 @@ fn a_removal_that_did_not_commit_is_put_back_by_the_sweep() {
         let tx = connection.transaction().unwrap();
         let remove = SetupAction::Remove {
             id: "superpowers".into(),
+            version: 0,
         };
         assert_eq!(
             apply_owner(&tx, &root.join("engine.db"), &remove).unwrap(),
@@ -258,6 +435,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
         (
             SetupAction::Remove {
                 id: "graphify".into(),
+                version: 0,
             },
             "pack_not_installed",
         ),
@@ -265,6 +443,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
             SetupAction::Set {
                 id: "graphify".into(),
                 on: false,
+                version: 0,
             },
             "pack_not_installed",
         ),
@@ -272,6 +451,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
             SetupAction::Set {
                 id: "superpowers".into(),
                 on: false,
+                version: 0,
             },
             "pack_not_installed",
         ),
@@ -290,6 +470,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
         (
             SetupAction::Remove {
                 id: "bad id!".into(),
+                version: 0,
             },
             "pack_unknown",
         ),
@@ -402,6 +583,7 @@ fn a_graphify_skill_already_in_the_store_reads_installed_and_is_adopted_not_inst
     let off = SetupAction::Set {
         id: "graphify".into(),
         on: false,
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert_eq!(
@@ -555,6 +737,7 @@ fn an_owner_skill_named_like_an_entry_survives_every_new_pin_and_switch() {
     let off = SetupAction::Set {
         id: "tiger-style".into(),
         on: false,
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     install(
@@ -697,20 +880,22 @@ fn a_new_pin_keeps_the_owner_switches_secrets_and_an_entry_left_off() {
         },
     )
     .unwrap();
-    let alpha = skills(&mut connection, root)[0].id.clone();
+    let alpha = skills(&mut connection, root).remove(0);
     plugins::execute(
         &mut connection,
         root,
         plugins::Command::Switch {
             project: app.clone(),
-            id: alpha,
+            id: alpha.id,
             on: false,
+            version: alpha.version,
         },
     )
     .unwrap();
     let off = SetupAction::Set {
         id: "superpowers".into(),
         on: false,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
 
@@ -768,6 +953,7 @@ fn a_new_pin_keeps_the_owner_switches_secrets_and_an_entry_left_off() {
     let on = SetupAction::Set {
         id: "superpowers".into(),
         on: true,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert_ne!(
@@ -788,4 +974,364 @@ fn a_new_pin_keeps_the_owner_switches_secrets_and_an_entry_left_off() {
     assert_eq!(listed[0].id, server);
     assert_eq!(listed[0].status_label, "Approved");
     assert!(skills(&mut connection, root)[0].enabled);
+}
+
+fn hook_plugin(parent: &Path, name: &str) -> PathBuf {
+    let folder = parent.join(name);
+    std::fs::create_dir_all(folder.join("hooks")).unwrap();
+    std::fs::write(
+        folder.join("hooks/hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt.sh\"","timeout":5}]}]}}"#,
+    )
+    .unwrap();
+    for script in ["start.sh", "prompt.sh"] {
+        std::fs::write(folder.join("hooks").join(script), "exit 0\n").unwrap();
+    }
+    std::fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        format!(r#"{{"name":"{name}"}}"#),
+    )
+    .unwrap();
+    folder
+}
+
+fn hook_views(
+    connection: &mut Connection,
+    root: &Path,
+    project: Option<crate::protocol::ProjectId>,
+) -> Vec<crate::plugins::HookView> {
+    let plugins::ResultValue::Hooks(views, next) = plugins::execute(
+        connection,
+        root,
+        plugins::Command::Hooks { project, offset: 0 },
+    )
+    .unwrap() else {
+        panic!("hook list required");
+    };
+    assert!(next.is_none());
+    views
+}
+
+fn seed(
+    connection: &mut Connection,
+    root: &Path,
+    id: &str,
+    plugin: &Path,
+) -> Result<(), EngineError> {
+    execute(
+        connection,
+        root,
+        Command::SeedHooks {
+            id: id.into(),
+            plugin: plugin.to_path_buf(),
+        },
+    )
+}
+
+fn effective_events(connection: &mut Connection, root: &Path, project: &str) -> Vec<String> {
+    let project = crate::protocol::ProjectId::new(project).unwrap();
+    let tx = connection.transaction().unwrap();
+    let hooks = plugins::effective_hooks(&tx, root, &project).unwrap();
+    for hook in &hooks {
+        assert!(hook.folder.join("hooks/start.sh").is_file(), "{hook:?}");
+    }
+    hooks.into_iter().map(|hook| hook.event).collect()
+}
+
+#[test]
+fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the_entry() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute(
+            "INSERT INTO projects(id, body) VALUES('project-1', '{}')",
+            [],
+        )
+        .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(work.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "caveman");
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let mut events: Vec<&str> = views.iter().map(|view| view.event.as_str()).collect();
+    events.sort();
+    assert_eq!(events, ["SessionStart", "UserPromptSubmit"]);
+    assert!(views.iter().all(|view| view.enabled
+        && view.plugin == "caveman"
+        && view.scope == Scope::Global
+        && view.follows.as_deref() == Some("caveman")));
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    assert_eq!(hook_views(&mut connection, root, None).len(), 2);
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1"),
+        ["SessionStart", "UserPromptSubmit"]
+    );
+
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap()
+        .id
+        .clone();
+    let prompt = views
+        .iter()
+        .find(|view| view.event == "UserPromptSubmit")
+        .unwrap()
+        .id
+        .clone();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: start.clone(),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1"),
+        ["UserPromptSubmit"]
+    );
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt.clone(),
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+    let here = hook_views(
+        &mut connection,
+        root,
+        Some(crate::protocol::ProjectId::new("project-1").unwrap()),
+    );
+    assert_eq!(
+        here.iter().find(|view| view.id == prompt).unwrap().on_here,
+        Some(false)
+    );
+
+    let off = SetupAction::Set {
+        id: "caveman".into(),
+        on: false,
+        version: status_of(&mut connection, root).version,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    assert!(effective_events(&mut connection, root, "project-2").is_empty());
+    let on = SetupAction::Set {
+        id: "caveman".into(),
+        on: true,
+        version: status_of(&mut connection, root).version,
+    };
+    assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+
+    let folders: Vec<PathBuf> = {
+        let tx = connection.transaction().unwrap();
+        let project = crate::protocol::ProjectId::new("project-2").unwrap();
+        plugins::effective_hooks(&tx, root, &project)
+            .unwrap()
+            .into_iter()
+            .map(|hook| hook.folder)
+            .collect()
+    };
+    assert_eq!(folders.len(), 1);
+    let remove = SetupAction::Remove {
+        id: "caveman".into(),
+        version: status_of(&mut connection, root).version,
+    };
+    assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
+    assert!(hook_views(&mut connection, root, None).is_empty());
+    let id = folders[0].file_name().unwrap().to_str().unwrap();
+    let noted: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM file_trash WHERE kind='hook_folder' AND name=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(noted, 1, "the removal notes the folder in the file trash");
+    crate::storage::trash::sweep(&connection, root, None).unwrap();
+    assert!(!folders[0].exists(), "{}", folders[0].display());
+}
+
+#[test]
+fn no_hooks_are_seeded_for_an_entry_not_installed_switched_off_or_without_hooks() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    let plugin = hook_plugin(work.path(), "superpowers");
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    assert!(hook_views(&mut connection, root, None).is_empty());
+
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: status_of(&mut connection, root).version,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    assert!(hook_views(&mut connection, root, None).is_empty());
+
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(work.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let hookless = work.path().join("hookless");
+    std::fs::create_dir(&hookless).unwrap();
+    seed(&mut connection, root, "caveman", &hookless).unwrap();
+    assert!(hook_views(&mut connection, root, None).is_empty());
+}
+
+fn hooks_refused(status: &SetupStatus, id: &str) -> Option<String> {
+    status
+        .pack
+        .iter()
+        .find(|entry| entry.id == id)
+        .unwrap()
+        .hooks_refused
+        .clone()
+}
+
+#[test]
+fn a_hooks_pack_without_plugin_json_is_refused_and_its_setup_row_says_why_until_seeded() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(work.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        hooks_refused(&status_of(&mut connection, root), "caveman"),
+        None
+    );
+    let plugin = hook_plugin(work.path(), "caveman-hooks");
+    std::fs::remove_dir_all(plugin.join(".claude-plugin")).unwrap();
+    let refused = seed(&mut connection, root, "caveman", &plugin).map_err(|problem| problem.0);
+    assert_eq!(refused, Err("hooks_plugin_manifest_missing".to_owned()));
+    assert!(hook_views(&mut connection, root, None).is_empty());
+    let sentence = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+    assert_eq!(
+        crate::plugins::plain_problem("hooks_plugin_manifest_missing"),
+        Some(sentence)
+    );
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "caveman"), PackState::On);
+    assert_eq!(hooks_refused(&status, "caveman").as_deref(), Some(sentence));
+    assert_eq!(hooks_refused(&status, "superpowers"), None);
+
+    std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin.join(".claude-plugin/plugin.json"),
+        r#"{"name":"caveman-hooks"}"#,
+    )
+    .unwrap();
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    assert_eq!(hook_views(&mut connection, root, None).len(), 2);
+    assert_eq!(
+        hooks_refused(&status_of(&mut connection, root), "caveman"),
+        None
+    );
+}
+
+#[test]
+fn hooks_seeded_for_an_adopted_owner_skill_follow_that_skill() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let mine = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AddSkill {
+            scope: Scope::Global,
+            source: skill(mine.path(), "graphify").display().to_string(),
+        },
+    )
+    .unwrap();
+    install(
+        &mut connection,
+        root,
+        "graphify",
+        "https://example.invalid/graphify@1",
+        vec![skill(work.path(), "graphify")],
+        None,
+    )
+    .unwrap();
+    let owned = skills(&mut connection, root);
+    assert_eq!(owned.len(), 1);
+    seed(
+        &mut connection,
+        root,
+        "graphify",
+        &hook_plugin(work.path(), "graphify-hooks"),
+    )
+    .unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("graphify"))
+    );
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1").len(),
+        2
+    );
+    let version = skills(&mut connection, root)
+        .into_iter()
+        .find(|skill| skill.id == owned[0].id)
+        .unwrap()
+        .version;
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: owned[0].id.clone(),
+            enabled: false,
+            version,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
 }

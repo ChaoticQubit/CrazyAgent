@@ -1,5 +1,7 @@
+pub(crate) mod codex_folder;
 pub mod interactive;
 pub mod launch;
+pub mod leftovers;
 pub mod terminal_session;
 pub mod transcript;
 
@@ -78,11 +80,13 @@ pub enum ToolControl {
 }
 
 /// States whether a harness can run a team agent, the master or a sub-agent.
+/// MasterOnly runs the project master, with no live terminal, and never a team agent;
 /// Unavailable carries the plain reason, such as no reader for its replies yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamUse {
     Available,
+    MasterOnly { reason: String },
     Unavailable { reason: String },
 }
 
@@ -261,6 +265,13 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                 team: match interactive::support(spec.id) {
                     interactive::Support::Terminal => TeamUse::Available,
                     interactive::Support::HeadlessOnly { reason }
+                        if crate::team::master_backend(spec.id).is_some() =>
+                    {
+                        TeamUse::MasterOnly {
+                            reason: reason.into(),
+                        }
+                    }
+                    interactive::Support::HeadlessOnly { reason }
                     | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
                         reason: reason.into(),
                     },
@@ -391,6 +402,13 @@ pub fn same(one: &str, other: &str) -> bool {
         (Some(one), Some(other)) => one.id == other.id,
         _ => one == other,
     }
+}
+
+/// The catalog id of a harness name as a team plan, agent row or connection stores it, or
+/// the name itself when the catalog does not know it.
+/// Input: the stored name. Output: one spelling per harness.
+pub fn canonical(id: &str) -> &str {
+    spec(id).map_or(id, |spec| spec.id)
 }
 
 const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];

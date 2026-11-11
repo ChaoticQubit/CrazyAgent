@@ -69,6 +69,7 @@ pub(super) struct CodexHostProcess {
     input: mpsc::Sender<WriteRequest>,
     worker: JoinHandle<()>,
     deadline: Instant,
+    close_time: Duration,
     pid: u32,
     pending_input: Option<PendingInput>,
 }
@@ -84,13 +85,18 @@ impl CodexHostProcess {
         command: Command,
         budget: &ResourceBudget,
     ) -> Result<Self, EngineError> {
-        Self::spawn_guarded(command, budget, None).await
+        Self::spawn_guarded(command, budget, None, false).await
     }
 
+    /// Starts the harness under custody with its account lease. A Full access harness,
+    /// `unconfined`, has what it left outside its group checked when it ends, which a close
+    /// waits `STOP_TIME` longer for. Inputs: the wrapped command, the budget, the lease and
+    /// whether the harness runs unconfined. Output: the running process or a plain code.
     pub(super) async fn spawn_guarded(
         command: Command,
         budget: &ResourceBudget,
         profile: Option<NativeProfileUse>,
+        unconfined: bool,
     ) -> Result<Self, EngineError> {
         budget.validate().map_err(EngineError)?;
         let deadline = Instant::now()
@@ -115,14 +121,23 @@ impl CodexHostProcess {
         let worker = std::thread::Builder::new()
             .name("codex-host-custody".into())
             .spawn(move || {
-                process_custody::run(command, profile, receiver, retained, deadline, limit);
+                process_custody::run(
+                    command, profile, unconfined, receiver, retained, deadline, limit,
+                );
             })
             .map_err(|_| EngineError("codex_host_custodian_unavailable".into()))?;
+        let close_time = CLOSE_TIME
+            + if unconfined {
+                crate::harnesses::leftovers::STOP_TIME
+            } else {
+                Duration::ZERO
+            };
         let mut process = Self {
             shared,
             input,
             worker,
             deadline,
+            close_time,
             pid: 0,
             pending_input: None,
         };
@@ -161,7 +176,7 @@ impl CodexHostProcess {
     /// Poisons the custody's shared state with a real panic under its lock, as a panic in
     /// any holder would, so the next output the custody counts fails its accounting.
     /// Input: the host. Output: none.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn poison_shared_state(&self) {
         let shared = Arc::clone(&self.shared);
         let poisoned = std::thread::spawn(move || {
@@ -264,7 +279,7 @@ impl CodexHostProcess {
 
     pub(super) async fn close(&mut self) -> Result<ExitStatus, EngineError> {
         self.request_stop();
-        let deadline = Instant::now() + CLOSE_TIME;
+        let deadline = Instant::now() + self.close_time;
         loop {
             {
                 let mut state = self.shared.lock()?;

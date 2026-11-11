@@ -124,3 +124,78 @@ test("the live master area shows the switch divider under its header, above the 
   assert.match(shown, /Switched to Codex\. Started fresh/);
   assert.doesNotMatch(view(null), /harness-switch/);
 });
+
+test("a listed live session with no messages is new already, and Delete says why it kept a session", () => {
+  const list = [summary("old", "parked", { turns: 2 })];
+  assert.equal(sessions.liveUnused("live", list, true), true);
+  assert.equal(sessions.liveUnused("live", [summary("live", "configured", { turns: 1 }), ...list], true), false);
+  assert.equal(sessions.liveUnused("live", [], false), false, "not before the list is read");
+  assert.equal(sessions.liveUnused(null, list, true), false);
+  assert.equal(api.failureCopy("master_session_unused"), "This session has no messages yet, so it already is a new session.");
+  assert.match(api.failureCopy("master_session_files_kept"), /nothing was deleted/);
+});
+
+const { bundle, withPage } = await import("./browser.mjs");
+const counted = await bundle(new URL("./fixtures/sessions-count.mjs", import.meta.url).pathname);
+
+/** Runs one Sessions bar count check in a page with the count fixture loaded. Input: the
+ * check, given the page's evaluate. Output: what the check returns. */
+const inCountPage = (check) => withPage(async ({ evaluate }) => {
+  await evaluate(counted);
+  return check(evaluate);
+});
+
+test("the live master's Sessions bar re-reads its count when the master's turn state changes, with no timer read", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("working")');
+    const first = await evaluate('Fixture.liveLine("1 message", 3000)');
+    await evaluate('Fixture.turnLive("idle")');
+    const second = await evaluate('Fixture.liveLine("2 messages", 3000)');
+    const quiet = await evaluate('Fixture.liveLine("never", 2500)');
+    return { first, second, quiet };
+  });
+  assert.equal(seen.first.line, "Live session · Started earlier · 1 message");
+  assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the master's ended turn shows in the count");
+  assert.equal(seen.quiet.reads, seen.second.reads, "the bar reads the list again only on a turn change");
+});
+
+test("the conversation's Sessions bar re-reads its count when a second turn shows, with no timer read", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate("Fixture.mountConversation()");
+    const first = await evaluate('Fixture.liveLine("1 message", 3000)');
+    await evaluate("Fixture.turnConversation()");
+    const second = await evaluate('Fixture.liveLine("2 messages", 5000)');
+    const quiet = await evaluate('Fixture.liveLine("never", 4500)');
+    return { first, second, quiet };
+  });
+  assert.equal(seen.first.line, "Live session · Started earlier · 1 message");
+  assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the second turn shows in the count");
+  assert.equal(seen.quiet.reads, seen.second.reads, "the conversation's two-second turn reads leave the list alone");
+});
+
+test("a Sessions list read that works again clears the problem an earlier refused read showed", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("working", 1)');
+    await evaluate('Fixture.liveLine("never", 500)');
+    const refused = await evaluate("Fixture.problem()");
+    await evaluate('Fixture.turnLive("idle")');
+    const line = await evaluate('Fixture.liveLine("2 messages", 3000)');
+    return { refused, line, after: await evaluate("Fixture.problem()") };
+  });
+  assert.equal(seen.refused, "CrazyAgent's engine isn't running.", "the refused read shows its problem");
+  assert.equal(seen.line.line, "Live session · Started earlier · 2 messages");
+  assert.equal(seen.after, null, "the read that worked clears the earlier problem");
+});
+
+test("a refused New session keeps its problem through the list read after it", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("idle")');
+    const before = await evaluate('Fixture.liveLine("1 message", 3000)');
+    const clicked = await evaluate('Fixture.click("New session")');
+    const after = await evaluate('Fixture.liveLine("never", 500)');
+    return { before, clicked, after, problem: await evaluate("Fixture.problem()") };
+  });
+  assert.equal(seen.clicked, true);
+  assert.equal(seen.after.reads, seen.before.reads + 1, "the refused switch reads the list once");
+  assert.equal(seen.problem, api.failureCopy({ code: "master_source_conflict" }), "the list read that worked keeps the switch's problem");
+});

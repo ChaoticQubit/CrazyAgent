@@ -10,7 +10,7 @@ import "../project/projects.css";
 import "./intake.css";
 
 function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: boolean; onTick: (id: string, on: boolean) => void; locked: boolean }) {
-  const state = packStateView(entry.state);
+  const state = packStateView(entry.state, entry.hooks_refused);
   const name = <span className="row"><Icon name={entryIcon(entry)} size={14} />{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}</span>;
   return <li className="in-row">
     <span className="in-row-main">
@@ -48,7 +48,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
     <p className="pj-error" role="alert">{status.message}</p>
     <span><Button onClick={onContinue}>Continue</Button></span>
   </div>;
-  const { dependencies, pack } = status.value;
+  const { dependencies, pack, notes } = status.value;
   const running = setupBusy(status.value);
   const locked = started || running;
   const approval = approvalLine(pack, ticks);
@@ -64,6 +64,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
           <StatusBadge word={row.word} tone={row.tone} />
         </li>;
       })}</ul>
+      {notes?.map((note) => <p className="pj-small pj-error" key={note}>{displayText(note)}</p>)}
     </section>
     <section className="pj-stack-s" aria-label="Default pack">
       <h2>Default pack</h2>

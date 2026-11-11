@@ -1,0 +1,231 @@
+import { useEffect, useRef, useState } from "react";
+import type { Failure } from "../../api";
+import { HEARTBEAT_MS, IDE_NOT_CLOSED, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, closeIde, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, sameBounds, touchIde } from "../../api-ide";
+import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
+import { Button, useOverlayShown } from "../../ui";
+import "./ide.css";
+
+/** How often a page waiting on the IDE build reads its state again, in milliseconds. */
+export const IDE_POLL_MS = 1_000;
+const NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";
+
+function failureLine(failure: Failure, sentence: (code: string) => string = () => ""): string {
+  if (failure.kind !== "error") return NOT_READY;
+  return sentence(failure.code) || failure.message;
+}
+
+/** The IDE tab's status: the build's plain line and its one action, Download or Retry.
+ * Inputs: the IDE state, whether the action runs, and its handler. Output: the panel. */
+export function IdeStatus({ state, busy, onAction }: { state: IdeTabState; busy: boolean; onAction: () => void }) {
+  const status = ideStatus(state);
+  return <div className="ide-status" role="status">
+    <p>{status.line}</p>
+    {status.action && <button type="button" className="btn" disabled={busy} onClick={onAction}>{status.action === "retry" ? "Retry" : "Download"}</button>}
+  </div>;
+}
+
+/** The project page's line while Context and Changes stay: the build's progress, or why the
+ * IDE can't open on this platform with the build's one action, Download or Retry, or a failed
+ * read of the IDE state with Retry. Inputs: the view, the failed read if the last one failed,
+ * whether the action runs, and its handler. Output: the line, or nothing when the IDE opens. */
+export function IdeUnavailable({ view, failure, busy = false, onAction }: { view: IdeView | undefined; failure?: Failure; busy?: boolean; onAction: () => void }) {
+  const unavailable = failure ? ideReadFailed(failure, desktopPlatform()) : ideUnavailable(view);
+  if (unavailable === null) return null;
+  return <div className="row pj-ide-unavailable" role="status">
+    <span className="secondary">{unavailable.line}</span>
+    {unavailable.action && <Button size="small" pending={busy} disabled={busy} onClick={onAction}>{unavailable.action === "retry" ? "Retry" : "Download"}</Button>}
+  </div>;
+}
+
+/** Closes the project's IDE when its page closes, and tells the owner when that failed. A build
+ * with no IDE has nothing to close and says nothing. Inputs: the project and the toast the page
+ * tells the owner through. Output: none. */
+export function useCloseIde(projectId: string, notify: (line: string) => void) {
+  useEffect(() => () => {
+    void closeIde(projectId).then((result) => {
+      if (result.kind === "error") notify(IDE_NOT_CLOSED);
+    });
+  }, [projectId]);
+}
+
+/** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
+ * native webview over the panel. The webview follows the panel's bounds, hides when the tab
+ * is left or a dialog, drawer or menu opens over the page, and the engine hears every minute
+ * that the owner still uses it. Every state it reads goes to `onView`, so the page swaps
+ * Context and Changes back when the build fails. A failed move shows on the tab; a failed hide
+ * goes to the page, whose line stays outside the box the IDE webview may still cover. The IDE can
+ * also move to a window of its own: the tab then says so and offers to bring it forward until
+ * that window closes.
+ * Inputs: the project id, the view handler and the hide's problem, null once it worked. Output:
+ * the tab. */
+export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void }) {
+  const panel = useRef<HTMLDivElement>(null);
+  const [state, setState] = useState<IdeTabState | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [left, setLeft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [outProject, setOutProject] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  const acting = useRef(false);
+  const out = outProject === projectId;
+  const ready = state !== null && ideStatus(state).ready;
+  const covered = useOverlayShown();
+  const waiting = state === null
+    || (state.unqualified === null && (state.build.state === "downloading" || state.build.state === "verifying"));
+
+  useEffect(() => {
+    if (!waiting) return;
+    let live = true;
+    const read = async () => {
+      const result = await ideView();
+      if (!live) return;
+      if (result.kind !== "ok") setProblem(failureLine(result));
+      else {
+        setProblem(null);
+        setState(result.value.state);
+        onView(result.value);
+      }
+    };
+    void read();
+    const timer = window.setInterval(() => void read(), IDE_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [projectId, waiting]);
+
+  useEffect(() => {
+    if (!out) return;
+    let live = true;
+    const timer = window.setInterval(() => {
+      void ideWindowOut(projectId).then((result) => {
+        if (live && result.kind === "ok" && !result.value) setOutProject(null);
+      });
+    }, IDE_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [projectId, out]);
+
+  useEffect(() => {
+    const element = panel.current;
+    if (!ready || !element || covered || out) return;
+    let live = true;
+    let shown = false;
+    let last: IdeBounds | null = null;
+    let frame = 0;
+    let misplaced = false;
+    let sending = false;
+    let waiting: IdeBounds | null = null;
+    const hide = () => void hideIde(projectId).then((result) => onHideProblem(result.kind === "ok" ? null : IDE_NOT_HIDDEN));
+    const send = (box: IdeBounds) => {
+      sending = true;
+      void placeIde(projectId, box).then((result) => {
+        sending = false;
+        if (!live) return;
+        if (result.kind !== "ok") {
+          misplaced = true;
+          setProblem(IDE_NOT_PLACED);
+        } else if (misplaced) {
+          misplaced = false;
+          setProblem(null);
+        }
+        const next = waiting;
+        waiting = null;
+        if (next) send(next);
+      });
+    };
+    const place = () => {
+      if (!shown) return;
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
+      if (!box || sameBounds(box, last)) return;
+      last = box;
+      if (sending) waiting = box;
+      else send(box);
+    };
+    const follow = () => {
+      if (!live || !shown) {
+        frame = 0;
+        return;
+      }
+      place();
+      frame = window.requestAnimationFrame(follow);
+    };
+    const open = async () => {
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
+      if (!box) return;
+      const result = await openIde(projectId, box);
+      if (!live) {
+        if (result.kind === "ok") hide();
+        return;
+      }
+      if (result.kind === "error" && result.code === "ide_open_cancelled") return;
+      if (result.kind !== "ok") {
+        setProblem(failureLine(result, openFailure));
+        return;
+      }
+      setLeft(result.value?.left ?? null);
+      if (result.value?.ownWindow === true) {
+        setOutProject(projectId);
+        return;
+      }
+      shown = true;
+      last = null;
+      setProblem(null);
+      onHideProblem(null);
+      if (frame === 0) follow();
+    };
+    void open();
+    const beat = window.setInterval(() => {
+      void touchIde(projectId).then((result) => {
+        if (live && result.kind === "ok" && !result.value) void open();
+      });
+    }, HEARTBEAT_MS);
+    return () => {
+      live = false;
+      window.cancelAnimationFrame(frame);
+      window.clearInterval(beat);
+      hide();
+    };
+  }, [projectId, ready, covered, out]);
+
+  const act = async () => {
+    setBusy(true);
+    const result = await ideView(true);
+    setBusy(false);
+    if (result.kind !== "ok") setProblem(failureLine(result));
+    else {
+      setProblem(null);
+      setState(result.value.state);
+      onView(result.value);
+    }
+  };
+
+  const once = async (work: () => Promise<void>) => {
+    if (acting.current) return;
+    acting.current = true;
+    setMoving(true);
+    await work();
+    acting.current = false;
+    setMoving(false);
+  };
+
+  const moveOut = () => once(async () => {
+    const result = await openIdeWindow(projectId);
+    setProblem(result.kind === "ok" ? null : IDE_NOT_MOVED);
+    if (result.kind === "ok") setOutProject(projectId);
+  });
+
+  const bringForward = () => once(async () => {
+    const result = await focusIdeWindow(projectId);
+    setProblem(result.kind === "ok" ? null : IDE_NOT_FORWARD);
+  });
+
+  return <div className="ide-tab">
+    {problem && <p className="ide-problem" role="alert">{problem}</p>}
+    {left && <p className="ide-left" role="status">Still running after this IDE stopped: {left}</p>}
+    {state && !ready && <IdeStatus state={state} busy={busy} onAction={() => void act()} />}
+    {!state && !problem && <p className="ide-status" role="status">Checking the IDE.</p>}
+    {ready && !out && <div className="ide-bar"><Button size="small" disabled={moving} onClick={() => void moveOut()}>Open in its own window</Button></div>}
+    {out && <div className="ide-status" role="status">
+      <p>This IDE is in its own window</p>
+      <Button size="small" disabled={moving} onClick={() => void bringForward()}>Bring it forward</Button>
+    </div>}
+    <div ref={panel} className="ide-panel" aria-label="IDE" hidden={!ready || out} />
+  </div>;
+}

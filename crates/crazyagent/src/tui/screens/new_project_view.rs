@@ -87,6 +87,7 @@ impl Look {
             "\u{00bb}" => ">",
             "\u{229b}" => "*",
             "\u{2213}" => "~",
+            "\u{225f}" => "?=",
             "\u{29c9}" => "[",
             "\u{2630}" => "=",
             "\u{2190}" => "<",
@@ -456,6 +457,10 @@ fn radio(on: bool, label: &str) -> String {
     format!("{} {label}", if on { "(*)" } else { "( )" })
 }
 
+/// The words of the roadmap planning toggle on New project and on the import and clone
+/// setup review.
+pub(in crate::tui) const ROADMAP_LABEL: &str = "Plan a roadmap after research";
+
 /// Gives the glyph of a research kind.
 /// Takes the kind.
 /// Returns its Unicode glyph from DESIGN.md section 6.3.
@@ -466,6 +471,7 @@ pub(in crate::tui) fn research_glyph(kind: ResearchKind) -> &'static str {
         ResearchKind::DesignResearch => "\u{25ec}",
         ResearchKind::FrontEndDesign => "\u{25ad}",
         ResearchKind::TechStackResearch => "\u{2263}",
+        ResearchKind::RoadmapPlanning => "\u{25a4}",
     }
 }
 
@@ -476,6 +482,7 @@ fn research_description(kind: ResearchKind) -> &'static str {
         ResearchKind::DesignResearch => "Patterns and references for the look",
         ResearchKind::FrontEndDesign => "A first UI for the platforms you picked",
         ResearchKind::TechStackResearch => "Libraries, hosting and architecture options",
+        ResearchKind::RoadmapPlanning => "Versions, time per version and how to release",
     }
 }
 
@@ -919,6 +926,26 @@ fn work(draw: &mut Draw) {
             &look,
         ));
     }
+    let roadmap = columns(
+        &[26, content.saturating_sub(32)],
+        vec![
+            Row::of(
+                checkbox(
+                    wizard.roadmap,
+                    &format!("{} Roadmap", look.glyph("\u{2630}")),
+                ),
+                look.fg,
+            ),
+            Row::of(ROADMAP_LABEL, look.muted),
+        ],
+    );
+    draw.add(list_row(
+        roadmap,
+        content,
+        focus && wizard.work_cursor == ResearchKind::ALL.len(),
+        focus,
+        &look,
+    ));
     draw.add(Row::default());
     let count = wizard.research.len();
     draw.add(Row::of(
@@ -1233,6 +1260,10 @@ fn picker_box(
             ),
             HarnessState::CantStart => (
                 format!("{} Can't start", look.glyph("\u{2298}")),
+                look.warning,
+            ),
+            HarnessState::MasterOnly => (
+                format!("{} Master only", look.glyph("\u{25e7}")),
                 look.warning,
             ),
             HarnessState::Unknown => (String::new(), look.muted),

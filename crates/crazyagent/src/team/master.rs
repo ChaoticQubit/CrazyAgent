@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub const INPUT_TEXT_MAX: usize = 16 * 1024;
-const OWNER_QUIET_MS: i64 = 10_000;
+pub(crate) const OWNER_QUIET_MS: i64 = 10_000;
 const DRAFT_ABANDONED_MS: i64 = 120_000;
 const INPUT_SETTLE_MS: i64 = 30_000;
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
@@ -26,29 +26,35 @@ const CHANGES_LISTED_MAX: usize = 20;
 const MASTER_TURNS_KEPT: i64 = 2000;
 const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
-const NOT_WIRED: &str = "Team messaging is not available in this build yet.";
+const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
+const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
+const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
 const MASTER_LABEL: &str = "Master";
-const NO_TERMINALS: &str = "Not sent: the engine has no agent terminals right now.";
-const MASTER_ACCEPT: &str = "Not accepted: the owner accepts change sets in Changes.";
-const OWNER_LANDS: &str = "Not accepted: the owner's setting keeps your workers' change sets for the owner's own Accept in Changes. Tell the master what is ready.";
+const RECALL_LEFT_OUT: &str =
+    "More memories matched and were left out. Search for something narrower.\n";
+const NOT_LIVE_TOOL: &str = "Not done: without its live terminal the master's team tools are delegate, ask, record_answer, remember and recall.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
-const ESCALATIONS_PER_HOUR_MAX: i64 = 10;
-const HOUR_MS: i64 = 3_600_000;
-const ESCALATED: &str =
-    "The owner has been notified. Wait for their answer here and do not decide this yourself.";
-const ESCALATIONS_FULL: &str = "Not sent: the owner already has 10 questions from this project within the hour. Wait for their answers here.";
-const _: () = assert!(ESCALATIONS_PER_HOUR_MAX == 10);
-const _: () = assert!(ESCALATIONS_PER_HOUR_MAX < super::events::NOTIFICATIONS_PER_PROJECT_MAX);
+const NO_MASTER: &str =
+    "Not asked: the engine has no live master of this project on record. Try again in a moment.";
+const QUESTIONS_FULL: &str = "Not asked: 64 questions of this project already wait for the owner. Wait for their answers before asking more.";
+const ASKER_FULL: &str = "Not asked: 8 of your questions already wait for the owner. Wait for their answers before asking more.";
+const ASK_REFUSED: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, with at most 6 distinct one-line options.";
+const TURN_REFUSED: &str = "Not recorded: that number is not an owner message of this project sent after the question was asked. Name the owner's message that answers it.";
+const ANSWER_REFUSED: &str = "Not recorded: the owner's message is blank, longer than 4096 bytes or holds hidden characters, so it cannot be the answer.";
+const _: () = assert!(crate::questions::PENDING_PER_PROJECT_MAX == 64);
+const _: () = assert!(crate::questions::PENDING_PER_ASKER_MAX == 8);
 
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
 /// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
 /// `OwnerTyping`: the owner typed within the quiet window or left an unsent draft.
+/// `Unready`: the master's app does not read keys yet (bracketed paste off).
 /// `Invalid`: the text is empty or too long. `Failed`: the pane or state could not be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputRefused {
     NoMaster,
     Busy,
+    Unready,
     OwnerTyping,
     Invalid,
     Failed(String),
@@ -106,6 +112,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 typed_ms INTEGER,
                 draft INTEGER NOT NULL DEFAULT 0,
                 problem TEXT
+            );
+            CREATE TABLE IF NOT EXISTS team_master_live_terminal (
+                project TEXT PRIMARY KEY,
+                terminal INTEGER NOT NULL CHECK(terminal IN (0,1))
             );
             CREATE TABLE IF NOT EXISTS team_master_turns (
                 agent INTEGER NOT NULL,
@@ -224,32 +234,91 @@ pub fn session_conversation(
         .map_err(state)
 }
 
+/// The live master's problem line and team note while every pool account it could run on
+/// still waits for this engine run's sign-in re-check (DEC-108); the views show it as is.
+pub(crate) const SIGN_INS_CHECKING: &str = "Checking account sign-ins after the restart. The live master starts once an account in this project's pool passes its check.";
+
+/// The live master's problem line and team note while its account's profile is held by
+/// another process, such as a sign-in or a sign-out, so it cannot be handed the account
+/// yet (LMS-1); the views show it as is.
+pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another process is using its profile, such as a sign-in or a sign-out. The live master starts once the profile is free.";
+
+/// The live master's problem line and one team note while an owner line has waited longer
+/// than a first screen may take for the master's app to read keys (F2); the line is typed
+/// once the app turns bracketed paste on.
+pub(crate) const MASTER_NOT_READING: &str =
+    "The master app is not reading keys yet; your message waits.";
+
 /// Turns a project's live master on or off: on, the runtime keeps the master's own app
-/// running in a terminal; off, the master ends with its next stop. Takes the owner
-/// transaction, the project and the switch. Returns any SQLite failure.
+/// running in a terminal; off, the master ends with its next stop. Turning it on clears why
+/// it last could not start, and either way a sign-in, profile or key-reading wait line no
+/// longer applies.
+/// Takes the owner transaction, the project and the switch. Returns any SQLite failure.
 pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Result<(), EngineError> {
     connection
         .execute(
             "INSERT INTO team_live_masters(project,live) VALUES (?1,?2)
-             ON CONFLICT(project) DO UPDATE SET live=excluded.live",
-            params![project.as_str(), on],
+             ON CONFLICT(project) DO UPDATE SET live=excluded.live,
+               problem=CASE WHEN excluded.live OR problem IN (?3,?4,?5) THEN NULL ELSE problem END",
+            params![
+                project.as_str(),
+                on,
+                SIGN_INS_CHECKING,
+                PROFILE_IN_USE,
+                MASTER_NOT_READING
+            ],
         )
         .map_err(state)?;
     Ok(())
 }
 
-/// Reads whether a project's live master is switched on. Takes the engine database and the
-/// project. Returns the switch, off when never set.
+/// Reads whether a project's master runs live: its run flag is on and the owner's "Live
+/// terminal" setting is not Off (DEC-117 Q4). Takes the engine database and the project.
+/// Returns the answer, no when the flag was never set.
 pub fn live(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT live FROM team_live_masters WHERE project=?1",
+            "SELECT live FROM team_live_masters WHERE project=?1
+             AND NOT EXISTS(SELECT 1 FROM team_master_live_terminal WHERE project=?1 AND terminal=0)",
             [project.as_str()],
             |row| row.get(0),
         )
         .optional()
         .map(|on| on.unwrap_or(false))
         .map_err(state)
+}
+
+/// Reads a project's "Live terminal" setting (DEC-117 Q4): whether its master may run as its
+/// own app in a live terminal. Takes the engine database and the project. Returns the
+/// setting, on when the owner never saved one.
+pub fn live_terminal(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT terminal FROM team_master_live_terminal WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|on| on.unwrap_or(true))
+        .map_err(state)
+}
+
+/// Saves a project's "Live terminal" setting, replacing any earlier one. Off ends a running
+/// live master at its next stop, through `live`. Takes the owner transaction, the project and
+/// the setting. Returns any SQLite failure.
+pub fn set_live_terminal(
+    connection: &Connection,
+    project: &ProjectId,
+    on: bool,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_master_live_terminal(project,terminal) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET terminal=excluded.terminal",
+            params![project.as_str(), on],
+        )
+        .map_err(state)?;
+    Ok(())
 }
 
 /// Reads a project's live master switch as the owner sees it, with why it last could not start.
@@ -285,6 +354,23 @@ pub(crate) fn problem(
         )
         .map_err(state)?;
     Ok(changed > 0 && reason.is_some())
+}
+
+/// Clears a project's live master problem line while it still reads the given wait line,
+/// so a wait that ended leaves nothing behind. Takes the engine database, the project and
+/// the line. Returns any SQLite failure.
+pub(crate) fn clear_problem(
+    connection: &Connection,
+    project: &ProjectId,
+    line: &str,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "UPDATE team_live_masters SET problem=NULL WHERE project=?1 AND problem=?2",
+            params![project.as_str(), line],
+        )
+        .map_err(state)?;
+    Ok(())
 }
 
 /// Records that a live master's pane runs, so engine input finds it. Takes the engine
@@ -402,7 +488,9 @@ pub(crate) fn turn_ended(
 }
 
 /// Types one engine message into a project's live master as one paste plus Enter, only
-/// while the master is idle and the owner is not typing, so w-events can queue team events.
+/// while the master is idle, its app reads keys (bracketed paste on, so a line is never
+/// left unsent in a prompt that is still booting) and the owner is not typing, so
+/// w-events can queue team events.
 /// Takes the engine database, the terminal host, the engine's owner typing signal when it
 /// has one, the project and the text. The newer of the signal and the stored owner typing
 /// counts. Returns Ok once typed, or why it was not typed; nothing is typed on refusal.
@@ -416,7 +504,25 @@ pub fn master_input(
     master_input_at(connection, host, typing, project, text, now_ms())
 }
 
-/// [`master_input`] at a given time. Takes the same inputs and the time in milliseconds.
+/// [`master_input`] with a step that runs once the master was found free and held for this
+/// input, right before anything is typed, so a step that records the input runs only for an
+/// input that is typed now. Takes the same inputs and the step, which answers false to leave
+/// the input waiting as `Busy`, or fails it as `Failed`; either way the hold is cleared and
+/// nothing is typed. Returns Ok once typed, or why it was not typed.
+pub(crate) fn master_input_when(
+    connection: &Connection,
+    host: &dyn Host,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    text: &str,
+    before: impl FnOnce() -> Result<bool, EngineError>,
+) -> Result<(), InputRefused> {
+    master_input_at_when(connection, host, typing, project, text, now_ms(), before)
+}
+
+/// [`master_input`] at a given time. It asks the host whether the app reads keys before it
+/// takes the write lock, so a slow terminal reply holds no engine writer, and checks the
+/// master again under the lock. Takes the same inputs and the time in milliseconds.
 pub(crate) fn master_input_at(
     connection: &Connection,
     host: &dyn Host,
@@ -425,18 +531,134 @@ pub(crate) fn master_input_at(
     text: &str,
     now: i64,
 ) -> Result<(), InputRefused> {
+    master_input_at_when(connection, host, typing, project, text, now, || Ok(true))
+}
+
+/// [`master_input_when`] at a given time. Takes the same inputs, the time in milliseconds
+/// and the step. Returns Ok once typed, or why it was not typed.
+fn master_input_at_when(
+    connection: &Connection,
+    host: &dyn Host,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    text: &str,
+    now: i64,
+    before: impl FnOnce() -> Result<bool, EngineError>,
+) -> Result<(), InputRefused> {
     let text = text.trim();
-    let plain = !text
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t');
-    if text.is_empty() || text.len() > INPUT_TEXT_MAX || !plain {
+    if !typable(text) {
         return Err(InputRefused::Invalid);
     }
     let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
+    let agent = input_open(connection, typing, project, now)?;
+    let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
+    if !host
+        .input_live(&pane)
+        .map_err(|problem| InputRefused::Failed(problem.0))?
+    {
+        return Err(InputRefused::Unready);
+    }
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(failed)?;
+    if input_open(&tx, typing, project, now)? != agent {
+        return Err(InputRefused::Busy);
+    }
+    tx.execute(
+        "UPDATE team_live_masters SET input_ms=?2 WHERE project=?1",
+        params![project.as_str(), now],
+    )
+    .map_err(failed)?;
+    tx.commit().map_err(failed)?;
+    let release = || {
+        let _ = connection.execute(
+            "UPDATE team_live_masters SET input_ms=NULL WHERE project=?1 AND input_ms=?2",
+            params![project.as_str(), now],
+        );
+    };
+    match before() {
+        Ok(true) => {}
+        Ok(false) => {
+            release();
+            return Err(InputRefused::Busy);
+        }
+        Err(problem) => {
+            release();
+            return Err(InputRefused::Failed(problem.0));
+        }
+    }
+    let typed = paste(text)
+        .iter()
+        .try_for_each(|part| host.input(&pane, part.as_bytes()))
+        .and_then(|()| {
+            std::thread::sleep(PASTE_SETTLE);
+            host.input(&pane, b"\r")
+        });
+    if let Err(problem) = typed {
+        release();
+        return Err(InputRefused::Failed(problem.0));
+    }
+    Ok(())
+}
+
+/// Whether text can be typed into a live master: once trimmed it is not empty, holds at
+/// most `INPUT_TEXT_MAX` bytes and has no control character but newline and tab. Takes the
+/// text. Returns the answer.
+pub(crate) fn typable(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.len() <= INPUT_TEXT_MAX
+        && !text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+/// How every line about a live master that was turned off starts.
+pub(crate) const LIVE_STOPPED: &str = "The live master was turned off";
+/// What follows `LIVE_STOPPED` on the line a live master stopped as idle leaves.
+const IDLE_WHY: &str = ": it was idle for ";
+
+/// The line a live master stopped as idle leaves. It names no place to go, since the owner
+/// can already be on the master view, and says a new start continues the conversation.
+/// Input: the idle choice's label. Output: the line.
+pub(crate) fn idle_stopped_line(label: &str) -> String {
+    format!(
+        "{LIVE_STOPPED}{IDLE_WHY}{label}. It continues the same conversation when you start it again."
+    )
+}
+
+/// Whether a problem line is the one `idle_stopped_line` leaves. Input: the line. Output:
+/// the answer.
+pub(crate) fn idle_stopped(problem: &str) -> bool {
+    problem
+        .strip_prefix(LIVE_STOPPED)
+        .is_some_and(|rest| rest.starts_with(IDLE_WHY))
+}
+
+/// Whether a project's live master is quiet now: it runs, no turn is open, the engine's last
+/// input settled and the owner holds no recent key or unsent line, so engine input or a
+/// stop cuts nothing short. Takes the engine database, the owner typing signal, the project
+/// and the time in milliseconds. Returns the answer; a failed read is not quiet.
+pub(crate) fn quiet(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    now: i64,
+) -> bool {
+    input_open(connection, typing, project, now).is_ok()
+}
+
+/// Checks that engine input may reach a project's live master now, as `quiet` describes.
+/// Takes the engine database, the owner typing signal, the project and the time. Returns
+/// the master's agent id, or why the input waits or cannot go.
+pub(crate) fn input_open(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    now: i64,
+) -> Result<i64, InputRefused> {
+    let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
     type Row = (bool, Option<i64>, bool, Option<i64>, Option<i64>, bool);
-    let row: Option<Row> = tx
+    let row: Option<Row> = connection
         .query_row(
             "SELECT live,agent,turn_open,input_ms,typed_ms,draft FROM team_live_masters WHERE project=?1",
             [project.as_str()],
@@ -465,32 +687,10 @@ pub(crate) fn master_input_at(
         }
         _ => (typed_ms, draft),
     };
-    let since_typed = typed_ms.map_or(i64::MAX, |at| now - at);
-    if since_typed < OWNER_QUIET_MS || (draft && since_typed < DRAFT_ABANDONED_MS) {
+    if owner_holds(typed_ms, draft, now) {
         return Err(InputRefused::OwnerTyping);
     }
-    let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
-    tx.execute(
-        "UPDATE team_live_masters SET input_ms=?2 WHERE project=?1",
-        params![project.as_str(), now],
-    )
-    .map_err(failed)?;
-    tx.commit().map_err(failed)?;
-    let typed = paste(text)
-        .iter()
-        .try_for_each(|part| host.input(&pane, part.as_bytes()))
-        .and_then(|()| {
-            std::thread::sleep(PASTE_SETTLE);
-            host.input(&pane, b"\r")
-        });
-    if let Err(problem) = typed {
-        let _ = connection.execute(
-            "UPDATE team_live_masters SET input_ms=NULL WHERE project=?1 AND input_ms=?2",
-            params![project.as_str(), now],
-        );
-        return Err(InputRefused::Failed(problem.0));
-    }
-    Ok(())
+    Ok(agent)
 }
 
 /// Records keys the owner typed into a team agent's terminal, the owner typing signal that
@@ -504,6 +704,28 @@ pub fn owner_typed(
 ) -> Result<(), EngineError> {
     write_typed(connection, agent, Typed::of(bytes, now_ms)).map_err(state)?;
     Ok(())
+}
+
+/// Reads when the owner last typed into a team agent's terminal: the newer of the
+/// in-memory signal and the time stored for that agent as a live master. Takes the engine
+/// database, the signal, if any, and the team agent id. Returns the time in milliseconds,
+/// none when no owner key was seen, or any SQLite failure.
+pub(crate) fn owner_key_ms(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    agent: i64,
+) -> Result<Option<i64>, EngineError> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(typed_ms) FROM team_live_masters WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    let held = typing
+        .and_then(|typing| typing.get(agent))
+        .map(|typed| typed.at_ms);
+    Ok(stored.max(held))
 }
 
 /// The owner typing signal, kept in memory so a key the owner types into a team agent's
@@ -608,6 +830,24 @@ impl OwnerTyping {
     fn get(&self, agent: i64) -> Option<Typed> {
         self.shared.state().agents.get(&agent).copied()
     }
+
+    /// Says whether the owner's keys hold the engine's typing into one team agent's
+    /// terminal back, by the rule live master input uses (DEC-104 Q13). Takes the team
+    /// agent id and the time in milliseconds. Returns true for a key under
+    /// `OWNER_QUIET_MS` ago or an unsent line under `DRAFT_ABANDONED_MS` old.
+    pub fn holds(&self, agent: i64, now_ms: i64) -> bool {
+        self.get(agent).is_some_and(|typed| {
+            owner_holds(Some(typed.at_ms), typed.draft.unwrap_or(false), now_ms)
+        })
+    }
+}
+
+/// The owner typing rule: engine input waits `OWNER_QUIET_MS` after the owner's last key,
+/// and `DRAFT_ABANDONED_MS` while that key left an unsent line. Takes the last key time,
+/// whether it left a line and the time, all in milliseconds. Returns whether input waits.
+fn owner_holds(typed_ms: Option<i64>, draft: bool, now_ms: i64) -> bool {
+    let since_typed = typed_ms.map_or(i64::MAX, |at| now_ms.saturating_sub(at));
+    since_typed < OWNER_QUIET_MS || (draft && since_typed < DRAFT_ABANDONED_MS)
 }
 
 impl Drop for OwnerTyping {
@@ -765,48 +1005,116 @@ fn keys(bytes: &[u8]) -> (bool, bool) {
 }
 
 /// Answers the calls a live master's team server left in its mailbox, at most
-/// `CALLS_PER_TICK_MAX` per call, each checked again before it takes effect: `delegate`
-/// admits the task at once, `message`, `answer` and `status` go to the team event handlers,
-/// `changes` lists the pending change sets and `escalate` notifies the owner. Takes the
-/// engine database, what the answers need and the mailbox. Returns how many calls were
-/// answered, or a SQLite failure.
+/// `CALLS_PER_TICK_MAX` per call, each checked again and against the owner's tool switches
+/// before it takes effect (DEC-104): the work verbs through `work`, `spawn` admits a lead's
+/// task at once, `stop` stops a sub-agent, `merge` merges a lead's task branch into the
+/// Master's branch, past conversations and memory, `ask` logs a question for the owner and
+/// `record_answer` records an owner chat answer. Takes the engine database, what the
+/// answers need, the master and the mailbox. Returns how many calls were answered, or a
+/// SQLite failure.
 pub fn serve_calls(
     connection: &mut Connection,
     answering: &Answering<'_>,
+    master: i64,
     mailbox: &Path,
 ) -> Result<usize, EngineError> {
+    let project = &answering.stored.project_id;
     let taken = tool::take_calls(mailbox, tool::CALLS_PER_TICK_MAX);
-    for (id, call) in &taken {
+    for (id, call, _) in &taken {
         let (text, error) = match call.clone().map(tool::checked) {
             None => (UNREAD.to_owned(), true),
             Some(Err(refused)) => (refused.to_owned(), true),
-            Some(Ok(call)) => answer(connection, answering, call)?,
+            Some(Ok(call)) if switched_off(connection, project, &call).unwrap_or(true) => {
+                (SWITCHED_OFF.to_owned(), true)
+            }
+            Some(Ok(call)) => {
+                let _ = crate::coord::touch(connection, master, now_ms());
+                answer(connection, answering, master, call)?
+            }
         };
         let _ = tool::answer_call(mailbox, id, &text, error);
     }
     Ok(taken.len())
 }
 
+/// Answers at most `CALLS_PER_TICK_MAX` memory calls a project's master left in its mailbox
+/// while it runs without its live terminal: `remember` and `recall` under the master's name,
+/// each checked again and against the owner's tool switches. Any other call is refused, since
+/// that master's server sends `delegate`, `ask` and `record_answer` through its drop file.
+/// Takes the database, the project and the mailbox. Returns the calls answered, or a SQLite error.
+pub fn serve_memory_calls(
+    connection: &mut Connection,
+    project: &ProjectId,
+    mailbox: &Path,
+) -> Result<usize, EngineError> {
+    let taken = tool::take_calls(mailbox, tool::CALLS_PER_TICK_MAX);
+    for (id, call, _) in &taken {
+        let (text, error) = match call.clone().map(tool::checked) {
+            None => (UNREAD.to_owned(), true),
+            Some(Err(refused)) => (refused.to_owned(), true),
+            Some(Ok(call)) if !tool::MEMORY_TOOLS.contains(&call.name()) => {
+                (NOT_LIVE_TOOL.to_owned(), true)
+            }
+            Some(Ok(call)) if switched_off(connection, project, &call).unwrap_or(true) => {
+                (SWITCHED_OFF.to_owned(), true)
+            }
+            Some(Ok(call)) => memory_answer(connection, project, MASTER_LABEL, call)
+                .expect("a memory call has an answer")?,
+        };
+        let _ = tool::answer_call(mailbox, id, &text, error);
+    }
+    Ok(taken.len())
+}
+
+/// The team tools the owner switched off or deleted for a project (DEC-104), which a
+/// master's team server leaves out of its list and the engine refuses. Takes the database
+/// and the project. Returns the names, sorted, or a SQLite failure.
+pub fn switched_off_tools(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<String>, EngineError> {
+    let off: Vec<String> = crate::coord::tool_switches::off_tools(
+        connection,
+        project,
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+    )?
+    .into_iter()
+    .filter(|name| tool::TEAM_TOOLS.contains(&name.as_str()))
+    .collect();
+    assert!(tool::known_tools(&off));
+    Ok(off)
+}
+
+/// Says whether the owner switched a call's tool off or deleted it for the project
+/// (DEC-104), so the engine refuses it even from a server that still lists it. Takes the
+/// database, the project and the call. Returns the answer, or a SQLite failure.
+pub(super) fn switched_off(
+    connection: &Connection,
+    project: &ProjectId,
+    call: &Call,
+) -> Result<bool, EngineError> {
+    let switch = crate::coord::tool_switches::get(
+        connection,
+        Some(project),
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        call.name(),
+    )?;
+    Ok(switch != crate::coord::tool_switches::Switch::On)
+}
+
 fn answer(
     connection: &mut Connection,
     answering: &Answering<'_>,
+    master: i64,
     call: Call,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
-    let typed =
-        |handler: Option<SendToAgent>, agent: &str, text: &str| match (handler, answering.host) {
-            (None, _) => (NOT_WIRED.to_owned(), true),
-            (Some(_), None) => (NO_TERMINALS.to_owned(), true),
-            (Some(handler), Some(host)) => match handler(connection, host, project, agent, text) {
-                Ok(said) => (said, false),
-                Err(reason) => (reason, true),
-            },
-        };
     Ok(match call {
-        Call::Delegate {
+        Call::Spawn {
             task,
             harness,
             role,
+            mode,
         } => {
             return delegate(
                 connection,
@@ -814,26 +1122,11 @@ fn answer(
                 &task,
                 harness.as_deref(),
                 role.as_deref(),
+                mode,
             );
         }
-        Call::Message { agent, text } => typed(
-            answering.events.map(|events| events.send_to_agent),
-            &agent,
-            &text,
-        ),
-        Call::Answer { agent, text } => {
-            typed(answering.events.map(|events| events.answer), &agent, &text)
-        }
-        Call::Wake { agent, text } => return wake(connection, answering, &agent, &text),
-        Call::Status => match answering.events {
-            None => (NOT_WIRED.to_owned(), true),
-            Some(events) => match (events.status)(connection, project) {
-                Ok(text) => (text, false),
-                Err(reason) => (reason, true),
-            },
-        },
-        Call::Changes => changes(answering),
-        Call::Escalate { text } => escalate(connection, project, &text)?,
+        Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
+        Call::Merge { agent } => return merge::merge(connection, answering, &agent),
         call @ (Call::Sessions { .. } | Call::Session { .. }) => {
             super::history::answer(connection, project, answering.agents, call)
                 .expect("a past-conversation call has an answer")
@@ -842,52 +1135,186 @@ fn answer(
             return memory_answer(connection, project, MASTER_LABEL, call)
                 .expect("a memory call has an answer");
         }
-        Call::Accept { .. } => (MASTER_ACCEPT.to_owned(), true),
+        Call::Ask {
+            question,
+            options,
+            recommended,
+            context,
+        } => {
+            let ask = crate::questions::Ask {
+                question,
+                options,
+                recommended,
+                context,
+            };
+            ask_owner(connection, project, &ask)?
+        }
+        Call::RecordAnswer {
+            question,
+            version,
+            owner_turn,
+        } => record_answer(connection, project, question, version, owner_turn)?,
+        call => return answer_work(connection, answering, master, true, call),
     })
 }
 
-/// Answers one lead call a sub-agent made (N1, N2): `delegate` starts a worker of its own
-/// within the owner's Sub-agent depth setting, `status`, `message`, `answer`, `wake` and
-/// `changes` reach only the workers it started, and `accept` lands one of their change sets
-/// on its own branch under the owner's landing setting. Takes the engine database, what the
-/// answers need, the lead and the call. Returns the text and whether it is an error, none
-/// for a call a sub-agent cannot make, or a SQLite failure.
-pub(super) fn answer_lead(
+/// Answers one call a sub-agent made (DEC-104, N1, N2): the work verbs as for the master,
+/// `spawn` starts a worker of its own within the owner's Sub-agent depth setting, and
+/// `stop` and `merge` reach only the workers it started. Takes the engine database, what
+/// the answers need, the sub-agent and the call. Returns the text and whether it is an
+/// error, none for the past-conversation and memory calls answered elsewhere, or a SQLite
+/// failure.
+pub(super) fn answer_sub(
     connection: &mut Connection,
     answering: &Answering<'_>,
-    lead: i64,
+    agent: i64,
     call: Call,
 ) -> Result<Option<(String, bool)>, EngineError> {
-    let project = &answering.stored.project_id;
     Ok(Some(match call {
-        Call::Delegate {
+        Call::Spawn { mode: Some(_), .. } => (LEAD_MODE_REFUSED.to_owned(), true),
+        Call::Spawn {
             task,
             harness,
             role,
+            mode: None,
         } => lead_delegate(
             connection,
             answering,
-            lead,
+            agent,
             &task,
             harness.as_deref(),
             role.as_deref(),
         )?,
-        Call::Status => lead_status(connection, project, lead)?,
-        Call::Message { agent, text } => {
-            type_to_worker(connection, answering, lead, &agent, &text, "Sent to")?
+        Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
+        Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
+        call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
+            tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
-        Call::Answer { agent, text } => {
-            type_to_worker(connection, answering, lead, &agent, &text, "Answered")?
-        }
-        Call::Wake { agent, text } => lead_wake(connection, answering, lead, &agent, &text)?,
-        Call::Changes => lead_changes(connection, answering, lead)?,
-        Call::Accept { change_set } => lead_accept(connection, answering, lead, &change_set)?,
-        Call::Escalate { .. }
-        | Call::Sessions { .. }
+        Call::Sessions { .. }
         | Call::Session { .. }
         | Call::Remember { .. }
-        | Call::Recall { .. } => return Ok(None),
+        | Call::Recall { .. } => {
+            return Ok(None);
+        }
+        call => answer_work(connection, answering, agent, false, call)?,
     }))
+}
+
+/// Answers one work verb of the master or a sub-agent through `work`. Takes the engine
+/// database, what the answers need, the caller, whether it is the master and the call,
+/// one of the five work verbs. Returns the text and whether it is an error, or a SQLite
+/// failure.
+fn answer_work(
+    connection: &mut Connection,
+    answering: &Answering<'_>,
+    agent: i64,
+    master: bool,
+    call: Call,
+) -> Result<(String, bool), EngineError> {
+    match call {
+        Call::StartWork { title, claims } => {
+            work::start_work(connection, answering, agent, &title, &claims)
+        }
+        Call::InspectWork => work::inspect_work(connection, answering, agent, master),
+        Call::UpdateWork {
+            kind,
+            text,
+            to,
+            question_for,
+            severity,
+            reply_to,
+            work: about,
+            key,
+        } => work::update_work(
+            connection,
+            answering,
+            agent,
+            master,
+            work::Sending {
+                kind,
+                text: &text,
+                to: to.as_deref(),
+                question: question_for.zip(severity),
+                reply_to,
+                work: about,
+                key: key.as_deref(),
+            },
+        ),
+        Call::TransferWork {
+            work: about,
+            version,
+            action,
+            to,
+        } => work::transfer_work(
+            connection,
+            answering,
+            agent,
+            about,
+            version,
+            action,
+            to.as_deref(),
+        ),
+        Call::FinishWork {
+            work: about,
+            version,
+            outcome,
+            evidence,
+        } => work::finish_work(
+            connection, answering, agent, master, about, version, outcome, &evidence,
+        ),
+        Call::LogActivity { goal, text, kind } => log_activity(
+            connection,
+            &answering.stored.project_id,
+            agent,
+            master,
+            &goal,
+            &text,
+            kind,
+        ),
+        other => unreachable!("{} is not a work verb", other.name()),
+    }
+}
+
+/// Records one `log_activity` call in the project activity: a new phase of the work or a
+/// finished test run with the goal it serves, under Master or the sub-agent's team label,
+/// within the caller's hourly rate (`activity::record_logged`). Takes the engine database,
+/// the project, the caller, whether it is the master and the call's goal, line and kind.
+/// Returns "Logged." and false, a plain refusal and true past the rate, or a SQLite failure.
+fn log_activity(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    master: bool,
+    goal: &str,
+    text: &str,
+    kind: tool::LogKind,
+) -> Result<(String, bool), EngineError> {
+    let actor = if master {
+        crate::activity::MASTER_ACTOR.to_owned()
+    } else {
+        crate::activity::agent_actor(connection, agent)?
+    };
+    let item = crate::activity::NewActivity {
+        kind: match kind {
+            tool::LogKind::Phase => crate::activity::ActivityKind::Phase,
+            tool::LogKind::Test => crate::activity::ActivityKind::Test,
+        },
+        actor: &actor,
+        agent: (!master).then_some(agent),
+        goal: Some(goal),
+        text,
+        change_set: None,
+    };
+    match crate::activity::record_logged(connection, project, (agent, master), &item, now_ms())? {
+        Some(_) => Ok(("Logged.".to_owned(), false)),
+        None => Ok((
+            format!(
+                "Not logged: you logged {} phases or test runs in the last hour. Log the next one later.",
+                crate::activity::LOGGED_PER_WINDOW_MAX
+            ),
+            true,
+        )),
+    }
 }
 
 /// The workers a lead started, newest first, at most `WORKERS_LISTED_MAX`. Takes the
@@ -928,12 +1355,11 @@ fn is_worker(
         .map_err(state)
 }
 
-/// Starts a worker of a lead (N1) when the owner's Sub-agent depth setting allows the lead
-/// one: the task is admitted as the master's would be, against the same plan and running
-/// agent limits, and records the lead, so its worktree is cut from the lead's commit and
-/// its result goes back to the lead. Takes the database, what the answers need, the lead,
-/// the task, harness and role. Returns the sentence the lead reads and whether it is a
-/// refusal, or a SQLite failure.
+/// Starts a worker of a lead (N1) when Sub-agent depth and Max teammates per harness allow
+/// it (DEC-104 K8): admitted as the master's task would be, only for a harness kind with a
+/// signed-in account, cut from the lead's commit and reporting back to the lead. Takes the
+/// database, what the answers need, the lead, the task, harness and role. Returns the
+/// sentence the lead reads and whether it is a refusal, or a SQLite failure.
 fn lead_delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -961,6 +1387,12 @@ fn lead_delegate(
             true,
         ));
     }
+    if super::lead_mode(&tx, project, lead)? == crate::coord::settings::SubagentMode::Native {
+        return Ok((NATIVE_LEAD_REFUSED.to_owned(), true));
+    }
+    if let Err(reason) = super::caps::admit_sub_agent(&tx, project, lead) {
+        return Ok((format!("Not started: {reason}"), true));
+    }
     let admitted = super::admit(
         &tx,
         answering.access,
@@ -985,28 +1417,73 @@ fn lead_delegate(
         params![id, lead],
     )
     .map_err(state)?;
-    let (chosen, status): (String, String) = tx
-        .query_row(
-            "SELECT harness,status FROM team_tasks WHERE id=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let chosen: String = tx
+        .query_row("SELECT harness FROM team_tasks WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
         .map_err(state)?;
-    if let Some(role) = role {
-        super::names::set_task_role(&tx, project, id, role)?;
+    let ready = super::launch_harness(&chosen)
+        .map(|launch| signed_in_account(&tx, answering.access, project, launch))
+        .transpose()?
+        .unwrap_or(false);
+    if !ready {
+        return Ok((
+            format!(
+                "Not started: no account in this project's pool that runs {} is signed in. Pick a harness kind with a signed-in account, or tell the master to ask the owner to sign one in.",
+                super::bound_text(&chosen, AGENT_SHOWN_MAX)
+            ),
+            true,
+        ));
+    }
+    if let Some(role) = role
+        && super::names::set_task_role(&tx, project, id, role, 0)?.is_err()
+    {
+        return Err(state("team_task_role_stale"));
     }
     tx.commit().map_err(state)?;
-    let waiting = if status == "needs_pool" {
-        " It waits until the pool has a ready account for that harness."
-    } else {
-        ""
-    };
     Ok((
         format!(
-            "Task {id} is queued for a {chosen} worker of yours, in its own worktree and branch cut from your current commit.{waiting} The engine tells you when it ends."
+            "Task {id} is queued for a {chosen} worker of yours, in its own worktree on a branch <your task branch>--<its name>, cut from your current commit. The engine tells you when it ends; then merge it into your task branch."
         ),
         false,
     ))
+}
+
+/// Tells whether a project's pool holds an account a harness kind can run on now
+/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: a keyless endpoint,
+/// or a native managed profile whose latest sign-in observed an account. Takes the
+/// database, the live access, the project and the launch harness. Returns the answer, or
+/// a SQLite failure.
+fn signed_in_account(
+    connection: &Connection,
+    access: &ModelAccess,
+    project: &ProjectId,
+    launch: &str,
+) -> Result<bool, EngineError> {
+    let super::Accounts::Usable(accounts) = super::eligible_accounts(access, project, launch)
+    else {
+        return Ok(false);
+    };
+    for account in &accounts {
+        let profile = match &account.reach {
+            super::TeamReach::Endpoint { .. } => return Ok(true),
+            super::TeamReach::Managed { profile_ref, .. } => profile_ref,
+        };
+        let key = crate::memory::hash(profile.as_str().as_bytes());
+        let phase: Option<String> = connection
+            .query_row(
+                "SELECT phase FROM native_auth_operations WHERE profile_key=?1
+                 ORDER BY generation DESC LIMIT 1",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(state)?;
+        if phase.as_deref() == Some("authenticated_observed") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Describes a lead's own workers as `status` does the team for the master: the running
@@ -1022,7 +1499,7 @@ fn lead_status(
         return Ok((
             format!(
                 "You have started no workers. Start one with {}(task).",
-                tool::TOOL_NAME
+                tool::SPAWN_TOOL
             ),
             false,
         ));
@@ -1038,88 +1515,45 @@ fn lead_status(
     Ok((format!("Your workers:\n{}", status.text()), false))
 }
 
-/// Types a lead's text into one of its own running workers. Takes the database, what the
-/// answers need, the lead, the worker's name, the text and the verb the reply starts with.
-/// Returns the sentence the lead reads and whether it is a refusal, or a SQLite failure.
-fn type_to_worker(
-    connection: &Connection,
-    answering: &Answering<'_>,
-    lead: i64,
-    agent: &str,
-    text: &str,
-    said: &str,
-) -> Result<(String, bool), EngineError> {
-    let Some(host) = answering.host else {
-        return Ok((NO_TERMINALS.to_owned(), true));
-    };
-    let project = &answering.stored.project_id;
-    let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
-    let not_yours = format!(
-        "Not sent: none of your own workers is called {shown}. Call {}() for their names.",
-        tool::STATUS_TOOL
-    );
-    let Some(found) = super::events::resolve(connection, project, agent)? else {
-        return Ok((not_yours, true));
-    };
-    if !is_worker(connection, project, lead, found)? {
-        return Ok((not_yours, true));
-    }
-    Ok(
-        match super::events::send_to(connection, host, Some(found), text)? {
-            Ok(id) => (
-                format!("{said} {}.", super::events::label(connection, id)?),
-                false,
-            ),
-            Err("team_message_invalid") => (
-                format!(
-                    "Not sent: give plain text up to {} bytes.",
-                    super::events::SEND_BYTES_MAX
-                ),
-                true,
-            ),
-            Err("team_agent_not_running") => (format!("Not sent: {shown} is not running."), true),
-            Err("team_agent_unreachable") => (
-                format!("Not sent: the terminal of {shown} could not be reached."),
-                true,
-            ),
-            Err(_) => (not_yours, true),
-        },
-    )
-}
-
-/// Wakes one of a lead's own finished workers as `wake` does for the master, found by the
-/// same names in the same order, and keeps the lead as the one its next result goes to.
-/// Takes the database, what the answers need, the lead, the name and the text. Returns the
+/// Wakes one of a lead's own finished workers as [`wake_in`] does for the master, found by
+/// the same names in the same order, and keeps the lead as the one its next result goes
+/// to. The caller's transaction holds the wake, so a refusal leaves it to roll back. Takes
+/// the transaction, what the answers need, the lead, the name and the text. Returns the
 /// sentence the lead reads and whether it is a refusal, or a SQLite failure.
 fn lead_wake(
-    connection: &mut Connection,
+    tx: &Transaction<'_>,
     answering: &Answering<'_>,
     lead: i64,
     agent: &str,
     text: &str,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(state)?;
-    let found = match super::names::resolve_finished(&tx, project, agent)? {
+    let found = match super::names::resolve_finished(tx, project, agent)? {
         Some(id) => Some(id),
-        None => super::events::resolve(&tx, project, agent)?,
+        None => super::events::resolve(tx, project, agent)?,
     };
     let worker = match found {
-        Some(worker) if is_worker(&tx, project, lead, worker)? => worker,
+        Some(worker) if is_worker(tx, project, lead, worker)? => worker,
         _ => {
             return Ok((
                 format!(
                     "Not woken: none of your own workers is called {}. Call {}() for their names.",
                     super::bound_text(agent, AGENT_SHOWN_MAX),
-                    tool::STATUS_TOOL
+                    tool::INSPECT_WORK_TOOL
                 ),
                 true,
             ));
         }
     };
-    let (said, refused) = wake_in(&tx, answering.access, answering.stored, agent, text, true)?;
+    let (said, refused) = wake_in(
+        tx,
+        answering.access,
+        answering.stored,
+        agent,
+        text,
+        true,
+        super::StoppedBy::Lead,
+    )?;
     if refused {
         return Ok((said, true));
     }
@@ -1128,11 +1562,10 @@ fn lead_wake(
         params![worker, lead, project.as_str()],
     )
     .map_err(state)?;
-    tx.commit().map_err(state)?;
     Ok((said, false))
 }
 
-/// Lists a lead's own workers' change sets that wait to land, with the id `accept` takes.
+/// Lists a lead's own workers' change sets that wait to land, which `merge` lands.
 /// Takes the database, what the answers need and the lead. Returns the text and whether it
 /// is an error, or a SQLite failure.
 fn lead_changes(
@@ -1189,8 +1622,8 @@ fn lead_changes(
     }
     Ok((
         format!(
-            "Your workers' change sets, accept one with {}(change_set):\n{}",
-            tool::ACCEPT_TOOL,
+            "Your workers' change sets, merge one with {}(agent):\n{}",
+            tool::MERGE_TOOL,
             waiting.join("\n")
         ),
         false,
@@ -1206,67 +1639,6 @@ fn worker_set(set: &crate::landing::ChangeSetView, workers: &[i64]) -> bool {
             .is_ok_and(|agent| workers.contains(&agent))
 }
 
-/// Lands one of a lead's own workers' change sets on the lead's branch (N2), unless the
-/// owner's landing setting keeps it for the owner's Accept. Takes the database, what the
-/// answers need, the lead and the change set id. Returns the sentence the lead reads and
-/// whether it is a refusal, or a SQLite failure.
-fn lead_accept(
-    connection: &Connection,
-    answering: &Answering<'_>,
-    lead: i64,
-    change_set: &str,
-) -> Result<(String, bool), EngineError> {
-    let project = &answering.stored.project_id;
-    if super::nesting(connection, project)?.lands == super::ChildLanding::Owner {
-        return Ok((OWNER_LANDS.to_owned(), true));
-    }
-    let not_yours = format!(
-        "Not accepted: no change set of your own workers has that id. Call {}() for them.",
-        tool::CHANGES_TOOL
-    );
-    let Ok(id) = crate::landing::ChangeSetId::new(change_set) else {
-        return Ok((not_yours, true));
-    };
-    let workers = workers_of(connection, project, lead)?;
-    let found = crate::landing::open(answering.landing).and_then(|db| {
-        let set = crate::landing::change_set(&db, &id)?;
-        Ok((db, set))
-    });
-    let (db, set) = match found {
-        Ok(found) => found,
-        Err(problem) => {
-            return Ok((
-                format!(
-                    "The change set could not be read ({}).",
-                    super::bound_text(&problem.0, 120)
-                ),
-                true,
-            ));
-        }
-    };
-    let view = match set {
-        Some((owner, view)) if &owner == project && worker_set(&view, &workers) => view,
-        _ => return Ok((not_yours, true)),
-    };
-    let worktree: Option<String> = connection
-        .query_row(
-            "SELECT worktree FROM team_worktrees WHERE agent=?1 AND project=?2",
-            params![lead, project.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(state)?;
-    let branch =
-        worktree.and_then(|worktree| crate::agent_git::linked_branch(Path::new(&worktree)));
-    let Some(branch) = branch else {
-        return Ok((
-            "Not accepted: your worktree has no branch of its own to land on. The owner accepts this change set in Changes.".to_owned(),
-            true,
-        ));
-    };
-    Ok(land_on_lead(&db, &id, &view.head, &branch))
-}
-
 /// Lands a worker's change set on its lead's branch as one squash commit through landing's
 /// `accept_into`, authored with the owner's git identity as the owner's own Accept is. The
 /// engine runs every git step; the lead only asks. Takes the store, the change set, the head
@@ -1278,8 +1650,17 @@ fn land_on_lead(
     head: &str,
     branch: &str,
 ) -> (String, bool) {
-    let landed = crate::projects_home::owner_home()
-        .and_then(|home| crate::landing::accept_into(db, &home, id, head, None, branch));
+    let landed = crate::projects_home::owner_home().and_then(|home| {
+        crate::landing::accept_into_as(
+            db,
+            &home,
+            id,
+            head,
+            None,
+            branch,
+            crate::activity::ENGINE_ACTOR,
+        )
+    });
     match landed {
         Ok(crate::landing::AcceptOutcome::Landed { commit, branch }) => (
             format!(
@@ -1294,6 +1675,10 @@ fn land_on_lead(
                 "Not accepted: it conflicts with your branch in {}. Ask the worker to bring its work up to date, then accept again.",
                 super::bound_text(&files.join(", "), 400)
             ),
+            true,
+        ),
+        Err(problem) if problem.0 == crate::landing::WORKER_OPEN => (
+            format!("Not accepted: {}", crate::landing::WORKER_OPEN_TEXT),
             true,
         ),
         Err(problem) => (
@@ -1387,13 +1772,113 @@ fn recall(
             MemoryOrigin::Selected { .. } => "the owner, from a file",
             MemoryOrigin::Imported { .. } => "the owner, imported from a file",
         };
-        text.push_str(&format!(
+        let line = format!(
             "> ({place}, saved by {by}) {}\n",
             memory.text.trim().replace('\n', "\n> ")
-        ));
+        );
+        if text.len() + line.len() + RECALL_LEFT_OUT.len() > tool::REPLY_TEXT_MAX {
+            text.push_str(RECALL_LEFT_OUT);
+            break;
+        }
+        text.push_str(&line);
     }
     assert!(text.len() <= tool::REPLY_TEXT_MAX);
     Ok((text, false))
+}
+
+/// Logs a live master's question for the owner, who is notified; the answer reaches the
+/// master once as an owner message. Takes the database, the master's project and the
+/// question. Returns the sentence the master reads, or a SQLite failure.
+fn ask_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    ask: &crate::questions::Ask,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::Asker;
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    Ok(
+        match crate::questions::ask(connection, project, &Asker::Master(master), ask) {
+            Ok(id) => (
+                format!(
+                    "Question {id} is logged and the owner is notified. Their answer or dismissal comes to you once as a message from the owner, so do not ask it again. If the owner answers you in chat first, record it with record_answer, question {id}, version 0 and the number of the owner's message."
+                ),
+                false,
+            ),
+            Err(problem) => match problem.0.as_str() {
+                "questions_full" => (QUESTIONS_FULL.to_owned(), true),
+                "questions_asker_full" => (ASKER_FULL.to_owned(), true),
+                "questions_ask_invalid" | "questions_text_invalid" => {
+                    (ASK_REFUSED.to_owned(), true)
+                }
+                _ => (unlogged(&problem), true),
+            },
+        },
+    )
+}
+
+/// Records the owner's chat message that answered one of a live master's own questions;
+/// the answer is that message's text, never the master's words. Takes the database, the
+/// master's project, the question id, the version the master read and the owner message
+/// id. Returns the sentence the master reads, or a SQLite failure.
+fn record_answer(
+    connection: &Connection,
+    project: &ProjectId,
+    id: u64,
+    version: u64,
+    owner_turn: i64,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::Settlement;
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    let recorded =
+        crate::questions::record_from_chat(connection, project, master, id, version, owner_turn);
+    Ok(match recorded {
+        Ok(Settlement::Settled) => (
+            format!("Recorded the owner's message {owner_turn} as the answer to question {id}."),
+            false,
+        ),
+        Ok(Settlement::Stale) => (
+            format!(
+                "Not recorded: question {id} is already answered or dismissed, or changed since version {version}."
+            ),
+            true,
+        ),
+        Err(problem) => match problem.0.as_str() {
+            "questions_not_found" => (
+                format!("Not recorded: you asked no question {id} in this project."),
+                true,
+            ),
+            "questions_owner_turn_invalid" => (TURN_REFUSED.to_owned(), true),
+            "questions_answer_invalid" | "questions_text_invalid" => {
+                (ANSWER_REFUSED.to_owned(), true)
+            }
+            _ => (unlogged(&problem), true),
+        },
+    })
+}
+
+/// Reads the team agent id of a project's live master. Takes the database and project.
+/// Returns the id, none when no live master is on record, or a SQLite failure.
+fn live_master(connection: &Connection, project: &ProjectId) -> Result<Option<i64>, EngineError> {
+    connection
+        .query_row(
+            "SELECT agent FROM team_live_masters WHERE project=?1",
+            [project.as_str()],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(state)
+}
+
+fn unlogged(problem: &EngineError) -> String {
+    format!(
+        "The questions log could not be written ({}). Try again in a moment.",
+        super::bound_text(&problem.0, 120)
+    )
 }
 
 fn delegate(
@@ -1402,6 +1887,7 @@ fn delegate(
     task: &str,
     harness: Option<&str>,
     role: Option<&str>,
+    mode: Option<crate::coord::settings::SubagentMode>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -1433,8 +1919,29 @@ fn delegate(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(state)?;
-    if let Some(role) = role {
-        super::names::set_task_role(&tx, project, id, role)?;
+    if let Some(role) = role
+        && super::names::set_task_role(&tx, project, id, role, 0)?.is_err()
+    {
+        return Err(state("team_task_role_stale"));
+    }
+    if let Some(mode) = mode {
+        use crate::coord::settings::{HarnessKind, SubagentMode, native_supported};
+        if mode == SubagentMode::Native
+            && !HarnessKind::from_harness(&chosen).is_some_and(native_supported)
+        {
+            return Ok((
+                format!(
+                    "Not handed off: a {} lead has no native teammates; leave mode out or use app_spawned (native_mode_unsupported).",
+                    super::bound_text(&chosen, AGENT_SHOWN_MAX)
+                ),
+                true,
+            ));
+        }
+        tx.execute(
+            "UPDATE team_tasks SET mode=?2 WHERE id=?1",
+            params![id, mode.as_str()],
+        )
+        .map_err(state)?;
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {
@@ -1450,26 +1957,6 @@ fn delegate(
     ))
 }
 
-/// Wakes the finished sub-agent a live master names with its `wake` tool (DEC-102), in one
-/// transaction through [`wake_in`]. Takes the database, what the answers need, the name and
-/// the text. Returns the sentence the master reads and whether it is a refusal, or a SQLite
-/// failure.
-fn wake(
-    connection: &mut Connection,
-    answering: &Answering<'_>,
-    agent: &str,
-    text: &str,
-) -> Result<(String, bool), EngineError> {
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(state)?;
-    let (said, refused) = wake_in(&tx, answering.access, answering.stored, agent, text, true)?;
-    if !refused {
-        tx.commit().map_err(state)?;
-    }
-    Ok((said, refused))
-}
-
 /// Wakes the finished sub-agent a master names (DEC-102) by pinning its text to that agent
 /// as a task, which the runtime hands to the same agent once it starts again under its name
 /// in its own worktree. Its names are settled before the sentence names it, so a handle a
@@ -1478,8 +1965,8 @@ fn wake(
 /// finished one; a name or number that reaches only a running sub-agent, none or one whose
 /// worktree is gone is refused in plain words, which point a live master at its tools and
 /// one that is not live (WK-R5) at its reply lines. Takes the transaction, the access, the
-/// setup, the name, the text and whether the master is live. Returns the sentence and
-/// whether it is a refusal, which wrote nothing, or a SQLite failure.
+/// setup, the name, the text, whether the master is live and who wakes it. Returns the
+/// sentence and whether it is a refusal, which wrote nothing, or a SQLite failure.
 pub(super) fn wake_in(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -1487,13 +1974,14 @@ pub(super) fn wake_in(
     agent: &str,
     text: &str,
     live: bool,
+    waker: super::StoppedBy,
 ) -> Result<(String, bool), EngineError> {
     let project = &stored.project_id;
     let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
     let unknown = if live {
         format!(
             "Not woken: no finished sub-agent of this project is called {shown}. Call {}() for their names.",
-            tool::STATUS_TOOL
+            tool::INSPECT_WORK_TOOL
         )
     } else {
         format!(
@@ -1508,7 +1996,7 @@ pub(super) fn wake_in(
         return Ok((unknown, true));
     };
     let label = super::events::label(tx, id)?;
-    let admitted = super::admit_wake(tx, access, stored, id, text, now_ms())?;
+    let admitted = super::admit_wake(tx, access, stored, id, text, waker, now_ms())?;
     let reason = match admitted {
         Ok(_) => {
             super::names::reclaim(tx, project, id)?;
@@ -1527,14 +2015,20 @@ pub(super) fn wake_in(
                 true,
             ));
         }
+        Err(super::MASTER_STOPPED) => {
+            return Ok((
+                format!("The master stopped {label}. Only the master or the owner can wake it."),
+                true,
+            ));
+        }
         Err("team_agent_running") if live => format!(
             "{label} is running. Reach it with {}().",
-            tool::MESSAGE_TOOL
+            tool::UPDATE_WORK_TOOL
         ),
         Err("team_agent_running") => format!("{label} is running."),
         Err("team_agent_no_worktree") if live => format!(
             "the worktree of {label} was cleaned up. Hand the work out with {}() instead.",
-            tool::TOOL_NAME
+            tool::SPAWN_TOOL
         ),
         Err("team_agent_no_worktree") => format!(
             "the worktree of {label} was cleaned up. Hand the work out with a {} line instead.",
@@ -1545,41 +2039,15 @@ pub(super) fn wake_in(
     Ok((format!("Not woken: {reason}"), true))
 }
 
-/// Raises an app notification for a decision only the owner makes, at most
-/// `ESCALATIONS_PER_HOUR_MAX` per project within an hour. Takes the database, the master's
-/// project and the question. Returns the sentence the master reads, or a SQLite failure.
-fn escalate(
-    connection: &Connection,
-    project: &ProjectId,
-    text: &str,
-) -> Result<(String, bool), EngineError> {
-    let now = now_ms();
-    let recent: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='escalation' AND created_ms>?2",
-            params![project.as_str(), now - HOUR_MS],
-            |row| row.get(0),
-        )
-        .map_err(state)?;
-    if recent >= ESCALATIONS_PER_HOUR_MAX {
-        return Ok((ESCALATIONS_FULL.to_owned(), true));
-    }
-    Ok(
-        match super::events::escalate(connection, project, text, now)? {
-            Ok(_) => (ESCALATED.to_owned(), false),
-            Err(_) => (
-                "Not sent: give the owner one plain question of up to 2000 bytes.".to_owned(),
-                true,
-            ),
-        },
-    )
-}
-
 fn changes(answering: &Answering<'_>) -> (String, bool) {
-    let listed = crate::landing::open(answering.landing)
-        .and_then(|db| crate::landing::list(&db, &answering.stored.project_id));
-    let sets = match listed {
-        Ok(sets) => sets,
+    let project = &answering.stored.project_id;
+    let listed = crate::landing::open(answering.landing).and_then(|db| {
+        let sets = crate::landing::list(&db, project)?;
+        let waiting = crate::landing::waiting(&db, Some(project))?;
+        Ok((sets, waiting))
+    });
+    let (sets, waiting) = match listed {
+        Ok(read) => read,
         Err(problem) => {
             return (
                 format!(
@@ -1590,7 +2058,7 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             );
         }
     };
-    let waiting: Vec<String> = sets
+    let open: Vec<String> = sets
         .iter()
         .filter(|set| {
             matches!(
@@ -1601,28 +2069,16 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             )
         })
         .take(CHANGES_LISTED_MAX)
-        .map(|set| {
-            let state = match set.state {
-                crate::landing::ChangeState::Conflict => "conflicts with the owner's branch",
-                crate::landing::ChangeState::Updating => "being updated",
-                _ => "waiting for review",
-            };
-            format!(
-                "- {}: {} files, +{} -{}, {state}",
-                super::bound_text(&set.agent.label, 80),
-                set.files,
-                set.added,
-                set.removed
-            )
-        })
+        .map(|set| format!("- {}", crate::landing::open_set_line(set)))
         .collect();
-    if waiting.is_empty() {
+    if open.is_empty() {
         return ("No change set is waiting for the owner.".into(), false);
     }
+    let here = waiting.here.expect("the count was asked for this project");
     (
         format!(
-            "Change sets waiting for the owner in Changes:\n{}",
-            waiting.join("\n")
+            "Change sets open in Changes, {here} waiting for the owner:\n{}",
+            open.join("\n")
         ),
         false,
     )
@@ -1645,7 +2101,15 @@ fn message_agent(
     agent: &str,
     text: &str,
 ) -> Result<String, String> {
-    type_to_agent(connection, host, project, agent, text).map(|name| format!("Sent to {name}."))
+    type_to_agent(
+        connection,
+        host,
+        project,
+        agent,
+        super::events::Said::Message,
+        text,
+    )
+    .map(|name| format!("Sent to {name}."))
 }
 
 fn answer_agent(
@@ -1655,23 +2119,33 @@ fn answer_agent(
     agent: &str,
     text: &str,
 ) -> Result<String, String> {
-    type_to_agent(connection, host, project, agent, text).map(|name| format!("Answered {name}."))
+    type_to_agent(
+        connection,
+        host,
+        project,
+        agent,
+        super::events::Said::Answer,
+        text,
+    )
+    .map(|name| format!("Answered {name}."))
 }
 
 /// Types a master's text into the running sub-agent it names: a persona or `@handle` first,
 /// then the `<harness>-<id>` names events use, and types into the agent found by its id, so
-/// the name is read once (RV-DS-62). Takes the database, terminal host, project, the name
-/// and the text. Returns the agent's label, or the plain reason it was not sent.
+/// the name is read once (RV-DS-62). Takes the database, terminal host, project, the name,
+/// whether it is a message or an answer and the text. Returns the agent's label, or the plain
+/// reason it was not sent.
 fn type_to_agent(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
     agent: &str,
+    said: super::events::Said,
     text: &str,
 ) -> Result<String, String> {
     let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
     let found = super::events::resolve(connection, project, agent).map_err(unreadable)?;
-    match super::events::send_to(connection, host, found, text).map_err(unreadable)? {
+    match super::events::send_to(connection, host, found, said, text).map_err(unreadable)? {
         Ok(id) => super::events::label(connection, id).map_err(unreadable),
         Err("team_message_invalid") => Err(format!(
             "Not sent: give plain text up to {} bytes.",
@@ -1682,7 +2156,7 @@ fn type_to_agent(
             "Not sent: the terminal of {shown} could not be reached."
         )),
         Err(_) => Err(format!(
-            "Not sent: no running sub-agent of this project is called {shown}. Call status() for their names."
+            "Not sent: no running sub-agent of this project is called {shown}. Call inspect_work() for their names."
         )),
     }
 }
@@ -1707,3 +2181,10 @@ fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, S
 #[cfg(all(test, unix))]
 #[path = "master/tests.rs"]
 mod tests;
+
+mod merge;
+mod sub_merge;
+mod work;
+
+pub use work::wait_sentence;
+pub(crate) use work::{WAKE_DELIVERED, WAKE_TASK};

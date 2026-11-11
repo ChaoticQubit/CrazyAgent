@@ -1,10 +1,11 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BranchMode, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
+export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -36,11 +37,15 @@ const COPY: Record<string, string> = {
   rejected: "The engine didn't accept this change.",
   unavailable: "This isn't available right now. Try again.",
   pool_member_limit: "A pool can hold up to 15 accounts.",
+  linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+  linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  project_not_found: "This project no longer exists.",
   account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
   account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
   account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
@@ -81,7 +86,9 @@ const COPY: Record<string, string> = {
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
+  native_auth_sign_in_running: "A sign-in is still running. Wait for it to finish or cancel it, then try again.",
   native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
+  native_auth_in_progress: "A sign-in is still running. Finish or cancel it on its sign-in page first.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -101,6 +108,8 @@ const COPY: Record<string, string> = {
   memory_note_invalid: "Remove hidden, direction-changing or control characters from the memory.",
   memory_duplicate: "This memory is already saved.",
   memory_full: "Memory is full. Delete an old memory first.",
+  memory_import_folder_invalid: "Choose a folder that exists. A link to a folder can't be imported.",
+  memory_import_invalid: "A file in this folder can't be imported.",
   memory_missing: "That memory no longer exists.",
   memory_changed: "This memory changed. Reload it and try again.",
   memory_not_kept: "Only memories you kept can be made global.",
@@ -121,9 +130,24 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  hidden_paths_too_many: "A project can hide at most 8 folders.",
+  hidden_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  hidden_path_not_absolute: "Each hidden folder must be one absolute path of up to 1024 characters.",
+  hidden_path_missing: "That folder can't be found. Pick a folder that exists.",
+  hidden_path_not_folder: "That path isn't a folder. Pick a folder.",
+  hidden_path_outside_project: "A hidden folder must sit inside the project. Pick a folder within it.",
+  hidden_path_not_plain: "A hidden folder path can't hold quotes, backslashes or control characters.",
+  hidden_path_tracked: "Git tracks files in that folder. Hidden folders cover only files git doesn't track; pick a folder git ignores.",
+  hidden_path_unchecked: "CrazyAgent couldn't check that folder against git. Try again.",
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
+  agent_access_lowered: "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+  agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+  agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+  agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+  agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
+  project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -132,7 +156,7 @@ export const KNOWN_ERROR_CODES = Object.keys(COPY);
  * sentence, or undefined when there is none. */
 export function knownError(code: string): string | undefined {
   if (Object.hasOwn(COPY, code)) return COPY[code];
-  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
+  return /^(skill|server|plugins?|hooks?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
 }
 
 /** The owner's line for a failure, never opaque: its own sentence, else the generic sentence;
@@ -297,6 +321,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_hidden_paths: "saving folders agents can't open",
   project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
@@ -304,12 +329,15 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_promote: "promoting a memory",
   memory_delete: "deleting a memory",
   memory_approve: "approving a memory",
-  memory_agent_writes: "saving Agent memory writes",
+  memory_agent_writes: "saving agent memory writes",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
   master: "changing the master conversation",
   owner_profile: "saving your profile",
+  sandbox_settings: "changing the sandbox setting",
+  cleanup_settings: "changing when finished agents' worktrees go",
+  quit_settings: "changing what quitting does to team agents",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -320,8 +348,10 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   team: "changing the team",
   project_setup_update: "updating the project setup",
   project_remove: "removing the project",
+  project_delete: "deleting the project",
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
+  plan_roadmap: "planning the roadmap",
 };
 
 /** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the
@@ -370,6 +400,69 @@ export function getProfile(): Promise<Result<OwnerProfile | null>> {
 /** Saves or updates the owner profile. Input: the full profile. Output: ok once saved. */
 export function saveProfile(profile: OwnerProfile): Promise<Result<void>> {
   return change("desktop_save_owner_profile", { profile, generation: nextGeneration() });
+}
+
+/** How a limited-network agent's sockets are held on Linux, the engine's `LinuxSockets`. */
+export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
+
+/** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
+export interface SandboxSettings {
+  linux_sockets: LinuxSockets;
+}
+
+/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
+export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
+  return call<SandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
+export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
+}
+
+/** When the engine removes a finished agent's worktree on its own, the engine's `CleanupMode`. */
+export type CleanupMode = "after_days" | "once_landed" | "manual";
+
+/** The owner's finished agents setting, the engine's `CleanupSettings`: the mode and the days
+ * the first mode waits, 1 to 365, kept while another mode is picked. */
+export interface CleanupSettings {
+  mode: CleanupMode;
+  days: number;
+}
+
+/** Reads when finished agents' worktrees go. Output: the stored setting, or the default before the first save. */
+export function getCleanupSettings(): Promise<Result<CleanupSettings>> {
+  return call<CleanupSettings>("desktop_cleanup_settings");
+}
+
+/** Saves when finished agents' worktrees go. Input: the full setting. Output: ok once saved. */
+export function saveCleanupSettings(settings: CleanupSettings): Promise<Result<void>> {
+  return change("desktop_set_cleanup_settings", { settings, generation: nextGeneration() });
+}
+
+/** What quitting CrazyAgent does to running team agents, the engine's `OnQuit`. */
+export type OnQuit = "keep_running" | "stop";
+
+/** How long agents left running wait for CrazyAgent to come back, the engine's `LeftRunning`. */
+export type LeftRunning = "after_hours" | "never";
+
+/** The owner's agents on quit setting, the engine's `QuitSettings`: what quitting does to
+ * running team agents, and how long the ones left running wait, with the hours, 1 to 168,
+ * kept while Never is picked. */
+export interface QuitSettings {
+  on_quit: OnQuit;
+  left_running: LeftRunning;
+  hours: number;
+}
+
+/** Reads what quitting does to team agents. Output: the stored setting, or the default before the first save. */
+export function getQuitSettings(): Promise<Result<QuitSettings>> {
+  return call<QuitSettings>("desktop_quit_settings");
+}
+
+/** Saves what quitting does to team agents. Input: the full setting. Output: ok once saved. */
+export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> {
+  return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
@@ -527,6 +620,9 @@ export function profileSettledLine(check: ProfileCheck): string | null {
 /** The banner line while a sign-in's outcome is unconfirmed. */
 export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
 
+/** The toast when settings changed after a stuck sign-in started: only the engine can end it. */
+export const STALE_SIGN_IN_LINE = "Settings changed after this sign-in started, so only the engine can end it, within 10 minutes of its start. Clear it again after that.";
+
 /** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
  * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
  * while the engine is still stopping it, or a plain error. */
@@ -537,7 +633,8 @@ export function clearStuckSignIn(): Promise<Result<boolean>> {
 /** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
 export function stuckClearedLine(result: Result<boolean>): string {
   if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
-  return result.kind === "error" ? result.message : plainError("unknown");
+  if (result.kind === "error") return result.code === "native_profile_source_conflict" ? STALE_SIGN_IN_LINE : result.message;
+  return plainError("unknown");
 }
 
 export interface PoolMember {
@@ -577,6 +674,7 @@ export interface AccountSchedule {
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
+  version: number;
 }
 
 export type ScheduleChange =
@@ -591,22 +689,40 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+/** Why a ready account stands where it does in its pool's ranking. */
+export type OrderWhy =
+  | { kind: "use_last" } | { kind: "limit_reported" } | { kind: "no_reading" }
+  | { kind: "resets_soonest"; resets_ms: number } | { kind: "resets_later"; resets_ms: number }
+  | { kind: "least_used" } | { kind: "more_used" } | { kind: "more_five_hour_used" }
+  | { kind: "ranked"; rank: number } | { kind: "unranked" }
+  | { kind: "tied_rank"; rank: number | null } | { kind: "tied_order" };
+
 export type AccountStanding =
-  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean; why: OrderWhy }
+  | { kind: "not_signed_in" }
+  | { kind: "sign_in_unconfirmed" }
   | { kind: "paused"; until_ms: number }
   | { kind: "never_use" }
   | { kind: "five_hour_cap"; until_ms: number | null }
   | { kind: "reserve_reached"; reserve_percent: number; until_ms: number | null };
 
+export interface ProjectHold {
+  project: string;
+  name: string;
+  until_ms: number;
+}
+
 export interface RankedAccount {
   connection: string;
   standing: AccountStanding;
+  held_for?: ProjectHold[];
 }
 
 export interface PoolRanking {
   pool: string;
   strategy: AccountStrategy;
   accounts: RankedAccount[];
+  own_order_projects: number;
 }
 
 /** Reads each pool's account ranking: the order work would try its accounts now, then each
@@ -617,11 +733,12 @@ export function accountRanking(): Promise<Result<PoolRanking[]>> {
 
 /** Saves one account choice change. Input: the change. Output: ok once the engine applied
  * it, or a plain error. */
-export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
-  return change("desktop_set_account_schedule", { change: scheduleChange, generation: nextGeneration() });
+export function setAccountSchedule(scheduleChange: ScheduleChange, version: number): Promise<Result<void>> {
+  return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
-function poolId(): string {
+/** Makes the id of a new pool, so the page can select the pool it creates. Output: the id. */
+export function newPoolId(): string {
   const bytes = new Uint8Array(10);
   crypto.getRandomValues(bytes);
   return "pool-" + Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -654,32 +771,31 @@ export function mergePool(now: PoolBase, opened: PoolBase, saved: PoolBase): Res
   return poolInput(renamed ? saved.name : now.name, [...kept, ...added]);
 }
 
-/** Creates a pool, or saves the owner's changes to an existing one while keeping its project
- * assignments and any change made elsewhere since the owner read it (see `mergePool`).
- * Inputs: pool id (absent for a new pool), name, member ids, and for an existing pool its
- * name and members as the owner read them. Output: ok once the engine saved it. */
-export async function savePool(id: string | undefined, name: string, members: string[], opened?: PoolBase): Promise<Result<void>> {
-  assert(id === undefined || opened !== undefined, "saving an existing pool needs the read it was edited from");
+/** Creates a pool with its first accounts. Inputs: its new id, name and member ids. Output: ok
+ * once the engine saved it. */
+export async function createPool(id: string, name: string, members: string[]): Promise<Result<void>> {
   const input = poolInput(name, members);
   if (input.kind !== "ok") return input;
-  let ticket: string;
-  let edit: ModelAccessEdit;
-  if (id === undefined) {
-    const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
-    if (page.kind !== "ok") return page;
-    ticket = page.value.ticket;
-    edit = { kind: "create_pool", pool: { id: poolId(), name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
-  } else {
-    const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
-    if (detail.kind !== "ok") return detail;
-    if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
-    const now = detail.value.record.pool;
-    const merged = mergePool({ name: now.name ?? "", members: now.members }, opened!, input.value);
-    if (merged.kind !== "ok") return merged;
-    ticket = detail.value.ticket;
-    edit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
-  }
-  return change("desktop_edit_model_access", { ticket, edit, generation: nextGeneration() });
+  const page = await call<ModelAccessPage>("desktop_model_access_page", { collection: "pools", next: false });
+  if (page.kind !== "ok") return page;
+  const edit: ModelAccessEdit = { kind: "create_pool", pool: { id, name: input.value.name, members: input.value.members, projects: [], roles: [], fallback_allowed: false } as AccountPool };
+  return change("desktop_edit_model_access", { ticket: page.value.ticket, edit, generation: nextGeneration() });
+}
+
+/** Saves the owner's changes to a pool while keeping its project assignments and any change made
+ * elsewhere since the owner read it (see `mergePool`). Inputs: pool id, name, member ids, and its
+ * name and members as the owner read them. Output: ok once the engine saved it. */
+export async function savePool(id: string, name: string, members: string[], opened: PoolBase): Promise<Result<void>> {
+  const input = poolInput(name, members);
+  if (input.kind !== "ok") return input;
+  const detail = await call<ModelAccessDetail>("desktop_inspect_model_access", { collection: "pools", id });
+  if (detail.kind !== "ok") return detail;
+  if (detail.value.record.kind !== "pool") return { kind: "error", code: "pool_not_found", message: plainError("pool_not_found") };
+  const now = detail.value.record.pool;
+  const merged = mergePool({ name: now.name ?? "", members: now.members }, opened, input.value);
+  if (merged.kind !== "ok") return merged;
+  const edit: ModelAccessEdit = { kind: "replace_pool", pool: { ...now, name: merged.value.name, members: merged.value.members } as AccountPool };
+  return change("desktop_edit_model_access", { ticket: detail.value.ticket, edit, generation: nextGeneration() });
 }
 
 /** Deletes a pool and takes it off every project that uses it, in one engine change.
@@ -702,7 +818,7 @@ export interface HarnessEntry {
   tools: { kind: "switchable" } | { kind: "limited"; reason: string };
   model_selection: boolean;
   account_kinds: HarnessAccountKind[];
-  team: { kind: "available" } | { kind: "unavailable"; reason: string };
+  team: TeamUse;
   aliases: string[];
 }
 
@@ -725,9 +841,10 @@ export function addSkill(scope: PluginScope, folder: string): Promise<Result<Ski
   return call<SkillView>("desktop_add_skill", { scope, folder });
 }
 
-/** Turns a skill on or off where it was added. Inputs: skill id and the switch. */
-export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<SkillView>> {
-  return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
+/** Turns a skill on or off where it was added. Inputs: skill id, the switch and the version
+ * the list showed; a skill changed since is refused with `stale_revision`. */
+export function setSkillEnabled(id: string, enabled: boolean, version: number): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_set_skill_enabled", { id, enabled, version });
 }
 
 /** Reads hooks for global settings (no project) or one project's settings, where global
@@ -748,8 +865,8 @@ export function setHookEnabled(id: string, enabled: boolean): Promise<Result<Hoo
 }
 
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
-export function removeSkill(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill for its detail view: the skill with the project's switch when a project
@@ -790,14 +907,15 @@ export function approveMcpServer(id: string, spec: McpServerSpec): Promise<Resul
   return call<McpServerView>("desktop_approve_mcp_server", { id, spec });
 }
 
-/** Turns an MCP server on or off where it was added. Inputs: server id and the switch. */
-export function setMcpServerEnabled(id: string, enabled: boolean): Promise<Result<McpServerView>> {
-  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+/** Turns an MCP server on or off where it was added. Inputs: server id, the switch and the
+ * version the list showed; a server changed since is refused with `stale_revision`. */
+export function setMcpServerEnabled(id: string, enabled: boolean, version: number): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled, version });
 }
 
 /** Removes an MCP server and its saved secrets. Input: server id. */
-export function removeMcpServer(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_mcp_server", { id, version });
 }
 
 /** Saves or replaces one secret for an MCP server; the value is sent once and not kept here.
@@ -818,9 +936,29 @@ export function checkMcpServer(id: string): Promise<Result<McpServerView>> {
 }
 
 /** Switches a global skill or MCP server on or off for one project.
- * Inputs: project id, item id and the switch. */
-export function switchPlugin(projectId: string, id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_switch_plugin", { projectId, id, on });
+ * Inputs: project id, item id, the switch and the item's version the list showed. */
+export function switchPlugin(projectId: string, id: string, on: boolean, version: number): Promise<Result<void>> {
+  return call<void>("desktop_switch_plugin", { projectId, id, on, version });
+}
+
+/** Reads tool switches: the CrazyAgent built-in tools (no server id) or one MCP server's
+ * checked tools, for global settings (no project) or one project. Output: each tool with its
+ * every-project switch and the project's own switch. */
+export function toolSwitches(projectId: string | undefined, serverId: string | null): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_tool_switches", { projectId: projectId ?? null, serverId });
+}
+
+/** Sets one tool's switch for every project (no project) or for one project; hidden deletes a
+ * built-in tool until Restore defaults. Inputs: project, server id (null for built-in), the tool
+ * and the switch. Output: the server's tools after the change. */
+export function setToolSwitch(projectId: string | undefined, serverId: string | null, tool: string, value: ToolSwitch): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_set_tool_switch", { projectId: projectId ?? null, serverId, tool, value });
+}
+
+/** Clears every tool switch of one server in that scope, bringing deleted built-in tools back.
+ * Inputs: project (none for every project) and server id (null for built-in). Output: the tools. */
+export function restoreToolSwitches(projectId: string | undefined, serverId: string | null): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_restore_tool_switches", { projectId: projectId ?? null, serverId });
 }
 
 /** Lists launched agents, newest first. Input: a project id, or none for every project.
@@ -1032,11 +1170,27 @@ export function loadTeamGraph(id: string): Promise<Result<TeamGraph>> {
   return call<TeamGraph>("desktop_team_graph", { id });
 }
 
+/** Reads one project's Questions inbox: the open questions agents put to the owner, most
+ * urgent first, and the agents waiting on the owner in their own terminal.
+ * Input: the project id. Output: the inbox, not ready, or a plain error. */
+export function loadQuestions(id: string): Promise<Result<QuestionsInbox>> {
+  return call<QuestionsInbox>("desktop_coord_questions", { id });
+}
+
+/** Answers one open question an agent put to the owner; it reaches the asker as the owner's
+ * reply. Inputs: the project id, the question's message id and the answer. Output: the engine
+ * receipt. */
+export function answerQuestion(id: string, message: number, text: string): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_coord_answer", { id, message, text, generation: nextGeneration() });
+}
+
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
- * then live output. Inputs: the terminal name and the channel. Output: the view's serial
- * once attached, which its detach names. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<number>> {
-  return call<number>("desktop_terminal_attach", { agent, output });
+ * then live output. With a pane, the view is that one pane of the terminal's window, such as
+ * a native teammate's. A wall window names its project, whose graph must show the terminal.
+ * Inputs: the terminal name, the channel, the pane id and the project id, if any.
+ * Output: the view's serial once attached, which its detach names. */
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null, project: string | null = null): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, pane, output, id: project });
 }
 
 /** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
@@ -1065,23 +1219,35 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
   return call<void>("desktop_terminal_detach", { agent, serial });
 }
 
-/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id
- * and the switch. Output: the engine receipt, not ready, or a plain error. */
-export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id,
+ * the switch and the team settings version the screen read. Output: the engine receipt, not
+ * ready, or a plain error; a save from an older read is rejected as `stale_revision`. */
+export function keepTeamWarm(id: string, on: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, version, generation: nextGeneration() });
 }
 
 /** Sets how long one task turn and one agent session of the team may run, and how long a
- * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
- * seconds. Output: the engine receipt, not ready, or a plain error. */
-export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+ * sub-agent may sit idle; null is no limit. Inputs: the project id, the three limits in
+ * seconds and the team settings version the screen read. Output: the engine receipt, not
+ * ready, or a plain error; a save from an older read is rejected as `stale_revision`. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, version, generation: nextGeneration() });
 }
 
 /** Sets what the live master does with the conversation when the master harness changes.
- * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
-export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+ * Inputs: the project id, the mode and the team settings version the screen read. Output:
+ * the engine receipt, not ready, or a plain error; a save from an older read is rejected as
+ * `stale_revision`. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation: nextGeneration() });
+}
+
+/** Sets when a saved master harness change reaches the running live master: once it is idle, or
+ * at its next start. Inputs: the project id, the choice and the team settings version the
+ * screen read. Output: the engine receipt, not ready, or a plain error; a save from an older
+ * read is rejected as `stale_revision`. */
+export function setApplyHarnessSwitch(id: string, mode: SwitchApply, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, version, generation: nextGeneration() });
 }
 
 /** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id
@@ -1098,10 +1264,11 @@ export function setChildLanding(id: string, mode: ChildLanding): Promise<Result<
 }
 
 /** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
- * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
- * receipt, not ready, or a plain error. */
-export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+ * the Finished fold-out (Hide). Inputs: the project id, true for Show and the team settings
+ * version the screen read. Output: the engine receipt, not ready, or a plain error; a save
+ * from an older read is rejected as `stale_revision`. */
+export function showFinishedAgents(id: string, show: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, version, generation: nextGeneration() });
 }
 
 /** Sets where the project's new sub-agents commit: each on its own branch crazyagent/agent-<id>
@@ -1111,11 +1278,186 @@ export function setAgentBranches(id: string, mode: BranchMode): Promise<Result<I
   return call<IntentReceipt>("desktop_team_agent_branches", { id, mode, generation: nextGeneration() });
 }
 
-/** Turns the project's live master on or off; on, the engine keeps the master's own app running
- * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
+/** Stops every agent of the project, the master, each harness and each teammate, until the
+ * owner starts the team again, or starts it again. Inputs: the project id and true to stop.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setTeamStopped(id: string, stopped: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_pause", { id, paused: stopped, generation: nextGeneration() });
+}
+
+/** Sets Max harnesses per project: how many harnesses run at once, null for No limit. Inputs:
+ * the project id and the cap. Output: the engine receipt, not ready, or a plain error. */
+export function setMaxHarnesses(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_max_harnesses", { id, max, generation: nextGeneration() });
+}
+
+/** Sets Max teammates per harness, null for No limit. Inputs: the project id and the cap.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setMaxTeammates(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_max_teammates", { id, max, generation: nextGeneration() });
+}
+
+/** Sets the project's Token budget, null for Off: once its agents use that many tokens from now,
+ * the engine stops the whole team. Inputs: the project id and the tokens. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function setTokenBudget(id: string, tokens: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation: nextGeneration() });
+}
+
+/** Turns the project's Spread harnesses across accounts on or off: on, a new or woken agent
+ * prefers a pool account no running agent of the project uses, else the account strategy
+ * picks. Inputs: the project id and the switch. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setSpreadAccounts(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_spread_accounts", { id, on, generation: nextGeneration() });
+}
+
+/** Sets the branch the project's master works on and merges finished harnesses into, or
+ * clears it back to the repository's default branch. Inputs: the project id and the branch,
+ * null for the default. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterBranch(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_branch", { id, branch, generation: nextGeneration() });
+}
+
+/** Sets the branch the project's team work lands on: the master's merges, an Accept with no
+ * branch picked and what each change set counts. Inputs: the project id and the branch, null
+ * for the master's branch. Output: the engine receipt, not ready, or a plain error. */
+export function setLandOn(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_land_on", { id, branch, generation: nextGeneration() });
+}
+
+/** Sets what the project's tasks do at their turn end while commands their agents started in
+ * the background still run. Inputs: the project id and the choice. Output: the engine
+ * receipt, not ready, or a plain error; the engine refuses a grace time outside 10 to 3600 s. */
+export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
+}
+
+/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+ * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
+ * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
+}
+
+/** Sets what a Full-access master does with its own conflict fixes: merge them into main
+ * itself, or leave them waiting for the owner's Accept in Changes. Inputs: the project id and
+ * the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLands(id: string, mode: MasterLands): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_lands", { id, mode, generation: nextGeneration() });
+}
+
+/** Turns the project's "Re-ask a sub-agent's empty reply" setting on or off; on, a
+ * sub-agent whose task ends with no reply text is asked once more for its reply. Inputs:
+ * the project id and the switch. Output: the engine receipt, not ready, or a plain error. */
+export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how many terminals Open all terminals puts in one terminal wall window. Inputs: the
+ * project id and the choice, 4, 6 or 9. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setTerminalsPerWindow(id: string, perWindow: 4 | 6 | 9): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_terminals_per_window", { id, perWindow, generation: nextGeneration() });
+}
+
+/** Reads how many terminals one terminal wall window holds; the wall windows may call it.
+ * Input: the project id. Output: 4, 6 or 9, not ready, or a plain error. */
+export function loadTerminalsPerWindow(id: string): Promise<Result<4 | 6 | 9>> {
+  return call<4 | 6 | 9>("desktop_terminals_per_window", { id });
+}
+
+/** Opens or updates the project's terminal wall windows: count windows titled with the
+ * project's name, closing any past the count. With focus they come to the front; without it
+ * nothing opens unless the project has one open already, and none closes. Inputs: the project id, its name,
+ * the window count and whether to focus them. Output: nothing, not ready, or a plain error. */
+export function openTerminalWindows(id: string, name: string, count: number, focus: boolean): Promise<Result<void>> {
+  return call<void>("desktop_open_terminal_windows", { id, name, count, focus });
+}
+
+/** Asks for the wall windows a wall window's growing team needs, from that wall window: the
+ * missing pages open beside it and none closes. Inputs: the project id and the window
+ * count. Output: nothing, not ready, or a plain error. */
+export function extendTerminalWindows(id: string, count: number): Promise<Result<void>> {
+  return call<void>("desktop_extend_terminal_windows", { id, count });
+}
+
+/** Brings forward, from a terminal wall window, the main window on its project's Agents tab
+ * or another wall window of its own project, as the wall's Back to Agents and Window switch
+ * do. Inputs: the project id and the target, "main" or a page. Output: nothing, not ready,
  * or a plain error. */
-export function setLiveMaster(id: string, on: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_live_master", { id, on, generation: nextGeneration() });
+export function focusTerminalWindow(id: string, target: "main" | number): Promise<Result<void>> {
+  return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
+}
+
+/** Closes a removed project's terminal wall windows, for the main window or a wall window of
+ * that project. Input: the project id. Output: nothing, not ready, or a plain error. */
+export function closeProjectWalls(id: string): Promise<Result<void>> {
+  return call<void>("desktop_close_project_walls", { id });
+}
+
+/** Sets the project's "Catch up with main" setting for agents started from now on: on lets each
+ * agent merge the landed main, `crazyagent/main`, into its own branch and tells it to; off makes the
+ * git the app writes for an agent refuse that merge, except a master at Full access, and is a guide,
+ * not a lock: landed work can still come in another way.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
+}
+
+/** Saves a project's "Stop the master when idle after" choice (DEC-117 Q4). Inputs: the
+ * project id and the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterIdleStop(id: string, choice: MasterIdleStop): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_idle_stop", { id, choice, generation: nextGeneration() });
+}
+
+/** Saves a project's "Live terminal" setting (DEC-117 Q4). Inputs: the project id and whether
+ * it is on. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLiveTerminal(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_live_terminal", { id, on, generation: nextGeneration() });
+}
+
+/** Sets the project's "Reuse idle agents" setting: off starts a new agent for each new task, on
+ * the current branch; on lets an idle agent of the same lead take it, on the history it already has.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setReuseIdle(id: string, mode: ReuseIdle): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_reuse_idle", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets the most files one new top-level folder, a folder the owner's branch does not have,
+ * may gain in a project's change set before the engine refuses the set. Inputs: the project id
+ * and the limit. Output: the engine receipt, not ready, or a plain error. */
+export function setNewFolderLimit(id: string, files: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_new_folder_limit", { id, files, generation: nextGeneration() });
+}
+
+/** Saves a project's coordination settings: where sub-agent questions go, what overlapping
+ * claims do, workflow nudges and the counted tools. Inputs: the project id and the settings.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setCoordSettings(id: string, settings: CoordSettings): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_coordination", { id, settings, generation: nextGeneration() });
+}
+
+/** Sets how one harness kind's sub-agents start in a project: app-spawned, or native teammates
+ * where that kind has them. Inputs: the project id, the harness kind and the mode. Output: the
+ * engine receipt, not ready, or a plain error. */
+export function setHarnessMode(id: string, harness: CoordHarness, mode: SubagentMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_harness_mode", { id, harness, mode, generation: nextGeneration() });
+}
+
+/** Sets how messages reach one harness kind's agents in a project. Inputs: the project id, the
+ * harness kind and the delivery. Output: the engine receipt, not ready, or a plain error. */
+export function setHarnessDelivery(id: string, harness: CoordHarness, delivery: Delivery): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_harness_delivery", { id, harness, delivery, generation: nextGeneration() });
+}
+
+/** Turns the project's live master on or off; on, the engine keeps the master's own app running
+ * in a terminal. Inputs: the project id, the switch and the team settings version the screen
+ * read. Output: the engine receipt, not ready, or a plain error; a save from an older read is
+ * rejected as `stale_revision`. */
+export function setLiveMaster(id: string, on: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_live_master", { id, on, version, generation: nextGeneration() });
 }
 
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan

@@ -226,6 +226,17 @@ pub fn connect_unix_std(
     guarded(|| std::os::unix::net::UnixStream::connect(&address))
 }
 
+/// Accepts one waiting connection on a non-blocking Unix listener inside the gate, never
+/// waiting for one. Input: the listener. Output: the stream, or `WouldBlock` when none
+/// waits, or the accept failure.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn accept_unix_std(
+    listener: &std::os::unix::net::UnixListener,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    guarded(|| listener.accept()).map(|(stream, _)| stream)
+}
+
 /// Binds a blocking Unix listener inside the gate, through the short address of a path
 /// too long for a socket address. Input: the socket path. Output: the listener.
 #[cfg(unix)]
@@ -264,6 +275,49 @@ pub fn unix_pair_std() -> io::Result<(
 #[allow(clippy::disallowed_methods)]
 pub fn bind_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::TcpListener> {
     guarded(|| std::net::TcpListener::bind(address))
+}
+
+/// Binds a blocking TCP listener like [`bind_tcp_std`] but without `SO_REUSEADDR`, so the
+/// bind fails with `AddrInUse` while any socket holds the port, including a wildcard
+/// listener of this user that `std`'s bind would sit beside, and a closed connection
+/// still in TIME_WAIT. It queues up to the system's `SOMAXCONN` connections, the largest
+/// queue nix takes (128 on macOS). Input: the address. Output: the close-on-exec listener.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, SockaddrIn6, bind, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    let family = match address {
+        std::net::SocketAddr::V4(_) => AddressFamily::Inet,
+        std::net::SocketAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let socket = guarded(|| -> io::Result<std::os::fd::OwnedFd> {
+        let socket = socket(family, SockType::Stream, SockFlag::empty(), None)?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        Ok(socket)
+    })?;
+    match address {
+        std::net::SocketAddr::V4(v4) => bind(socket.as_raw_fd(), &SockaddrIn::from(v4))?,
+        std::net::SocketAddr::V6(v6) => bind(socket.as_raw_fd(), &SockaddrIn6::from(v6))?,
+    }
+    listen(&socket, Backlog::MAXCONN)?;
+    Ok(std::net::TcpListener::from(socket))
+}
+
+/// The [`bind_tcp_std_exclusive`] of a system whose `std` bind sets no `SO_REUSEADDR`.
+/// Input: the address. Output: the listener.
+#[cfg(not(unix))]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    bind_tcp_std(address)
+}
+
+/// Binds a blocking UDP socket inside the gate.
+/// Input: the address. Output: the socket.
+#[allow(clippy::disallowed_methods)]
+pub fn bind_udp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::UdpSocket> {
+    guarded(|| std::net::UdpSocket::bind(address))
 }
 
 /// Connects a blocking TCP stream inside the gate, so the gate is held for the

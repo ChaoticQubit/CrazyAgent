@@ -55,6 +55,15 @@ install = "copy the skill folder at the pinned commit into each agent's skills f
 source = { kind = "git", repo = "https://github.com/mattpocock/skills", commit = "24fe0ef7737efae15c87225755e9f6f5965e4888", path = "skills/productivity/grill-me" }
 
 [[entries]]
+id = "grill"
+kind = "skill"
+group = "workflow"
+license = "Apache-2.0"
+on_by_default = true
+install = "copy the bundled skill folder into each agent's skills folder"
+source = { kind = "bundled", path = "skills/grill" }
+
+[[entries]]
 id = "linear-method"
 kind = "skill"
 group = "workflow"
@@ -151,6 +160,7 @@ group = "context"
 license = "Elastic-2.0"
 on_by_default = true
 install = "run npx -y context-mode@1.0.169 as a stdio MCP server, matching the pinned v1.0.169 commit"
+integrity = "sha512-94JIaFuLjF9SO2BsGTrbGtyT44K95+9OC8BdbaL/UT76xOkanJLfUR5CzmNw+GELXZQqH4nBrKg9wjBnSFkVnQ=="
 source = { kind = "git", repo = "https://github.com/mksglu/context-mode", commit = "589d8214d56740a28b5f7bf63167743d586b0b40" }
 
 [[entries]]

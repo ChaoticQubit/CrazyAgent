@@ -1,8 +1,12 @@
-use super::super::settings_add_account::{AddAccount, choices, key_problem, provider_tiles};
+use super::super::settings_add_account::{
+    AddAccount, choices, code_left_line, key_problem, provider_tiles, sign_in_problem,
+};
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
+use crate::engine::owner::{NativeAuthMethod, NativeAuthPhase};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::tui::client::accounts::AccountsReply;
+use crate::tui::client::settings::SignInView;
 use crate::tui::client::{OwnerEvent, settings::SettingsEvent};
 use crate::tui::ctx::{Link, Load};
 use crate::tui::glyphs::UNICODE;
@@ -1152,5 +1156,428 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
             .await
             .unwrap()
             .unwrap();
+    }
+
+    const CODEX: &str = r#"
+[model_access]
+accounts = ["account-chatgpt"]
+[[model_access.connections]]
+id = "acct-000"
+provider = "provider-chatgpt"
+harness = "codex"
+protocol = "native"
+account_ref = "account-chatgpt"
+endpoint = { kind = "native" }
+model = { id = "model-chatgpt", author = "author-chatgpt" }
+auth = { method = "native_managed", profile_ref = "profile-chatgpt" }
+"#;
+
+    /// Counts what the engine has stored about sign-ins. Inputs: the engine root and the
+    /// table. Output: the row count.
+    fn rows(root: &std::path::Path, table: &str) -> i64 {
+        rusqlite::Connection::open_with_flags(
+            root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    /// Registers a stand-in custodian that reads its bootstrap and keeps running, so the
+    /// sign-in it serves stays open and holds its fence, until `release` exists; then it
+    /// exits 1 without naming a cause. Inputs: the service and the engine root. Output: the
+    /// release path.
+    fn hold_sign_ins(service: &mut EngineService, root: &std::path::Path) -> std::path::PathBuf {
+        let release = root.join("release");
+        let custodian = root.join("held-custodian");
+        std::fs::write(
+            &custodian,
+            format!(
+                "#!/bin/sh\n/bin/cat >/dev/null\nwhile [ ! -e '{}' ]; do /bin/sleep 0.05; done\nexit 1\n",
+                release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&custodian, std::fs::Permissions::from_mode(0o700)).unwrap();
+        service.register_native_auth_host(&custodian).unwrap();
+        release
+    }
+
+    /// On Settings, Add account, a sign-in the engine refuses because another client's
+    /// sign-in of the same account is still open says so with a way out, and the n it
+    /// names sends a new start each time; once that sign-in is cancelled and its custodian
+    /// has let go, n starts a fresh one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sign_in_held_open_by_another_client_says_how_it_clears_and_n_tries_again() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tacc-open-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(
+            &global,
+            format!("timeout_ms = {}\n{CODEX}", ENGINE_WAIT.as_millis()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let release = hold_sign_ins(&mut service, root.path());
+
+        let mut other = crate::client_controller::OwnerController::attach(
+            root.path(),
+            crate::engine::owner::OwnerClientKind::Desktop,
+            ENGINE_WAIT,
+        )
+        .await
+        .unwrap();
+        let held_account = crate::protocol::CredentialRef::new("acct-000").unwrap();
+        let read = other
+            .read(crate::engine::owner::OwnerRead::ModelAccessRecord {
+                collection: crate::engine::owner::ModelAccessCollection::Connections,
+                id: held_account.clone(),
+            })
+            .await
+            .unwrap();
+        let crate::engine::owner::OwnerData::ModelAccessRecord { source_hash, .. } = read.data
+        else {
+            panic!("the engine has no record for the account");
+        };
+        let scope = crate::engine::owner::NativeAuthScope {
+            expected_database_instance: other.identity().database_instance().into(),
+            connection: held_account,
+            expected_config_id: read.config_id,
+            expected_source_hash: source_hash,
+        };
+        let held = other
+            .start_native_auth(crate::engine::owner::NativeAuthStart {
+                request_id: crate::protocol::RequestId::new("held-elsewhere").unwrap(),
+                scope: scope.clone(),
+                method: NativeAuthMethod::CodexBrowser,
+            })
+            .await
+            .unwrap();
+        assert_eq!(held.fact.phase, NativeAuthPhase::Starting);
+        assert_eq!(rows(root.path(), "native_auth_fences"), 1);
+
+        let mut connection = Connection::connect_paired(
+            Client::new(root.path().join("e.sock"), ENGINE_WAIT).unwrap(),
+        )
+        .unwrap();
+        let chatgpt = account(
+            0,
+            "Work ChatGPT",
+            Provider::Chatgpt,
+            SignInMethod::Subscription,
+            AccountStatus::NotSignedIn,
+        );
+        let mut shell = Shell::with(ctx(320, 40), Box::new(AddAccount::again(chatgpt)));
+        until(&mut shell, &mut connection, ready).await;
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::Accounts(AccountsRequest::Catalog))
+        })
+        .await;
+        shell.refresh();
+        let sign_in = |job: &SettingsJob| matches!(job, SettingsJob::SignIn(_));
+        send(&mut shell, &mut connection, sign_in).await;
+        for attempt in ["first start", "n"] {
+            if attempt == "n" {
+                shell.key(Key::Char('n'));
+                send(&mut shell, &mut connection, sign_in).await;
+            }
+            let page = render(&mut shell, 320, 40).join("\n");
+            assert!(page.contains(STILL_OPEN), "{attempt}: {page}");
+            assert!(
+                page.contains("Press n for a new code."),
+                "{attempt}: {page}"
+            );
+            assert!(!page.contains("recovery_required"), "{attempt}: {page}");
+            assert_eq!(rows(root.path(), "native_auth_operations"), 1, "{attempt}");
+        }
+
+        let cancelled = other
+            .cancel_native_auth(crate::engine::owner::NativeAuthCancel {
+                request_id: crate::protocol::RequestId::new("cancel-elsewhere").unwrap(),
+                scope,
+                operation_id: held.fact.operation_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(cancelled.fact.phase, NativeAuthPhase::Cancelling);
+        std::fs::write(&release, b"").unwrap();
+        let deadline = std::time::Instant::now() + ENGINE_WAIT;
+        while rows(root.path(), "native_auth_fences") != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled sign-in never let go of its fence"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        shell.key(Key::Char('n'));
+        send(&mut shell, &mut connection, sign_in).await;
+        let page = render(&mut shell, 320, 40).join("\n");
+        assert!(!page.contains(STILL_OPEN), "{page}");
+        assert_eq!(rows(root.path(), "native_auth_operations"), 2);
+        drop(connection);
+        drop(other);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+const UNCONFIRMED: &str = "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.";
+#[cfg(unix)]
+const STILL_OPEN: &str = "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.";
+
+/// A failed sign-in view for one recorded code, with or without a device code on screen.
+/// Inputs: the code and the device code. Output: the view the engine reply gives the TUI.
+fn failed(code: &str, device_code: Option<&str>) -> SignInView {
+    SignInView {
+        phase: NativeAuthPhase::Failed,
+        problem: Some(code.to_owned()),
+        generation: 1,
+        page: None,
+        device_code: device_code.map(str::to_owned),
+        code_left: None,
+        claude_prompt: None,
+        email: None,
+        plan: None,
+    }
+}
+
+/// Each recorded sign-in failure reads in the TUI as the app reads it, with the harness of
+/// the method used filled in, even while a device code is on screen; an unknown code still
+/// names itself.
+#[test]
+fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used() {
+    let claude = Some(NativeAuthMethod::ClaudeOfficial);
+    let codex = Some(NativeAuthMethod::CodexBrowser);
+    for (native, code, device_code, sentence) in [
+        (
+            claude,
+            "native_auth_claude_native_exit",
+            None,
+            "Claude Code stopped before it finished. Try again.",
+        ),
+        (
+            codex,
+            "native_auth_codex_io_failed",
+            None,
+            "CrazyAgent lost contact with Codex. Try again.",
+        ),
+        (
+            Some(NativeAuthMethod::CodexDeviceCode),
+            "native_auth_codex_deadline",
+            Some("QX4F-7K2M"),
+            "Codex didn't answer in time. Try again.",
+        ),
+        (
+            claude,
+            "native_auth_host_executable_unsafe",
+            None,
+            "Claude Code on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall Claude Code, then try again.",
+        ),
+        (
+            claude,
+            "native_auth_sign_in_expired",
+            None,
+            "This code expired.",
+        ),
+        (
+            Some(NativeAuthMethod::CodexDeviceCode),
+            "native_auth_sign_in_timed_out",
+            Some("QX4F-7K2M"),
+            "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.",
+        ),
+        (
+            codex,
+            "native_auth_sign_in_page_timed_out",
+            None,
+            "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.",
+        ),
+    ] {
+        assert_eq!(
+            sign_in_problem(native, &failed(code, device_code)),
+            sentence,
+            "{code}"
+        );
+    }
+    assert_eq!(
+        sign_in_problem(claude, &failed("native_auth_made_up", None)),
+        "The sign-in did not work. (code: native_auth_made_up)"
+    );
+}
+
+/// A finished view for one phase and, when the engine recorded one, its code. Inputs: the
+/// phase and the code. Output: the view the engine reply gives the TUI.
+fn finished(phase: NativeAuthPhase, code: Option<&str>) -> SignInView {
+    SignInView {
+        phase,
+        problem: code.map(str::to_owned),
+        ..failed("unused", None)
+    }
+}
+
+/// A code the engine recorded wins over the phase's own line, as the app reads it: a harness
+/// that is not installed (phase Unavailable) names the harness and how to install it, and a
+/// cancel reads the app's row. Without a code the phase lines remain. A sign-in the engine
+/// could not confirm says how it clears.
+#[test]
+fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_it_clears() {
+    let codex = Some(NativeAuthMethod::CodexBrowser);
+    let claude = Some(NativeAuthMethod::ClaudeOfficial);
+    for (native, phase, code, sentence) in [
+        (
+            codex,
+            NativeAuthPhase::Unavailable,
+            Some("native_auth_host_unavailable"),
+            "Codex isn't installed on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.",
+        ),
+        (
+            claude,
+            NativeAuthPhase::Cancelled,
+            Some("native_auth_cancelled"),
+            "Sign-in cancelled.",
+        ),
+        (
+            claude,
+            NativeAuthPhase::Uncertain,
+            Some("native_auth_recovery_required"),
+            UNCONFIRMED,
+        ),
+        (
+            claude,
+            NativeAuthPhase::Cancelled,
+            None,
+            "The sign-in was cancelled.",
+        ),
+        (
+            claude,
+            NativeAuthPhase::Unavailable,
+            None,
+            "This sign-in is not available on this Mac.",
+        ),
+    ] {
+        assert_eq!(
+            sign_in_problem(native, &finished(phase, code)),
+            sentence,
+            "{phase:?} {code:?}"
+        );
+    }
+}
+
+/// Two pools share the display name "Team", one account in each, and one project is
+/// assigned to the first pool: that project counts only for the first pool and its
+/// account, in the pools list and in the account details.
+#[test]
+fn pools_sharing_a_name_show_only_the_projects_assigned_to_each() {
+    let member = |id: &CredentialRef| PoolMember {
+        id: id.clone(),
+        kind: MemberKind::Claude,
+        provider: "Claude".into(),
+        status: MemberStatus::SignedIn,
+        status_label: "Signed in".into(),
+    };
+    let first = account(
+        0,
+        "Claude one",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+    );
+    let second = account(
+        1,
+        "Claude two",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+    );
+    let pool = |name: &str, holder: &AccountView, projects: usize| PoolSummary {
+        id: id(name),
+        name: "Team".into(),
+        summary: String::new(),
+        members: vec![member(&holder.id)],
+        project_count: projects,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+    };
+    let pools = vec![
+        pool("pool-team-a", &first, 1),
+        pool("pool-team-b", &second, 0),
+    ];
+    let project = crate::protocol::StoredProject {
+        project_id: crate::protocol::ProjectId::new("alpha").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Alpha".into(),
+            repositories: vec![],
+        },
+    };
+    let setup = crate::project_setup::StoredSetup {
+        project_id: project.project_id.clone(),
+        name: "Alpha".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: Some(pools[0].id.clone()),
+        team: crate::project_setup::TeamPlan {
+            master: "claude-code".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/private/tmp/ca-alpha".into(),
+        created_ms: 1_793_000_000_000,
+        revision: 1,
+    };
+    let mut ctx = list_ctx(80, 24, pools.clone());
+    ctx.store.projects = Load::Ready(vec![crate::tui::seam::ProjectCard::build(
+        &project,
+        Some(&setup),
+        &[],
+        &pools,
+    )]);
+
+    let pools_list: Vec<String> = pools
+        .iter()
+        .map(|pool| crate::tui::screens::settings::pools::used_by(pool, true, &ctx))
+        .collect();
+    let details: Vec<String> = [first, second]
+        .into_iter()
+        .map(|account| AccountDetails::new(account, Accounts::with(Vec::new())).used_by(&ctx))
+        .collect();
+
+    assert_eq!(pools_list, ["Alpha", "Not used"]);
+    assert_eq!(details, ["Alpha", "No projects"]);
+}
+
+/// The code screen says how long the ChatGPT device code still works, in whole minutes
+/// rounded up, and that it ran out once no time is left.
+#[test]
+fn the_device_code_screen_counts_the_code_s_minutes_down() {
+    use std::time::Duration;
+    for (left, line) in [
+        (900, "This code works for 15 more minutes."),
+        (61, "This code works for 2 more minutes."),
+        (60, "This code works for 1 more minute."),
+        (1, "This code works for 1 more minute."),
+        (0, "This code ran out."),
+    ] {
+        assert_eq!(code_left_line(Duration::from_secs(left)), line, "{left}");
     }
 }

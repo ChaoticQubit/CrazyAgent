@@ -1,12 +1,17 @@
-use super::{AgentSession, KeyFile, Resume, TerminalSession, host_failure};
+use super::{
+    AgentSession, FolderStep, KEY_FILE_BYTES_MAX, KeyFile, Resume, Screen, TerminalSession,
+    codex_folder, host_failure,
+};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
+use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
-use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::policy::{AgentAccess, AgentNetwork};
+use crate::sandbox::toolchains::Toolchain;
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,9 +34,11 @@ pub enum RecordSource {
 /// without starting the harness again: the session record, the working folder, when the
 /// harness started, the pane's first process, the key file the harness reads, if any, for a
 /// resumed conversation its record and the offset where this pane's turns begin, the
-/// project access level the agent started at, and where its launch wrote the project
-/// context files that hold MCP secrets. A record from an engine that did not keep the
-/// level or the files has none.
+/// project access level the agent started at, where its launch wrote the project context
+/// files that hold MCP secrets, the toolchains its sandbox granted, the loopback port of the
+/// model proxy its profile and variables name (S4b), and the project network it started
+/// under (CS-2). A record from an engine that did not keep the level, the files, the
+/// toolchains, the port or the network has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -47,6 +54,14 @@ pub struct PaneRecord {
     pub access: Option<AgentAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<InstalledFiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchains: Option<Vec<Toolchain>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<AgentNetwork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<LineageToken>,
 }
 
 impl PaneRecord {
@@ -79,6 +94,10 @@ impl PaneRecord {
             resumed: None,
             access: None,
             context: None,
+            toolchains: None,
+            proxy: None,
+            network: None,
+            lineage: None,
         })
     }
 
@@ -91,7 +110,8 @@ impl PaneRecord {
     }
 
     /// Reads a stored record. Takes the JSON.
-    /// Returns the record, or none for anything malformed, long or with relative paths.
+    /// Returns the record, or none for anything malformed, long, with relative paths or with
+    /// a toolchain listed twice.
     pub fn decode(text: &str) -> Option<Self> {
         if text.len() > RECORD_BYTES_MAX {
             return None;
@@ -110,13 +130,22 @@ impl PaneRecord {
             .context
             .as_ref()
             .is_none_or(|files| files.home.is_absolute());
+        let toolchains = record.toolchains.as_ref().is_none_or(|toolchains| {
+            toolchains.len() <= Toolchain::ALL.len()
+                && toolchains
+                    .iter()
+                    .enumerate()
+                    .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
+        });
         (path.is_absolute()
             && record.cwd.is_absolute()
-            && record.pid > 0
+            && record.pid > 1
             && key
             && resumed
-            && context)
-            .then_some(record)
+            && context
+            && toolchains
+            && record.proxy != Some(0))
+        .then_some(record)
     }
 
     /// Deletes the context files of a pane that ends without being taken over, unless its
@@ -152,11 +181,14 @@ impl PaneRecord {
         run_time.saturating_sub(ran)
     }
 
+    /// Guards the key file the record names, as the pane's launch wrote it. The file sits in
+    /// the agent-writable account home, so it is read through one open that follows no link
+    /// and waits on no FIFO, and taken only as a regular file of at most
+    /// `KEY_FILE_BYTES_MAX` bytes. Input: the record. Output: the guard, or none.
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
-        std::fs::symlink_metadata(path)
-            .is_ok_and(|metadata| metadata.file_type().is_file())
-            .then(|| KeyFile(path.clone()))
+        let content = crate::platform::read_plain_file(path, KEY_FILE_BYTES_MAX)?;
+        Some(KeyFile::new(path.clone(), content.as_bytes()))
     }
 }
 
@@ -203,10 +235,15 @@ fn replay(
 impl TerminalSession {
     /// Takes over an agent pane a previous engine left running, without starting the harness
     /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work. The launch's run time and event budget go on
-    /// counting from its start. The key and context files are removed when the session stops,
-    /// or at once when the pane cannot be taken over. Takes the host, the pane name, the
-    /// stored record and the limits. Returns the idle session, or a plain code.
+    /// longer be matched to the engine's work; a turn that does not end ends the pane, with
+    /// `launch_adopt_unsettled` once its processes are confirmed gone and
+    /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
+    /// budget go on counting from its start. A Codex pane still on its folder access screen
+    /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
+    /// failed look at the screen counts as not on it, so it cannot end the pane. The
+    /// key and context files are removed when the session stops, or at once when the pane
+    /// cannot be taken over. Takes the host, the pane name, the stored record and the limits.
+    /// Returns the idle session, or a plain code.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
@@ -214,6 +251,9 @@ impl TerminalSession {
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
         let context = record.context.as_ref().map(Installed::adopt).transpose()?;
+        if let Some(code) = super::agent_pane_unavailable(std::env::consts::OS) {
+            return Err(failure(code));
+        }
         if !host.alive().map_err(host_failure)?.contains(&agent) {
             return Err(failure("launch_closed"));
         }
@@ -240,11 +280,24 @@ impl TerminalSession {
                 });
             }
             if !settled {
-                let _ = host.kill(&agent);
-                return Err(failure("launch_adopt_unsettled"));
+                return Err(failure(
+                    match super::end_left_pane(host.as_ref(), &agent, "adopt") {
+                        Ok(true) => "launch_adopt_unsettled",
+                        Ok(false) | Err(_) => "launch_adopt_cleanup_uncertain",
+                    },
+                ));
             }
             replay(&mut reader, &limits, &mut events)?;
         }
+        let unkept = host.unkept(&agent);
+        let unconfined = !matches!(
+            record.access,
+            Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
+        );
+        let on_menu = matches!(record.source, RecordSource::CodexRollouts { .. })
+            && host
+                .screen(&agent)
+                .is_ok_and(|screen| codex_folder::read_screen(&screen) == Screen::Menu);
         Ok(Self {
             host,
             agent,
@@ -255,12 +308,28 @@ impl TerminalSession {
             deadline: Instant::now() + record.run_time_left(limits.run_time),
             checked: Instant::now(),
             events,
-            ready: true,
+            ready: !on_menu,
+            first: None,
+            folder: on_menu.then_some(FolderStep::Waiting),
             turn: false,
+            held: false,
+            over_hold: false,
+            noticed: false,
+            own_held: false,
             live: false,
+            own: false,
             facts: VecDeque::new(),
+            background: BTreeSet::new(),
             exited: false,
             stopped: false,
+            group_ended: false,
+            uncertain: false,
+            #[cfg(target_os = "macos")]
+            unconfined,
+            #[cfg(target_os = "macos")]
+            unkept,
+            lineage: super::lineage_of(record.pid, unkept, unconfined, record.lineage.clone()),
+            followed: Instant::now(),
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,

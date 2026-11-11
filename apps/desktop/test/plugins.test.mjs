@@ -57,6 +57,6 @@ test("every plugins command the client calls is registered for the main window",
     const command = match[1];
     assert.ok(capability.permissions.includes(`allow-${command.replaceAll("_", "-")}`), command);
     assert.ok(manifest.includes(`"${command}"`), command);
-    assert.ok(handlers.includes(`            ${command},`), command);
+    assert.ok(handlers.includes(`\n    ${command},`), command);
   }
 });

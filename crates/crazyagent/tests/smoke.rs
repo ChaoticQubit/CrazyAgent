@@ -341,13 +341,10 @@ async fn setup_status_projects_home_and_an_empty_team_graph_read_on_a_fresh_engi
         graph
             .nodes
             .iter()
-            .map(|node| (node.kind, node.harness.as_str(), node.agents))
+            .map(|node| (node.kind, node.harness.as_str(), node.parent.as_deref()))
             .collect::<Vec<_>>(),
-        [
-            (NodeKind::Master, "codex", None),
-            (NodeKind::HarnessGroup, "codex", Some(0))
-        ],
-        "the default team is a Codex master and one Codex research group with no agent running"
+        [(NodeKind::Master, "codex", None)],
+        "the default team is a Codex master leading no agent yet"
     );
     assert!(graph.nodes.iter().all(|node| node.terminal.is_none()));
     assert!(graph.edges.is_empty());
@@ -374,10 +371,12 @@ fn listed(text: &str, open: &str, close: &str) -> Vec<String> {
 }
 
 fn command_function(lib: &str, command: &str) -> bool {
-    lib.match_indices(&format!("fn {command}(")).any(|(at, _)| {
+    let head = format!("fn {command}");
+    lib.match_indices(&head).any(|(at, _)| {
+        let next = lib[at + head.len()..].chars().next();
         let before = lib[..at].trim_end();
         let before = before.strip_suffix("async").unwrap_or(before).trim_end();
-        before.ends_with("#[tauri::command]")
+        matches!(next, Some('(' | '<')) && before.ends_with("#[tauri::command]")
     })
 }
 
@@ -390,7 +389,7 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
     assert_eq!(unique.len(), build.len(), "build.rs lists a command twice");
 
     let lib = desktop_source("src/lib.rs");
-    let handler = listed(&lib, "generate_handler![", "]")
+    let handler = listed(&lib, "native_commands! {", "}")
         .into_iter()
         .collect::<BTreeSet<_>>();
     assert_eq!(
@@ -398,14 +397,18 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         build.iter().cloned().collect::<BTreeSet<_>>(),
         "the invoke handler and build.rs list the same commands"
     );
-    let capabilities: serde_json::Value =
-        serde_json::from_str(&desktop_source("capabilities/main-window.json")).unwrap();
-    let allowed = capabilities["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|permission| permission.as_str())
-        .collect::<BTreeSet<_>>();
+    let granted = |file: &str| -> BTreeSet<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(&desktop_source(&format!("capabilities/{file}"))).unwrap();
+        capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|permission| permission.as_str().map(str::to_owned))
+            .collect()
+    };
+    let main = granted("main-window.json");
+    let wall = granted("terminal-wall.json");
     for command in &build {
         assert!(
             command_function(&lib, command),
@@ -413,8 +416,8 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         );
         let permission = format!("allow-{}", command.replace('_', "-"));
         assert!(
-            allowed.contains(permission.as_str()),
-            "{permission} is missing from main-window.json"
+            main.contains(&permission) || wall.contains(&permission),
+            "{permission} is in neither main-window.json nor terminal-wall.json"
         );
     }
 

@@ -17,7 +17,7 @@ use crate::engine::native_auth_host::RegisteredNativeAuthHost;
 #[cfg(unix)]
 use crate::engine::native_auth_host::custody::Retirement;
 use crate::engine::native_auth_host::custody::cleanup_direct_child;
-use crate::engine::owner::native_auth::{CodexAuthObservation, apply_codex_presentation};
+use crate::engine::owner::native_auth::{CodexAuthObservation, CodexLog, apply_codex_presentation};
 use crate::storage::{NativeAuthDispatch, NativeAuthWork};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -34,7 +34,7 @@ const CLEANUP_BOUND: Duration = Duration::from_secs(2);
 
 fn operation_bound(fact: &NativeAuthFact) -> Duration {
     match fact.action {
-        NativeAuthAction::SignIn { .. } => Duration::from_secs(600),
+        NativeAuthAction::SignIn { method } => method.sign_in_window(),
         NativeAuthAction::Logout => READ_BOUND,
     }
 }
@@ -64,6 +64,7 @@ pub(super) struct NativeAuthSlot {
     supervisor: Option<tokio::task::AbortHandle>,
     pub(super) dispatch_task: Option<tokio::task::JoinHandle<Result<(), EngineError>>>,
     pub(super) child: Option<Child>,
+    custodian_failure: Option<String>,
     retained: bool,
     cleaning: bool,
     committed: bool,
@@ -76,6 +77,7 @@ struct CodexProgress {
     login_id: Option<String>,
     request_id: i64,
     challenge: Option<crate::adapters::codex::LoginChallenge>,
+    challenge_seen: Option<Instant>,
     account: Option<crate::adapters::codex::AuthAccount>,
 }
 
@@ -261,6 +263,27 @@ impl NativeAuthDispatchHost {
             .ok_or_else(|| failure("native_auth_recovery_required"))?
             .try_wait()
             .map_err(io_error)
+    }
+
+    /// Keeps the failure code the custodian named before it exited, for the release that
+    /// settles its attempt. Input: the code. Output: Ok once kept in this dispatch's slot.
+    pub(crate) fn record_custodian_failure(&self, code: &str) -> Result<(), EngineError> {
+        let authority = self
+            .authority
+            .upgrade()
+            .ok_or_else(|| failure("owner_runtime_stale"))?;
+        let mut current = authority
+            .native_auth
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        let slot = current
+            .as_mut()
+            .ok_or_else(|| failure("native_auth_recovery_required"))?;
+        if slot.fact != self.fact || slot.admission != self.admission || slot.cleaning {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        slot.custodian_failure = Some(code.to_owned());
+        Ok(())
     }
 }
 
@@ -661,6 +684,7 @@ impl OwnerRuntimeHandle {
                 runtime.spawn(crate::engine::native_auth_host::dispatch(work, host)),
             ),
             child: None,
+            custodian_failure: None,
             retained: true,
             cleaning: false,
             committed: false,
@@ -813,7 +837,12 @@ impl Authority {
                 .as_ref()
                 .ok_or_else(|| failure("native_auth_recovery_required"))?,
         )?;
-        apply_codex_presentation(reply, progress.challenge.clone(), progress.account.clone())
+        apply_codex_presentation(
+            reply,
+            progress.challenge.clone(),
+            progress.challenge_seen.map(|seen| seen.elapsed()),
+            progress.account.clone(),
+        )
     }
 
     fn native_auth_owner_runtime_dir(&self) -> Result<PathBuf, EngineError> {
@@ -991,6 +1020,7 @@ impl Authority {
                 supervisor: None,
                 dispatch_task: None,
                 child: None,
+                custodian_failure: None,
                 retained: false,
                 cleaning: false,
                 committed: false,
@@ -1214,7 +1244,7 @@ impl Authority {
                 continue;
             }
             self.cleanup_native_auth_child()?;
-            let dispatch = {
+            let (dispatch, named) = {
                 let mut current = self
                     .native_auth
                     .lock()
@@ -1242,11 +1272,12 @@ impl Authority {
                     self.native_auth_changed.notify_waiters();
                     return Ok(());
                 };
+                let named = slot.custodian_failure.clone();
                 current.as_mut().unwrap().cleaning = true;
-                dispatch
+                (dispatch, named)
             };
             let released = engine
-                .native_auth_job(|reply| Job::NativeAuthCustodyReleased(dispatch, reply))
+                .native_auth_job(|reply| Job::NativeAuthCustodyReleased(dispatch, named, reply))
                 .await;
             {
                 let mut current = self
@@ -1340,6 +1371,7 @@ enum RequestKind {
     ObserveClaude,
     TakeClaudeInput,
     RetireAfterChildReaped,
+    LogCodex,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1355,6 +1387,8 @@ struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claude_observation:
         Option<crate::engine::native_auth_host::claude_auth::types::ClaudeAuthObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_log: Option<CodexLog>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -1491,6 +1525,9 @@ impl Session {
             || request.seq != *expected
             || (request.kind == RequestKind::ObserveCodex) != request.observation.is_some()
             || (request.kind == RequestKind::ObserveClaude) != request.claude_observation.is_some()
+            || (request.kind == RequestKind::LogCodex) != request.codex_log.is_some()
+            || (request.kind == RequestKind::LogCodex
+                && fact.binding.connection.harness.as_str() != "codex")
             || (request.kind == RequestKind::TakeClaudeInput
                 && fact.binding.connection.harness.as_str() != "claude")
         {
@@ -1582,6 +1619,38 @@ impl Session {
         Ok(())
     }
 
+    /// Sets whether a failed completion came once the device code on screen ran out, from the
+    /// owner's own count of when it recorded the code, never from the custodian's word.
+    /// Input: the observation. Output: the observation with that flag set by the owner.
+    fn counted(&self, event: CodexAuthObservation) -> CodexAuthObservation {
+        let (login_id, success) = match event {
+            CodexAuthObservation::LoginCompleted {
+                login_id, success, ..
+            } => (login_id, success),
+            other => return other,
+        };
+        let shown = self.authority.upgrade().and_then(|owner| {
+            owner.native_auth.lock().ok().and_then(|current| {
+                current
+                    .as_ref()
+                    .filter(|slot| {
+                        slot.dispatch
+                            .as_ref()
+                            .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch))
+                    })
+                    .and_then(|slot| slot.progress.as_ref())
+                    .and_then(|progress| progress.challenge_seen)
+                    .map(|seen| seen.elapsed())
+            })
+        });
+        CodexAuthObservation::LoginCompleted {
+            login_id,
+            success,
+            code_ran_out: !success
+                && shown.is_some_and(crate::engine::owner::native_auth::code_ran_out),
+        }
+    }
+
     fn record_observation(
         &self,
         event: &CodexAuthObservation,
@@ -1617,6 +1686,12 @@ impl Session {
         } else {
             None
         };
+        let challenge_seen = challenge.as_ref().map(|_| {
+            slot.progress
+                .as_ref()
+                .and_then(|progress| progress.challenge_seen)
+                .unwrap_or_else(Instant::now)
+        });
         let account = if fact.phase == NativeAuthPhase::AuthenticatedObserved {
             event.account()?
         } else {
@@ -1627,6 +1702,7 @@ impl Session {
             login_id,
             request_id,
             challenge,
+            challenge_seen,
             account,
         });
         assert!(slot.progress.is_some());
@@ -1649,8 +1725,20 @@ async fn custody_reply(
     if let Some(event) = &request.observation {
         session.validate_observation(event)?;
     }
+    let observation = request
+        .observation
+        .clone()
+        .map(|event| session.counted(event));
     if let Some(event) = &request.claude_observation {
         session.validate_claude(event)?;
+    }
+    if let Some(log) = &request.codex_log {
+        log.validate()?;
+        eprintln!(
+            "native_auth_codex_log dropped={} stderr={:?}",
+            log.dropped.join(","),
+            log.stderr
+        );
     }
     let job = async {
         if retirement {
@@ -1666,7 +1754,7 @@ async fn custody_reply(
                     )
                 })
                 .await
-        } else if let Some(event) = &request.observation {
+        } else if let Some(event) = &observation {
             engine
                 .native_auth_job(|reply| {
                     Job::NativeAuthCustodyObserve(
@@ -1709,7 +1797,7 @@ async fn custody_reply(
         ReplyKind::Retired
     } else {
         session.validate()?;
-        if let Some(event) = &request.observation {
+        if let Some(event) = &observation {
             session.record_observation(event, fact.clone())?;
         }
         if let Some(event) = &request.claude_observation {
@@ -1879,6 +1967,13 @@ impl NativeAuthCustodyChannel {
         self.stream.take();
     }
 
+    /// Tells whether the channel is sealed: a refused profile guard or a failed exchange
+    /// closed it, or a retirement began, so it refuses every later report. Input: none.
+    /// Output: true once sealed.
+    pub(crate) fn sealed(&self) -> bool {
+        self.sealed
+    }
+
     fn guard_or_close(&mut self, guard: &NativeProfileUse) -> Result<(), EngineError> {
         if let Err(error) = self.verify_guard(guard) {
             self.close();
@@ -1914,6 +2009,64 @@ impl NativeAuthCustodyChannel {
         }
         self.guard_or_close(guard)?;
         let observation = CodexAuthObservation::from_native(event)?;
+        self.send_codex(guard, observation).await
+    }
+
+    /// Reports how the custodian saw its started Codex child end without an app-server
+    /// outcome, a host failure or the owner's cancel, so the engine settles the sign-in.
+    /// Inputs: the held profile and the observation. Output: whether to go on or cancel.
+    pub(crate) async fn observe_codex_host(
+        &mut self,
+        guard: &NativeProfileUse,
+        observation: CodexAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        assert!(matches!(
+            observation,
+            CodexAuthObservation::HostFailed { .. } | CodexAuthObservation::HostCancelled
+        ));
+        if self.sealed {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        self.guard_or_close(guard)?;
+        self.send_codex(guard, observation).await
+    }
+
+    /// Sends what the custodian saw of Codex when a sign-in failed or ran out of time, so the
+    /// engine writes it to its log. Inputs: the held profile and the log. Output: whether to
+    /// go on or cancel.
+    pub(crate) async fn log_codex(
+        &mut self,
+        guard: &NativeProfileUse,
+        log: CodexLog,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        if self.sealed {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        self.guard_or_close(guard)?;
+        let mut request = match self.next_request(RequestKind::LogCodex, None) {
+            Ok(request) => request,
+            Err(error) => {
+                self.close();
+                return Err(error);
+            }
+        };
+        request.codex_log = Some(log);
+        let reply = self.exchange_request(request).await?;
+        self.guard_or_close(guard)?;
+        match reply.kind {
+            ReplyKind::Continue => Ok(NativeAuthCustodyControl::Continue),
+            ReplyKind::Cancel => Ok(NativeAuthCustodyControl::Cancel),
+            ReplyKind::Retired => Err(failure("native_auth_reply_invalid")),
+        }
+    }
+
+    /// Sends one Codex observation and reads the engine's answer. Inputs: the held
+    /// profile and the observation. Output: whether to go on or cancel.
+    async fn send_codex(
+        &mut self,
+        guard: &NativeProfileUse,
+        observation: CodexAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
         let reply = self
             .exchange(RequestKind::ObserveCodex, Some(observation))
             .await?;
@@ -1947,7 +2100,12 @@ impl NativeAuthCustodyChannel {
         self.retirement_or_close(&retirement)?;
         let reply = self.exchange(RequestKind::RetireNoEffect, None).await?;
         self.retirement_or_close(&retirement)?;
-        if reply.kind != ReplyKind::Retired || reply.fact.phase != NativeAuthPhase::Unavailable {
+        if reply.kind != ReplyKind::Retired
+            || !matches!(
+                reply.fact.phase,
+                NativeAuthPhase::Unavailable | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled
+            )
+        {
             self.close();
             return Err(failure("native_auth_reply_invalid"));
         }
@@ -2039,6 +2197,7 @@ impl NativeAuthCustodyChannel {
             kind,
             observation,
             claude_observation: None,
+            codex_log: None,
         })
     }
 
@@ -2063,6 +2222,7 @@ impl NativeAuthCustodyChannel {
                         | RequestKind::ObserveCodex
                         | RequestKind::ObserveClaude
                         | RequestKind::TakeClaudeInput
+                        | RequestKind::LogCodex
                 ) && matches!(
                     reply.fact.phase,
                     NativeAuthPhase::Starting
@@ -2080,6 +2240,7 @@ impl NativeAuthCustodyChannel {
                         | RequestKind::ObserveCodex
                         | RequestKind::ObserveClaude
                         | RequestKind::TakeClaudeInput
+                        | RequestKind::LogCodex
                 ) && matches!(
                     reply.fact.phase,
                     NativeAuthPhase::Cancelling | NativeAuthPhase::Cancelled
@@ -2087,7 +2248,12 @@ impl NativeAuthCustodyChannel {
             }
             ReplyKind::Retired => {
                 (request.kind == RequestKind::RetireNoEffect
-                    && reply.fact.phase == NativeAuthPhase::Unavailable)
+                    && matches!(
+                        reply.fact.phase,
+                        NativeAuthPhase::Unavailable
+                            | NativeAuthPhase::Failed
+                            | NativeAuthPhase::Cancelled
+                    ))
                     || (request.kind == RequestKind::RetireAfterChildReaped
                         && matches!(
                             reply.fact.phase,
@@ -2527,6 +2693,56 @@ fallback_allowed = false
             assert_eq!(replay.fact, retired);
             assert!(replay.account.is_some());
             case.durable_payloads_are_redacted();
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_auth_device_code_sign_in_outlasts_the_code_and_shows_its_time_left() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut case = Case::open(NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexDeviceCode,
+            })
+            .await;
+            let host = case.service.owner_runtime().unwrap();
+            let window = host
+                .authority
+                .native_auth_deadline()
+                .unwrap()
+                .saturating_duration_since(Instant::now());
+            assert!(window > Duration::from_secs(15 * 60 + 40), "{window:?}");
+            let mut browser = case.fact.clone();
+            browser.action = NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            };
+            assert_eq!(operation_bound(&browser), Duration::from_secs(600));
+            let mut protocol = protocol();
+            case.observe(challenge(&mut protocol, true)).await;
+            let waiting = case.read().await;
+            assert_eq!(waiting.fact.phase, NativeAuthPhase::AwaitingOwner);
+            let wire = serde_json::to_value(
+                crate::engine::owner::native_auth::presentation::encode(&waiting).unwrap(),
+            )
+            .unwrap();
+            let left = wire["challenge"]["left_s"].as_u64();
+            assert!(
+                left.is_some_and(|left| (880..=900).contains(&left)),
+                "{left:?}"
+            );
+            let log = CodexLog {
+                dropped: vec!["account/login/unknown".into()],
+                stderr: "ERROR codex_login: * timed out".into(),
+            };
+            assert!(matches!(
+                case.channel
+                    .log_codex(case.guard.as_ref().unwrap(), log)
+                    .await
+                    .unwrap(),
+                NativeAuthCustodyControl::Continue
+            ));
+            assert_eq!(case.read().await.fact.phase, NativeAuthPhase::AwaitingOwner);
             case.close().await;
         })
         .await

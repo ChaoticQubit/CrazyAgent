@@ -96,7 +96,7 @@ async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
     assert!(root.path().join("setup/pack").is_dir());
 
     let off = owner
-        .set_pack_entry("caveman".into(), false, 1)
+        .set_pack_entry("caveman".into(), false, 0, 1)
         .await
         .unwrap();
     assert_eq!(result(off), OwnerResult::Applied);
@@ -107,7 +107,10 @@ async fn network_run_setup_installs_a_ticked_skill_entry_through_the_engine() {
         .find(|entry| entry.id == "caveman")
         .unwrap();
     assert_eq!(caveman.state, PackState::Off);
-    let removed = owner.remove_pack_entry("caveman".into(), 1).await.unwrap();
+    let removed = owner
+        .remove_pack_entry("caveman".into(), 1, 1)
+        .await
+        .unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     let status = owner.setup_status().await.unwrap();
     let caveman = status

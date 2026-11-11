@@ -82,6 +82,12 @@ pub(crate) enum MasterRuntimeCommand {
         session_id: SessionId,
         turn_id: RequestId,
     },
+    Policy {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+    },
     AcquireProfile {
         host: HostStamp,
         project_id: ProjectId,
@@ -124,6 +130,13 @@ pub(crate) enum MasterRuntimeCommand {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    ServeMemory {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        mailbox: PathBuf,
+    },
     Checked {
         provisioned: Box<crate::worktrees::Provisioned>,
         prepare: Box<MasterRuntimeCommand>,
@@ -150,6 +163,7 @@ pub(crate) enum MasterRuntimeObservation {
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
     pub(crate) message: String,
+    pub(crate) owner_turn: Option<u64>,
     pub(crate) instructions: String,
     pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
@@ -161,6 +175,8 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) lease: WorktreeLease,
     pub(crate) agent_project: crate::agent_home::AgentProject,
     pub(crate) agent_policy: crate::sandbox::policy::AgentPolicy,
+    pub(crate) hidden_paths: Vec<std::path::PathBuf>,
+    pub(crate) tools_off: Vec<String>,
 }
 
 impl PreparedMasterTurn {
@@ -180,6 +196,7 @@ pub(crate) enum MasterRuntimeResult {
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
+    Policy(Box<Option<crate::sandbox::policy::AgentPolicy>>),
     Profile(Box<NativeProfileUse>),
     Checkout(Box<MasterCheckout>),
     Waiting,
@@ -1392,18 +1409,20 @@ fn fail_before_running(
     Ok(())
 }
 
-/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause
-/// and the provider's rejection of its earlier credential, so its next turn may run at once.
-/// Inputs: the transaction and the account's connection. Output: both holds are gone.
+/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause,
+/// every project's hold on it and the provider's rejection of its earlier credential, so its
+/// next turn may run at once. Inputs: the transaction and the account's connection. Output:
+/// every hold is gone.
 pub(super) fn lift_account_holds(
     tx: &Transaction<'_>,
     connection: &ModelConnection,
 ) -> Result<(), EngineError> {
-    tx.execute(
+    for sql in [
         "DELETE FROM team_paused_accounts WHERE connection=?1",
-        [connection.id.as_str()],
-    )
-    .map_err(error)?;
+        "DELETE FROM team_project_pauses WHERE connection=?1",
+    ] {
+        tx.execute(sql, [connection.id.as_str()]).map_err(error)?;
+    }
     model_gateway::sign_in_renewed(tx, connection, now_ms()?)
 }
 
@@ -2773,12 +2792,16 @@ fn bundle(
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
     let tools = turn_tools(tx, &session)?;
+    let tools_off = match tools {
+        true => crate::team::master::switched_off_tools(tx, &session.project_id)?,
+        false => Vec::new(),
+    };
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => crate::launch_context::for_master(
             tx,
             &session.project_id,
-            tools,
+            tools.then_some(tools_off.as_slice()),
             config.settings.model_access.as_ref(),
         )
         .map_err(|problem| EngineError(problem.0))?,
@@ -2787,9 +2810,12 @@ fn bundle(
         .map_err(|problem| EngineError(problem.0))?;
     let agent_policy =
         crate::sandbox::policy::load(tx, session.project_id.as_str()).map_err(error)?;
+    let hidden_paths =
+        crate::sandbox::hidden_paths::load(tx, session.project_id.as_str()).map_err(error)?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: running_message(tx, &session, turn)?,
+        owner_turn: turn.engine_request.is_none().then_some(turn.ordinal),
         instructions,
         tools,
         session,
@@ -2801,6 +2827,8 @@ fn bundle(
         lease: record.lease,
         agent_project,
         agent_policy,
+        hidden_paths,
+        tools_off,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -4004,6 +4032,12 @@ pub(super) fn runtime(
             session_id,
             turn_id,
         }
+        | MasterRuntimeCommand::Policy {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+        }
         | MasterRuntimeCommand::AcquireProfile {
             host,
             project_id,
@@ -4033,6 +4067,13 @@ pub(super) fn runtime(
             ..
         }
         | MasterRuntimeCommand::Changes {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
+        }
+        | MasterRuntimeCommand::ServeMemory {
             host,
             project_id,
             session_id,
@@ -4081,6 +4122,12 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
+        MasterRuntimeCommand::Policy { ref host, .. } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            let policy = crate::sandbox::policy::load(&tx, session.project_id.as_str()).ok();
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Policy(Box::new(policy)))
+        }
         MasterRuntimeCommand::AcquireProfile {
             ref host,
             ref attempt_id,
@@ -4118,6 +4165,19 @@ pub(super) fn runtime(
                 )?,
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
+        }
+        MasterRuntimeCommand::ServeMemory {
+            ref host,
+            ref mailbox,
+            ..
+        } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            if turn.phase != MasterTurnPhase::Running || !turn_tools(&tx, &session)? {
+                return Err(error("master_memory_turn_not_running"));
+            }
+            tx.commit().map_err(error)?;
+            crate::team::master::serve_memory_calls(db, &session.project_id, mailbox)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
         MasterRuntimeCommand::RecordChild { group, .. } => {
             super::harness_groups::record(&tx, &session.session_id, &turn.id, group)?;
@@ -4175,7 +4235,12 @@ pub(super) fn runtime(
                 turn.reason = Some(reason);
                 turn.cause = Some(cause_code(cause));
                 if turn.phase == MasterTurnPhase::Failed
-                    && cause == "native_profile_credential_unavailable"
+                    && matches!(
+                        cause.as_str(),
+                        "native_profile_credential_unavailable"
+                            | "native_profile_codex_api_key"
+                            | "native_profile_codex_token_unreadable"
+                    )
                     && let Some(attempt) = &turn.attempt
                 {
                     super::native_auth::doubt_sign_in(&tx, host, &attempt.connection)?;
@@ -4250,7 +4315,9 @@ fn rebind(
         if &bound.id != session.binding().0 {
             return Err(error("master_config_record"));
         }
-        if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+        if master_scope(&bound, &session.project_id, &session.selection)
+            != master_scope(config, &session.project_id, &session.selection)
+        {
             return Ok(false);
         }
     }

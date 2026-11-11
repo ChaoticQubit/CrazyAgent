@@ -60,6 +60,17 @@ pub(super) fn finished_rows(status: &TeamStatus) -> Vec<FinishedRow> {
     rows
 }
 
+/// Counts the agents the team tree lists, as the desktop's Running and All filters do: the
+/// agents the engine has not marked finished, and the finished ones too while the setting is
+/// Show; Running leaves out stopped and failed ones. Inputs: each agent's finished and live
+/// flags and the setting. Output: the Running and All counts.
+fn tree_counts(agents: &[(bool, bool)], show: bool) -> (usize, usize) {
+    let listed = agents.iter().filter(|(finished, _)| show || !finished);
+    let all = listed.clone().count();
+    let running = listed.filter(|(_, live)| *live).count();
+    (running, all)
+}
+
 /// The box title. Input: how many agents it holds. Output: "Finished (N)".
 pub(super) fn finished_label(count: usize) -> String {
     format!("Finished ({count})")
@@ -102,6 +113,8 @@ pub(super) struct Finished {
     open: bool,
     rows: Option<Vec<FinishedRow>>,
     show: Option<bool>,
+    version: u64,
+    tally: Option<Vec<(bool, bool)>>,
     cursor: usize,
     waking: Option<String>,
     saving: bool,
@@ -114,6 +127,8 @@ impl Finished {
             open: false,
             rows: None,
             show: None,
+            version: 0,
+            tally: None,
             cursor: 0,
             waking: None,
             saving: false,
@@ -196,6 +211,7 @@ impl Finished {
             action: TeamAction::FinishedAgents {
                 project_id: project.clone(),
                 show: !show,
+                version: self.version,
             },
             generation,
         }));
@@ -216,6 +232,14 @@ impl Finished {
                 if asked == project =>
             {
                 self.show = Some(status.show_finished);
+                self.version = status.settings_version;
+                self.tally = Some(
+                    status
+                        .agents
+                        .iter()
+                        .map(|agent| (agent.finished, agent.status.live()))
+                        .collect(),
+                );
                 if self.open {
                     let rows = finished_rows(status);
                     self.cursor = self.cursor.min(rows.len().saturating_sub(1));
@@ -233,7 +257,12 @@ impl Finished {
             }
             (
                 SetupQuery::TeamChange {
-                    action: TeamAction::FinishedAgents { project_id, show },
+                    action:
+                        TeamAction::FinishedAgents {
+                            project_id,
+                            show,
+                            version,
+                        },
                     ..
                 },
                 result,
@@ -242,6 +271,7 @@ impl Finished {
                 match refusal(result) {
                     None => {
                         self.show = Some(*show);
+                        self.version = version + 1;
                         let lead = if *show {
                             "Finished agents now stay in the team tree."
                         } else {
@@ -252,10 +282,15 @@ impl Finished {
                             project: project.clone(),
                         });
                     }
-                    Some(code) => ctx.say(Message::warning(
-                        "Could not change where finished agents show.",
-                        words(code),
-                    )),
+                    Some(code) => {
+                        ctx.say(Message::warning(
+                            "Could not change where finished agents show.",
+                            words(code),
+                        ));
+                        if code == crate::storage::versioned::STALE_CODE {
+                            Self::read(project, ctx);
+                        }
+                    }
                 }
             }
             (
@@ -301,10 +336,12 @@ impl Finished {
         vec![hint("w", "Wake"), hint("h", setting), hint("f", "Close")]
     }
 
-    /// The box lines while it is open: the setting, then each finished agent with its
-    /// harness and status and, below it, the engine's reason when it cannot wake and what it
-    /// last worked on; the picked one is marked.
-    /// Rows past the box's height are counted in one "and N more" line.
+    /// The box lines while it is open: the setting and the team tree's Running and All counts,
+    /// then each finished agent with its harness and status and, below it, the engine's
+    /// reason when it cannot wake and what it last worked on; the picked one is marked.
+    /// The list starts low enough that the picked row is always drawn, with the rows above it
+    /// counted in one "N more above" line and the rows past the box's height in one "and N
+    /// more" line.
     /// Inputs: the line width, the box's inner height and the context. Output: the title and
     /// at most `room` lines (one when `room` is zero), or None while closed.
     pub(super) fn lines(
@@ -331,6 +368,18 @@ impl Finished {
             .into_iter()
             .map(|text| styled(text, Role::Muted, theme))
             .collect();
+        if let Some(agents) = &self.tally {
+            let (running, all) = tree_counts(agents, self.show == Some(true));
+            lines.push(styled(
+                cut(
+                    &format!("Team tree: Running ({running})  All ({all})"),
+                    limit,
+                    ctx.glyphs.ellipsis,
+                ),
+                Role::Muted,
+                theme,
+            ));
+        }
         lines.push(Line::default());
         if rows.is_empty() {
             lines.push(Line::raw(cut(
@@ -340,10 +389,27 @@ impl Finished {
             )));
         }
         let free = room.max(1);
-        for (index, row) in rows.iter().enumerate() {
+        assert!(rows.is_empty() || self.cursor < rows.len());
+        let height = |row: &FinishedRow| 2 + usize::from(row.note.is_some() && !row.wakeable);
+        let top = (0..=self.cursor)
+            .take_while(|_| !rows.is_empty())
+            .find(|&top| {
+                let drawn: usize = rows[top..=self.cursor].iter().map(height).sum();
+                let below = usize::from(self.cursor + 1 < rows.len());
+                lines.len() + usize::from(top > 0) + drawn + below <= free
+            })
+            .unwrap_or(self.cursor);
+        if top > 0 {
+            lines.push(Line::raw(cut(
+                &format!("{top} more above"),
+                limit,
+                ctx.glyphs.ellipsis,
+            )));
+        }
+        for (index, row) in rows.iter().enumerate().skip(top) {
             let left = rows.len() - index;
             let note = row.note.as_ref().filter(|_| !row.wakeable);
-            let height = 2 + usize::from(note.is_some());
+            let height = height(row);
             if lines.len() + height + usize::from(left > 1) > free {
                 lines.push(Line::raw(cut(
                     &format!("and {left} more"),

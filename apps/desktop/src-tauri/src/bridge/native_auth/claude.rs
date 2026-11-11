@@ -26,8 +26,8 @@ impl NativeBridge {
         if self.profile_pending() {
             return Err(failure("account_profile_recovery_required"));
         }
-        let (scope, _) = self.native_auth_selection(ticket)?;
-        let operation_id = self.auth_operation(&scope)?;
+        let (scope, connection) = self.held_auth_selection(ticket)?;
+        let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let epoch = self.controller()?.identity().engine_epoch().to_owned();
         let operation = self
             .native_auth

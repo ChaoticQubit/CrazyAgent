@@ -1,6 +1,9 @@
 use super::*;
+use crate::coord::tool_switches::Switch;
 use crate::engine::owner::AccountSecret;
-use crate::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, check};
+use crate::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView, check,
+};
 use crate::protocol::encode_frame;
 use crate::storage::plugins::{Command, ResultValue};
 use serde::{Deserialize, Serialize};
@@ -46,9 +49,11 @@ enum Action {
     SetSkill {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveSkill {
         id: String,
+        version: u64,
     },
     Hooks {
         project: Option<ProjectId>,
@@ -72,6 +77,7 @@ enum Action {
     UpdateServer {
         id: String,
         spec: ServerSpec,
+        version: u64,
     },
     Approve {
         id: String,
@@ -80,14 +86,17 @@ enum Action {
     SetServer {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveServer {
         id: String,
+        version: u64,
     },
     Switch {
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     },
     SetSecret {
         id: String,
@@ -102,6 +111,20 @@ enum Action {
     },
     Effective {
         project: ProjectId,
+    },
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
     },
 }
 
@@ -168,9 +191,28 @@ enum Reply {
     Effective {
         plugins: EffectivePlugins,
     },
+    Tools {
+        tools: Vec<ToolView>,
+    },
     Rejected {
         code: String,
     },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Skills { .. } => Some("plugins.skills"),
+        Action::SkillDetail { .. } => Some("plugins.skill_detail"),
+        Action::Servers { .. } => Some("plugins.servers"),
+        Action::Server { .. } => Some("plugins.server"),
+        Action::ImportScan => Some("plugins.import_scan"),
+        Action::Hooks { .. } => Some("plugins.hooks"),
+        Action::Effective { .. } => Some("plugins.effective"),
+        Action::Tools { .. } => Some("plugins.tools"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -197,12 +239,12 @@ impl Action {
             Self::Server { id }
             | Self::SkillDetail { id, .. }
             | Self::SetSkill { id, .. }
-            | Self::RemoveSkill { id }
+            | Self::RemoveSkill { id, .. }
             | Self::SetHook { id, .. }
             | Self::UpdateServer { id, .. }
             | Self::Approve { id, .. }
             | Self::SetServer { id, .. }
-            | Self::RemoveServer { id }
+            | Self::RemoveServer { id, .. }
             | Self::Switch { id, .. }
             | Self::SetSecret { id, .. }
             | Self::RemoveSecret { id, .. }
@@ -212,7 +254,27 @@ impl Action {
         if id.is_some_and(|id| !valid_id(id)) {
             return Err(failure("plugin_not_found"));
         }
+        if let Self::Tools {
+            server: Some(id), ..
+        }
+        | Self::SetTool {
+            server: Some(id), ..
+        }
+        | Self::RestoreTools {
+            server: Some(id), ..
+        } = self
+            && !valid_id(id)
+        {
+            return Err(failure("server_not_found"));
+        }
         match self {
+            Self::SetTool { tool, .. }
+                if tool.is_empty()
+                    || tool.len() > crate::plugins::TOOL_NAME_BYTES_MAX
+                    || tool.chars().any(char::is_control) =>
+            {
+                Err(failure("tool_unknown"))
+            }
             Self::AddSkill { folder, .. }
             | Self::ImportSkill { folder, .. }
             | Self::AddHooks { folder, .. }
@@ -252,7 +314,8 @@ impl Action {
             | Self::Server { .. }
             | Self::ImportScan
             | Self::Hooks { .. }
-            | Self::Effective { .. } => false,
+            | Self::Effective { .. }
+            | Self::Tools { .. } => false,
             Self::AddSkill { .. }
             | Self::ImportSkill { .. }
             | Self::SetSkill { .. }
@@ -267,7 +330,9 @@ impl Action {
             | Self::Switch { .. }
             | Self::SetSecret { .. }
             | Self::RemoveSecret { .. }
-            | Self::Check { .. } => true,
+            | Self::Check { .. }
+            | Self::SetTool { .. }
+            | Self::RestoreTools { .. } => true,
         }
     }
 }
@@ -390,18 +455,26 @@ impl OwnerClient {
         }
     }
 
-    /// Turns a skill on or off where it was added. Inputs: skill id and the new state.
+    /// Turns a skill on or off where it was added. Inputs: skill id, the new state and the
+    /// version the owner's screen showed; a skill changed since is refused `stale_revision`.
     pub async fn set_skill_enabled(
         &self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<SkillView, EngineError> {
-        self.skill_reply(Action::SetSkill { id, enabled }).await
+        self.skill_reply(Action::SetSkill {
+            id,
+            enabled,
+            version,
+        })
+        .await
     }
 
-    /// Removes a skill and its stored folder copy. Input: the skill id.
-    pub async fn remove_skill(&self, id: String) -> Result<(), EngineError> {
-        self.done_reply(Action::RemoveSkill { id }).await
+    /// Removes a skill and its stored folder copy. Inputs: the skill id and the version the
+    /// screen showed. Output: done, or `stale_revision` after another change.
+    pub async fn remove_skill(&self, id: String, version: u64) -> Result<(), EngineError> {
+        self.done_reply(Action::RemoveSkill { id, version }).await
     }
 
     /// Reads one page of hooks, with the same inputs as `plugin_skills`. Output: each hook
@@ -473,12 +546,15 @@ impl OwnerClient {
     }
 
     /// Changes how an MCP server runs. Any change sends it back to "Waiting for approval".
+    /// Inputs: id, the new command or URL and the version the owner's screen showed; a server
+    /// changed since is refused `stale_revision`.
     pub async fn update_mcp_server(
         &self,
         id: String,
         spec: ServerSpec,
+        version: u64,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::UpdateServer { id, spec }, Vec::new())
+        self.server_reply(Action::UpdateServer { id, spec, version }, Vec::new())
             .await
     }
 
@@ -493,30 +569,48 @@ impl OwnerClient {
             .await
     }
 
-    /// Turns an MCP server on or off where it was added. Output: the server.
+    /// Turns an MCP server on or off where it was added. Inputs: id, the new state and the
+    /// version the owner's screen showed. Output: the server, or `stale_revision`.
     pub async fn set_mcp_server_enabled(
         &self,
         id: String,
         enabled: bool,
+        version: u64,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::SetServer { id, enabled }, Vec::new())
-            .await
+        self.server_reply(
+            Action::SetServer {
+                id,
+                enabled,
+                version,
+            },
+            Vec::new(),
+        )
+        .await
     }
 
-    /// Removes an MCP server and deletes its saved secrets. Input: the server id.
-    pub async fn remove_mcp_server(&self, id: String) -> Result<(), EngineError> {
-        self.done_reply(Action::RemoveServer { id }).await
+    /// Removes an MCP server and deletes its saved secrets. Inputs: the server id and the
+    /// version the screen showed. Output: done, or `stale_revision` after another change.
+    pub async fn remove_mcp_server(&self, id: String, version: u64) -> Result<(), EngineError> {
+        self.done_reply(Action::RemoveServer { id, version }).await
     }
 
     /// Switches a global skill or MCP server on or off for one project.
-    /// Inputs: the project, the global item id and the new state.
+    /// Inputs: the project, the global item id, the new state and the item's version the
+    /// owner's screen showed; an item changed since is refused `stale_revision`.
     pub async fn switch_plugin(
         &self,
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     ) -> Result<(), EngineError> {
-        self.done_reply(Action::Switch { project, id, on }).await
+        self.done_reply(Action::Switch {
+            project,
+            id,
+            on,
+            version,
+        })
+        .await
     }
 
     /// Saves one secret for an MCP server, sent only as a separate frame and kept by the
@@ -558,6 +652,57 @@ impl OwnerClient {
                 return Err(failure("server_check_timeout"));
             }
             tokio::time::sleep(CHECK_POLL).await;
+        }
+    }
+
+    /// Reads one server's tools with their switches: the CrazyAgent built-in tools (no server
+    /// id) or one MCP server's checked tools, for every project (no project) or one project.
+    /// Output: each tool with its every-project switch and the project's own switch.
+    pub async fn tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::Tools { project, server }).await
+    }
+
+    /// Sets one tool's switch for every project (no project) or one project; Hidden deletes a
+    /// built-in tool until its defaults are restored. Inputs: project, server id (none for the
+    /// built-in tools), tool and switch. Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        })
+        .await
+    }
+
+    /// Clears every stored switch of one server in that scope. Inputs: project (none for every
+    /// project) and server id (none for the built-in tools). Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::RestoreTools { project, server })
+            .await
+    }
+
+    async fn tools_reply(&self, action: Action) -> Result<Vec<ToolView>, EngineError> {
+        match self
+            .plugins_exchange(action, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Tools { tools } => Ok(tools),
+            _ => Err(unknown()),
         }
     }
 
@@ -615,6 +760,7 @@ impl OwnerClient {
     ) -> Result<Reply, EngineError> {
         action.validate()?;
         tokio::time::timeout(timeout, async {
+            let read = read_kind(&action);
             let envelope = Envelope {
                 plugins: action,
                 secret_present: !secrets.is_empty(),
@@ -653,7 +799,9 @@ impl OwnerClient {
                 sent.map_err(|_| failure("plugins_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -992,16 +1140,27 @@ async fn handle(
                 },
             }
         }
-        Action::SetSkill { id, enabled } => {
-            let ResultValue::Skill(skill) =
-                actor(engine, Command::SetSkill { id, enabled }).await?
+        Action::SetSkill {
+            id,
+            enabled,
+            version,
+        } => {
+            let ResultValue::Skill(skill) = actor(
+                engine,
+                Command::SetSkill {
+                    id,
+                    enabled,
+                    version,
+                },
+            )
+            .await?
             else {
                 return Err(unknown());
             };
             Reply::Skill { skill: skill.view }
         }
-        Action::RemoveSkill { id } => {
-            actor(engine, Command::RemoveSkill { id }).await?;
+        Action::RemoveSkill { id, version } => {
+            actor(engine, Command::RemoveSkill { id, version }).await?;
             Reply::Done
         }
         Action::AddServer {
@@ -1059,22 +1218,34 @@ async fn handle(
                     .await?,
             )?
         }
-        Action::UpdateServer { id, spec } => {
-            server(actor(engine, Command::UpdateServer { id, spec }).await?)?
+        Action::UpdateServer { id, spec, version } => {
+            server(actor(engine, Command::UpdateServer { id, spec, version }).await?)?
         }
         Action::Approve { id, spec } => {
             server(actor(engine, Command::Approve { id, spec }).await?)?
         }
-        Action::SetServer { id, enabled } => {
-            server(actor(engine, Command::SetServer { id, enabled }).await?)?
-        }
-        Action::RemoveServer { id } => {
+        Action::SetServer {
+            id,
+            enabled,
+            version,
+        } => server(
+            actor(
+                engine,
+                Command::SetServer {
+                    id,
+                    enabled,
+                    version,
+                },
+            )
+            .await?,
+        )?,
+        Action::RemoveServer { id, version } => {
             let root = engine_root(authority)?;
             let checks = root.join(CHECK_FOLDER);
             let server = id.clone();
             let removed = engine
                 .settled_job(
-                    move |reply| Job::Plugins(Command::RemoveServer { id }, reply),
+                    move |reply| Job::Plugins(Command::RemoveServer { id, version }, reply),
                     move |result| match result {
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
@@ -1091,9 +1262,46 @@ async fn handle(
             };
             Reply::Done
         }
-        Action::Switch { project, id, on } => {
-            actor(engine, Command::Switch { project, id, on }).await?;
+        Action::Switch {
+            project,
+            id,
+            on,
+            version,
+        } => {
+            actor(
+                engine,
+                Command::Switch {
+                    project,
+                    id,
+                    on,
+                    version,
+                },
+            )
+            .await?;
             Reply::Done
+        }
+        Action::Tools { project, server } => {
+            tools(actor(engine, Command::Tools { project, server }).await?)?
+        }
+        Action::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        } => tools(
+            actor(
+                engine,
+                Command::SetTool {
+                    project,
+                    server,
+                    tool,
+                    switch,
+                },
+            )
+            .await?,
+        )?,
+        Action::RestoreTools { project, server } => {
+            tools(actor(engine, Command::RestoreTools { project, server }).await?)?
         }
         Action::SetSecret { id, name } => {
             let secret = secrets
@@ -1192,6 +1400,13 @@ async fn handle(
     })
 }
 
+fn tools(value: ResultValue) -> Result<Reply, EngineError> {
+    match value {
+        ResultValue::Tools(tools) => Ok(Reply::Tools { tools }),
+        _ => Err(unknown()),
+    }
+}
+
 fn server(value: ResultValue) -> Result<Reply, EngineError> {
     match value {
         ResultValue::Server(server) => Ok(Reply::Server { server: *server }),
@@ -1223,7 +1438,7 @@ async fn start_check(
     authority: &Authority,
     id: String,
 ) -> Result<Reply, EngineError> {
-    let ResultValue::Check(spec, secrets) =
+    let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
         return Err(unknown());
@@ -1255,8 +1470,9 @@ async fn start_check(
         let folder = id.clone();
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let kept = settings.owner_ports();
-            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept);
+            let outcome = settings.owner_ports().and_then(|kept| {
+                boundary_check(&root, &folder, &command, &args, &values, &kept, network)
+            });
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -1298,8 +1514,9 @@ fn boundary_check(
     args: &[String],
     secrets: &[(String, Vec<u8>)],
     kept: &[u16],
+    network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, &'static str> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
@@ -1343,7 +1560,7 @@ fn boundary_check(
         .create(&profiles)
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
-    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
+    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
@@ -1370,6 +1587,7 @@ fn boundary_check(
     _args: &[String],
     _secrets: &[(String, Vec<u8>)],
     _kept: &[u16],
+    _network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, &'static str> {
     Err("server_check_unavailable")
 }
@@ -1429,3 +1647,6 @@ fn public_code(error: EngineError) -> String {
         "plugins_outcome_unknown".into()
     }
 }
+
+#[cfg(test)]
+mod tests;

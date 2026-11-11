@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  …  /  Context  /  market_research.md
 ────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
-───────────────────────────────────────────────────────━━━━━━━━━────────────────
+  Overview   Conversation   Agents   Changes   Questions   Context   Settings
+───────────────────────────────────────────────────────────━━━━━━━──────────────
   research/market_research.md                                  Market research
 
   Market research: Fieldnotes Mobile
@@ -21,4 +21,4 @@
 
 
 
- m Save to memory  o Open in editor  PgDn Scroll  Esc Back to files      ? Help
+ m Save to memory  o Open in app  PgDn Scroll  Esc Back to files         ? Help

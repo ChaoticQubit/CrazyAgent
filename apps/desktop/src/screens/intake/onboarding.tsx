@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadOnboarding, startOnboarding } from "../../api-intake";
 import {
@@ -7,10 +7,11 @@ import {
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, StatusBadge, navigate } from "../../ui";
-import { BasicsFields, ResearchSwitches } from "../new-project/fields";
+import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
-import { ONBOARDING_POLL_MS, confirmReady, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
+import { ImportMoveCommit } from "../process";
+import { ONBOARDING_POLL_MS, confirmReady, inRepo, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -21,8 +22,9 @@ const STEPS = [{ key: "graph", title: "Build the code graph" }, { key: "mapping"
  * and a Confirm that waits for the agent.
  * A failed mapping offers Retry and Skip until skipped; a saved setup shows its saved values.
  * Inputs: the project name, the onboarding read, the form draft or null before it fills in, the
- * catalog, field errors, flags, the last problem and the handlers. Output: the page. */
-export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping }: {
+ * catalog, field errors, flags, the last problem, the handlers and the Commit the move choice
+ * shown under the moved instruction files. Output: the page. */
+export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping, importMove }: {
   name: string;
   view: Loaded<OnboardingView>;
   draft: ProjectDraft | null;
@@ -39,6 +41,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   retrying?: boolean;
   onRetryMapping?: () => void;
   onSkipMapping?: () => void;
+  importMove?: ReactNode;
 }) {
   const finished = view.kind === "ok" && view.value.finished;
   const header = <PageHeader title={`Set up ${name}`} description={finished ? "This project is set up. You can change its setup here." : "Review what CrazyAgent found, fill in anything missing, then confirm."} />;
@@ -49,10 +52,11 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   const gate = confirmReady(value);
   const missing = missingLabels(value.missing);
   const offerRetry = mappingRetry(value) && !skipped;
+  const repo = inRepo(value.facts);
   return <div className="pj in-page">
     {header}
     <ol className="in-list" aria-label="Setup steps">{STEPS.map((step) => {
-      const shown = stepView(value[step.key], value.finished);
+      const shown = stepView(value[step.key], value.finished, step.key === "mapping" ? value.mapping_try ?? null : null);
       return <li className="in-row" key={step.key}>
         <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className={`pj-small ${shown.tone === "danger" ? "pj-error" : "pj-secondary"}`}>{shown.line}</span>}</span>
         <StatusBadge word={shown.word} tone={shown.tone} />
@@ -62,6 +66,13 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <Button pending={retrying} pendingLabel="Retrying..." onClick={() => onRetryMapping?.()}>Retry mapping</Button>
       <Button disabled={retrying} onClick={() => onSkipMapping?.()}>Skip mapping</Button>
     </span>}
+    {(value.imported ?? []).length > 0 && <Notice tone="info">
+      <span className="pj-stack">
+        <span>CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:</span>
+        <ul>{(value.imported ?? []).map((file) => <li key={file.path}>{file.path}{file.uncommitted === true ? " (git shows it as deleted)" : ""}</li>)}</ul>
+      </span>
+    </Notice>}
+    {importMove}
     {value.overview && <Panel title="Overview"><MarkdownView source={value.overview} onOpenLink={onOpenLink} /></Panel>}
     {value.folder_overview && <Panel title="Overview found in the folder"><p className="pj-help">The mapping agent did not write this: it came with the folder or was changed since.</p><MarkdownView source={value.folder_overview} onOpenLink={onOpenLink} /></Panel>}
     {draft && missing.length > 0 && <Notice tone="warn">Not found: {missing.join(", ")}. Add them below.</Notice>}
@@ -70,8 +81,14 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <fieldset className="pj-field">
         <legend>Research</legend>
         <p className="pj-help">Research is off for existing code. Turn on what you want; it runs on the project's pool.</p>
-        <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} />
+        <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} found={repo.research} />
       </fieldset>
+      {!finished && <RoadmapSwitch prefix="ob" value={draft.roadmap} onChange={(roadmap) => onDraft({ ...draft, roadmap })} />}
+      {repo.documents.length > 0 && <fieldset className="pj-field">
+        <legend>Project documents found</legend>
+        <p className="pj-help">The mapping read these files in the repository as project documents.</p>
+        <ul>{repo.documents.map((path) => <li key={path}>{path}</li>)}</ul>
+      </fieldset>}
     </form>}
     <p className="pj-secondary" role="status">{gate.line}</p>
     {problem && <p className="pj-error" role="alert">{problem}</p>}
@@ -97,7 +114,9 @@ export function OnboardingReview({ id }: { id: string }) {
   const [showErrors, setShowErrors] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
+  const [moveLeft, setMoveLeft] = useState(false);
   const value = view.kind === "ok" ? view.value : null;
+  const waiting = (value?.imported ?? []).filter((file) => file.uncommitted === true).map((file) => file.path);
   const saved: StoredSetup | null = stored.kind === "ok" ? stored.value : null;
   const done = value !== null && settled(value);
 
@@ -144,7 +163,7 @@ export function OnboardingReview({ id }: { id: string }) {
   const confirm = async () => {
     if (!draft || !saved || busy) return;
     if (Object.keys(errors).length > 0) { setShowErrors(true); document.getElementById("ob-name")?.focus(); return; }
-    const request = editRequest(saved, draft);
+    const request = editRequest(saved, draft, value?.finished ? undefined : draft.roadmap);
     setBusy(true);
     setProblem("");
     const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision);
@@ -164,5 +183,6 @@ export function OnboardingReview({ id }: { id: string }) {
 
   return <OnboardingReviewView name={name} view={view} draft={draft} catalog={catalog} errors={errors} showErrors={showErrors} busy={busy} problem={problem}
     onDraft={setDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} onRetry={reloadView}
-    skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping} />;
+    skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping}
+    importMove={waiting.length > 0 && !moveLeft ? <ImportMoveCommit projectId={id} files={waiting} onCommitted={reloadView} onLeave={() => setMoveLeft(true)} /> : undefined} />;
 }

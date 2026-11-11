@@ -1,20 +1,30 @@
-import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setChildLanding, setOnHarnessSwitch, setSubAgentDepth, setTeamTimeLimits, showFinishedAgents } from "../../api";
+import { useContext, useEffect, useState, type ReactNode } from "react";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
-import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
-import type { SelectOption } from "../../ui";
+import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
+import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
+import type { IconName, SelectOption } from "../../ui";
+import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
+import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
+import { savedStale } from "../project/settings";
+import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coordination";
+import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
+/** What the master settings say while the project's agent access cannot be read. */
+export const ACCESS_UNREADABLE = "This project's agent access can't be read, so the master's conflict fixes wait for your Accept.";
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
 export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
-export const MASTER_IDLE_STOP_SECS = 900;
 const ANY_HARNESS = "";
 const NO_LIMIT = "off";
 const encoder = new TextEncoder();
 export const PARTIAL_LINE = "Older team history is hidden so the team fits in one view. Queued and running work stays listed.";
+
+/** What the team controls say after a save refused because the team settings changed since
+ * the controls read them, here or in another window, once they show the saved settings again. */
+export const TEAM_SETTINGS_STALE = "Team settings changed since the controls read them, so your change was not saved. The controls now show the saved settings; make your change again.";
 
 /** The harnesses a task can go to: every sub-agent harness of the team plan, once each, plus
  * "Any sub-agent" first. Inputs: the team status and a harness name lookup. Output: options. */
@@ -69,6 +79,12 @@ export const SWITCH_OPTIONS: SelectOption[] = [
   { value: "fresh", label: "Start fresh" },
 ];
 
+export const MASTER_IDLE_OPTIONS: SelectOption[] = [
+  { value: "off", label: "Off" },
+  { value: "fifteen_minutes", label: "15 min" },
+  { value: "one_hour", label: "1 h" },
+];
+
 /** The On harness switch mode a team status holds, Carry over when an older engine sends none.
  * Input: the status. Output: the mode. */
 export function switchMode(status: Pick<TeamStatus, "on_harness_switch">): SwitchMode {
@@ -83,11 +99,82 @@ export const DEPTH_OPTIONS: SelectOption[] = [
 ];
 export const DEPTH_DEFAULT = 2;
 
+/** The New folder limit choices, the engine's own list, 1,000 files as the default: the most
+ * files one new top-level folder the owner's branch does not have may gain in a change set. */
+export const NEW_FOLDER_OPTIONS: SelectOption[] = [100, 1000, 10000, 100000].map((files) => ({
+  value: String(files),
+  label: `${files.toLocaleString("en-US")} files`,
+}));
+export const NEW_FOLDER_DEFAULT = 1000;
+
+/** The choices of Background commands at task end. A grace time is the default (DEC-119). */
+export const BACKGROUND_OPTIONS: SelectOption[] = [
+  { value: "wait", label: "Wait for them" },
+  { value: "grace", label: "Stop them after a grace time" },
+  { value: "stop", label: "Stop them when the turn ends" },
+];
+
+/** The default grace time, also offered when the owner first picks one, and its bounds,
+ * in seconds. */
+export const GRACE_SECS_DEFAULT = 1800;
+export const GRACE_SECS_MIN = 10;
+export const GRACE_SECS_MAX = 3600;
+
+/** The Background commands choice a team status holds, the default grace time when the
+ * engine sends none. Input: the status. Output: the choice. */
+export function backgroundChoice(status: Pick<TeamStatus, "background_at_end">): BackgroundAtEnd {
+  return status.background_at_end ?? { mode: "grace", secs: GRACE_SECS_DEFAULT };
+}
+
+/** Reads a grace time the owner typed: whole seconds from 10 to 3600. Input: the text.
+ * Output: the seconds, or null for anything else. */
+export function graceSecs(text: string): number | null {
+  const typed = text.trim();
+  if (!/^[0-9]{1,4}$/.test(typed)) return null;
+  const secs = Number(typed);
+  return secs >= GRACE_SECS_MIN && secs <= GRACE_SECS_MAX ? secs : null;
+}
+
 /** The choices of where a lead's worker lands, When the lead accepts first as the default. */
 export const LANDING_OPTIONS: SelectOption[] = [
   { value: "lead", label: "When the lead accepts" },
   { value: "owner", label: "Only when I accept" },
 ];
+
+/** The Max harnesses per project and Max teammates per harness choices besides No limit, the
+ * engine's own list. */
+export const CAP_CHOICES = [1, 2, 3, 4, 5, 6, 8, 10, 15] as const;
+
+/** The Token budget choices besides Off, the engine's own list, in tokens. */
+export const BUDGET_CHOICES = [10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000] as const;
+
+/** Words a token count the way the engine does: millions with one decimal at most, else the
+ * number. Input: the count. Output: the words, such as "12.5M tokens". */
+export function tokenWords(tokens: number): string {
+  if (tokens < 1_000_000) return `${tokens} tokens`;
+  const tenths = Math.floor(tokens / 100_000);
+  return tenths % 10 === 0 ? `${tenths / 10}M tokens` : `${Math.floor(tenths / 10)}.${tenths % 10}M tokens`;
+}
+
+/** The choices for one cap: No limit first, then each of `CAP_CHOICES`. Output: options whose
+ * value is the number, or "off". */
+export function capOptions(): SelectOption[] {
+  return [{ value: NO_LIMIT, label: "No limit" }, ...CAP_CHOICES.map((cap) => ({ value: String(cap), label: String(cap) }))];
+}
+
+/** The Token budget choices: Off first, then each of `BUDGET_CHOICES`. Output: options whose
+ * value is the tokens, or "off". */
+export function budgetOptions(): SelectOption[] {
+  return [{ value: NO_LIMIT, label: "Off" }, ...BUDGET_CHOICES.map((tokens) => ({ value: String(tokens), label: tokenWords(tokens) }))];
+}
+
+/** Reads a cap or budget choice. Inputs: the option value and the listed choices. Output: the
+ * number, null for "off", or undefined for a value that is not listed. */
+export function chosen(value: string, listed: readonly number[]): number | null | undefined {
+  if (value === NO_LIMIT) return null;
+  const number = Number(value);
+  return listed.includes(number) ? number : undefined;
+}
 
 /** What a team change's result means for the owner. Inputs: the call result, what it did and
  * the "Not ready yet" subject. Output: the note to show, empty when it applied. */
@@ -99,108 +186,264 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
-/** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
- * task and an agent session may run, choose what a master harness switch does with the
- * conversation, choose whether finished agents stay in the list and graph or move to the
- * Finished fold-out, and hand one task straight to a sub-agent when the master should not
- * plan it. Inputs: the project id, the
- * latest team status, a harness name lookup and a reload. Output: the controls. */
-export function TeamControls({ projectId, status, harness, reload }: {
+/** The team settings version a team change must name: the version of the team read whose
+ * values the controls show and build the change from, never one an earlier save made, so a
+ * second change before the team read returns is refused as stale instead of sending values
+ * it did not read. Input: the team status shown. Output: the version, 0 when an older engine
+ * sends none. */
+export function settingsVersion(status: Pick<TeamStatus, "settings_version">): number {
+  return status.settings_version ?? 0;
+}
+
+export { afterSave, shownChoice, SettingRow };
+
+type Limits = { turn: number | null; session: number | null; idle: number | null };
+
+function sameLimits(a: Limits, b: Limits): boolean {
+  return a.turn === b.turn && a.session === b.session && a.idle === b.idle;
+}
+
+function sameBackground(a: BackgroundAtEnd, b: BackgroundAtEnd): boolean {
+  return a.mode === b.mode && (a.mode !== "grace" || b.mode !== "grace" || a.secs === b.secs);
+}
+
+function capValue(value: number | null | undefined): string {
+  return value == null ? NO_LIMIT : String(value);
+}
+
+/** A control group's busy flag and note, and the calls that save one change, keep the pick
+ * shown while it saves, show the save's note and read the team again. `run` takes a save that
+ * answers a note; `change` a save that answers an engine result, worded by `what`. Input: the
+ * reload. Output: the state and the calls. */
+export function useChange(reload: () => void) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  async function run(send: () => Promise<string>, hold?: () => (message: string) => void) {
+    if (busy) return;
+    const settled = hold?.();
+    setBusy(true);
+    const message = await send();
+    setBusy(false);
+    settled?.(message);
+    setNote(message);
+    reload();
+  }
+  const change = (send: () => Promise<Result<IntentReceipt>>, what: string, hold?: () => (message: string) => void) =>
+    run(async () => changeNote(await send(), what), hold);
+  return { busy, note, setNote, run, change };
+}
+
+/** One group of settings: an id, its heading, an optional purpose line, an icon and the label
+ * of every row it holds, which Find a setting and the group counts read. */
+export interface SettingGroupInfo {
+  id: string;
+  title: string;
+  about?: string;
+  icon: IconName;
+  rows: readonly string[];
+}
+
+/** The Agent settings groups on the Agents tab. */
+export type SettingGroupId = "model" | "access" | "tools" | "coord" | "limits";
+
+const MERGE_INTO_MAIN = "Under Full access, merging into main";
+const RESTARTS_FROM_MAIN = "After you accept, the agent's branch restarts from main";
+const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"];
+
+/** The Agent settings groups in the order the approved mockup lists them, each with its purpose
+ * line and the labels of its rows in the order they show. */
+export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; about: string })[] = [
+  { id: "model", title: "Model and harness", about: "Which harnesses run, on which accounts, and how many.", icon: "cpu",
+    rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
+  { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
+    rows: ["Agent access", MERGE_INTO_MAIN, "Ask me before merging into the master's branch", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
+  { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
+    rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
+  { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
+    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", ...PER_HARNESS_ROWS] },
+  { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
+    rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
+];
+
+function findWords(query: string): string {
+  return query.trim().toLowerCase();
+}
+
+/** The groups and rows Find a setting keeps: every row whose label holds the typed words, any
+ * case, in each group that holds one. Input: the typed words. Output: the groups with their
+ * kept rows, in order; every group and row for blank words. */
+export function matchingGroups(query: string): { id: SettingGroupId; rows: string[] }[] {
+  const words = findWords(query);
+  return SETTING_GROUPS.map((group) => ({ id: group.id, rows: group.rows.filter((row) => settingMatches(row, words)) })).filter((group) => group.rows.length > 0);
+}
+
+/** One group of settings drawn as the mockup's panel: its icon, heading and purpose line over its
+ * rows, hidden while Find a setting keeps none of its rows. Inputs: the group, the id prefix of
+ * its panel and heading, the heading level and the rows. Output: the group. */
+export function SettingGroup({ group, prefix, level = 2, children }: { group: SettingGroupInfo; prefix: string; level?: 2 | 3; children: ReactNode }) {
+  const words = useContext(SettingFind);
+  const id = `${prefix}-${group.id}`;
+  const Heading = level === 2 ? "h2" : "h3";
+  return <section className="set-group" id={id} aria-labelledby={`${id}-title`} hidden={!group.rows.some((row) => settingMatches(row, words))}>
+    <div className="set-head"><span className="set-icon" aria-hidden="true"><Icon name={group.icon} size={16} /></span>
+      <div><Heading id={`${id}-title`} tabIndex={-1}>{group.title}</Heading>{group.about && <p>{group.about}</p>}</div></div>
+    {children}
+  </section>;
+}
+
+/** Saves one team setting with the settings version of the team read the controls show, so a
+ * save from an older read is refused as stale instead of undoing a newer change. Inputs: the
+ * status shown, the call given that version and the "Not ready yet" subject. Output: the note to
+ * show, empty when the engine applied it. */
+async function teamSave(status: Pick<TeamStatus, "settings_version">, send: (version: number) => Promise<Result<IntentReceipt>>, missing: string): Promise<string> {
+  const result = await send(settingsVersion(status));
+  return savedStale(result) ? TEAM_SETTINGS_STALE : changeNote(result, missing);
+}
+
+/** The On master harness switch setting as one row, on Agent settings and in the master's
+ * settings: it names the team settings version shown, and a stale save says so and reads the
+ * team again. Inputs: the project id, the team status and a reload. Output: the row. */
+export function OnSwitchSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, run } = useChange(reload);
+  const [shown, hold] = useHeld<SwitchMode>(switchMode(status), Object.is, status);
+
+  const chooseSwitch = (mode: SwitchMode) => run(() => teamSave(status, (version) => setOnHarnessSwitch(projectId, mode, version), "the On harness switch setting"), () => hold(mode));
+
+  return <SettingRow label="On master harness switch">
+    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={shown} options={SWITCH_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** What an idle master does under its own idle stop choice, for the sub-agent idle stop's
+ * helper. Input: the team status. Output: the sentence. */
+function masterIdleWords(status: TeamStatus): string {
+  const choice = status.master_idle_stop ?? "fifteen_minutes";
+  if (choice === "off") return "An idle master keeps running until the team stops.";
+  const label = choice === "one_hour" ? "1 h" : "15 min";
+  return `An idle master stops ${label} after its work is done and is never stopped while that work is still going.`;
+}
+
+/** The Stop the master when idle after setting as one row of the master's settings: Off, 15
+ * min or 1 h, showing the engine's choice for this project (DEC-117 Q4). Inputs: the project
+ * id, the team status and a reload. Output: the row. */
+export function MasterIdleSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<MasterIdleStop>(status.master_idle_stop ?? "fifteen_minutes", Object.is, status);
+
+  const choose = (choice: MasterIdleStop) => change(() => setMasterIdleStop(projectId, choice), "the master idle stop setting", () => hold(choice));
+
+  return <SettingRow label="Stop the master when idle after">
+    <Select id={`tg-master-idle-${projectId}`} label="Stop the master when idle after" value={shown} options={MASTER_IDLE_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "off" || value === "fifteen_minutes" || value === "one_hour")) void choose(value); }}
+      helper="A master in a live terminal stops too, once no turn is open and you have no unsent line." />
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** The Live terminal setting as one row of the master's settings: on, the master runs in its
+ * own terminal; off, the area shows the conversation and a running live master ends at its next
+ * stop (DEC-117 Q4). A master with no live terminal gets the row unavailable with the reason.
+ * Inputs: the project id, the team status, a reload and whether the master runs in a live
+ * terminal. Output: the row. */
+export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: { projectId: string; status: TeamStatus; reload: () => void; liveHarness: boolean }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on", Object.is, status);
+
+  const choose = (on: boolean) => change(() => setMasterLiveTerminal(projectId, on), "the Live terminal setting", () => hold(on ? "on" : "off"));
+
+  return <SettingRow label="Live terminal">
+    <span className="set-label" aria-hidden="true">Live terminal</span>
+    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel disabledReason={liveHarness ? undefined : "This master has no live terminal: its conversation is the console."} checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
+    {liveHarness && <span className="tg-terminal-note">You see and type into the master's own terminal.</span>}
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** The Re-ask a sub-agent's empty reply setting as one row, on Agent settings and in the
+ * master's settings. Inputs: the project id, the team status and a reload. Output: the row. */
+export function ReaskSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [reask, hold] = useHeld<"off" | "on">(status.reask_empty_reply === false ? "off" : "on", Object.is, status);
+
+  const chooseReask = (choice: "off" | "on") => change(() => setReaskEmptyReply(projectId, choice === "on"), "the empty reply setting", () => hold(choice));
+
+  return <SettingRow label="Re-ask a sub-agent's empty reply">
+    <span className="set-label" aria-hidden="true">Re-ask a sub-agent's empty reply</span>
+    <Segmented label="Re-ask a sub-agent's empty reply" value={reask} onValue={(choice) => { if (!busy) void chooseReask(choice); }}
+      options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+    <span className="tg-terminal-note">On asks a sub-agent once more when its task ends with no reply text, and reports the empty reply if the second answer is empty too. Off reports the empty reply at once.</span>
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** Stop all and Start all again for one project, shared by the Team view's row and the project
+ * menu: `ask` opens the one confirm, whose Stop all stops every agent; `start` starts them again
+ * at once. Inputs: the project id, a reload and where a change's note goes ("" once applied)
+ * with whether it stopped. Output: whether a change runs, ask, start and the confirm. */
+export function useStopAll(projectId: string, reload: () => void, onNote: (note: string, stopped: boolean) => void) {
+  const [asked, setAsked] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function change(stopped: boolean) {
+    setAsked(false);
+    setBusy(true);
+    const message = changeNote(await setTeamStopped(projectId, stopped), stopped ? "stopping the team" : "starting the team again");
+    setBusy(false);
+    onNote(message, stopped);
+    reload();
+  }
+
+  const dialog = <ConfirmDialog open={asked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
+    pending={busy} onCancel={() => setAsked(false)} onConfirm={() => void change(true)}>
+    The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
+  </ConfirmDialog>;
+  return { busy, ask: () => setAsked(true), start: () => void change(false), dialog };
+}
+
+/** Stop all, or Start all again while the team is stopped, with its line and its confirm:
+ * every agent of the project stops and stays stopped across restarts until the owner starts
+ * them again. The project menu shares its action and confirm through `useStopAll`. Inputs:
+ * the project id, the latest team status and a reload. Output: the row. */
+export function StopAll({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const [note, setNote] = useState("");
+  const stop = useStopAll(projectId, reload, setNote);
+
+  return <>
+    <div className="pj-row">
+      {status.paused
+        ? <Button variant="primary" size="small" pending={stop.busy} onClick={stop.start}>Start all again</Button>
+        : <Button variant="danger" size="small" icon="circle-stop" disabled={stop.busy} onClick={stop.ask}>Stop all</Button>}
+      <span className="tg-terminal-note" role="status">{status.paused
+        ? status.budget_reached === true
+          ? "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."
+          : "Every agent of this project is stopped until you start them again."
+        : "Stops the master, every harness and every teammate of this project. They stay stopped across restarts."}</span>
+    </div>
+    {stop.dialog}
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </>;
+}
+
+/** The team's actions in the Agents tab's Agents and tasks fold: Stop all while the team runs
+ * (a stopped team's line and Start all again sit above the graph), and hand one task straight
+ * to a sub-agent when the master should not plan it. A team view the engine shortened says so. Inputs: the project id, the latest team status, a harness name lookup
+ * and a reload. Output: the actions. */
+export function TeamActions({ projectId, status, harness, reload }: {
   projectId: string;
   status: TeamStatus;
   harness?: (id: string) => string;
   reload: () => void;
 }) {
-  const [warm, setWarm] = useState<boolean | null>(null);
-  const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
-  const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
-  const [finished, setFinished] = useState<"hide" | "show" | null>(null);
-  const [depth, setDepth] = useState<number | null>(null);
-  const [lands, setLands] = useState<ChildLanding | null>(null);
-  const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [sent, setSent] = useState("");
   const options = delegateOptions(status, harness);
-  const checked = warm ?? status.keep_warm;
-  const shown = limits ?? { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
   const check = taskInput(text);
   const subs = options.length > 1;
-
-  async function toggle(on: boolean) {
-    setWarm(on);
-    setBusy(true);
-    const message = changeNote(await keepTeamWarm(projectId, on), "keeping agents ready");
-    setBusy(false);
-    setWarm(null);
-    setNote(message);
-    reload();
-  }
-
-  async function limit(changed: "turn" | "session" | "idle", value: string) {
-    if (busy) return;
-    const secs = value === NO_LIMIT ? null : Number(value);
-    const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
-    setLimits(next);
-    setBusy(true);
-    const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle), "team time limits");
-    setBusy(false);
-    setLimits(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseSwitch(mode: SwitchMode) {
-    setOnSwitch(mode);
-    setBusy(true);
-    const message = changeNote(await setOnHarnessSwitch(projectId, mode), "the On harness switch setting");
-    setBusy(false);
-    setOnSwitch(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseDepth(value: number) {
-    setDepth(value);
-    setBusy(true);
-    const message = changeNote(await setSubAgentDepth(projectId, value), "the Sub-agent depth setting");
-    setBusy(false);
-    setDepth(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseLanding(mode: ChildLanding) {
-    setLands(mode);
-    setBusy(true);
-    const message = changeNote(await setChildLanding(projectId, mode), "the worker landing setting");
-    setBusy(false);
-    setLands(null);
-    setNote(message);
-    reload();
-  }
-
-  async function view(choice: "hide" | "show") {
-    setFinished(choice);
-    setBusy(true);
-    const message = changeNote(await showFinishedAgents(projectId, choice === "show"), "choosing where finished agents show");
-    setBusy(false);
-    setFinished(null);
-    setNote(message);
-    reload();
-  }
-
-  async function branches(choice: BranchMode) {
-    setBranchMode(choice);
-    setBusy(true);
-    const message = changeNote(await setAgentBranches(projectId, choice), "choosing where new agents commit");
-    setBusy(false);
-    setBranchMode(null);
-    setNote(message);
-    reload();
-  }
 
   async function hand() {
     if (check.kind !== "ok" || busy) return;
@@ -217,37 +460,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
 
   return <section className="tg-controls" aria-label="Team controls">
     {status.partial && <p className="pj-note" role="status">{PARTIAL_LINE}</p>}
-    <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
-      onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
-    <div className="tg-limits" role="group" aria-label="Time limits">
-      <Select id={`tg-turn-limit-${projectId}`} label="Each task may run" value={shown.turn === null ? NO_LIMIT : String(shown.turn)} options={limitOptions(shown.turn)}
-        onValue={(value) => void limit("turn", value)} />
-      <Select id={`tg-session-limit-${projectId}`} label="Each agent session may run" value={shown.session === null ? NO_LIMIT : String(shown.session)} options={limitOptions(shown.session)}
-        onValue={(value) => void limit("session", value)}
-        helper="Off lets agents work as long as they need. A task limit stops one turn. A session counts from when the agent started; once it passes, the next task goes to a fresh agent. The conversation names the limit that stopped a turn." />
-      <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
-        onValue={(value) => void limit("idle", value)}
-        helper={`Off keeps an idle sub-agent running until the team stops. An idle master stops ${limitLabel(MASTER_IDLE_STOP_SECS)} after its work is done and is never stopped while that work is still going.`} />
-    </div>
-    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
-      onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
-    <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth ?? status.sub_agent_depth ?? DEPTH_DEFAULT)} options={DEPTH_OPTIONS}
-      onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
-      helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
-    <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands ?? status.child_landing ?? "lead"} options={LANDING_OPTIONS}
-      onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
-    <div className="pj-row">
-      <span aria-hidden="true">Finished agents</span>
-      <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
-        options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
-      <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
-    </div>
-    <div className="pj-row">
-      <span aria-hidden="true">Agent branches</span>
-      <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
-        options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
-      <span className="tg-terminal-note">Named branch gives each new agent its own branch, crazyagent/agent-N. Detached keeps the older detached HEAD.</span>
-    </div>
+    {!status.paused && <StopAll projectId={projectId} status={status} reload={reload} />}
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />
@@ -261,5 +474,287 @@ export function TeamControls({ projectId, status, harness, reload }: {
     </form> : <p className="tg-terminal-note">This team has no sub-agents. Add some in the project settings to hand tasks to them.</p>}
     {sent && <p className="pj-note" role="status">{sent}</p>}
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </section>;
+}
+
+/** Agent settings on the Agents tab, grouped as the approved mockup shows them: Model and
+ * harness, Access and merging, Skills and tools, Coordination and Limits, each a panel with its
+ * purpose line, beside a list of the groups with Find a setting. Each setting change names the
+ * team settings version shown; one refused as stale reads the team again. The harnesses and
+ * agent access are changed in place and saved as project Settings saves them. Inputs: the
+ * project id, the latest team status, a reload, the project's data for the team and access
+ * rows, and a group to open at. Output: the settings. */
+export function TeamControls({ projectId, status, reload, data, group }: {
+  projectId: string;
+  status: TeamStatus;
+  reload: () => void;
+  data?: TeamProject;
+  group?: SettingGroupId | null;
+}) {
+  const harnessRows = useTeam(data);
+  const [masterBranch, setMasterBranchText] = useState<string | null>(null);
+  const [landOn, setLandOnText] = useState<string | null>(null);
+  const [graceText, setGraceText] = useState<string | null>(null);
+  const [find, setFind] = useState("");
+  const { busy, note, setNote, run, change } = useChange(reload);
+  const saved: Limits = { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
+  const [checked, holdWarm] = useHeld(status.keep_warm, Object.is, status);
+  const [shown, holdLimits] = useHeld(saved, sameLimits, status);
+  const [listed, holdFinished] = useHeld<"hide" | "show">(status.show_finished === true ? "show" : "hide", Object.is, status);
+  const [depth, holdDepth] = useHeld(status.sub_agent_depth ?? DEPTH_DEFAULT, Object.is, status);
+  const [lands, holdLands] = useHeld<ChildLanding>(status.child_landing ?? "lead", Object.is, status);
+  const [branchMode, holdBranchMode] = useHeld<BranchMode>(status.agent_branches ?? "named", Object.is, status);
+  const [spread, holdSpread] = useHeld<"off" | "on">(status.spread_accounts === true ? "on" : "off", Object.is, status);
+  const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off", Object.is, status);
+  const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits", Object.is, status);
+  const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on", Object.is, status);
+  const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off", Object.is, status);
+  const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT, Object.is, status);
+  const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses), Object.is, status);
+  const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates), Object.is, status);
+  const [tokenBudget, holdTokenBudget] = useHeld(capValue(status.token_budget), Object.is, status);
+  const [backgroundShown, holdBackground] = useHeld(backgroundChoice(status), sameBackground, status);
+  const [masterBranchSaved, holdMasterBranch] = useHeld(status.master_branch ?? null, Object.is, status);
+  const [landOnSaved, holdLandOn] = useHeld(status.land_on ?? null, Object.is, status);
+  const graceTyped = backgroundShown.mode === "grace" ? graceText ?? String(backgroundShown.secs) : null;
+  const words = findWords(find);
+  const kept = matchingGroups(find);
+  const prefix = `set-${projectId}`;
+  const save = (send: (version: number) => Promise<Result<IntentReceipt>>, missing: string) => teamSave(status, send, missing);
+
+  function jump(id: string) {
+    const panel = document.getElementById(`${prefix}-${id}`);
+    panel?.scrollIntoView({ block: "start" });
+    document.getElementById(`${prefix}-${id}-title`)?.focus({ preventScroll: true });
+  }
+
+  useEffect(() => { if (group) jump(group); }, [group, projectId]);
+
+  const toggle = (on: boolean) => run(() => save((version) => keepTeamWarm(projectId, on, version), "keeping agents ready"), () => holdWarm(on));
+
+  function limit(changed: "turn" | "session" | "idle", value: string) {
+    const secs = value === NO_LIMIT ? null : Number(value);
+    const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
+    return run(() => save((version) => setTeamTimeLimits(projectId, next.turn, next.session, next.idle, version), "team time limits"), () => holdLimits(next));
+  }
+
+  const chooseDepth = (value: number) => change(() => setSubAgentDepth(projectId, value), "the Sub-agent depth setting", () => holdDepth(value));
+  const chooseLanding = (mode: ChildLanding) => change(() => setChildLanding(projectId, mode), "the worker landing setting", () => holdLands(mode));
+  const view = (choice: "hide" | "show") => run(() => save((version) => showFinishedAgents(projectId, choice === "show", version), "choosing where finished agents show"), () => holdFinished(choice));
+  const branches = (choice: BranchMode) => change(() => setAgentBranches(projectId, choice), "choosing where new agents commit", () => holdBranchMode(choice));
+
+  async function saveMasterBranch(branch: string | null) {
+    if (busy) return;
+    await change(() => setMasterBranch(projectId, branch), "the Master's branch", () => holdMasterBranch(branch));
+    setMasterBranchText(null);
+  }
+
+  async function saveLandOn(branch: string | null) {
+    if (busy) return;
+    await change(() => setLandOn(projectId, branch), "the Land on branch", () => holdLandOn(branch));
+    setLandOnText(null);
+  }
+
+  function cap(which: "harnesses" | "teammates", value: string) {
+    const max = chosen(value, CAP_CHOICES);
+    if (max === undefined) return;
+    if (which === "harnesses") void change(() => setMaxHarnesses(projectId, max), "the Max harnesses setting", () => holdMaxHarnesses(value));
+    else void change(() => setMaxTeammates(projectId, max), "the Max teammates setting", () => holdMaxTeammates(value));
+  }
+
+  const chooseSpread = (choice: "off" | "on") => change(() => setSpreadAccounts(projectId, choice === "on"), "the account spread setting", () => holdSpread(choice));
+
+  function budget(value: string) {
+    const tokens = chosen(value, BUDGET_CHOICES);
+    if (tokens !== undefined) void change(() => setTokenBudget(projectId, tokens), "the token budget", () => holdTokenBudget(value));
+  }
+
+  const chooseMasterLands = (choice: MasterLands) => change(() => setMasterLands(projectId, choice), "what the master does with its conflict fixes", () => holdMasterLands(choice));
+  const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
+  const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
+  const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
+  const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
+
+  async function saveBackground(choice: BackgroundAtEnd) {
+    if (busy) return;
+    await change(() => setBackgroundAtEnd(projectId, choice), "the Background commands setting", () => holdBackground(choice));
+    setGraceText(null);
+  }
+
+  function chooseBackground(mode: string) {
+    if (mode === "wait" || mode === "stop") void saveBackground({ mode });
+    if (mode === "grace") void saveBackground({ mode, secs: backgroundShown.mode === "grace" ? backgroundShown.secs : GRACE_SECS_DEFAULT });
+  }
+
+  const [model, access, tools, coord, limitsGroup] = SETTING_GROUPS;
+  return <section className="set" aria-label="Agent settings">
+    <nav className="set-nav" aria-label="Setting groups">
+      <input id={`${prefix}-find`} type="search" className="pj-input set-find" placeholder="Find a setting" aria-label="Find a setting" value={find} onChange={(event) => setFind(event.target.value)} />
+      {SETTING_GROUPS.map((item) => <button type="button" key={item.id} aria-controls={`${prefix}-${item.id}`} disabled={words !== "" && !kept.some((keep) => keep.id === item.id)} onClick={() => jump(item.id)}>
+        <Icon name={item.icon} size={15} />{item.title}<span className="count">{words === "" ? item.rows.length : kept.find((keep) => keep.id === item.id)?.rows.length ?? 0}</span>
+      </button>)}
+    </nav>
+    <SettingFind.Provider value={words}>
+      <div className="set-groups">
+        {words !== "" && kept.length === 0 && <p className="pj-muted" role="status">No setting matches "{find.trim()}".</p>}
+        <SettingGroup group={model} prefix={prefix}>
+          <MasterHarnessSetting rows={harnessRows} data={data} label="Master harness" id={`${prefix}-master-harness`}
+            helper="The master plans, hands out tasks and merges. A change reaches the running master as Apply a master harness change says." />
+          <SubHarnessesSetting rows={harnessRows} data={data} prefix={`${prefix}-slots`} />
+          <SettingRow label="Keep sub-agents ready">
+            <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
+              onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
+          </SettingRow>
+          <SettingRow label="Reuse idle agents">
+            <span className="set-label" aria-hidden="true">Reuse idle agents</span>
+            <Segmented label="Reuse idle agents" value={reuseIdle} onValue={(choice) => { if (!busy) void chooseReuseIdle(choice); }}
+              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+            <span className="tg-terminal-note">Off, each new task starts a new agent on the current branch. On, an idle agent of the same lead may take the next task, on the history it already has. Keep sub-agents ready reuses its agents either way.</span>
+          </SettingRow>
+          <OnSwitchSetting projectId={projectId} status={status} reload={reload} />
+          <SettingRow label="Spread harnesses across accounts">
+            <span className="set-label" aria-hidden="true">Spread harnesses across accounts</span>
+            <Segmented label="Spread harnesses across accounts" value={spread} onValue={(choice) => { if (!busy) void chooseSpread(choice); }}
+              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+            <span className="tg-terminal-note">On, a new harness or sub-agent takes a signed-in pool account no running agent of this project uses, when there is one. Off, your account strategy picks. Teammates run on their harness's account.</span>
+          </SettingRow>
+          <SettingRow label="Max harnesses per project">
+            <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={maxHarnesses} options={capOptions()}
+              onValue={(value) => void cap("harnesses", value)}
+              helper="How many harnesses the master's work runs at once. More tasks wait until one finishes." />
+          </SettingRow>
+          <SettingRow label="Max teammates per harness">
+            <Select id={`tg-max-teammates-${projectId}`} label="Max teammates per harness" value={maxTeammates} options={capOptions()}
+              onValue={(value) => void cap("teammates", value)}
+              helper="How many sub-agents each harness runs at once: app-spawned sub-agents and native teammates alike. A new sub-agent waits at the limit; the engine ends the newest native teammates past it and tells the harness." />
+          </SettingRow>
+        </SettingGroup>
+        <SettingGroup group={access} prefix={prefix}>
+          <AgentAccessSetting projectId={projectId} notify={data?.notify} reload={reload} />
+          <SettingRow label={MERGE_INTO_MAIN} wide>
+            <span className="set-label" aria-hidden="true">{MERGE_INTO_MAIN}</span>
+            <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
+            <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
+              <RadioCard name={`${prefix}-merge`} value="merges" checked={masterLands === "merges"} disabled={!status.master_lands}
+                onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
+                title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
+                details={["A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Ask me before merging is off. Anything else in the set makes all of it wait for your Accept."]} />
+              <RadioCard name={`${prefix}-merge`} value="waits" checked={masterLands === "waits"} disabled={!status.master_lands}
+                onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
+                title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
+            </div>
+            {!status.master_lands && <span className="tg-terminal-note">{status.access_unreadable ? ACCESS_UNREADABLE : "Only at Full access."}</span>}
+          </SettingRow>
+          <SettingRow label="Ask me before merging into the master's branch">
+            <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
+            <Segmented label="Ask me before merging into the master's branch" value={askMerge} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
+              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+            <span className="tg-terminal-note">On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict.</span>
+          </SettingRow>
+          <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => settingMatches(row, words))}>Branches</h3>
+          <SettingRow label="Agent branches">
+            <span className="set-label" aria-hidden="true">Agent branches</span>
+            <Segmented label="Agent branches" value={branchMode} onValue={(choice) => { if (!busy) void branches(choice); }}
+              options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
+            <span className="tg-terminal-note">Named branch gives each new agent its own branch: a harness's is named after its task, crazyagent/&lt;task&gt;. Detached keeps the older detached HEAD.</span>
+          </SettingRow>
+          <SettingRow label={RESTARTS_FROM_MAIN}>
+            <span className="set-label">{RESTARTS_FROM_MAIN}</span>
+            <span className="set-ctl"><span className="badge">Always</span></span>
+          </SettingRow>
+          <SettingRow label="Master's branch" wide>
+            <form className="pj-row" aria-label="Master's branch" onSubmit={(event) => { event.preventDefault(); void saveMasterBranch((masterBranch ?? masterBranchSaved ?? "").trim() || null); }}>
+              <label htmlFor={`tg-master-branch-${projectId}`}>Master's branch</label>
+              <input id={`tg-master-branch-${projectId}`} className="pj-input" value={masterBranch ?? masterBranchSaved ?? ""} placeholder="Repository default"
+                onChange={(event) => setMasterBranchText(event.target.value)} aria-describedby={`tg-master-branch-help-${projectId}`} />
+              <Button type="submit" size="small" disabled={busy || masterBranch === null} pending={busy && masterBranch !== null} pendingLabel="Saving...">Save</Button>
+              <Button type="button" size="small" disabled={busy || !masterBranchSaved} onClick={() => void saveMasterBranch(null)}>Use default</Button>
+              <span className="tg-terminal-note" id={`tg-master-branch-help-${projectId}`}>The master works on this branch and merges finished harnesses into it, locally; nothing is pushed. Empty uses the repository's default branch.</span>
+            </form>
+          </SettingRow>
+          <SettingRow label="Land on" wide>
+            <form className="pj-row" aria-label="Land on" onSubmit={(event) => { event.preventDefault(); void saveLandOn((landOn ?? landOnSaved ?? "").trim() || null); }}>
+              <label htmlFor={`tg-land-on-${projectId}`}>Land on</label>
+              <input id={`tg-land-on-${projectId}`} className="pj-input" value={landOn ?? landOnSaved ?? ""} placeholder="The master's branch"
+                onChange={(event) => setLandOnText(event.target.value)} aria-describedby={`tg-land-on-help-${projectId}`} />
+              <Button type="submit" size="small" disabled={busy || landOn === null} pending={busy && landOn !== null} pendingLabel="Saving...">Save</Button>
+              <Button type="button" size="small" disabled={busy || !landOnSaved} onClick={() => void saveLandOn(null)}>Use the master's branch</Button>
+              <span className="tg-terminal-note" id={`tg-land-on-help-${projectId}`}>The master's merges and your Accept in Changes land on this branch, and each change set counts only what this branch lacks. It can be a branch checked out nowhere: then your project folder's files stay as they are. Empty uses the master's branch. New agents start from its tip.</span>
+            </form>
+          </SettingRow>
+          <SettingRow label="Sub-agent work lands on its lead's branch">
+            <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands} options={LANDING_OPTIONS}
+              onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
+          </SettingRow>
+          <SettingRow label="Refuse a change set when one new folder adds more than">
+            <Select id={`tg-new-folder-${projectId}`} label="Refuse a change set when one new folder adds more than" value={String(newFolder)} options={NEW_FOLDER_OPTIONS}
+              onValue={(value) => { const chosen = Number(value); if (!busy && NEW_FOLDER_OPTIONS.some((option) => option.value === value)) void chooseNewFolder(chosen); }}
+              helper="Counts the files a change set adds in one new top-level folder your branch does not have, such as a scratch folder an agent committed. The agent is told the folder to remove and finishes again." />
+          </SettingRow>
+        </SettingGroup>
+        <SettingGroup group={tools} prefix={prefix}>
+          <ToolsControls projectId={projectId} status={status} reload={reload} />
+          <ReaskSetting projectId={projectId} status={status} reload={reload} />
+        </SettingGroup>
+        <SettingGroup group={coord} prefix={prefix}>
+          <CoordinationControls projectId={projectId} status={status} reload={reload}>
+            <SettingRow label="Sub-agent depth">
+              <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth)} options={DEPTH_OPTIONS}
+                onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
+                helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
+            </SettingRow>
+          </CoordinationControls>
+          <SettingRow label="Catch up with main">
+            <span className="set-label" aria-hidden="true">Catch up with main</span>
+            <Segmented label="Catch up with main" value={catchUp} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
+              options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off makes the git the app writes for an agent refuse that command, except a master at Full access, whose git runs everything. Off is a guide, not a lock: nothing checks it later, so landed work can still come in another way.</span>
+          </SettingRow>
+          <SettingRow label="Finished agents">
+            <span className="set-label" aria-hidden="true">Finished agents</span>
+            <Segmented label="Finished agents" value={listed} onValue={(choice) => { if (!busy) void view(choice); }}
+              options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
+            <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
+          </SettingRow>
+          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => settingMatches(row, words))}>Per harness</h3>
+          <PerHarnessControls projectId={projectId} status={status} reload={reload} />
+        </SettingGroup>
+        <SettingGroup group={limitsGroup} prefix={prefix}>
+          <SettingRow label="Each task may run">
+            <Select id={`tg-turn-limit-${projectId}`} label="Each task may run" value={shown.turn === null ? NO_LIMIT : String(shown.turn)} options={limitOptions(shown.turn)}
+              onValue={(value) => void limit("turn", value)} />
+          </SettingRow>
+          <SettingRow label="Each agent session may run">
+            <Select id={`tg-session-limit-${projectId}`} label="Each agent session may run" value={shown.session === null ? NO_LIMIT : String(shown.session)} options={limitOptions(shown.session)}
+              onValue={(value) => void limit("session", value)}
+              helper="Off lets agents work as long as they need. A task limit stops one turn. A session counts from when the agent started; once it passes, the next task goes to a fresh agent. The conversation names the limit that stopped a turn." />
+          </SettingRow>
+          <SettingRow label="Stop an idle sub-agent after">
+            <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
+              onValue={(value) => void limit("idle", value)}
+              helper={`Off keeps an idle sub-agent running until the team stops. ${masterIdleWords(status)}`} />
+          </SettingRow>
+          <SettingRow label="Background commands at task end">
+            <Select id={`tg-background-${projectId}`} label="Background commands at task end" value={backgroundShown.mode} options={BACKGROUND_OPTIONS}
+              onValue={(value) => { if (!busy) chooseBackground(value); }}
+              helper="The default is a grace time of 30 minutes (1800 seconds). Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first. Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice." />
+            {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs === null) setNote(failureCopy("team_background_grace_invalid")); else void saveBackground({ mode: "grace", secs }); }}>
+              <label htmlFor={`tg-grace-${projectId}`}>Grace time in seconds</label><input id={`tg-grace-${projectId}`} className="pj-input" inputMode="numeric" value={graceTyped}
+                onChange={(event) => setGraceText(event.target.value)} aria-describedby={`tg-grace-help-${projectId}`} />
+              <Button type="submit" size="small" disabled={busy || graceText === null} pending={busy && graceText !== null} pendingLabel="Saving...">Save</Button>
+              <span className="tg-terminal-note" id={`tg-grace-help-${projectId}`}>From 10 to 3600 seconds.</span>
+            </form>}
+          </SettingRow>
+          <SettingRow label="Token budget">
+            <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={tokenBudget} options={budgetOptions()}
+              onValue={(value) => void budget(value)}
+              helper={tokenBudget === NO_LIMIT
+                ? "Off lets the agents use tokens as their accounts allow. A budget counts new input, cache writes and output; re-reads from cache are not counted. It counts from when you set it or start the team again."
+                : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(Number(tokenBudget))}. At the budget the engine stops every agent and notifies you.`} />
+          </SettingRow>
+        </SettingGroup>
+        {note && <p className="pj-note warn set-note" role="alert">{displayText(note)}</p>}
+      </div>
+    </SettingFind.Provider>
   </section>;
 }

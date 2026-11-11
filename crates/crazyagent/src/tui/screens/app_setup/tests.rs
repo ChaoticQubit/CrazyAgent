@@ -1,5 +1,9 @@
 use super::*;
+use crate::cleanup_settings::{CleanupMode, CleanupSettings};
 use crate::github::GitHubMethod;
+use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+use crate::sandbox::LinuxSockets;
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
@@ -48,6 +52,7 @@ fn entry(id: &str, kind: PackKind, group: PackGroup, on: bool, state: PackState)
         license: "MIT".into(),
         on_by_default: on,
         state,
+        hooks_refused: None,
     }
 }
 
@@ -113,6 +118,8 @@ fn first_run_status() -> SetupStatus {
             ),
         ],
         running: false,
+        notes: Vec::new(),
+        version: 4,
     }
 }
 
@@ -158,15 +165,41 @@ fn first_run(width: u16, height: u16) -> Shell {
 }
 
 fn settings(width: u16, height: u16) -> Shell {
+    settings_with(width, height, LinuxSockets::TcpOnly)
+}
+
+fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell {
     let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(false)));
     assert!(matches!(
         jobs(&mut shell).as_slice(),
-        [AppSetupJob::Status, AppSetupJob::Home, AppSetupJob::GitHub]
+        [
+            AppSetupJob::Status,
+            AppSetupJob::Home,
+            AppSetupJob::GitHub,
+            AppSetupJob::Sandbox,
+            AppSetupJob::Cleanup,
+            AppSetupJob::Quit
+        ]
     ));
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
     shell.arrive(event(AppSetupEvent::Home(Ok(home()))));
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
+        linux_sockets,
+    }))));
+    shell.arrive(event(AppSetupEvent::Cleanup(
+        Ok(CleanupSettings::default()),
+    )));
+    shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings::default()))));
     shell
+}
+
+fn chosen(shell: &mut Shell) -> LinuxSockets {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetSandbox { settings, .. }] = sent.as_slice() else {
+        panic!("one sandbox change required, got {} jobs", sent.len())
+    };
+    settings.linux_sockets
 }
 
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
@@ -230,6 +263,24 @@ fn tools_show_found_missing_and_failed_in_plain_words() {
                 .all(|row| row.chars().count() <= usize::from(width))
         );
     }
+}
+
+#[test]
+fn a_setup_note_shows_its_plain_reason_under_tools() {
+    let mut shell = Shell::with(ctx(120, 36), Box::new(AppSetup::new(true)));
+    assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
+    let mut status = first_run_status();
+    status.notes = vec!["agent_git_needs_tools".into()];
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let rows = render(&mut shell, 120, 36);
+    find(
+        &rows,
+        "Agent git needs the Command Line Tools: run xcode-select --install",
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("agent_git_needs_tools"))
+    );
 }
 
 #[test]
@@ -410,6 +461,32 @@ fn a_failed_install_shows_the_sentence_the_engine_sent() {
 }
 
 #[test]
+fn an_installed_entry_whose_hooks_were_refused_says_why_without_being_picked() {
+    let mut status = installed_status();
+    status.pack[1].hooks_refused = Some(
+        crate::plugins::plain_problem("hooks_plugin_manifest_missing")
+            .unwrap()
+            .to_owned(),
+    );
+    let mut shell = settings(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let rows = render(&mut shell, 120, 36);
+    assert!(find(&rows, "[x] superpowers").contains("Installed"));
+    find(
+        &rows,
+        "superpowers hooks were not added: This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("hooks were not added"))
+            .count(),
+        1,
+        "{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn a_setup_problem_without_a_sentence_names_its_code() {
     assert_eq!(
         setup_plain("setup_code_nobody_uses"),
@@ -500,14 +577,14 @@ fn settings_switch_installed_entries_and_remove_after_yes() {
     let sent = jobs(&mut shell);
     let [
         AppSetupJob::Pack {
-            change: PackChange::Switch { id, on },
+            change: PackChange::Switch { id, on, version },
             ..
         },
     ] = sent.as_slice()
     else {
         panic!("one switch required")
     };
-    assert_eq!((id.as_str(), *on), ("superpowers", false));
+    assert_eq!((id.as_str(), *on, *version), ("superpowers", false, 4));
     shell.arrive(event(AppSetupEvent::PackChanged(Ok(()))));
     assert_eq!(lead(&shell), "superpowers is off.");
     assert!(
@@ -536,13 +613,14 @@ fn settings_switch_installed_entries_and_remove_after_yes() {
     let sent = jobs(&mut shell);
     let [
         AppSetupJob::Pack {
-            change: PackChange::Remove { id },
+            change: PackChange::Remove { id, version },
             ..
         },
     ] = sent.as_slice()
     else {
         panic!("one remove required")
     };
+    assert_eq!(*version, 4);
     assert_eq!(id, "caveman");
 }
 
@@ -701,4 +779,472 @@ fn a_long_pack_scrolls_with_the_cursor() {
     assert!(find(&rows, "entry-16").contains("> [x] entry-16"));
     assert!(rows.iter().all(|row| !row.contains("entry-0 ")));
     assert!(rows.iter().all(|row| row.chars().count() <= 80));
+}
+
+#[test]
+fn settings_show_the_linux_sockets_setting_and_its_risk() {
+    let mut shell = settings(120, 60);
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Linux sockets  ").contains("TCP only, names looked up over TCP"));
+    find(&rows, "RES_OPTIONS");
+    assert!(
+        sockets_words(LinuxSockets::TcpOnly)
+            .1
+            .contains("Wrappers are judged by their first file, a script by its interpreter")
+    );
+    assert!(rows.last().unwrap().contains("l Linux sockets"));
+    shell.key(Key::Char('l'));
+    let rows = render(&mut shell, 120, 60);
+    find(
+        &rows,
+        "how an agent limited to its model reaches the network",
+    );
+    for title in [
+        "> TCP only, names looked up over TCP (recommended)",
+        "  Do not start limited-network agents",
+        "  TCP ports only",
+    ] {
+        find(&rows, title);
+    }
+    find(&rows, "Hosts and UDP are not limited");
+    find(&rows, "the master is unavailable there");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the current option saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn choosing_tcp_only_saves_it_in_the_engine() {
+    let mut shell = settings_with(120, 60, LinuxSockets::TcpPorts);
+    assert!(find(&render(&mut shell, 120, 60), "Linux sockets  ").contains("TCP ports only"));
+    shell.key(Key::Char('l'));
+    find(&render(&mut shell, 120, 60), "> TCP ports only");
+    shell.key(Key::Up);
+    shell.key(Key::Up);
+    shell.key(Key::Up);
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::TcpOnly);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "Linux sockets: TCP only, names looked up over TCP (recommended)."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Sandbox)),
+        "a saved change reads the setting back"
+    );
+}
+
+#[test]
+fn choosing_do_not_start_saves_refuse_in_the_engine() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    find(
+        &render(&mut shell, 120, 60),
+        "> Do not start limited-network agents",
+    );
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::Refuse);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "Linux sockets: Do not start limited-network agents."
+    );
+}
+
+#[test]
+fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> TCP ports only");
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::TcpPorts);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Linux sockets: TCP ports only.");
+    assert!(!lead(&shell).is_empty());
+    shell.key(Key::Char('l'));
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetCleanup { settings, .. }] = sent.as_slice() else {
+        panic!(
+            "one finished agents change required, got {} jobs",
+            sent.len()
+        )
+    };
+    *settings
+}
+
+fn stored(shell: &mut Shell, mode: CleanupMode, days: u16) {
+    shell.arrive(event(AppSetupEvent::Cleanup(Ok(CleanupSettings {
+        mode,
+        days,
+    }))));
+}
+
+fn clear(shell: &mut Shell) {
+    for _ in 0..3 {
+        shell.key(Key::Backspace);
+    }
+}
+
+#[test]
+fn settings_show_finished_agents_one_day_after_by_default_and_what_stays() {
+    let mut shell = settings(160, 60);
+    let rows = render(&mut shell, 160, 60);
+    assert!(find(&rows, "Finished agents  ").contains("1 day after the agent finishes"));
+    find(
+        &rows,
+        "Only the worktree goes: the code checkout and its build files.",
+    );
+    assert!(rows.last().unwrap().contains("f Finished agents"));
+    shell.key(Key::Char('f'));
+    let rows = render(&mut shell, 160, 60);
+    find(
+        &rows,
+        "when CrazyAgent removes a finished agent's worktree on its own",
+    );
+    for title in [
+        "> 1 day after the agent finishes",
+        "  Once its work lands",
+        "  Only when I click Clean up",
+    ] {
+        find(&rows, title);
+    }
+    find(
+        &rows,
+        "The agent's conversations, history, logs and messages stay.",
+    );
+    shell.key(Key::Enter);
+    find(
+        &render(&mut shell, 160, 60),
+        "Days after the agent finishes",
+    );
+    shell.key(Key::Enter);
+    assert!(jobs(&mut shell).is_empty(), "the stored days save nothing");
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn after_n_days_saves_the_typed_days_and_refuses_days_outside_one_to_365() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('f'));
+    shell.key(Key::Enter);
+    for refused in ["0", "366", "1.5", "-2", "ten", ""] {
+        clear(&mut shell);
+        typed(&mut shell, refused);
+        shell.key(Key::Enter);
+        assert!(jobs(&mut shell).is_empty(), "{refused:?} is not sent");
+        assert_eq!(lead(&shell), "Enter a whole number of days from 1 to 365.");
+        find(
+            &render(&mut shell, 120, 60),
+            "Days after the agent finishes",
+        );
+    }
+    clear(&mut shell);
+    typed(&mut shell, "30");
+    shell.key(Key::Enter);
+    assert_eq!(
+        cleanup_chosen(&mut shell),
+        CleanupSettings {
+            mode: CleanupMode::AfterDays,
+            days: 30
+        }
+    );
+    shell.arrive(event(AppSetupEvent::CleanupSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "Finished agents: 30 days after the agent finishes."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Cleanup)),
+        "a saved change reads the setting back"
+    );
+}
+
+#[test]
+fn once_its_work_lands_saves_it_and_keeps_the_stored_days() {
+    let mut shell = settings(120, 60);
+    stored(&mut shell, CleanupMode::AfterDays, 7);
+    assert!(
+        find(&render(&mut shell, 120, 60), "Finished agents  ")
+            .contains("7 days after the agent finishes")
+    );
+    shell.key(Key::Char('f'));
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Once its work lands");
+    shell.key(Key::Enter);
+    assert_eq!(
+        cleanup_chosen(&mut shell),
+        CleanupSettings {
+            mode: CleanupMode::OnceLanded,
+            days: 7
+        }
+    );
+    shell.arrive(event(AppSetupEvent::CleanupSet(Ok(()))));
+    assert_eq!(lead(&shell), "Finished agents: Once its work lands.");
+}
+
+#[test]
+fn only_when_i_click_clean_up_saves_manual_and_a_refused_save_says_why() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('f'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Only when I click Clean up");
+    shell.key(Key::Enter);
+    assert_eq!(
+        cleanup_chosen(&mut shell),
+        CleanupSettings {
+            mode: CleanupMode::Manual,
+            days: 1
+        }
+    );
+    shell.arrive(event(AppSetupEvent::CleanupSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Finished agents: Only when I click Clean up.");
+    assert!(!lead(&shell).is_empty());
+    stored(&mut shell, CleanupMode::Manual, 1);
+    assert!(
+        find(&render(&mut shell, 120, 60), "Finished agents  ")
+            .contains("Only when I click Clean up")
+    );
+    shell.key(Key::Char('f'));
+    find(&render(&mut shell, 120, 60), "> Only when I click Clean up");
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+#[test]
+fn a_stored_finished_agents_setting_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Cleanup(Err(
+        "cleanup_settings_invalid".into(),
+    ))));
+    let rows = render(&mut shell, 120, 60);
+    let row = find(&rows, "Finished agents  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    shell.key(Key::Char('f'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        "The finished agents setting is not known yet."
+    );
+}
+
+fn quit_chosen(shell: &mut Shell) -> QuitSettings {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetQuit { settings, .. }] = sent.as_slice() else {
+        panic!("one quitting change required, got {} jobs", sent.len())
+    };
+    *settings
+}
+
+#[test]
+fn settings_show_team_agents_kept_running_and_ended_a_day_after_quitting_by_default() {
+    let mut shell = settings(200, 60);
+    let rows = render(&mut shell, 200, 60);
+    assert!(find(&rows, "When quitting  ").contains("Keep team agents running"));
+    assert!(find(&rows, "Left running  ").contains("24 hours after CrazyAgent quits"));
+    find(
+        &rows,
+        "An agent still running when the time is up ends with its terminal.",
+    );
+    let note = rows
+        .iter()
+        .skip_while(|row| !row.contains("An agent still running when the time is up"))
+        .take(3)
+        .map(|row| row.trim_matches(|c: char| !(c.is_alphanumeric() || c.is_ascii_punctuation())))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        note.contains(
+            "The limit also covers agents left behind when CrazyAgent did not quit cleanly."
+        ),
+        "{note}"
+    );
+    assert!(rows.last().unwrap().contains("q Quitting"));
+    shell.key(Key::Char('q'));
+    let rows = render(&mut shell, 200, 60);
+    find(&rows, "what happens to team agents that are running");
+    find(&rows, "> Keep team agents running");
+    find(
+        &rows,
+        "They go on with their work, and CrazyAgent takes them over when it opens again.",
+    );
+    find(&rows, "  Stop team agents");
+    find(
+        &rows,
+        "Each agent stops as Stop would, and its task goes back to the queue.",
+    );
+    assert!(rows.last().unwrap().contains("Enter Next"));
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 200, 60);
+    find(
+        &rows,
+        "how long agents left running wait for CrazyAgent to open again",
+    );
+    find(&rows, "> 24 hours after CrazyAgent quits");
+    find(&rows, "  No limit, until CrazyAgent opens again");
+    shell.key(Key::Enter);
+    find(&render(&mut shell, 200, 60), "Hours after CrazyAgent quits");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the stored setting saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn stop_team_agents_saves_stop_with_the_stored_hours_and_reads_the_setting_back() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Stop team agents");
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    assert_eq!(
+        quit_chosen(&mut shell),
+        QuitSettings {
+            on_quit: OnQuit::Stop,
+            left_running: LeftRunning::AfterHours,
+            hours: 24
+        }
+    );
+    shell.arrive(event(AppSetupEvent::QuitSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "When quitting: Stop team agents. Left running: 24 hours after CrazyAgent quits."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Quit)),
+        "a saved change reads the setting back"
+    );
+    shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings {
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::AfterHours,
+        hours: 24,
+    }))));
+    assert!(find(&render(&mut shell, 120, 60), "When quitting  ").contains("Stop team agents"));
+    shell.key(Key::Char('q'));
+    find(&render(&mut shell, 120, 60), "> Stop team agents");
+}
+
+#[test]
+fn no_limit_saves_never_and_keeps_the_stored_hours_for_later() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings {
+        on_quit: OnQuit::KeepRunning,
+        left_running: LeftRunning::AfterHours,
+        hours: 48,
+    }))));
+    assert!(
+        find(&render(&mut shell, 120, 60), "Left running  ")
+            .contains("48 hours after CrazyAgent quits")
+    );
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Down);
+    find(
+        &render(&mut shell, 120, 60),
+        "> No limit, until CrazyAgent opens again",
+    );
+    shell.key(Key::Enter);
+    assert_eq!(
+        quit_chosen(&mut shell),
+        QuitSettings {
+            on_quit: OnQuit::KeepRunning,
+            left_running: LeftRunning::Never,
+            hours: 48
+        }
+    );
+    shell.arrive(event(AppSetupEvent::QuitSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "When quitting: Keep team agents running. Left running: No limit, until CrazyAgent opens again."
+    );
+}
+
+#[test]
+fn after_hours_saves_the_typed_hours_and_refuses_hours_outside_one_to_168() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    for refused in ["0", "169", "1.5", "-2", "ten", ""] {
+        clear(&mut shell);
+        typed(&mut shell, refused);
+        shell.key(Key::Enter);
+        assert!(jobs(&mut shell).is_empty(), "{refused:?} is not sent");
+        assert_eq!(lead(&shell), "Enter a whole number of hours from 1 to 168.");
+        find(&render(&mut shell, 120, 60), "Hours after CrazyAgent quits");
+    }
+    clear(&mut shell);
+    typed(&mut shell, "1");
+    shell.key(Key::Enter);
+    assert_eq!(
+        quit_chosen(&mut shell),
+        QuitSettings {
+            on_quit: OnQuit::KeepRunning,
+            left_running: LeftRunning::AfterHours,
+            hours: 1
+        }
+    );
+    shell.arrive(event(AppSetupEvent::QuitSet(Err("busy".into()))));
+    assert_ne!(
+        lead(&shell),
+        "When quitting: Keep team agents running. Left running: 1 hour after CrazyAgent quits."
+    );
+    assert!(!lead(&shell).is_empty());
+}
+
+#[test]
+fn esc_at_each_quitting_step_changes_nothing() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+#[test]
+fn a_stored_quitting_setting_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Quit(Err(
+        "quit_settings_invalid".into()
+    ))));
+    let rows = render(&mut shell, 120, 60);
+    let row = find(&rows, "When quitting  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    assert!(!rows.iter().any(|row| row.contains("Left running  ")));
+    shell.key(Key::Char('q'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The quitting setting is not known yet.");
 }

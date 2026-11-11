@@ -15,17 +15,16 @@ fn project(root: &Path) -> AgentProject {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     }
 }
 
+#[cfg(unix)]
 fn given(text: &str) -> Given {
     Given {
         text: text.into(),
         files: Vec::new(),
         section_bytes: 0,
-        context: Vec::new(),
     }
 }
 
@@ -36,7 +35,7 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     let folder = project.folder.clone().unwrap();
     assert_eq!(read_app(&project.data).unwrap(), "");
     assert_eq!(read_project(&folder).unwrap(), "");
-    assert_eq!(text(&project, None).unwrap().text, "");
+    assert_eq!(text(&project).unwrap().text, "");
 
     save_app(&project.data, "Use TDD.\n").unwrap();
     save_project(&folder, "Run make check.\n").unwrap();
@@ -86,8 +85,11 @@ fn the_size_bound_holds_on_save_and_on_read() {
     save_app(&project.data, &full).unwrap();
     save_project(&folder, &full).unwrap();
     assert_eq!(read_app(&project.data).unwrap().len(), TEXT_BYTES_MAX);
-    let rendered = text(&project, None).unwrap().text;
-    assert!(rendered.len() <= PROCESS_BYTES_MAX);
+    assert_eq!(
+        text(&project).unwrap_err().0,
+        "agent_instructions_too_large_app",
+        "two full parts are more than one launch is given, and the refusal names the larger"
+    );
 
     let over = "a".repeat(TEXT_BYTES_MAX + 1);
     assert_eq!(
@@ -109,10 +111,7 @@ fn the_size_bound_holds_on_save_and_on_read() {
         read_project(&folder).unwrap_err().0,
         "process_text_too_large"
     );
-    assert_eq!(
-        text(&project, None).unwrap_err().0,
-        "process_text_too_large"
-    );
+    assert_eq!(text(&project).unwrap_err().0, "process_text_too_large");
 }
 
 #[test]
@@ -173,9 +172,10 @@ fn render_puts_app_text_first_and_project_text_last_under_headings() {
 
 #[cfg(unix)]
 fn home(root: &Path, name: &str) -> PathBuf {
-    use std::os::unix::fs::DirBuilderExt;
     let home = root.join(name);
-    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700)
+        .create(&home)
+        .unwrap();
     home
 }
 
@@ -187,7 +187,7 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     let project = project(&root);
     save_app(&project.data, "App rule.\n").unwrap();
     save_project(project.folder.as_deref().unwrap(), "Project rule.\n").unwrap();
-    let rendered = text(&project, None).unwrap().text;
+    let rendered = text(&project).unwrap().text;
     let app = rendered.find("App rule.").unwrap();
     let own = rendered.find("Project rule.").unwrap();
     assert!(app < own, "project text goes last");
@@ -533,4 +533,42 @@ fn the_default_process_leaves_commits_to_the_landing_rules_of_each_access_level(
     ] {
         assert!(DEFAULT_PROCESS.contains(rule), "{rule}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_part() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let app = format!("{}\n", "a".repeat(40 * 1024));
+    save_app(&project.data, &app).unwrap();
+    let given = text(&project).unwrap();
+    assert!(given.text.contains(app.trim()));
+    assert!(given.text.len() <= GIVEN_BYTES_MAX);
+
+    let claude = home(&root, "claude");
+    let stale = claude.join(STALE_CONTEXT_FOLDER);
+    fs::create_dir(&stale).unwrap();
+    fs::write(stale.join("app-instructions.md"), &app).unwrap();
+    prepare(&claude, Harness::Claude, &project, &given).unwrap();
+    assert_eq!(
+        fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
+        given.text
+    );
+    assert!(
+        !stale.exists(),
+        "an earlier launch's context folder never outlives an inline launch"
+    );
+
+    let folder = project.folder.clone().unwrap();
+    save_project(&folder, &"p".repeat(30 * 1024)).unwrap();
+    assert_eq!(
+        text(&project).unwrap_err().0,
+        "agent_instructions_too_large_app"
+    );
+    save_project(&folder, &"p".repeat(60 * 1024)).unwrap();
+    assert_eq!(
+        text(&project).unwrap_err().0,
+        "agent_instructions_too_large_project"
+    );
 }

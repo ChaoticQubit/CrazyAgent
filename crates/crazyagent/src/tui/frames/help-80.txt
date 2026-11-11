@@ -2,23 +2,23 @@
 ────────────────────────────────────────────────────────────────────────────────
   P┌─ Keys ─────────────────────────────────────────────────────────────────┐t  
    │ Everywhere                          Lists                              │   
-  ▌│ Ctrl-K     Go to anything           ↑↓        Move                     │g  
-  ▌│ Esc        Back or cancel           PgUp PgDn Page                     │   
-  ▌│ Tab        Next field or panel      Home End  First, last              │o  
-   │ Shift-Tab  Previous                 /         Filter                   │   
-   │ Shift-←→   Next tab                 Space     Select                   │e  
-   │ ?          This help                Enter     Open                     │   
-   │ Ctrl-Q     Quit                                                        │y  
+  ▌│ Ctrl-K       Go to anything         ↑↓        Move                     │g  
+  ▌│ Esc          Back or cancel         PgUp PgDn Page                     │   
+  ▌│ Tab          Next field or panel    Home End  First, last              │o  
+   │ Shift-Tab    Previous               /         Filter                   │   
+   │ Shift-←→     Next tab               Space     Select                   │e  
+   │ ?            This help              Enter     Open                     │   
+   │ Ctrl-Q       Quit                                                      │y  
    │                                                                        │   
    │ Text fields                         This screen                        │l  
-   │ ←→         Move the cursor          n         New project              │   
-   │ Ctrl-A E   Start, end               a         Add project              │9  
-   │ Ctrl-W     Delete a word            s         Settings                 │   
-   │ Ctrl-U     Clear the field          Enter     Open project             │   
-   │ Ctrl-J     New line                 f         Projects folder          │   
+   │ ←→           Move the cursor        n         New project              │   
+   │ Ctrl-A E     Start, end             a         Add project              │9  
+   │ Ctrl-W       Delete a word          s         Settings                 │   
+   │ Ctrl-U       Clear the field        Enter     Open project             │   
+   │ Ctrl-J       New line               f         Projects folder          │   
+   │ Shift-Enter  New line, if supported                                    │   
    │                                                                        │   
-   │ Letter keys work when you are not typing in a field.                   │   
+   │ Letter keys work outside fields. In tmux, use Ctrl-J for a new line.   │   
    └────────────────────────────────────────────────────────────────────────┘   
-                                                                                
                                                                                 
  Esc Close  ? Close                                                      ? Help 

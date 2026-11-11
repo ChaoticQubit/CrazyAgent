@@ -405,7 +405,7 @@ fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
     Ok(())
 }
 
-async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
 ) -> Result<Vec<u8>, EngineError> {
     let length = stream.read_u32().await.map_err(io_error)? as usize;
@@ -459,6 +459,7 @@ async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, ti
 
 /// The terminal host the engine serves agent terminals through, once one is made: the tmux
 /// program it was made for, none when tmux was not found, and the host.
+#[cfg(unix)]
 type TerminalHost = (
     Option<std::path::PathBuf>,
     std::sync::Arc<dyn crate::terminal::Host>,
@@ -468,9 +469,10 @@ pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
     timeout: Duration,
-    owner_egress: tokio::sync::RwLock<()>,
+    owner_egress: std::sync::Arc<tokio::sync::RwLock<()>>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
+    #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -535,16 +537,22 @@ impl Engine {
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
+    /// The engine's two settings files, global then project, for what reads them itself at
+    /// each launch. Output: the paths, or none for an engine opened without them.
+    pub(crate) fn settings_files(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        self.settings_files.clone()
+    }
+
     /// The loopback ports of the owner's configured local model endpoints, read from the
     /// engine's settings files at each call, for a sandbox the engine starts to keep free
-    /// of the listeners of what it runs. Output: the ports; none when the engine has no
-    /// settings files or they do not read, as for team and research launches.
-    pub(crate) fn owner_ports(&self) -> Vec<u16> {
-        self.settings_files
-            .as_ref()
-            .and_then(|(global, project)| crate::config::resolve_config(global, project).ok())
-            .and_then(|config| config.settings.model_access)
-            .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+    /// of the listeners of what it runs. Output: the ports, none when the engine has no
+    /// settings files, or [`crate::sandbox::OWNER_PORTS_UNREADABLE`] when they do not read,
+    /// so that sandbox does not start (OWNER-PORTS-FAIL-OPEN).
+    pub(crate) fn owner_ports(&self) -> Result<Vec<u16>, &'static str> {
+        match &self.settings_files {
+            Some((global, project)) => crate::sandbox::settings_owner_ports(global, project),
+            None => Ok(Vec::new()),
+        }
     }
 
     pub async fn open_with_settings_sources(
@@ -567,9 +575,10 @@ impl Engine {
                 storage,
                 input: Mutex::default(),
                 timeout,
-                owner_egress: tokio::sync::RwLock::new(()),
+                owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
+                #[cfg(unix)]
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
@@ -585,9 +594,10 @@ impl Engine {
             storage: Storage::open(path, config, false).await?,
             input: Mutex::default(),
             timeout,
-            owner_egress: tokio::sync::RwLock::new(()),
+            owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             settings_files: None,
@@ -601,9 +611,10 @@ impl Engine {
             storage: Storage::open(path, config, true).await?,
             input: Mutex::default(),
             timeout,
-            owner_egress: tokio::sync::RwLock::new(()),
+            owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             settings_files: None,

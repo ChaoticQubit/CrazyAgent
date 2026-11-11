@@ -1,16 +1,19 @@
 use super::*;
+use crate::coord::tool_switches::{self, BUILTIN_TOOLS, CRAZYAGENT_SERVER, Switch};
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill,
     HOOKS_PER_SCOPE_MAX, HookView, LaunchPlugins, LaunchSecret, LaunchServer,
     SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX, SKILLS_PER_SCOPE_MAX, Scope, SecretValue,
     SecretView, ServerSpec, ServerStatus, ServerView, SkillView, TOOL_NAME_BYTES_MAX,
-    TOOL_NAMES_BYTES_MAX, TOOLS_MAX, hook_folder, skill_folder,
+    TOOL_NAMES_BYTES_MAX, TOOLS_MAX, ToolView, hook_folder, skill_folder,
 };
+use crate::storage::versioned;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
+#[cfg(any(unix, test))]
 macro_rules! items_columns {
     () => {
         "(
@@ -37,6 +40,7 @@ CREATE TABLE IF NOT EXISTS plugin_switches (
 );
 /// Rebuilds an item table from before hooks with the current check, keeping every row, for
 /// the upgrade step that lets it hold hooks.
+#[cfg(unix)]
 pub(super) const WIDEN_ITEMS: &str = concat!(
     "CREATE TABLE plugin_items_next ",
     items_columns!(),
@@ -62,9 +66,11 @@ pub(crate) enum Command {
     SetSkill {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveSkill {
         id: String,
+        version: u64,
     },
     AddHooks {
         scope: Scope,
@@ -88,6 +94,7 @@ pub(crate) enum Command {
     UpdateServer {
         id: String,
         spec: ServerSpec,
+        version: u64,
     },
     Approve {
         id: String,
@@ -96,14 +103,17 @@ pub(crate) enum Command {
     SetServer {
         id: String,
         enabled: bool,
+        version: u64,
     },
     RemoveServer {
         id: String,
+        version: u64,
     },
     Switch {
         project: ProjectId,
         id: String,
         on: bool,
+        version: u64,
     },
     AttachSecret {
         id: String,
@@ -143,6 +153,20 @@ pub(crate) enum Command {
     Launch {
         project: ProjectId,
     },
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
 }
 
 pub(crate) struct SkillChange {
@@ -159,12 +183,17 @@ pub(crate) enum ResultValue {
     Skills(Vec<SkillView>, Option<u16>),
     Servers(Vec<ServerView>, Option<u16>),
     Secret(Box<ServerView>, Option<String>),
-    Check(Box<ServerSpec>, Vec<EffectiveSecret>),
+    Check(
+        Box<ServerSpec>,
+        Vec<EffectiveSecret>,
+        crate::sandbox::SandboxNetwork,
+    ),
     Effective(Box<EffectivePlugins>),
     Launch(Box<LaunchPlugins>),
     HooksAdded(Vec<HookView>, PathBuf),
     Hooks(Vec<HookView>, Option<u16>),
     Hook(Box<HookView>),
+    Tools(Vec<ToolView>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +310,10 @@ pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, Engin
 
 #[cfg(unix)]
 const SECRET_BYTES_MAX: usize = 8192;
+/// The shortest MCP secret value kept. A shorter value such as `1` or `true` is part of
+/// nearly every launch path or flag, so no launch could prove its command keeps it hidden.
+#[cfg(unix)]
+const SECRET_BYTES_MIN: usize = 8;
 
 fn valid_reference(reference: &str) -> bool {
     reference.strip_prefix("secret-").is_some_and(|hex| {
@@ -340,7 +373,8 @@ pub(crate) fn store_secret(
 
 /// Saves one MCP server secret as a private 0600 file named by its reference.
 /// Inputs: the engine root, a fresh reference and the secret bytes, which are zeroed after
-/// writing. Output: Ok, or a code with no file left behind.
+/// writing. Output: Ok, or a code with no file left behind; `server_secret_too_short` for a
+/// value under `SECRET_BYTES_MIN` bytes.
 #[cfg(unix)]
 pub(crate) fn store_secret(
     root: &Path,
@@ -350,6 +384,9 @@ pub(crate) fn store_secret(
     let stored = (|| {
         if !valid_reference(reference) || secret.is_empty() || secret.len() > SECRET_BYTES_MAX {
             return Err(error("server_secret_invalid"));
+        }
+        if secret.len() < SECRET_BYTES_MIN {
+            return Err(error("server_secret_too_short"));
         }
         let directory = secrets_directory(root)?;
         let mut file = std::fs::File::from(
@@ -486,6 +523,7 @@ pub(crate) fn move_check_folder_aside(
 /// moved aside for deletion that a crash left, for the start sweep. Inputs: the engine root
 /// and the server id. Output: Ok when all are gone, including when already missing;
 /// `plugin_check_folder_invalid` for a name that is not one plain folder name.
+#[cfg(unix)]
 pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineError> {
     check_folder_name(id)?;
     let checks = root.join(CHECK_FOLDER);
@@ -530,10 +568,11 @@ fn moved_aside(name: &str, id: &str) -> bool {
 /// Deletes one removed project's skill store folder with everything in it, for the start
 /// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
 /// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
-/// not one store-relative folder name.
+/// not one store-relative folder name, on Windows also for a colon, which Windows reads as a
+/// stream or device suffix instead of that folder; elsewhere a project id's colon names the
+/// folder as it always has.
 pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
-    if project.is_empty() || project.len() > 128 || project.contains('/') || project.contains("..")
-    {
+    if !crate::protocol::single_component(project) || (cfg!(windows) && project.contains(':')) {
         return Err(error("plugin_skill_folder_invalid"));
     }
     match std::fs::remove_dir_all(
@@ -550,6 +589,7 @@ pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<
 
 /// Deletes one stored hook folder the trash names, all its hooks being gone. Inputs: the
 /// engine root and the folder's id. Output: Ok when it is gone, or a plain refusal.
+#[cfg(unix)]
 pub(crate) fn remove_hook_folder(root: &Path, id: &str) -> Result<(), EngineError> {
     if !valid_folder_id(id) {
         return Err(error("plugin_hook_folder_invalid"));
@@ -579,6 +619,7 @@ fn folder_id(record: &HookRecord) -> Option<&str> {
 
 /// Tells whether any stored hook follows one skill or MCP server. Inputs: the transaction
 /// and the item id. Output: true when one does.
+#[cfg(unix)]
 pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, EngineError> {
     Ok(all::<HookRecord>(tx, "hook")?
         .iter()
@@ -777,6 +818,51 @@ fn switched_off(tx: &Transaction<'_>, project: &ProjectId) -> Result<Vec<String>
     Ok(items)
 }
 
+/// The network a global server's plugin check runs under: the strictest choice among the
+/// projects that enable the server, so the check reaches no further than any of their agents
+/// may; Open when no project enables it. A project enables a global server unless it is in
+/// that project's switched-off list. Takes the transaction and the server id. Returns the
+/// sandbox network, or `project_network_unreadable` when a project's policy cannot be read.
+fn global_check_network(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> Result<crate::sandbox::SandboxNetwork, EngineError> {
+    use crate::sandbox::policy::AgentNetwork;
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut statement = tx.prepare("SELECT id FROM projects").map_err(error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(error)?;
+        for row in rows {
+            ids.push(row.map_err(error)?);
+        }
+    }
+    let rank = |network: AgentNetwork| {
+        AgentNetwork::ALL
+            .iter()
+            .position(|choice| *choice == network)
+            .unwrap_or(0)
+    };
+    let mut strictest: Option<AgentNetwork> = None;
+    for project in ids {
+        let project = ProjectId::new(&project).map_err(|_| error("project_network_unreadable"))?;
+        if switched_off(tx, &project)?.iter().any(|item| item == id) {
+            continue;
+        }
+        let network = crate::sandbox::policy::load(tx, project.as_str())
+            .map_err(|_| error("project_network_unreadable"))?
+            .network;
+        let replace = strictest.is_none_or(|current| rank(network) > rank(current));
+        if replace {
+            strictest = Some(network);
+        }
+    }
+    Ok(strictest
+        .map(|network| network.sandbox(None))
+        .unwrap_or(crate::sandbox::SandboxNetwork::Open))
+}
+
 fn visible(scope: &Scope, project: Option<&ProjectId>) -> bool {
     match (scope, project) {
         (Scope::Global, _) => true,
@@ -792,13 +878,36 @@ fn on_here(scope: &Scope, id: &str, project: Option<&ProjectId>, off: &[String])
     }
 }
 
-fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> SkillView {
+/// Reads one plugin's version, 0 for a plugin the owner never changed.
+pub(super) fn plugin_version(connection: &Connection, id: &str) -> Result<u64, EngineError> {
+    Ok(versioned::current(connection, &versioned::plugin_item(id)?)?.version)
+}
+
+/// Writes the next version of one plugin when the owner's screen showed the current one,
+/// before its On switch, project switches or command change. Takes the transaction, the
+/// plugin id and the version shown. Returns the plain refusal `stale_revision` otherwise.
+fn owner_change(tx: &Transaction<'_>, id: &str, version: u64) -> Result<(), EngineError> {
+    match versioned::owner_write(tx, &versioned::plugin_item(id)?, version)? {
+        Ok(next) => {
+            assert_eq!(next, version + 1);
+            Ok(())
+        }
+        Err(_) => Err(error(versioned::STALE_CODE)),
+    }
+}
+
+fn skill_view(
+    connection: &Connection,
+    record: &SkillRecord,
+    root: &Path,
+    on_here: Option<bool>,
+) -> Result<SkillView, EngineError> {
     let description = crate::memory::visible_text(&record.description);
     let folder = root.join(&record.folder);
     let refused = crate::plugins::skill_folder::stored_description(&folder.join("SKILL.md"))
         .err()
         .map(str::to_owned);
-    SkillView {
+    Ok(SkillView {
         id: record.id.clone(),
         name: record.name.clone(),
         line: crate::skills::one_line(&description),
@@ -809,12 +918,18 @@ fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> Skill
         on_here,
         source: crate::memory::visible_text(&record.source),
         folder: folder.display().to_string(),
+        version: plugin_version(connection, &record.id)?,
         refused,
-    }
+    })
 }
 
-fn hook_view(record: &HookRecord, follows: Option<String>, on_here: Option<bool>) -> HookView {
-    HookView {
+fn hook_view(
+    connection: &Connection,
+    record: &HookRecord,
+    follows: Option<String>,
+    on_here: Option<bool>,
+) -> Result<HookView, EngineError> {
+    Ok(HookView {
         id: record.id.clone(),
         name: record.name.clone(),
         plugin: record.plugin.clone(),
@@ -827,7 +942,8 @@ fn hook_view(record: &HookRecord, follows: Option<String>, on_here: Option<bool>
         on_here,
         follows,
         source: crate::memory::visible_text(&record.source),
-    }
+        version: plugin_version(connection, &record.id)?,
+    })
 }
 
 /// Names the skill or MCP server a hook follows, as the hook list shows it.
@@ -1001,11 +1117,16 @@ fn secret_saved(root: &Path, reference: &str) -> bool {
         .is_ok_and(|metadata| metadata.is_file())
 }
 
-fn server_view(record: &ServerRecord, root: &Path, on_here: Option<bool>) -> ServerView {
+fn server_view(
+    connection: &Connection,
+    record: &ServerRecord,
+    root: &Path,
+    on_here: Option<bool>,
+) -> Result<ServerView, EngineError> {
     let status = status(record);
     let digest = record.spec.digest();
     let current = record.check.as_ref().filter(|check| check.digest == digest);
-    ServerView {
+    Ok(ServerView {
         id: record.id.clone(),
         name: record.name.clone(),
         scope: record.scope.clone(),
@@ -1033,7 +1154,8 @@ fn server_view(record: &ServerRecord, root: &Path, on_here: Option<bool>) -> Ser
             })
             .collect(),
         on_here,
-    }
+        version: plugin_version(connection, &record.id)?,
+    })
 }
 
 fn page<T: Serialize>(items: Vec<T>, offset: u16) -> Result<(Vec<T>, Option<u16>), EngineError> {
@@ -1341,9 +1463,13 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 value: SecretValue::new(read_secret(root, &secret.reference)?),
             });
         }
+        #[cfg(unix)]
+        let spec = crate::context_mode::for_launch(root, server.spec);
+        #[cfg(not(unix))]
+        let spec = server.spec;
         servers.push(LaunchServer {
             name: server.name,
-            spec: server.spec,
+            spec,
             secrets,
         });
     }
@@ -1362,7 +1488,17 @@ pub(crate) fn execute(
     root: &Path,
     command: Command,
 ) -> Result<ResultValue, EngineError> {
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if let Command::SetSkill { id, .. }
+    | Command::RemoveSkill { id, .. }
+    | Command::UpdateServer { id, .. }
+    | Command::SetServer { id, .. }
+    | Command::RemoveServer { id, .. } = &command
+    {
+        super::setup::plugin_changed(&tx, id)?;
+    }
     let value = run(&tx, root, command)?;
     let committed = tx.commit().map_err(error);
     match (&value, committed) {
@@ -1394,7 +1530,7 @@ pub(super) fn run(
         Command::AddSkill { scope, source } => {
             let (record, _) = add_skill(tx, root, scope, source, &skill_folder::PICKED)?;
             ResultValue::Skill(Box::new(SkillChange {
-                view: skill_view(&record, root, None),
+                view: skill_view(tx, &record, root, None)?,
                 added: true,
             }))
         }
@@ -1406,15 +1542,20 @@ pub(super) fn run(
             };
             ResultValue::Imported(
                 Box::new(SkillChange {
-                    view: skill_view(&record, root, None),
+                    view: skill_view(tx, &record, root, None)?,
                     added,
                 }),
                 meta.skipped,
                 meta.skipped_total,
             )
         }
-        Command::SetSkill { id, enabled } => {
+        Command::SetSkill {
+            id,
+            enabled,
+            version,
+        } => {
             let mut record: SkillRecord = load(tx, "skill", &id)?;
+            owner_change(tx, &id, version)?;
             record.enabled = enabled;
             save(
                 tx,
@@ -1425,12 +1566,14 @@ pub(super) fn run(
                 &record,
             )?;
             ResultValue::Skill(Box::new(SkillChange {
-                view: skill_view(&record, root, None),
+                view: skill_view(tx, &record, root, None)?,
                 added: false,
             }))
         }
-        Command::RemoveSkill { id } => {
+        Command::RemoveSkill { id, version } => {
             let record: SkillRecord = load(tx, "skill", &id)?;
+            owner_change(tx, &id, version)?;
+            versioned::forget(tx, &versioned::plugin_item(&id)?)?;
             tx.execute("DELETE FROM plugin_items WHERE id=?1", [&id])
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
@@ -1446,7 +1589,7 @@ pub(super) fn run(
             let (records, copy) = add_hooks(tx, root, scope, source, follows)?;
             let mut views = Vec::with_capacity(records.len());
             for record in &records {
-                views.push(hook_view(record, follows_name(tx, record)?, None));
+                views.push(hook_view(tx, record, follows_name(tx, record)?, None)?);
             }
             ResultValue::HooksAdded(views, copy)
         }
@@ -1455,7 +1598,7 @@ pub(super) fn run(
             record.enabled = enabled;
             save(tx, "hook", &record.id, &record.scope, &record.name, &record)?;
             let follows = follows_name(tx, &record)?;
-            ResultValue::Hook(Box::new(hook_view(&record, follows, None)))
+            ResultValue::Hook(Box::new(hook_view(tx, &record, follows, None)?))
         }
         Command::Hooks { project, offset } => {
             let off = match &project {
@@ -1468,7 +1611,7 @@ pub(super) fn run(
                 .filter(|record| visible(&record.scope, project.as_ref()))
             {
                 let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
-                views.push(hook_view(record, follows_name(tx, record)?, here));
+                views.push(hook_view(tx, record, follows_name(tx, record)?, here)?);
             }
             let (views, next) = page(views, offset)?;
             ResultValue::Hooks(views, next)
@@ -1480,18 +1623,19 @@ pub(super) fn run(
             secrets,
         } => {
             let record = add_server(tx, scope, name, spec, secrets)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
-        Command::UpdateServer { id, spec } => {
+        Command::UpdateServer { id, spec, version } => {
             spec.validate()?;
             let mut record: ServerRecord = load(tx, "server", &id)?;
+            owner_change(tx, &id, version)?;
             if record.spec != spec {
                 record.spec = spec;
                 record.approved = None;
                 record.check = None;
                 put_server(tx, &record)?;
             }
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::Approve { id, spec } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
@@ -1500,16 +1644,23 @@ pub(super) fn run(
             }
             record.approved = Some(record.spec.digest());
             put_server(tx, &record)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
-        Command::SetServer { id, enabled } => {
+        Command::SetServer {
+            id,
+            enabled,
+            version,
+        } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
+            owner_change(tx, &id, version)?;
             record.enabled = enabled;
             put_server(tx, &record)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
-        Command::RemoveServer { id } => {
+        Command::RemoveServer { id, version } => {
             let record: ServerRecord = load(tx, "server", &id)?;
+            owner_change(tx, &id, version)?;
+            versioned::forget(tx, &versioned::plugin_item(&id)?)?;
             tx.execute("DELETE FROM plugin_items WHERE id=?1", [&id])
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
@@ -1521,7 +1672,12 @@ pub(super) fn run(
             super::trash::put(tx, super::trash::MCP_CHECKS, &id)?;
             ResultValue::Removed(record.secrets.into_iter().map(|s| s.reference).collect())
         }
-        Command::Switch { project, id, on } => {
+        Command::Switch {
+            project,
+            id,
+            on,
+            version,
+        } => {
             if !project_exists(tx, &project)? {
                 return Err(error("plugin_project_unknown"));
             }
@@ -1536,6 +1692,7 @@ pub(super) fn run(
                 Some("global") => {}
                 Some(_) => return Err(error("plugin_switch_global_only")),
             }
+            owner_change(tx, &id, version)?;
             if on {
                 tx.execute(
                     "DELETE FROM plugin_switches WHERE project=?1 AND item=?2",
@@ -1572,7 +1729,7 @@ pub(super) fn run(
             if let Some(old) = &replaced {
                 super::trash::put(tx, super::trash::MCP_SECRET, old)?;
             }
-            ResultValue::Secret(Box::new(server_view(&record, root, None)), replaced)
+            ResultValue::Secret(Box::new(server_view(tx, &record, root, None)?), replaced)
         }
         Command::DetachSecret { id, name } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
@@ -1585,17 +1742,26 @@ pub(super) fn run(
             put_server(tx, &record)?;
             super::trash::put(tx, super::trash::MCP_SECRET, &removed.reference)?;
             ResultValue::Secret(
-                Box::new(server_view(&record, root, None)),
+                Box::new(server_view(tx, &record, root, None)?),
                 Some(removed.reference),
             )
         }
         Command::Server { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
-            ResultValue::Check(Box::new(record.spec), record.secrets)
+            let network = match &record.scope {
+                Scope::Project { project_id } => {
+                    crate::sandbox::policy::load(tx, project_id.as_str())
+                        .map_err(|_| error("project_network_unreadable"))?
+                        .network
+                        .sandbox(None)
+                }
+                Scope::Global => global_check_network(tx, &id)?,
+            };
+            ResultValue::Check(Box::new(record.spec), record.secrets, network)
         }
         Command::RecordCheck {
             id,
@@ -1616,7 +1782,7 @@ pub(super) fn run(
                 });
             }
             put_server(tx, &record)?;
-            ResultValue::Server(Box::new(server_view(&record, root, None)))
+            ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::Skills { project, offset } => {
             let off = match &project {
@@ -1628,12 +1794,13 @@ pub(super) fn run(
                 .filter(|record| visible(&record.scope, project.as_ref()))
                 .map(|record| {
                     skill_view(
+                        tx,
                         record,
                         root,
                         on_here(&record.scope, &record.id, project.as_ref(), &off),
                     )
                 })
-                .collect();
+                .collect::<Result<_, EngineError>>()?;
             let (views, next) = page(views, offset)?;
             ResultValue::Skills(views, next)
         }
@@ -1648,7 +1815,7 @@ pub(super) fn run(
             };
             let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
             ResultValue::Skill(Box::new(SkillChange {
-                view: skill_view(&record, root, here),
+                view: skill_view(tx, &record, root, here)?,
                 added: false,
             }))
         }
@@ -1662,12 +1829,13 @@ pub(super) fn run(
                 .filter(|record| visible(&record.scope, project.as_ref()))
                 .map(|record| {
                     server_view(
+                        tx,
                         record,
                         root,
                         on_here(&record.scope, &record.id, project.as_ref(), &off),
                     )
                 })
-                .collect();
+                .collect::<Result<_, EngineError>>()?;
             let (views, next) = page(views, offset)?;
             ResultValue::Servers(views, next)
         }
@@ -1680,7 +1848,111 @@ pub(super) fn run(
         Command::Launch { project } => {
             ResultValue::Launch(Box::new(launch_set(tx, root, &project)?))
         }
+        Command::Tools { project, server } => {
+            ResultValue::Tools(tool_views(tx, root, project.as_ref(), server.as_deref())?.1)
+        }
+        Command::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        } => {
+            let (key, views) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            let Some(found) = views.iter().find(|view| view.tool == tool) else {
+                return Err(error("tool_unknown"));
+            };
+            if switch == Switch::Hidden && !found.builtin {
+                return Err(error("tool_delete_builtin_only"));
+            }
+            tool_switches::set(tx, project.as_ref(), &key, &tool, switch)?;
+            let (_, views) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            assert!(views.iter().any(|view| view.tool == tool));
+            ResultValue::Tools(views)
+        }
+        Command::RestoreTools { project, server } => {
+            let (key, _) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            tool_switches::restore_defaults(tx, project.as_ref(), &key)?;
+            ResultValue::Tools(tool_views(tx, root, project.as_ref(), server.as_deref())?.1)
+        }
     })
+}
+
+/// Lists one server's tools with their switches: the CrazyAgent built-in tools when no server
+/// id is given, else the checked tools of that MCP server, keyed by its name as agents see it.
+/// A project-only server is listed only in its own project.
+/// Inputs: the transaction, the plugin store root, the project (none for every project) and the
+/// server id. Output: the switch key of the server and its tools in order, or a plain refusal.
+fn tool_views(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: Option<&ProjectId>,
+    server: Option<&str>,
+) -> Result<(String, Vec<ToolView>), EngineError> {
+    if let Some(project) = project
+        && !project_exists(tx, project)?
+    {
+        return Err(error("plugin_project_unknown"));
+    }
+    let (key, tools): (String, Vec<(String, String)>) = match server {
+        None => (
+            CRAZYAGENT_SERVER.to_owned(),
+            BUILTIN_TOOLS
+                .iter()
+                .map(|(tool, description)| ((*tool).to_owned(), (*description).to_owned()))
+                .collect(),
+        ),
+        Some(id) => {
+            let record: ServerRecord = load(tx, "server", id)?;
+            let view = server_view(tx, &record, root, None)?;
+            if let Scope::Project { project_id } = &view.scope
+                && project != Some(project_id)
+            {
+                return Err(error("server_not_found"));
+            }
+            let tools = view.tools.into_iter().map(|tool| (tool, String::new()));
+            (view.name, tools.collect())
+        }
+    };
+    let global: std::collections::BTreeMap<String, Switch> =
+        tool_switches::overrides(tx, None, &key)?
+            .into_iter()
+            .collect();
+    let here: std::collections::BTreeMap<String, Switch> = match project {
+        Some(project) => tool_switches::overrides(tx, Some(project), &key)?
+            .into_iter()
+            .collect(),
+        None => std::collections::BTreeMap::new(),
+    };
+    let views: Vec<ToolView> = tools
+        .into_iter()
+        .map(|(tool, description)| ToolView {
+            server: key.clone(),
+            server_id: server.map(str::to_owned),
+            global: global.get(&tool).copied().unwrap_or(Switch::On),
+            here: here.get(&tool).copied(),
+            builtin: server.is_none(),
+            tool,
+            description,
+        })
+        .collect();
+    assert!(views.len() <= TOOLS_MAX.max(BUILTIN_TOOLS.len()));
+    assert!(project.is_some() || views.iter().all(|view| view.here.is_none()));
+    Ok((key, views))
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn a_skill_folder_name_with_a_colon_is_refused_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["name:x", "owner:abc"] {
+            let outcome = super::remove_skill_project_folder(root.path(), id);
+            assert!(
+                matches!(&outcome, Err(refused) if refused.0 == "plugin_skill_folder_invalid"),
+                "{id}: Windows reads a colon as a stream or device, never as this folder: {outcome:?}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

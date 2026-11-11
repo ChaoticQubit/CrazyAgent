@@ -72,6 +72,10 @@ pub const FILES: &[(&str, &[u8])] = &[
         ),
     ),
     (
+        "skills/grill/SKILL.md",
+        include_bytes!("../../assets/pack/skills/grill/SKILL.md"),
+    ),
+    (
         "skills/html-explainer/SKILL.md",
         include_bytes!("../../assets/pack/skills/html-explainer/SKILL.md"),
     ),
@@ -235,6 +239,29 @@ pub const FILES: &[(&str, &[u8])] = &[
     ),
 ];
 
+/// The hook folders CrazyAgent ships for default-pack entries whose own source has no hooks,
+/// as paths relative to `assets/pack` and their bytes, in path order. `hooks/<entry id>` is
+/// one entry's plugin folder, with the `.claude-plugin/plugin.json` naming it, its
+/// `hooks/hooks.json` and the scripts it runs.
+pub const HOOK_FILES: &[(&str, &[u8])] = &[
+    (
+        "hooks/graphify/.claude-plugin/plugin.json",
+        include_bytes!("../../assets/pack/hooks/graphify/.claude-plugin/plugin.json"),
+    ),
+    (
+        "hooks/graphify/hooks/graphify-reminder.sh",
+        include_bytes!("../../assets/pack/hooks/graphify/hooks/graphify-reminder.sh"),
+    ),
+    (
+        "hooks/graphify/hooks/hooks.json",
+        include_bytes!("../../assets/pack/hooks/graphify/hooks/hooks.json"),
+    ),
+];
+
+/// The setup subfolder the shipped hook folders are unpacked into, apart from the bundled
+/// skills, so unpacking them never replaces skills a running setup reads.
+const HOOKS_FOLDER: &str = "bundled-hooks";
+
 /// Fingerprints the shipped files under one bundled path, so a new app version with
 /// changed skill text installs again. Input: a bundled path such as `skills/tiger-style`.
 /// Output: the lowercase hex SHA-256 over each file's path and bytes, in order.
@@ -260,11 +287,41 @@ pub fn digest(path: &str) -> String {
 /// folders 0700 and files 0600 owned by this user. Input: the setup folder. Output: the
 /// bundled folder, the root that bundled pack paths such as `skills/tiger-style` name.
 pub fn extract(setup: &Path) -> Result<PathBuf, InstallError> {
+    unpack(setup, "bundled", FILES)
+}
+
+/// Writes the shipped hook folders into `<setup>/bundled-hooks`, replacing any older copy,
+/// with the same modes as `extract`. Input: the setup folder. Output: that folder.
+pub fn extract_hooks(setup: &Path) -> Result<PathBuf, InstallError> {
+    unpack(setup, HOOKS_FOLDER, HOOK_FILES)
+}
+
+/// Names the unpacked hook folder this build ships for one default-pack entry. Inputs: the
+/// setup folder and the entry id. Output: the folder when the build ships hooks for that
+/// entry and they are unpacked, else none.
+pub fn hook_folder(setup: &Path, id: &str) -> Option<PathBuf> {
+    let prefix = format!("hooks/{id}/");
+    if id.is_empty()
+        || id.contains('/')
+        || !HOOK_FILES.iter().any(|(path, _)| path.starts_with(&prefix))
+    {
+        return None;
+    }
+    let folder = setup.join(HOOKS_FOLDER).join("hooks").join(id);
+    std::fs::symlink_metadata(&folder)
+        .is_ok_and(|metadata| metadata.is_dir())
+        .then_some(folder)
+}
+
+/// Writes compiled files into one setup subfolder through a fresh staging folder, then
+/// swaps it in for any older copy. Inputs: the setup folder, the subfolder name and the
+/// files as relative paths and bytes. Output: the subfolder.
+fn unpack(setup: &Path, name: &str, files: &[(&str, &[u8])]) -> Result<PathBuf, InstallError> {
     private_folder(setup)?;
-    let target = setup.join("bundled");
-    let staging = staging_folder(setup, "bundled")?;
+    let target = setup.join(name);
+    let staging = staging_folder(setup, name)?;
     let result = (|| {
-        for (path, bytes) in FILES {
+        for (path, bytes) in files {
             let relative = Path::new(path);
             assert!(
                 relative

@@ -2,6 +2,8 @@ use super::*;
 #[cfg(all(test, unix))]
 mod barrier_tests;
 #[cfg(all(test, unix))]
+mod dispatch_identity_tests;
+#[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
 #[cfg(all(test, unix))]
@@ -44,11 +46,16 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide;
+pub(crate) mod ide_extensions;
+pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
+pub(crate) mod questions;
+pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -67,6 +74,8 @@ mod owner_deadline_tests;
 #[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
+mod reply_skew_tests;
+#[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
 #[cfg(all(test, unix))]
 mod setup_tests;
@@ -74,6 +83,8 @@ mod setup_tests;
 mod usage_tests;
 
 const SOCKET: &str = "owner.sock";
+/// The log of owner replies this client could not read, in the data root's logs folder.
+const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
@@ -299,6 +310,7 @@ struct Slot {
     token: [u8; 32],
     file: File,
     identity: Identity,
+    closed: u64,
 }
 
 struct PinnedBootstrap {
@@ -478,8 +490,13 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
+    #[cfg(unix)]
+    ide_servers: crate::ide::server::Servers,
+    ide: Arc<crate::ide::bridge::Grants>,
+    reproving: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Authority {
@@ -814,7 +831,12 @@ impl Authority {
         Ok(slot.registration.admission.clone())
     }
 
-    fn publish(&self, registration: Registration) -> Result<(), EngineError> {
+    /// Makes a registration storage committed the one this engine admits, with a fresh
+    /// capability when it is active. A late answer never replaces a newer epoch of the same
+    /// owner nor reopens a slot closed at its own epoch, and one from a control sent before
+    /// the slot's last close is adopted closed. Inputs: the registration and its control's
+    /// place in submit order. Output: Ok, or a capability write or native sign-in failure.
+    fn publish(&self, mut registration: Registration, submitted: u64) -> Result<(), EngineError> {
         let i = match registration.kind {
             OwnerClientKind::Tui => 0,
             OwnerClientKind::Desktop => 1,
@@ -824,8 +846,19 @@ impl Authority {
             .lock()
             .map_err(|_| failure("owner_authority_unavailable"))?;
         let slot = &mut slots[i];
+        registration.active &= submitted > slot.closed;
         if slot.registration.admission == registration.admission
             && slot.registration.active == registration.active
+        {
+            return Ok(());
+        }
+        let (held, next) = (&slot.registration.admission, &registration.admission);
+        if (&held.db_instance, &held.engine_epoch, &held.owner_id)
+            == (&next.db_instance, &next.engine_epoch, &next.owner_id)
+            && (next.owner_epoch < held.owner_epoch
+                || next.owner_epoch == held.owner_epoch
+                    && registration.active
+                    && !slot.registration.active)
         {
             return Ok(());
         }
@@ -849,11 +882,40 @@ impl Authority {
         result.and(cleanup)
     }
 
-    /// Unlinks the owner socket, both owner keys and every runner key this server made,
-    /// each only while it is still the engine's own file, and tries all of them even after
-    /// one fails. Input: none. Output: Ok, or the first failure.
+    /// Refuses one client kind at once and keeps its epoch, for a revocation that did not
+    /// commit in time; only a control sent after it that storage commits opens the slot again.
+    /// Inputs: the client kind and the revocation's place in submit order.
+    /// Output: Ok, or a lock or native sign-in cleanup failure.
+    fn close(&self, kind: OwnerClientKind, submitted: u64) -> Result<(), EngineError> {
+        let i = match kind {
+            OwnerClientKind::Tui => 0,
+            OwnerClientKind::Desktop => 1,
+        };
+        let mut slots = self
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_authority_unavailable"))?;
+        let previous = slots[i].registration.admission.clone();
+        slots[i].registration.active = false;
+        slots[i].closed = slots[i].closed.max(submitted);
+        drop(slots);
+        self.invalidate_native_auth_dispatch(Some(&previous))
+    }
+
+    /// Takes the next owner control's place in submit order, so a close can tell the controls
+    /// the owner sent before it from those sent after. Input: none. Output: the place, from 1.
+    fn next_control(&self) -> u64 {
+        self.controls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// Unlinks the owner socket, both owner keys, every runner key and every IDE capability
+    /// file this server made, each only while it is still the engine's own file, and tries
+    /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
         let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
             Ok(slots) => {
                 for (i, slot) in slots.iter().enumerate() {
@@ -880,9 +942,19 @@ impl Authority {
     }
 }
 
+#[derive(Clone)]
 pub struct OwnerRuntimeHandle {
     engine: Arc<Engine>,
     authority: Arc<Authority>,
+}
+
+#[cfg(unix)]
+impl OwnerRuntimeHandle {
+    /// The engine's IDE servers, one per open project, all stopped when the owner server
+    /// stops. Output: the register.
+    pub fn ide_servers(&self) -> &crate::ide::server::Servers {
+        &self.authority.ide_servers
+    }
 }
 
 impl OwnerRuntimeHandle {
@@ -1052,20 +1124,37 @@ impl OwnerRuntimeHandle {
     }
 
     /// Orders a trusted host grant change with actor work and response delivery.
-    /// Takes an exact control identity, client kind and expected grant epoch.
-    /// Returns committed status; prior delivered data cannot be recalled.
+    /// Takes an exact control identity, client kind and expected grant epoch. Returns
+    /// committed status; prior delivered data cannot be recalled. A revocation that fails in
+    /// any way refuses the client at once; what storage commits late still takes effect.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
-        let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
-            .await
-            .map_err(|_| failure("owner_control_not_submitted"))?;
-        let (result, registration) = self
-            .engine
-            .owner_job(|reply| Job::OwnerControl(self.authority.host.clone(), control, reply))
-            .await?;
-        self.authority
-            .publish(registration)
-            .map_err(|_| failure("owner_control_committed_publication_unavailable"))?;
-        Ok(result)
+        let (target, decision) = (control.target, control.decision);
+        let barrier =
+            tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
+        let submitted = self.authority.next_control();
+        let committed = if barrier.is_err() {
+            Err(failure("owner_control_not_submitted"))
+        } else {
+            let authority = self.authority.clone();
+            self.engine
+                .settled_owner_job(
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    move |stored| {
+                        let (result, registration) = stored?;
+                        authority.publish(registration, submitted).map_err(|_| {
+                            failure("owner_control_committed_publication_unavailable")
+                        })?;
+                        Ok(result)
+                    },
+                )
+                .await
+        };
+        let closed = match (&committed, decision) {
+            (Err(_), OwnerDecision::Revoke) => self.authority.close(target, submitted),
+            _ => Ok(()),
+        };
+        drop(barrier);
+        closed.and(committed)
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1083,6 +1172,54 @@ impl OwnerRuntimeHandle {
                 Job::OwnerControlReconcile(self.authority.host.clone(), control, reply)
             })
             .await
+    }
+}
+
+impl OwnerRuntimeHandle {
+    /// The IDE bridge's view of this owner server: its capability grants, the engine root
+    /// that holds `ide/` and the owner socket path. Fails with `ide_unavailable` once the
+    /// server stopped or its root was replaced. Input: none. Output: the view.
+    pub(crate) fn ide(&self) -> Result<crate::ide::bridge::IdeHost<'_>, EngineError> {
+        if !self
+            .authority
+            .usable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(failure("ide_unavailable"));
+        }
+        self.authority
+            .root
+            .verify()
+            .map_err(|_| failure("ide_unavailable"))?;
+        let root = self
+            .authority
+            .root
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| failure("ide_unavailable"))?;
+        Ok(crate::ide::bridge::IdeHost {
+            grants: &self.authority.ide,
+            root,
+            socket: self.authority.root.path.join(SOCKET),
+        })
+    }
+
+    /// Runs one domain command in this engine for the IDE bridge while the server is
+    /// usable; the bridge only builds commands for its capability's own project.
+    /// Input: the request. Output: the engine's reply, or `ide_unavailable`.
+    pub(crate) async fn ide_apply(
+        &self,
+        request: crate::protocol::WireRequest,
+    ) -> Result<crate::protocol::WireReply, EngineError> {
+        self.ide()?;
+        self.engine.apply(request).await
+    }
+
+    /// This owner server's IDE capability grants, whether or not it still runs, so a
+    /// capability can be revoked after the server stopped. Input: none. Output: the grants.
+    pub(crate) fn ide_grants(&self) -> &crate::ide::bridge::Grants {
+        &self.authority.ide
     }
 }
 
@@ -1151,6 +1288,7 @@ impl OwnerServer {
                     token,
                     file,
                     identity,
+                    closed: 0,
                 });
             }
             root.verify()?;
@@ -1176,6 +1314,17 @@ impl OwnerServer {
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
+            let ide = Arc::new(crate::ide::bridge::Grants::default());
+            let ide_servers = crate::ide::server::Servers::new(
+                root.path
+                    .parent()
+                    .ok_or_else(|| failure("owner_root_unavailable"))?,
+                crate::ide::server::IDLE_LIMIT,
+                crate::ide::server::START_LIMIT,
+                Arc::clone(&ide),
+                root.path.join(SOCKET),
+                engine.settings_files(),
+            );
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1187,8 +1336,13 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
+                #[cfg(unix)]
+                ide_servers,
+                ide,
+                reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1212,6 +1366,28 @@ impl OwnerServer {
                 return Err(failure(&errors.join("; ")));
             }
         };
+        authority.ide_servers.sweep_left().await;
+        if let Ok(root) = changes::engine_root(&authority) {
+            let swept = tokio::task::spawn_blocking(move || {
+                crate::landing::open(&root).and_then(|db| {
+                    let locked = crate::worktrees::lock_existing(&db);
+                    if let Err(problem) = crate::landing::sweep_regenerations(&db) {
+                        eprintln!(
+                            "landing_regenerate_sweep_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                    locked
+                })
+            })
+            .await;
+            if let Ok(Err(problem)) = swept {
+                eprintln!(
+                    "worktree_lock_sweep_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+        }
         let server = Self {
             listener,
             engine: engine.clone(),
@@ -1236,7 +1412,8 @@ impl OwnerServer {
             while let Some(result) = tasks.terminals.try_join_next() {
                 log_panic(&result, "owner_terminal_panicked");
             }
-            if tasks.terminals.len() >= crate::terminal::VIEWERS_MAX {
+            if tasks.terminals.len() >= crate::terminal::CONNECTIONS_MAX {
+                self.refuse_terminal(stream, auth, deadline, &mut tasks.refusals);
                 return;
             }
             let engine = self.engine.clone();
@@ -1244,6 +1421,22 @@ impl OwnerServer {
             tasks.terminals.spawn(async move {
                 terminal::serve(stream, auth, engine, authority, deadline).await;
             });
+            return;
+        }
+        if &auth[..4] == crate::ide::bridge::MAGIC {
+            while let Some(result) = tasks.ides.try_join_next() {
+                log_panic(&result, "owner_ide_panicked");
+            }
+            if tasks.ides.len() >= crate::ide::bridge::CONNECTIONS_MAX {
+                return;
+            }
+            let runtime = OwnerRuntimeHandle {
+                engine: self.engine.clone(),
+                authority: self.authority.clone(),
+            };
+            tasks
+                .ides
+                .spawn(crate::ide::bridge::serve(stream, auth, runtime, deadline));
             return;
         }
         if &auth[..4] == b"CAN1" {
@@ -1319,10 +1512,49 @@ impl OwnerServer {
         assert!(refusals.len() <= REFUSALS_MAX);
     }
 
+    /// Answers a terminal view past `CONNECTIONS_MAX` with `terminal_viewers_full`, at most
+    /// `REFUSALS_MAX` refusals at once with the busy refusals; past that the connection is
+    /// closed and the closing is logged. Inputs: the stream, its handshake packet and
+    /// deadline, and the refusal tasks. Output: none.
+    fn refuse_terminal(
+        &self,
+        stream: UnixStream,
+        auth: [u8; 37],
+        deadline: Instant,
+        refusals: &mut tokio::task::JoinSet<()>,
+    ) {
+        while let Some(result) = refusals.try_join_next() {
+            log_panic(&result, "owner_refusal_panicked");
+        }
+        if refusals.len() >= REFUSALS_MAX {
+            eprintln!("owner_terminal_closed_full");
+            return;
+        }
+        refusals.spawn(terminal::refuse(
+            stream,
+            auth,
+            self.authority.clone(),
+            deadline,
+        ));
+        assert!(refusals.len() <= REFUSALS_MAX);
+    }
+
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        if let Ok(root) = changes::engine_root(&self.authority) {
+            crate::ide::fetch::on_engine_start(&root);
+        }
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
-        let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
+        let (sweep_stop, sweep_stopped) = oneshot::channel();
+        let sweep = tokio::spawn(cleanup::sweep(
+            Arc::downgrade(&self.authority),
+            sweep_stopped,
+        ));
+        let (upkeep_stop, upkeep_stopped) = oneshot::channel();
+        let upkeep = tokio::spawn(changes::upkeep(
+            Arc::downgrade(&self.authority),
+            upkeep_stopped,
+        ));
         let backfill = setup::engine_root(&self.authority).ok().map(|root| {
             tokio::spawn(setup::backfill_hooks(
                 self.engine.storage.sender.clone(),
@@ -1355,6 +1587,9 @@ impl OwnerServer {
                 result=tasks.terminals.join_next(), if !tasks.terminals.is_empty() => {
                     if let Some(result)=result {log_panic(&result, "owner_terminal_panicked");}
                 }
+                result=tasks.ides.join_next(), if !tasks.ides.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_ide_panicked");}
+                }
                 result=tasks.refusals.join_next(), if !tasks.refusals.is_empty() => {
                     if let Some(result)=result {log_panic(&result, "owner_refusal_panicked");}
                 }
@@ -1384,12 +1619,16 @@ impl OwnerServer {
             assert!(handshakes.len() <= HANDSHAKES_MAX);
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
-            assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
+            assert!(tasks.terminals.len() <= crate::terminal::CONNECTIONS_MAX);
+            assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
-        upkeep.abort();
+        drop(upkeep_stop);
+        drop(sweep_stop);
         if let Some(backfill) = backfill {
             backfill.abort();
         }
+        #[cfg(unix)]
+        self.authority.ide_servers.stop_all().await;
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
@@ -1401,12 +1640,16 @@ impl OwnerServer {
         tasks.custody.abort_all();
         tasks.clients.abort_all();
         tasks.terminals.abort_all();
+        tasks.ides.abort_all();
         tasks.refusals.abort_all();
         while tasks.terminals.join_next().await.is_some() {}
+        while tasks.ides.join_next().await.is_some() {}
         while handshakes.join_next().await.is_some() {}
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
         while tasks.refusals.join_next().await.is_some() {}
+        log_panic(&upkeep.await, "landing_upkeep_panicked");
+        log_panic(&sweep.await, "finished_agents_sweep_panicked");
         let drained = self
             .authority
             .drain_native_auth_dispatch(&self.engine)
@@ -1499,6 +1742,34 @@ impl Engine {
             .try_send(job)
             .map_err(|_| failure("owner_queue_not_submitted"))?;
         tokio::time::timeout(deadline, receive)
+            .await
+            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
+    }
+
+    /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
+    /// stops waiting first, so what storage commits late still takes effect in memory.
+    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
+    /// outcome-unknown error while storage has not answered in time or went away.
+    async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+        settle: impl FnOnce(Result<T, EngineError>) -> Result<U, EngineError> + Send + 'static,
+    ) -> Result<U, EngineError> {
+        let (send, receive) = oneshot::channel();
+        let job = build(send);
+        let deadline = job.reply_deadline(self.timeout);
+        self.storage
+            .sender
+            .try_send(job)
+            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let settled = tokio::spawn(async move {
+            match receive.await {
+                Ok(stored) => settle(stored),
+                Err(_) => Err(failure("owner_actor_stopped_outcome_unknown")),
+            }
+        });
+        tokio::time::timeout(deadline, settled)
             .await
             .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
@@ -1617,7 +1888,10 @@ impl Engine {
             },
             OwnerOperation::Read { query } => OwnerResponse::Read {
                 state: self
-                    .owner_job(|reply| Job::OwnerRead(a, query.clone(), reply))
+                    .kept_named(
+                        self.owner_job(|reply| Job::OwnerRead(a, query.clone(), reply))
+                            .await?,
+                    )
                     .await?,
             },
             OwnerOperation::Reconcile {
@@ -1922,8 +2196,13 @@ enum Protocol {
     Changes,
     Cleanup,
     Usage,
+    IdeExtensions,
+    Recovery,
+    Questions,
     NativeAuth,
     Process,
+    Ide,
+    IdeTab,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -1949,8 +2228,13 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
+        ("ide_extensions", Protocol::IdeExtensions),
+        ("recovery", Protocol::Recovery),
+        ("questions", Protocol::Questions),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
+        ("ide", Protocol::Ide),
+        ("ide_tab", Protocol::IdeTab),
     ];
     Ok(named
         .into_iter()
@@ -2012,8 +2296,11 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
+            Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
+            Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
+            Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2024,6 +2311,13 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Ide if ide::deferred(body) => return Ok(Some(Deferred::Ide(a))),
+            Protocol::Ide => {
+                return ide::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2160,6 +2454,26 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::IdeExtensions(a) => {
+            let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+        }
+        Deferred::Recovery(a) => {
+            let served = recovery::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+        }
+        Deferred::Ide(a) => {
+            let served = ide::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+        }
+        Deferred::IdeTab(a) => {
+            let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+        }
+        Deferred::Questions(a) => {
+            let served = questions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+        }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
@@ -2185,7 +2499,7 @@ impl<'a> Deferral<'a> {
     fn take(count: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
         use std::sync::atomic::Ordering;
         let before = count
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
                 (running < DEFERRED_MAX).then_some(running + 1)
             })
             .ok()?;
@@ -2202,12 +2516,14 @@ impl Drop for Deferral<'_> {
 }
 
 /// The owner server's running tasks: owner and runner requests, the native auth
-/// custody channel, terminal viewers and busy refusals, each bounded by its own maximum.
+/// custody channel, terminal viewers, IDE bridge connections and busy refusals, each
+/// bounded by its own maximum.
 #[derive(Default)]
 struct Tasks {
     clients: tokio::task::JoinSet<()>,
     custody: tokio::task::JoinSet<()>,
     terminals: tokio::task::JoinSet<()>,
+    ides: tokio::task::JoinSet<()>,
     refusals: tokio::task::JoinSet<()>,
 }
 
@@ -2215,16 +2531,25 @@ struct Tasks {
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
 /// agent's process group or its host to end it, Changes requests, which run git on the
-/// owner's checkout, Cleanup requests, which size and remove finished agents' worktrees
-/// and folders, skill import scans and imports, which copy skill folders, and Usage
-/// requests, which read and write the usage store. Each carries the admission, and the
-/// projects home its validated request; the others read the request frame.
+/// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
+/// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
+/// which wait for an IDE server to start, Questions requests, which wait for the database
+/// write lock and rewrite a project's questions page, Cleanup requests, which size and
+/// remove finished agents' worktrees and folders, skill import scans and imports, which
+/// copy skill folders, and Usage requests, which read and write the usage store. Each
+/// carries the admission, and the projects home its validated request; the others read
+/// the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    IdeExtensions(Admission),
+    Recovery(Admission),
+    Ide(Admission),
+    IdeTab(Admission),
+    Questions(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
@@ -2266,8 +2591,13 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
+        Protocol::IdeExtensions => ide_extensions::refusal(code)?,
+        Protocol::Recovery => recovery::refusal(code)?,
+        Protocol::Questions => questions::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
+        Protocol::Ide => ide::refusal(code)?,
+        Protocol::IdeTab => ide_tab::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {
@@ -2353,6 +2683,14 @@ fn native_auth_dispatch_diagnostic(error: &EngineError) -> String {
 fn master_turn_diagnostic(error: &EngineError) -> String {
     let cause = plain_cause(error, "master_turn_error_redacted");
     format!("master_turn_not_completed cause={cause}")
+}
+
+/// Renders the engine log line for a console master's memory calls that one tick of its
+/// turn could not answer (OP22-L2). Input: the ServeMemory error. Output: the line naming its
+/// plain code, or a redacted marker for storage text, which can carry a memory's words.
+fn master_memory_diagnostic(error: &EngineError) -> String {
+    let cause = plain_cause(error, "master_memory_error_redacted");
+    format!("master_memory_calls_not_answered cause={cause}")
 }
 
 /// Picks the text an engine diagnostic may show for an error. Inputs: the error and the
@@ -2523,7 +2861,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
                 .and_then(|v| v.strip_suffix(']'))
                 .ok_or_else(|| failure("dispatch_git_config_unsupported"))?
                 .to_ascii_lowercase();
-            section = if matches!(value.as_str(), "core" | "user" | "init") {
+            section = if matches!(value.as_str(), "core" | "user" | "init" | "extensions") {
                 value
             } else if value.starts_with("remote \"") && value.ends_with('"') {
                 "remote".into()
@@ -2545,6 +2883,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
             ("core", "filemode" | "logallrefupdates" | "ignorecase" | "precomposeunicode") => {
                 matches!(value, "true" | "false")
             }
+            ("extensions", "worktreeconfig") => value == "true",
             ("user", "name" | "email")
             | ("init", "defaultbranch")
             | ("remote", "url" | "fetch")
@@ -2615,9 +2954,8 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     {
         return Err(failure("dispatch_git_backlink_or_branch_changed"));
     }
-    match std::fs::symlink_metadata(metadata.join("config.worktree")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Err(failure("dispatch_git_metadata_unsupported")),
+    if !crate::worktrees::remote_lock_kept(&metadata) {
+        return Err(failure("dispatch_git_metadata_unsupported"));
     }
     Ok(metadata)
 }
@@ -3008,6 +3346,41 @@ impl OwnerClient {
         })
     }
 
+    /// Says what a reply that would not parse means. For a read it is an engine writing what
+    /// this client cannot read, noted in the logs folder by where the reply broke and never
+    /// by what it held, since serde's message can echo values. A mutation may have landed, so
+    /// it keeps its unknown outcome. Inputs: the parse error, the read's name or None, and
+    /// the unknown-outcome error. Output: the error to return.
+    fn skewed_reply(
+        &self,
+        error: &serde_json::Error,
+        read: Option<&str>,
+        unknown: fn() -> EngineError,
+    ) -> EngineError {
+        let Some(kind) = read else {
+            return unknown();
+        };
+        let category = match error.classify() {
+            serde_json::error::Category::Io => "io",
+            serde_json::error::Category::Syntax => "syntax",
+            serde_json::error::Category::Data => "data",
+            serde_json::error::Category::Eof => "eof",
+        };
+        let entry = serde_json::json!({
+            "event": "owner_reply_unreadable",
+            "kind": kind,
+            "category": category,
+            "line": error.line(),
+            "column": error.column(),
+        });
+        let _ = crate::engine::claude_host::diagnostic::append_to(
+            &self.root.path.with_file_name("logs"),
+            REPLY_LOG,
+            &entry,
+        );
+        failure("engine_version_mismatch")
+    }
+
     /// Authenticates a fresh bounded connection for one closed owner operation.
     /// Takes a stable operation identity and returns live or historical state.
     /// Uncertain delivery requires reconciliation or retry of the same payload.
@@ -3039,8 +3412,13 @@ impl OwnerClient {
             let bytes = read_frame(&mut stream)
                 .await
                 .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?;
-            let reply: OwnerReply = serde_json::from_slice(&bytes[4..])
-                .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?;
+            let reply: OwnerReply = serde_json::from_slice(&bytes[4..]).map_err(|error| {
+                self.skewed_reply(
+                    &error,
+                    owner_read_kind(&request.operation).as_deref(),
+                    || failure("owner_outcome_unknown_reconcile_same_identity"),
+                )
+            })?;
             if reply.request_id != request.request_id {
                 return Err(failure("owner_outcome_unknown_reconcile_same_identity"));
             }
@@ -3049,6 +3427,17 @@ impl OwnerClient {
         .await
         .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
     }
+}
+
+/// Names an owner request that only reads, for the log of replies this client could not
+/// read. Input: the operation. Output: the read's kind, None for a mutation or a reconcile,
+/// whose outcome stays unknown.
+fn owner_read_kind(operation: &OwnerOperation) -> Option<String> {
+    let OwnerOperation::Read { query } = operation else {
+        return None;
+    };
+    let query = serde_json::to_value(query).ok()?;
+    Some(format!("owner.{}", query.get("kind")?.as_str()?))
 }
 
 #[cfg(all(test, unix))]

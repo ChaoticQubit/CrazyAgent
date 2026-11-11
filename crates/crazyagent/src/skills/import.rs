@@ -297,6 +297,7 @@ mod tests {
             on_here: None,
             source: source.display().to_string(),
             folder: folder.display().to_string(),
+            version: 0,
             refused: None,
         }
     }

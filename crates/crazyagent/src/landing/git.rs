@@ -1,16 +1,17 @@
 use crate::engine::EngineError;
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const GIT: &str = "/usr/bin/git";
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
 const VERSION_MIN: (u32, u32) = (2, 40);
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
+const CHECK_LINE_BYTES_MAX: usize = 80;
 
 #[cfg(test)]
 thread_local! {
@@ -18,13 +19,18 @@ thread_local! {
     /// that test reads that home's global ignore rules. None keeps the process's HOME.
     pub(super) static OWNER_HOME: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
+    /// How many git commands engine git started on this thread, so a landing test can
+    /// count what one read costs.
+    pub(super) static GIT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The settings every engine git call carries on top of the research runner's
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
-/// case-folding path checks on, no signing, no untracked or split index caches and no
-/// reflog created for a ref update.
-const ENGINE_SETTINGS: [&str; 18] = [
+/// case-folding path checks on, no signing, no untracked or split index caches, no
+/// reflog created for a ref update and no commit-graph file, which a confined process could
+/// write to make git answer ancestry wrongly (land-19 r1 M1), and no advice about the grafts
+/// file the command's `GIT_GRAFT_FILE=/dev/null` names (land-19 r2).
+const ENGINE_SETTINGS: [&str; 22] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -43,6 +49,10 @@ const ENGINE_SETTINGS: [&str; 18] = [
     "core.splitIndex=false",
     "-c",
     "core.logAllRefUpdates=false",
+    "-c",
+    "core.commitGraph=false",
+    "-c",
+    "advice.graftFileDeprecated=false",
 ];
 
 pub(super) fn failure(code: &str) -> EngineError {
@@ -84,7 +94,7 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         return None;
     }
     let xdg = xdg.filter(|xdg| xdg.is_absolute());
-    let mut command = Command::new(GIT);
+    let mut command = Command::new(crate::research::runner::setup_git());
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -128,17 +138,40 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
 }
 
 /// A repository the engine runs git on through a git folder and work tree it computed
-/// itself, never a `.git` file in the work tree. Every call runs the host git with a
-/// cleared environment, no system or global config, no system attributes, hooks,
-/// fsmonitor, pager, submodule recursion, protocols or upkeep, and with every filter
+/// itself, never a `.git` file in the work tree. Every call runs the real git, not the
+/// `/usr/bin/git` xcrun shim where xcrun resolves it, with a cleared environment, no
+/// system or global config, no system attributes, hooks, fsmonitor, pager, submodule
+/// recursion, protocols or upkeep, and with every filter
 /// driver the repository's own config names blanked. A work tree also honours the
 /// owner's global ignore file, so what the owner's git ignores the engine never stages.
+#[derive(Clone)]
 pub(super) struct Repo {
     git_dir: PathBuf,
     work_tree: Option<PathBuf>,
     overrides: Vec<String>,
     excludes: Option<String>,
     index: Option<PathBuf>,
+    confinement: Vec<std::ffi::OsString>,
+}
+
+/// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
+/// unconfined-git-add-reads-through-raced-symlink, unconfined-read-tree-u): it reads only the
+/// system, its own toolchain, the work tree, the repository's git folder and the owner's
+/// ignore file, and writes only what the step names and the worktree's index, never the
+/// repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
+/// Paths reach it as parameters, so no path text is read as profile text.
+#[cfg(target_os = "macos")]
+const WORK_TREE_PROFILE: &str = "(version 1)\n\
+(allow default)\n\
+(deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")))))\n\
+(deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n";
+
+/// What one confined git step may write besides the worktree's index: the object store,
+/// for a step that only reads the work tree, or the work tree, for one that fills it.
+#[derive(Clone, Copy)]
+pub(super) enum Writes {
+    Objects,
+    WorkTree,
 }
 
 impl Repo {
@@ -175,6 +208,7 @@ impl Repo {
             overrides: Vec::new(),
             excludes,
             index: None,
+            confinement: Vec::new(),
         };
         repo.check_version()?;
         let listing = repo.capture(
@@ -211,6 +245,7 @@ impl Repo {
             overrides: Vec::new(),
             excludes: None,
             index: None,
+            confinement: Vec::new(),
         }
     }
 
@@ -220,6 +255,83 @@ impl Repo {
     pub(super) fn private_index(mut self, index: &Path) -> Self {
         self.index = Some(index.to_path_buf());
         self
+    }
+
+    /// This repository with its git calls run under [`WORK_TREE_PROFILE`], for a step on a
+    /// linked agent worktree whose agent may still be changing it. Git reads a path with no
+    /// check it can hold, so a link swapped in during the step is stopped here. Input: what
+    /// the step may write. Output: the repository, `changes_workspace_invalid` for one that
+    /// is not a linked worktree's, or `changes_git_unsupported` where no toolchain git is
+    /// found.
+    #[cfg(target_os = "macos")]
+    pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
+        use std::ffi::OsString;
+        assert!(
+            self.index.is_none(),
+            "a confined step uses the worktree's own index"
+        );
+        let invalid = || failure("changes_workspace_invalid");
+        let real = |path: &Path| std::fs::canonicalize(path).map_err(|_| invalid());
+        let work = real(self.work_tree.as_deref().ok_or_else(invalid)?)?;
+        let private = real(&self.git_dir)?;
+        let common = private
+            .parent()
+            .filter(|parent| parent.ends_with("worktrees"))
+            .and_then(Path::parent)
+            .ok_or_else(invalid)?
+            .to_path_buf();
+        let unsupported = || failure("changes_git_unsupported");
+        let git = std::fs::canonicalize(crate::research::runner::sandboxed_git())
+            .map_err(|_| unsupported())?;
+        let tools = git
+            .ends_with("usr/bin/git")
+            .then(|| git.ancestors().nth(3))
+            .flatten()
+            .filter(|root| root.parent().is_some())
+            .ok_or_else(unsupported)?
+            .to_path_buf();
+        let excludes = self
+            .excludes
+            .as_deref()
+            .and_then(|setting| setting.strip_prefix("core.excludesFile="))
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| PathBuf::from("/dev/null"));
+        let target = match writes {
+            Writes::Objects => common.join("objects"),
+            Writes::WorkTree => work.clone(),
+        };
+        let mut confinement = Vec::new();
+        for (name, value) in [
+            ("WORK", &work),
+            ("COMMON", &common),
+            ("TOOLS", &tools),
+            ("EXCLUDES", &excludes),
+            ("WRITE", &target),
+            ("INDEX", &private.join("index")),
+            ("INDEX_LOCK", &private.join("index.lock")),
+        ] {
+            let mut pair = OsString::from(name);
+            pair.push("=");
+            pair.push(value);
+            confinement.extend([OsString::from("-D"), pair]);
+        }
+        confinement.extend([
+            OsString::from("-p"),
+            OsString::from(WORK_TREE_PROFILE),
+            git.into_os_string(),
+        ]);
+        Ok(Self {
+            confinement,
+            ..self.clone()
+        })
+    }
+
+    /// This repository unchanged, since only macOS has a confined step: elsewhere the step
+    /// runs as any engine git call does. Input: what the step may write. Output: the
+    /// repository.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn confined(&self, _writes: Writes) -> Result<Self, EngineError> {
+        Ok(self.clone())
     }
 
     fn check_version(&self) -> Result<(), EngineError> {
@@ -238,7 +350,13 @@ impl Repo {
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let mut command = Command::new(GIT);
+        let mut command = if self.confinement.is_empty() {
+            Command::new(crate::research::runner::setup_git())
+        } else {
+            let mut confined = Command::new(crate::sandbox::SANDBOX_EXEC);
+            confined.args(&self.confinement);
+            confined
+        };
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -249,6 +367,7 @@ impl Repo {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_GRAFT_FILE", "/dev/null")
             .envs(env.iter().copied())
             .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")
@@ -286,6 +405,8 @@ impl Repo {
         limit: usize,
     ) -> Result<Output, EngineError> {
         let mut command = self.command(args, env);
+        #[cfg(test)]
+        GIT_RUNS.with(|runs| runs.set(runs.get() + 1));
         command.stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -368,6 +489,40 @@ impl Repo {
             1 => Ok(false),
             _ => Err(failure("changes_git_failed")),
         }
+    }
+
+    /// Says which of the given object ids name a commit here, with one git run for all of
+    /// them. Input: the ids; one that is not an object id is never sent. Output: the ids
+    /// that are commits; a missing id or one naming another object type is left out.
+    pub(super) fn commits_among(&self, ids: &[&str]) -> Result<BTreeSet<String>, EngineError> {
+        let asked: Vec<&str> = ids.iter().copied().filter(|id| is_object_id(id)).collect();
+        if asked.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let input: String = asked.iter().map(|id| format!("{id}\n")).collect();
+        let output = self.exec(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(input.as_bytes()),
+            &[],
+            asked.len() * CHECK_LINE_BYTES_MAX,
+        )?;
+        if output.code != 0 || output.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+        let text =
+            std::str::from_utf8(&output.stdout).map_err(|_| failure("changes_git_failed"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() != asked.len() {
+            return Err(failure("changes_git_failed"));
+        }
+        let commits: BTreeSet<String> = asked
+            .iter()
+            .zip(lines)
+            .filter(|(id, line)| line.strip_prefix(**id) == Some(" commit"))
+            .map(|(id, _)| (*id).to_owned())
+            .collect();
+        assert!(commits.len() <= asked.len());
+        Ok(commits)
     }
 
     /// Resolves a revision to a commit id. Input: the revision. Output: the id, or None

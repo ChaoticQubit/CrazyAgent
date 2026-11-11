@@ -23,6 +23,8 @@ export interface ChangeSet {
   message: string;
   waiting: boolean;
   outside: boolean;
+  regenerated: string[];
+  number?: number | null;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -65,6 +67,7 @@ const REFUSALS: Record<string, string> = {
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
+  changes_undo_unavailable: "This merge can't be undone. CrazyAgent undoes only a merge it committed itself, and only once.",
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",
   changes_agent_busy: "The agent is working right now. Try again when it finishes.",
   changes_unavailable: "Landing changes isn't ready in this engine yet.",
@@ -116,29 +119,34 @@ export function loadChanges(projectId: string): Promise<Result<ChangeSet[]>> {
   return call<ChangeSet[]>("desktop_changes", { projectId });
 }
 
-/** Reads one page of a change set's diff. Inputs: the change set id and the page, from 0.
- * Output: that page's files with marks, its plain diff text and the next page, if any. */
-export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeDiff>> {
-  return call<ChangeDiff>("desktop_change_diff", { id, page });
+/** Reads one page of a change set's diff at the head the owner is reading. Inputs: the
+ * change set id, that head and the page, from 0. Output: that page's files with marks, its
+ * plain diff text and the next page, if any, or `changes_stale` once the set moved on. */
+export function loadChangeDiff(id: string, head: string, page: number): Promise<Result<ChangeDiff>> {
+  return call<ChangeDiff>("desktop_change_diff", { id, head, page });
 }
 
-/** The local branches a change set can land on and the checked-out one, the default. */
+/** The local branches a change set can land on, the checked-out one and the team's Land on
+ * branch, where an Accept with no branch picked lands, or the plain sentence naming the Land on
+ * setting and its missing branch when that branch cannot be found. */
 export interface TargetBranches {
   branches: string[];
   current: string | null;
+  land_on?: string | null;
+  land_on_problem?: string | null;
 }
 
-/** Lands a change set as one commit on a local branch: the checked-out one by default, or
+/** Lands a change set as one commit on a local branch: the team's Land on branch by default, or
  * the named target, which moves as a ref while the project folder's files stay as they are
  * when it isn't checked out. Inputs: the id, the head the owner reviewed, the owner's commit
- * message and the target branch, null for the checked-out one. Output: the new commit and
+ * message and the target branch, null for the Land on branch. Output: the new commit and
  * its branch, or the files that conflict with the branch, in which case nothing changed. */
 export function acceptChange(id: string, expectedHead: string, message: string, target: string | null = null): Promise<Result<AcceptOutcome>> {
   return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message, target });
 }
 
 /** Lists the local branches a change set can be accepted onto. Input: the id. Output: the
- * branches and the checked-out one. */
+ * branches, the checked-out one and the Land on branch. */
 export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> {
   return call<TargetBranches>("desktop_change_branches", { id });
 }
@@ -152,6 +160,13 @@ export function discardChange(id: string, expectedHead: string): Promise<Result<
 /** Restores a discarded change set to its agent. Input: the id. */
 export function restoreChange(id: string): Promise<Result<void>> {
   return call<void>("desktop_restore_change", { id });
+}
+
+/** Undoes a merge a change set's own Accept made, with one revert commit on the branch it
+ * landed on. Input: the change set id. Output: the undo commit and branch, or the files the
+ * branch changed since, when nothing changed. */
+export function undoChange(id: string): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_undo_change", { id });
 }
 
 /** Asks the agent to update its changes onto the owner's branch and resolve the

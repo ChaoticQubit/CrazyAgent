@@ -2,6 +2,7 @@ use super::{Anchor, Identity, hex, safe_directory, safe_file};
 use crate::config::{ModelAuthentication, ModelConnection};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
+use crate::file_lock::HeldLock;
 use crate::protocol::{CredentialRef, RequestId};
 use rustix::fs::{AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, flock};
 use serde::{Deserialize, Serialize};
@@ -19,12 +20,15 @@ pub(crate) use agent_copy::AgentCredential;
 mod configured_rcli;
 mod generated_configured_rcli;
 mod renewal;
+mod retire;
 mod staging;
 pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
 use configured_rcli::lock;
 use staging::{ROOT_STAGING, STAGING, Staging, step};
 
 const ROOT: &str = "native-profiles";
+pub(crate) use retire::{remove_generated_home, remove_sign_in};
+
 const MANIFEST: &str = "identity.json";
 const MAX_MANIFEST: usize = 4096;
 pub(crate) const MAX_PROFILES: usize = 1024;
@@ -366,21 +370,6 @@ fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> 
     })
 }
 
-/// An exclusive lock one custody step holds on a profile file, taken through its own
-/// duplicate of the open file description and unlocked when dropped, so a child that
-/// another thread is starting, and that briefly shares the description, cannot keep it.
-/// Holds the duplicate. Dropping it ends the lock for every descriptor of the file.
-#[must_use = "the lock ends as soon as this guard is dropped"]
-pub(crate) struct HeldLock(File);
-
-impl Drop for HeldLock {
-    /// Unlocks the open file description through the guard's duplicate, ending the lock
-    /// for every descriptor that shares it. Input: the guard being dropped. Output: none.
-    fn drop(&mut self) {
-        let _ = flock(&self.0, FlockOperation::Unlock);
-    }
-}
-
 /// The locks that show no custodian holds one native profile, taken while a stale sign-in
 /// is settled: a shared lock on its manifest, which every sign-in and logout excludes, and
 /// its renewal lock, which every check holds, so agents keep their shared leases and no
@@ -417,6 +406,12 @@ pub(crate) struct NativeProfileUse {
 }
 
 impl NativeProfileUse {
+    /// Names the account this lease holds the profile of. Input: the lease. Output: the
+    /// account's connection id.
+    pub(crate) fn account(&self) -> &crate::protocol::CredentialRef {
+        &self.binding.connection.id
+    }
+
     pub(crate) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
         self.revalidate_retained()?;
         if let Some(configured) = &self.configured {

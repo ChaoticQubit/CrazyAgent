@@ -10,12 +10,12 @@
   ▌ Save to memory?            │   Tidepool / Conversation           Project tab        │                               
   ▌ "Most labs already use ERDD│   Tidepool / Agents                 Project tab        │ain                            
   ▌ From Competitor research   │   Tidepool / Changes                Project tab        │, 1 not signed in              
-                               │   Tidepool / Context                Project tab        │                               
-    Done check                 │   Tidepool / Settings               Project tab        │                               
-    Front-end design asks you t│                                                        │Charts component started       
-    Enter Review               │ Projects, tabs, settings, actions. Enter goes there.   │Market research finished       
-                               └────────────────────────────────────────────────────────┘competitors.md updated         
-  Work                                                                          │ 10:31  Competitor research started    
+                               │   Tidepool / Questions              Project tab        │                               
+    Done check                 │   Tidepool / Context                Project tab        │                               
+    Front-end design asks you t│   Tidepool / Settings               Project tab        │Charts component started       
+    Enter Review               │                                                        │Market research finished       
+                               │ Projects, tabs, settings, actions. Enter goes there.   │competitors.md updated         
+  Work                         └────────────────────────────────────────────────────────┘Competitor research started    
     ◔ Market research       ✓ Done 10:38                research/market.md      │ 10:24  Market research started        
     ≷ Competitor research   ▸ Running  ━━━━━━──── 3 of 5research/competitors.md │ 10:22  Project created                
     ▭ Front-end design      ◌ Queued                                            │                                       

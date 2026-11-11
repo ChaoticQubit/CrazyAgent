@@ -1,11 +1,15 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
-use crate::projects_home::{AddMode, AddPlan, HomeEffect, MovePlan, folder_size};
+use crate::projects_home::{
+    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, folder_size,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
+const SETTLE_TRIES: usize = 3;
+const SETTLE_GAP: Duration = Duration::from_millis(50);
 static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 
 enum Step {
@@ -13,12 +17,14 @@ enum Step {
     Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
+    Deleted(Result<(PathBuf, Vec<crate::projects_home::RecordedFile>), String>),
 }
 
 enum Work {
     Add(AddPlan),
     Move(MovePlan),
     New(NewProjectPlan),
+    Delete(DeletePlan, Vec<i64>),
 }
 
 impl Work {
@@ -27,6 +33,7 @@ impl Work {
             Self::Add(_) => "home_add_interrupted",
             Self::Move(_) => "home_move_interrupted",
             Self::New(_) => "home_new_project_interrupted",
+            Self::Delete(..) => "project_delete_interrupted",
         }
     }
 
@@ -38,6 +45,10 @@ impl Work {
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::New(plan) => Step::Staged(plan.run()),
+            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
+                let files = plan.engine_files(&research);
+                (plan.database, files)
+            })),
         }
     }
 }
@@ -49,8 +60,9 @@ enum Planned {
 
 /// True for the owner requests that touch folders outside the engine data:
 /// AddExistingFolder, MoveProjectsHome that moves the projects, SetupProject
-/// (New Project), FolderSize and ProjectFiles. These run their slow disk work
-/// here, off the storage actor, and only then reach the engine database.
+/// (New Project), DeleteProject (Delete everything), FolderSize and ProjectFiles.
+/// These run their slow disk work here, off the storage actor, and only then
+/// reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
     matches!(
         &request.operation,
@@ -61,6 +73,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                     ..
                 }
                 | OwnerMutation::SetupProject { .. }
+                | OwnerMutation::DeleteProject { .. }
         } | OwnerOperation::Read {
             query: OwnerRead::FolderSize { .. } | OwnerRead::ProjectFiles { .. }
         }
@@ -71,15 +84,20 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// for one owner. Input: the stream, engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
-/// the replay check, the plan and a grant check under the owner barrier just
-/// before the disk work, which runs under its own bounds and without the
-/// barrier; a fresh owner deadline then bounds the record and the reply, so a finished
+/// the replay check, the plan, a grant check under the owner barrier and, for a
+/// home move, a recheck of agent work under the move's hold just before the disk
+/// work, which runs under its own bounds and without the barrier; a move the
+/// recheck refuses is recorded as Rejected with its code and never runs; a fresh owner deadline then bounds the record and the reply, so a finished
 /// effect is recorded as Applied or as Rejected with the refusal code. A home
-/// move then sends a settle job for this exchange's pending move: one whose
+/// move then sends a settle job for this exchange's pending move, trying again
+/// when that fails: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
-/// is finished from disk, and one whose disk work never ran is forgotten. The
-/// exchange number is unique within the engine process; engine start finishes
-/// any move left by an earlier process before serving.
+/// is finished from disk, and one whose disk work never ran is forgotten. A Delete
+/// everything stops the project's IDE server before its wait and moves, and forgets
+/// its plan before its reply, trying again when that fails, so the reply means projects
+/// home moves may go again; a plan the reply could not reach is forgotten after it.
+/// The exchange number is unique within the engine process; engine start finishes
+/// any move and forgets any delete plan left by an earlier process before serving.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -103,6 +121,12 @@ pub(super) async fn serve(
             mutation: OwnerMutation::MoveProjectsHome { .. }
         }
     );
+    let deleting = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::DeleteProject { .. }
+        }
+    );
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -115,14 +139,31 @@ pub(super) async fn serve(
             })
             .await
             .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+            let admitted = match (admitted, &work) {
+                (Ok(()), Work::Move(_)) => tokio::time::timeout_at(
+                    deadline,
+                    engine.owner_job(|reply| Job::HomeMoveRecheck(exchange, reply)),
+                )
+                .await
+                .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+                (admitted, _) => admitted.map(Ok),
+            };
             match admitted {
-                Ok(()) => {
+                Ok(Ok(())) => {
+                    #[cfg(unix)]
+                    let _ide_refused = match &work {
+                        Work::Delete(plan, _) => {
+                            Some(authority.ide_servers.hold_for_delete(&plan.project).await)
+                        }
+                        _ => None,
+                    };
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
                         .await
                         .map_err(|_| failure(interrupted));
                     (step, Instant::now() + engine.timeout, true)
                 }
+                Ok(Err(code)) => (Ok(Step::Record(Err(code))), deadline, false),
                 Err(e) => (Err(e), deadline, false),
             }
         }
@@ -131,6 +172,10 @@ pub(super) async fn serve(
     };
     let staging = match &step {
         Ok(Step::Staged(Ok(staged))) => Some(staged.staging().to_path_buf()),
+        _ => None,
+    };
+    let deleted = match &step {
+        Ok(Step::Deleted(Ok(files))) => Some(files.clone()),
         _ => None,
     };
     let answer = async {
@@ -146,17 +191,73 @@ pub(super) async fn serve(
         {
             remove_staging(staging).await;
         }
-        write_owner_reply(stream, result, id, mutation).await
+        let removed = matches!(
+            &result,
+            Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
+                if operation.result == OwnerResult::Applied && !operation.historical_replay
+        );
+        let forgotten = deleting && settle_delete(engine, exchange).await;
+        (
+            write_owner_reply(stream, result, id, mutation).await,
+            removed,
+            forgotten,
+        )
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
-    if moving
-        && let Err(e) = engine
-            .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
+    if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
+        let done = tokio::task::spawn_blocking(move || {
+            crate::projects_home::remove_engine_files(&database, &files)
+        })
+        .await
+        .unwrap_or_default();
+        if let Err(e) = engine
+            .owner_job(|reply| Job::DeleteFilesClear(done, reply))
             .await
-    {
-        eprintln!("projects_home_move_not_settled cause={}", e.0);
+        {
+            eprintln!("project_delete_files_not_cleared cause={}", e.0);
+        }
+    }
+    let forgotten = matches!(&answered, Ok((_, _, true)));
+    let answered = answered.map(|(written, _, _)| written);
+    if moving {
+        settled(engine, "projects_home_move_not_settled", |reply| {
+            Job::HomeMoveSettle(exchange, ran, reply)
+        })
+        .await;
+    }
+    if deleting && !forgotten {
+        settle_delete(engine, exchange).await;
     }
     answered.map_err(|_| failure(UNKNOWN))?
+}
+
+/// Forgets a Delete everything's plan. Inputs: the engine and the exchange. Output: whether
+/// the plan is gone.
+async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+    settled(engine, "project_delete_not_settled", |reply| {
+        Job::DeleteSettle(exchange, reply)
+    })
+    .await
+}
+
+/// Runs one settling job, trying again after a full queue or a SQLite failure, since a row
+/// left behind refuses later projects home changes until the engine restarts. Inputs: the
+/// engine, the log line's name and the job for one try. Output: whether it settled.
+async fn settled(
+    engine: &Arc<Engine>,
+    name: &str,
+    job: impl Fn(oneshot::Sender<Result<(), EngineError>>) -> Job,
+) -> bool {
+    for attempt in 0..SETTLE_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(SETTLE_GAP).await;
+        }
+        match engine.owner_job(&job).await {
+            Ok(()) => return true,
+            Err(e) => eprintln!("{name} cause={}", e.0),
+        }
+    }
+    false
 }
 
 async fn plan(
@@ -190,10 +291,17 @@ async fn plan(
     }
     let expected = request.expected_revision.clone();
     let work = match mutation {
-        OwnerMutation::AddExistingFolder { source, mode } => {
-            let (source, mode): (String, AddMode) = (source.clone(), *mode);
+        OwnerMutation::AddExistingFolder {
+            source,
+            mode,
+            overrides,
+        } => {
+            let (source, mode, overrides): (String, AddMode, Vec<AddOverride>) =
+                (source.clone(), *mode, overrides.clone());
             engine
-                .owner_job(|reply| Job::HomeAddPlan(a.clone(), expected, source, mode, reply))
+                .owner_job(|reply| {
+                    Job::HomeAddPlan(a.clone(), expected, source, mode, overrides, reply)
+                })
                 .await
                 .map(Work::Add)
         }
@@ -206,6 +314,18 @@ async fn plan(
                 })
                 .await
                 .map(Work::Move)
+        }
+        OwnerMutation::DeleteProject { .. } => {
+            let request = Box::new(request.clone());
+            return Ok(
+                match engine
+                    .owner_job(|reply| Job::DeletePlan(a.clone(), request, exchange, reply))
+                    .await?
+                {
+                    Ok((plan, research)) => Planned::Work(Work::Delete(plan, research)),
+                    Err(code) => Planned::Step(Step::Deleted(Err(code))),
+                },
+            );
         }
         OwnerMutation::SetupProject { .. } => {
             let request = Box::new(request.clone());
@@ -348,6 +468,14 @@ async fn finish(
         Step::Staged(staged) => OwnerResponse::Applied {
             operation: engine
                 .owner_job(|reply| Job::SetupRecord(a.clone(), Box::new(request), staged, reply))
+                .await?,
+        },
+        Step::Deleted(outcome) => OwnerResponse::Applied {
+            operation: engine
+                .owner_job(|reply| {
+                    let files = outcome.map(|(_, files)| files);
+                    Job::DeleteRecord(a.clone(), Box::new(request), files, reply)
+                })
                 .await?,
         },
         Step::Size(bytes) => {

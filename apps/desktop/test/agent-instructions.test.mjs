@@ -13,8 +13,8 @@ const SKILLS = [
   { id: "skill-000000000000000000000002", name: "code-review", description: "Review a diff for bugs." },
 ];
 
-function node(id, kind) {
-  return { id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: null };
+function node(id, kind, extra = {}) {
+  return { id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal: null, ...extra };
 }
 
 function panel(read) {
@@ -22,10 +22,14 @@ function panel(read) {
 }
 
 test("the master and each agent card name the team agent the engine reads", () => {
-  assert.equal(client.agentOf(node("master", "master")), null);
-  assert.equal(client.agentOf(node("team-12", "agent")), 12);
-  for (const shown of [node("group:codex", "harness_group"), node("team-0", "agent"), node("team--3", "agent"), node("team-1x", "agent"), node("team:12", "agent"), node("team-012", "agent"),
-    node("team-99999999999999999999", "agent"), node("master", "agent")]) {
+  assert.equal(client.agentOf(node("master", "master", { agent: 4 })), null);
+  assert.equal(client.agentOf(node("team-12", "lead", { agent: 12 })), 12);
+  assert.equal(client.agentOf(node("team-12", "sub", { agent: 12 })), 12);
+  assert.equal(client.agentOf(node("team-12", "sub", { agent: 7 })), 7, "the node's own agent id wins over its card id");
+  assert.equal(client.agentOf(node("team-9", "teammate", { agent: 9, pane: "%12" })), 9);
+  for (const shown of [node("team-12", "lead"), node("team-12", "sub"), node("teammate-3-12", "teammate", { agent: null, pane: "%12" }), node("team-3", "teammate"), node("team-0", "sub"), node("team--3", "sub"), node("team-1x", "lead"),
+    node("team:12", "sub"), node("team-012", "sub"), node("team-99999999999999999999", "sub"), node("master", "lead"), node("team-5", "sub", { agent: 0 }),
+    node("team-5x", "sub", { agent: 1.5 }), node("team-5y", "sub", { agent: -2 }), node("team-5", "sub", { agent: null })]) {
     assert.equal(client.agentOf(shown), undefined, shown.id);
   }
 });
@@ -55,9 +59,15 @@ test("the view says which instruction files the harness loaded and which skills 
   for (const path of ["/w/agent-12/CLAUDE.md", "/w/agent-12/AGENTS.md", "/h/agent-12/CLAUDE.md"]) assert.ok(markup.includes(path), path);
   assert.ok(markup.indexOf("Skills used:") < markup.indexOf("No app or project instructions"), "the report leads the view");
 
-  assert.match(panel({ kind: "ok", value: { ...value, loaded: [], skills_used: [] } }), /Instructions: none loaded by its harness - Skills used: none/);
-  assert.match(panel({ kind: "ok", value: { ...value, sessions: 0, loaded: [], skills_used: [] } }),
-    /Instructions: not reported yet - Skills used: not reported yet/);
+  assert.match(panel({ kind: "ok", value: { ...value, loaded: [], skills_used: [] } }),
+    /Instructions: none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt - Skills used: none/,
+    "Claude loads no instruction file itself, and the line says why");
+  assert.match(panel({ kind: "ok", value: { ...value, harness: "codex", loaded: [], skills_used: [] } }), /Instructions: none loaded by its harness - Skills used: none/);
+  const unreported = panel({ kind: "ok", value: { ...value, sessions: 0, loaded: [], skills_used: [] } });
+  assert.match(unreported, /Instructions: not reported yet - Skills used: not reported yet/);
+  assert.match(unreported, /A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off\./,
+    "a Claude run that keeps no session record is not left at not reported yet with no reason");
+  assert.doesNotMatch(panel({ kind: "ok", value: { ...value, harness: "codex", sessions: 0, loaded: [], skills_used: [] } }), /headless Claude/);
   assert.doesNotMatch(panel({ kind: "ok", value: { ...value, launched: false } }), /Skills used/, "an agent that never launched has no report");
 });
 
@@ -73,7 +83,7 @@ test("the view lists each instruction file the engine recorded with its size and
   const markup = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "Use tdd.\n", skills: [], sessions: 0, loaded: [], skills_used: [], files } });
   for (const shown of [
     /CLAUDE\.md<\/span> 1\.2 KB, given/,
-    /AGENTS\.md<\/span> 300 bytes, left out: the same text as a file above/,
+    /AGENTS\.md<\/span> 300 bytes, left out: the same text as the instructions or a file above/,
     /CLAUDE\.local\.md<\/span> 0 bytes, left out: a link or not a plain file/,
     /~\/\.claude\/CLAUDE\.md<\/span> 39\.1 KB, left out: larger than CrazyAgent gives/,
     /~\/\.codex\/AGENTS\.md<\/span> 12 bytes, left out: not plain text/,
@@ -110,5 +120,16 @@ test("every agent view refusal has a plain sentence and is an engine code", () =
 
 test("the agent panel reads the view for the open card only", () => {
   const source = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
-  assert.match(source, /<AgentInstructions key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} \/>/);
+  assert.match(source, /<AgentSide key=\{panelKey\(node\)\} projectId=\{projectId\} node=\{node\} /);
+  assert.match(source, /\{openNode && side\(openNode\)\}/);
+});
+
+test("the open agent's terminal head carries the reported line once the read is in", () => {
+  const value = { agent: 12, harness: "codex", launched: true, text: "", skills: [], sessions: 1,
+    loaded: [{ name: "AGENTS.md", path: "/w/agent-12/AGENTS.md" }], skills_used: ["tdd"], files: [] };
+  assert.equal(view.headReport({ kind: "ok", value }), "Instructions: AGENTS.md - Skills used: tdd");
+  assert.equal(view.headReport({ kind: "ok", value: { ...value, launched: false } }), undefined, "an agent that never launched has no report");
+  assert.equal(view.headReport({ kind: "loading" }), undefined);
+  const source = readFileSync(new URL("../src/screens/team/agent-instructions.tsx", import.meta.url), "utf8");
+  assert.match(source, /<TerminalPanel [^>]*reported=\{agent === undefined \? undefined : headReport\(read\)\}/);
 });

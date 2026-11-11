@@ -45,6 +45,7 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
         &codex,
         &connection.endpoint,
         &AgentPolicy::default(),
+        &[],
     )
     .unwrap();
     let mut master = CodexHost::spawn(
@@ -132,6 +133,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: 240_000,
@@ -150,6 +152,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         &connection,
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &[],
     )
     .unwrap();
     assert_ne!(home, managed);
@@ -159,6 +162,8 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         Some(crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &record,
+            mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         }),
     )
     .unwrap();
@@ -353,6 +358,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: 240_000,
@@ -371,6 +377,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         &connection,
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &[],
     )
     .unwrap();
     let record = tool_record.unwrap();

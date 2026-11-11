@@ -61,6 +61,9 @@ pub use master_launch::{RcliMasterBinding, RcliMasterLaunch};
 #[cfg(all(test, unix))]
 #[path = "rcli_host/master_tests.rs"]
 mod master_tests;
+#[cfg(test)]
+#[path = "rcli_host/usage_tests.rs"]
+mod usage_tests;
 
 pub const HOST_PROTOCOL_VERSION: u16 = 1;
 
@@ -525,6 +528,25 @@ fn safe_counter(value: u64) -> Result<(), ProtocolError> {
 }
 
 impl Usage {
+    /// The tokens one provider call used. Every R-CLI provider adapter counts cache reads
+    /// and writes inside input, so input keeps them apart, never below zero; each count is
+    /// capped at `LINE_TOKENS_MAX`. Output: the count.
+    fn tokens(&self) -> crate::usage::capture::Tokens {
+        let cache_read = self.cached_tokens.unwrap_or(0);
+        let cache_write = self.cache_write_tokens.unwrap_or(0);
+        crate::usage::capture::Tokens {
+            input: self
+                .input_tokens
+                .unwrap_or(0)
+                .saturating_sub(cache_read)
+                .saturating_sub(cache_write),
+            output: self.output_tokens.unwrap_or(0),
+            cache_read,
+            cache_write,
+        }
+        .at_most(crate::usage::capture::LINE_TOKENS_MAX)
+    }
+
     fn validate(&self) -> Result<(), ProtocolError> {
         for counter in [
             self.input_tokens,

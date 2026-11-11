@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
-use crazyagent_desktop::bridge::open::{context_file, link_allowed, project_folder};
+use crazyagent::project_setup::{Platform, ResearchKind, StoredSetup, TeamPlan, list_context};
+use crazyagent::protocol::ProjectId;
+use crazyagent_desktop::bridge::open::{context_file, context_item, link_allowed, project_folder};
 use std::os::unix::fs::symlink;
 
 #[test]
@@ -88,6 +90,65 @@ fn context_files_open_only_inside_the_project_folder_and_only_as_documents() {
             context_file(&folder, refused).unwrap_err().code,
             "context_item_not_openable",
             "{refused:?}"
+        );
+    }
+}
+
+fn setup_at(folder: &std::path::Path) -> StoredSetup {
+    StoredSetup {
+        project_id: ProjectId::new("notes-cli").unwrap(),
+        name: "Notes CLI".into(),
+        about: "Terminal-first notes.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Cli],
+        research: vec![ResearchKind::CompetitorResearch],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: folder.display().to_string(),
+        created_ms: 1_793_000_000_000,
+        revision: 1,
+    }
+}
+
+/// Open in default app on each context file the engine listed: a project made in the
+/// projects home keeps its context in `.crazyagent/context` and an older project keeps it
+/// in the project folder, and both open the listed file.
+#[test]
+fn every_listed_context_file_opens_from_the_folder_the_engine_listed_it_in() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let made = home.join("notes-cli");
+    let older = home.join("older-app");
+    for state in [made.join(".crazyagent"), older.clone()] {
+        std::fs::create_dir_all(state.join("context/research")).unwrap();
+        std::fs::write(state.join("context/brief.md"), "# Brief").unwrap();
+        std::fs::write(state.join("context/research/market.md"), "# Market").unwrap();
+    }
+
+    for (project, state) in [(&made, made.join(".crazyagent")), (&older, older.clone())] {
+        let setup = setup_at(project);
+        let listed = list_context(&setup).unwrap();
+        let paths: Vec<&str> = listed.items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(paths, ["context/brief.md", "context/research/market.md"]);
+        let opened: Vec<_> = listed
+            .items
+            .iter()
+            .map(|item| context_item(&setup, &item.path).map_err(|error| error.code))
+            .collect();
+        assert_eq!(
+            opened,
+            vec![
+                Ok(state.join("context/brief.md")),
+                Ok(state.join("context/research/market.md")),
+            ],
+            "{project:?}"
         );
     }
 }

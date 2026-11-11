@@ -3,8 +3,9 @@ import {
   addMemory, approveMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryWrites,
   MEMORY_TEXT_BYTES_MAX, type AgentMemoryWrites, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
 } from "../../api";
-import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, SearchField, Select, Skeleton, TextArea } from "../../ui";
+import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
+import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, SearchField, Select, SettingSection, Skeleton, TextArea } from "../../ui";
+import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
 import "../project/projects.css";
 
@@ -48,13 +49,13 @@ function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) 
     if (await onAdd(trimmed)) setText("");
     setPending(false);
   };
-  return <Panel title="Add memory">
-    <form className="stack-small" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+  return <SettingSection title="Add memory">
+    <form className="set-body" onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <TextArea id="memory-note" label={`Something agents should remember (${where})`} value={text} onValue={setText} rows={2}
         maxLength={NOTE_MAX} counterAt={NOTE_MAX - 200} error={error} />
       <span><Button type="submit" variant="primary" icon="brain" pending={pending} pendingLabel="Saving...">Add memory</Button></span>
     </form>
-  </Panel>;
+  </SettingSection>;
 }
 
 function ImportMemoryForm({ projects, initial, onImport }: {
@@ -72,8 +73,8 @@ function ImportMemoryForm({ projects, initial, onImport }: {
     setDone(await onImport(chosen));
     setPending(false);
   };
-  return <Panel title="Import memory">
-    <div className="stack-small">
+  return <SettingSection title="Import memory">
+    <div className="set-body">
       <p className="secondary">Choose a folder of markdown memory files, such as a Claude Code project memory folder. Each file becomes one memory of the chosen project. MEMORY.md, links and other files are left out.</p>
       {projects.length === 0 ? <p className="muted">Add a project first. Imported memories belong to one project.</p> : <>
         <Select id="memory-import-project" label="Into project" value={chosen} options={projects.map((item) => ({ value: item.id, label: item.name }))} onValue={setProject} />
@@ -81,7 +82,7 @@ function ImportMemoryForm({ projects, initial, onImport }: {
       </>}
       {done && <p className="muted small" role="status">{done}</p>}
     </div>
-  </Panel>;
+  </SettingSection>;
 }
 
 /** One research suggestion rewritten in the owner's words before it is saved, like the TUI's
@@ -114,12 +115,79 @@ export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel 
   </form>;
 }
 
-/** Settings, Memory as a pure view: research suggestions to save, edit then save, or dismiss
- * (one click is the owner's approval), the Agent memory writes setting, saved memory for the
- * chosen scope with who saved it, search, older pages, approve and delete, and forms to add and
- * import memory. Inputs: the reads, filters, last failure and the actions. */
-export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
+/** The Suggested section: research suggestions to save, edit then save, or dismiss, with the
+ * editor opening in place. Inputs: the suggestions read, the action running and the handlers.
+ * Output: the section, or nothing while there is no suggestion. */
+function SuggestedSection({ suggested, busy, onSave, onSaveEdited, onDismiss }: {
+  suggested: Loaded<Suggestion[]>;
+  busy: string | null;
+  onSave: (suggestion: Suggestion) => void;
+  onSaveEdited: (suggestion: Suggestion, text: string) => void;
+  onDismiss: (suggestion: Suggestion) => void;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+  if (suggested.kind !== "ok" || suggested.value.length === 0) return null;
+  return <SettingSection title="Suggested">
+    {suggested.value.map((suggestion) => {
+      const key = `${suggestion.project_id}/${suggestion.id}`;
+      if (editing === key) return <div className="set-row wide" key={key}>
+        <SuggestionEditor suggestion={suggestion} pending={busy === suggestion.id} onCancel={() => setEditing(null)}
+          onSave={(text) => onSaveEdited(suggestion, text)} />
+      </div>;
+      return <div className="set-row" key={key}>
+        <p className="set-label pj-note-text">{displayText(suggestion.text)}</p>
+        <span className="set-help">From {displayText(suggestion.project_name)}</span>
+        <div className="set-ctl set-line-ctl">
+          <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
+          <Button size="small" icon="pencil" disabled={busy === suggestion.id} onClick={() => setEditing(key)}>Edit</Button>
+          <Button size="small" disabled={busy === suggestion.id} onClick={() => onDismiss(suggestion)}>Dismiss</Button>
+        </div>
+      </div>;
+    })}
+  </SettingSection>;
+}
+
+/** What Saved memories lists: skeletons, a not-ready or failed read, the empty lines, or one row
+ * per memory with who saved it, Approve while it waits, Delete and Show older. Inputs: the read,
+ * the search, project names by id, the action running and the handlers. */
+function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onApprove }: {
   saved: Loaded<SavedMemoryPage>;
+  search: string;
+  names: Map<string, string>;
+  busy: string | null;
+  onDelete: (memory: SavedMemory) => void;
+  onMore: () => void;
+  onRetry: () => void;
+  onApprove?: (memory: SavedMemory) => void;
+}) {
+  if (saved.kind === "loading") return <div className="set-body"><Skeleton shape="row" count={4} /></div>;
+  if (saved.kind === "not_ready") return <NotReady what="Memory" compact />;
+  if (saved.kind === "error") return <LoadError message={saved.message} onRetry={onRetry} />;
+  if (saved.value.items.length === 0) {
+    return search.trim() ? <p className="item-row muted"><Icon name="search" size={14} /> No memories match.</p>
+      : <EmptyState icon="brain" title="No memories yet" compact>When agents find something worth keeping, it shows up here for you to save.</EmptyState>;
+  }
+  return <>
+    {saved.value.items.map((memory) => <div className="set-row" key={memory.id}>
+      <p className="set-label pj-note-text">{displayText(memory.text)}</p>
+      <span className="set-help">{displayText(memorySource(memory, names))}</span>
+      <div className="set-ctl set-line-ctl">
+        {memory.origin === "requested" && onApprove && <Button variant="primary" size="small" icon="brain" pending={busy === memory.id} pendingLabel="Approving..." onClick={() => onApprove(memory)}>Approve</Button>}
+        <Button variant="danger-text" size="small" icon="trash" onClick={() => onDelete(memory)}>Delete</Button>
+      </div>
+    </div>)}
+    {saved.value.next !== null && <div className="item-row"><span /><Button size="small" onClick={onMore}>Show older</Button></div>}
+  </>;
+}
+
+/** Settings, Memory as a pure view: the title in every state, the Agent memory writes setting,
+ * research suggestions to save (one click is the owner's approval), saved memory for the chosen
+ * scope with search and older pages, and forms to add and import memory. Inputs: the reads, the
+ * first page's read the writes setting came from (older pages merged in make a new object, which
+ * no read made), filters, last failure and the actions. */
+export function MemoryView({ saved, writesRead, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
+  saved: Loaded<SavedMemoryPage>;
+  writesRead: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
   scope: string;
   projects: { id: string; name: string }[];
@@ -137,64 +205,35 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   onMore: () => void;
   onRetry: () => void;
   onApprove?: (memory: SavedMemory) => void;
-  onWrites?: (writes: AgentMemoryWrites) => void;
+  onWrites?: (writes: AgentMemoryWrites) => Promise<string>;
 }) {
-  const [editing, setEditing] = useState<string | null>(null);
+  const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null, Object.is, writesRead);
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const where = scope ? `${names.get(scope) ?? "this project"} only` : "app-wide";
   const filters = <span className="row">
     {projects.length > 0 && <Select id="memory-scope" label="Show" hideLabel value={scope} options={scopeOptions(projects)} onValue={onScope} />}
     <SearchField label="Search memory" value={search} onValue={onSearch} />
   </span>;
-  let list;
-  if (saved.kind === "loading") list = <Skeleton shape="row" count={4} />;
-  else if (saved.kind === "not_ready") list = <NotReady what="Memory" compact />;
-  else if (saved.kind === "error") list = <LoadError message={saved.message} onRetry={onRetry} />;
-  else if (saved.value.items.length === 0) {
-    list = search.trim() ? <p className="item-row muted"><Icon name="search" size={14} /> No memories match.</p>
-      : <EmptyState icon="brain" title="No memories yet" compact>When agents find something worth keeping, it shows up here for you to save.</EmptyState>;
-  } else {
-    list = <div className="rows">
-      {saved.value.items.map((memory) => <div className="item-row" key={memory.id}>
-        <div className="stack-small"><p className="pj-note-text">{displayText(memory.text)}</p><span className="muted small">{displayText(memorySource(memory, names))}</span></div>
-        <span className="row">
-          {memory.origin === "requested" && onApprove && <Button variant="primary" size="small" icon="brain" pending={busy === memory.id} pendingLabel="Approving..." onClick={() => onApprove(memory)}>Approve</Button>}
-          <Button variant="danger-text" size="small" icon="trash" onClick={() => onDelete(memory)}>Delete</Button>
-        </span>
-      </div>)}
-      {saved.value.next !== null && <div className="item-row"><span /><Button size="small" onClick={onMore}>Show older</Button></div>}
-    </div>;
-  }
   return <div className="stack">
-    <p className="secondary">Facts agents keep across projects, with who saved each one. Agents read them at launch.</p>
+    <div className="settings-top"><div><h2>Memory</h2><p>Facts agents keep across projects, with who saved each one. Agents read them at launch.</p></div></div>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    {saved.kind === "ok" && onWrites && <Panel title="Agent memory writes">
-      <div className="stack-small">
-        <Select id="memory-agent-writes" label="When an agent saves a memory" value={saved.value.agent_writes} options={AGENT_WRITES_OPTIONS}
-          onValue={(value) => onWrites(value === "ask" ? "ask" : "save")} />
-        <span className="muted small">{saved.value.agent_writes === "ask"
-          ? "Agents' memories wait here until you approve them."
-          : "Agents' memories are saved at once. A sub-agent that reads hostile content could save a memory that steers every agent; delete any you don't trust."}</span>
-      </div>
-    </Panel>}
-    {suggested.kind === "ok" && suggested.value.length > 0 && <Panel title="Suggested" padded={false}><div className="rows">
-      {suggested.value.map((suggestion) => {
-        const key = `${suggestion.project_id}/${suggestion.id}`;
-        if (editing === key) return <div className="item-row" key={key}>
-          <SuggestionEditor suggestion={suggestion} pending={busy === suggestion.id} onCancel={() => setEditing(null)}
-            onSave={(text) => onSaveEdited(suggestion, text)} />
-        </div>;
-        return <div className="item-row" key={key}>
-          <div className="stack-small"><p className="pj-note-text">{displayText(suggestion.text)}</p><span className="muted small">From {displayText(suggestion.project_name)}</span></div>
-          <span className="row">
-            <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
-            <Button size="small" icon="pencil" disabled={busy === suggestion.id} onClick={() => setEditing(key)}>Edit</Button>
-            <Button size="small" onClick={() => onDismiss(suggestion)}>Dismiss</Button>
-          </span>
-        </div>;
-      })}
-    </div></Panel>}
-    <Panel title="Saved" actions={filters} padded={false}>{list}</Panel>
+    {saved.kind === "ok" && onWrites && <SettingSection title="Agent memory writes">
+      <SettingRow label="When an agent saves a memory">
+        <Select id="memory-agent-writes" label="When an agent saves a memory" value={writes ?? saved.value.agent_writes} options={AGENT_WRITES_OPTIONS}
+          helper={(writes ?? saved.value.agent_writes) === "ask"
+            ? "Agents' memories wait here until you approve them."
+            : "Agents' memories are saved at once. A sub-agent that reads hostile content could save a memory that steers every agent; delete any you don't trust."}
+          onValue={(value) => {
+            const chosen = value === "ask" ? "ask" : "save";
+            const settled = holdWrites(chosen);
+            void onWrites(chosen).then(settled);
+          }} />
+      </SettingRow>
+    </SettingSection>}
+    <SuggestedSection suggested={suggested} busy={busy} onSave={onSave} onSaveEdited={onSaveEdited} onDismiss={onDismiss} />
+    <SettingSection title="Saved memories" actions={filters}>
+      <SavedList saved={saved} search={search} names={names} busy={busy} onDelete={onDelete} onMore={onMore} onRetry={onRetry} onApprove={onApprove} />
+    </SettingSection>
     <AddMemoryForm where={where} onAdd={onAdd} />
     <ImportMemoryForm projects={projects} initial={scope} onImport={onImport} />
   </div>;
@@ -220,14 +259,16 @@ export function MemorySettings() {
     ? { kind: "ok", value: { items: [...first.value.items, ...older.items], next: older.next, agent_writes: first.value.agent_writes } } : first;
   const plain = (result: Result<unknown>) => result.kind === "not_ready" ? NOT_READY : result.kind === "error" ? result.message : "";
 
-  async function act(id: string, action: () => Promise<Result<void>>, done: string, reload: () => void) {
+  async function act(id: string, action: () => Promise<Result<void>>, done: string, reload: () => void): Promise<string> {
     setFailure("");
     setBusy(id);
     const result = session.noteResult(await action());
     setBusy(null);
+    const failed = plain(result);
     if (result.kind === "ok") session.showToast(done);
-    else setFailure(plain(result));
+    else setFailure(failed);
     reload();
+    return failed;
   }
 
   const more = async () => {
@@ -238,10 +279,10 @@ export function MemorySettings() {
   };
 
   return <>
-    <MemoryView saved={saved} suggested={suggested} scope={scope} projects={projects} search={search} failure={failure} busy={busy}
+    <MemoryView saved={saved} writesRead={first} suggested={suggested} scope={scope} projects={projects} search={search} failure={failure} busy={busy}
       onSearch={setSearch} onScope={setScope} onRetry={reloadSaved} onMore={() => void more()} onDelete={setDeleting}
       onApprove={(memory) => void act(memory.id, () => approveMemory(memory.id), "Memory approved. Agents get it from their next launch.", reloadSaved)}
-      onWrites={(writes) => void act("agent-writes", () => setAgentMemoryWrites(writes), writes === "ask" ? "Agents now ask you before a memory is saved." : "Agents now save memories directly.", reloadSaved)}
+      onWrites={(writes) => act("agent-writes", () => setAgentMemoryWrites(writes), writes === "ask" ? "Agents now ask you before a memory is saved." : "Agents now save memories directly.", reloadSaved)}
       onAdd={async (text) => {
         setFailure("");
         const result = session.noteResult(await addMemory(scope || null, text));

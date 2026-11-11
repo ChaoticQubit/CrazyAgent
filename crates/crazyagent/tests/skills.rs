@@ -156,11 +156,11 @@ async fn the_catalog_lists_each_skill_with_its_line_source_and_both_switches() {
     assert_eq!(app_level[0].source, graph_source);
 
     controller
-        .set_skill_enabled(notes.id.clone(), false)
+        .set_skill_enabled(notes.id.clone(), false, notes.version)
         .await
         .unwrap();
     controller
-        .switch_plugin(project.clone(), graph.id.clone(), false)
+        .switch_plugin(project.clone(), graph.id.clone(), false, graph.version)
         .await
         .unwrap();
     let here = skills::catalog(&controller, Some(project.clone()))
@@ -198,11 +198,11 @@ async fn the_catalog_lists_each_skill_with_its_line_source_and_both_switches() {
         "only skills on at both levels reach agents"
     );
     controller
-        .switch_plugin(project.clone(), graph.id.clone(), true)
+        .switch_plugin(project.clone(), graph.id.clone(), true, graph.version + 1)
         .await
         .unwrap();
     controller
-        .set_skill_enabled(notes.id.clone(), true)
+        .set_skill_enabled(notes.id.clone(), true, notes.version + 1)
         .await
         .unwrap();
     let effective = controller.project_plugins(project.clone()).await.unwrap();
@@ -254,7 +254,7 @@ async fn a_skill_detail_reads_the_whole_skill_md_its_files_and_the_project_switc
     assert_eq!(detail.files_more, 0);
 
     controller
-        .switch_plugin(project.clone(), big.id.clone(), false)
+        .switch_plugin(project.clone(), big.id.clone(), false, big.version)
         .await
         .unwrap();
     let here = controller
@@ -282,7 +282,16 @@ async fn a_skill_detail_reads_the_whole_skill_md_its_files_and_the_project_switc
         .await
         .unwrap_err();
     assert_eq!(global_view.0, "skill_not_found");
-    controller.remove_skill(big.id.clone()).await.unwrap();
+    let shown = controller.plugin_skills(None).await.unwrap();
+    let version = shown
+        .iter()
+        .find(|skill| skill.id == big.id)
+        .expect("the listed skill")
+        .version;
+    controller
+        .remove_skill(big.id.clone(), version)
+        .await
+        .unwrap();
     let removed = controller
         .skill_detail(big.id.clone(), None)
         .await
@@ -410,11 +419,11 @@ async fn only_ticked_skills_are_imported_on_without_private_files_and_a_differin
     );
 
     controller
-        .switch_plugin(project.clone(), notes_id.clone(), false)
+        .switch_plugin(project.clone(), notes_id.clone(), false, app[1].version)
         .await
         .unwrap();
     controller
-        .set_skill_enabled(notes_id.clone(), false)
+        .set_skill_enabled(notes_id.clone(), false, app[1].version + 1)
         .await
         .unwrap();
     let taken = controller

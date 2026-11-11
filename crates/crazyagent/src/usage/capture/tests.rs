@@ -4,6 +4,12 @@ use std::io::Write;
 const HOUR: i64 = 60 * 60 * 1000;
 const NOW: i64 = 1_793_000_000_000;
 
+fn tokens_of(usages: &[Usage]) -> Tokens {
+    usages
+        .iter()
+        .fold(Tokens::default(), |sum, usage| sum.plus(usage.tokens))
+}
+
 fn attribution(kind: RunKind, pool: Option<&str>) -> Attribution {
     Attribution {
         kind,
@@ -213,6 +219,55 @@ fn claude_sub_agent_records_count_and_a_linked_record_is_never_followed() {
     assert_eq!(stored[0].5, "agent-a1");
 }
 
+/// A native lead's teammates keep their session records in their own home beside the
+/// lead's (TPH-2 C), and those count with the lead's own. A teammates' home whose
+/// `projects` is a link is not walked, so no teammate points the scan at another folder.
+#[test]
+fn a_native_lead_s_teammates_records_count_from_their_home_and_a_linked_top_folder_is_not_walked() {
+    let (_root, db) = store();
+    let agent = tempfile::tempdir().unwrap();
+    let home = agent.path().join("home");
+    append(
+        &home.join("projects/-work-alpha/lead.jsonl"),
+        &claude_assistant("lead1", 1, 2, 0, 0, "end_turn"),
+    );
+    append(
+        &agent
+            .path()
+            .join("mates-home/projects/-work-alpha/mate.jsonl"),
+        &claude_assistant("mate1", 10, 20, 0, 0, "end_turn"),
+    );
+    let who = attribution(RunKind::Master, Some("pool-a"));
+    let added = scan_home(&db, &home, Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        added,
+        Tokens {
+            input: 11,
+            output: 22,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    append(
+        &elsewhere.path().join("projects/-work-beta/other.jsonl"),
+        &claude_assistant("other1", 1000, 1000, 0, 0, "end_turn"),
+    );
+    std::fs::create_dir_all(other.path().join("home")).unwrap();
+    std::fs::create_dir_all(other.path().join("mates-home")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("projects"),
+        other.path().join("mates-home").join("projects"),
+    )
+    .unwrap();
+    assert_eq!(
+        records(&other.path().join("home"), Format::Claude).0,
+        Vec::<PathBuf>::new()
+    );
+}
+
 fn codex_count(input: u64, cached: u64, output: u64) -> String {
     format!(
         "{}\n",
@@ -228,8 +283,7 @@ fn codex_count(input: u64, cached: u64, output: u64) -> String {
                         "output_tokens": output,
                         "reasoning_output_tokens": 0,
                         "total_tokens": input + output
-                    },
-                    "last_token_usage": {"input_tokens": 1, "output_tokens": 1}
+                    }
                 },
                 "rate_limits": null
             }
@@ -372,7 +426,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     let opened = open_record(&record).unwrap();
     let length = opened.2;
     append(&record, &claude_assistant("g2", 3, 1, 0, 0, "end_turn"));
-    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW, "").0);
     assert_eq!(
         growth,
         Tokens {
@@ -383,7 +437,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
         }
     );
     assert_eq!(progress.offset, length);
-    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 1);
+    let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 1).0);
     assert_eq!(
         growth,
         Tokens {
@@ -401,14 +455,14 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     append(&record, head);
     let opened = open_record(&record).unwrap();
     append(&record, tail);
-    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW + 2);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW + 2, "").0);
     assert_eq!(growth, Tokens::default());
     assert_eq!(progress.offset, grown);
-    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 3);
+    let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 3).0);
     assert_eq!((growth.input, growth.output), (5, 5));
     assert_eq!(progress.offset, std::fs::metadata(&record).unwrap().len());
     assert_eq!(
-        read_record(&record, Format::Claude, &mut progress, NOW + 4).0,
+        tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 4).0),
         Tokens::default()
     );
 }
@@ -646,7 +700,7 @@ fn a_record_that_is_a_fifo_is_skipped_without_waiting_for_a_writer() {
     });
     assert_eq!(
         read.recv_timeout(std::time::Duration::from_secs(5)),
-        Ok(((Tokens::default(), None), Progress::default())),
+        Ok(((Vec::new(), None), Progress::default())),
         "a FIFO record is skipped without waiting for a writer"
     );
 }
@@ -751,7 +805,7 @@ fn an_implausible_token_count_is_bounded_and_later_growth_never_overflows_its_ro
         )
         .unwrap();
     assert_eq!(stored, (ROW_TOKENS_MAX, "integer".into(), ROW_TOKENS_MAX));
-    let report = super::super::report::report(&db, None, None, 0, NOW + 4).unwrap();
+    let report = super::super::report::report(&db, None, None, 0, NOW + 4, &[]).unwrap();
     assert_eq!(report.total.input, ROW_TOKENS_MAX as u64);
 }
 
@@ -817,6 +871,7 @@ fn transcript_limits_stay_within_their_window_below_the_owner_and_a_fresh_poll()
             resets_at_ms: Some(NOW + 4 * HOUR),
         }),
         weekly: None,
+        provider: Some(crate::usage::poll::Provider::Codex),
     };
     record_observation(&db, &account, &polled, LimitSource::Poll, NOW + 3).unwrap();
     append(&record, &codex_limits(100.0, 300, NOW + HOUR));
@@ -847,9 +902,11 @@ fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
     let homes = tempfile::tempdir().unwrap();
     let gone = homes.path().join("run");
     let kept = homes.path().join("run-2");
-    for home in [&gone, &kept] {
+    for (home, thread) in [(&gone, "a"), (&kept, "b")] {
         append(
-            &home.join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-r.jsonl"),
+            &home.join(format!(
+                "sessions/2026/10/27/rollout-2026-10-27T03-00-00-{thread}.jsonl"
+            )),
             &codex_count(400, 100, 20),
         );
         register_run(&db, home, &unattributed("codex"), NOW).unwrap();
@@ -955,7 +1012,11 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
                 .unwrap();
         }
     }
-    let found = records(home.path(), Format::Claude);
+    let (found, _, cut) = records(home.path(), Format::Claude);
+    assert!(
+        cut,
+        "a walk stopped at the entry bound says the home was cut"
+    );
     assert_eq!(found.len(), FILES_PER_SCAN_MAX);
     let folders: std::collections::BTreeSet<&Path> =
         found.iter().map(|path| path.parent().unwrap()).collect();
@@ -965,12 +1026,110 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
     );
 }
 
-/// A home past the entry bound still counts the record that changed last: the walk enters
-/// the most recently changed folder first and reads every entry of it, so the bound leaves
-/// out only folders that changed before. Here that record is the last entry of a folder of
-/// 1,100 records that a walk in plain directory order reaches last.
+/// A session record whose stored progress names the same inode on another device, as a
+/// reboot that renumbered the volume leaves it, keeps its offset and counts only the lines
+/// appended since the last scan, while its stored pin moves to the live device. A record
+/// removed and recreated on that renumbered pin, with a new inode, starts over.
 #[test]
-fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
+fn a_record_whose_volume_was_renumbered_keeps_its_place_and_counts_nothing_twice() {
+    use std::os::unix::fs::MetadataExt;
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s1.jsonl");
+    let who = attribution(RunKind::Agent, None);
+    let key = record.to_string_lossy().into_owned();
+    let renumber = |db: &Connection| {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut progress: Progress = serde_json::from_str(&text).unwrap();
+        progress.identity.0 ^= 1;
+        db.execute(
+            "UPDATE usage_files SET progress=?2 WHERE path=?1",
+            params![key, serde_json::to_string(&progress).unwrap()],
+        )
+        .unwrap();
+    };
+    let stored_identity = |db: &Connection| -> (u64, u64) {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().identity
+    };
+
+    append(&record, &claude_assistant("r1", 5, 2, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        5
+    );
+
+    renumber(&db);
+    append(&record, &claude_assistant("r2", 3, 1, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap(),
+        Tokens {
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        "only the line appended since the last scan is counted, not the whole record again"
+    );
+    let live = std::fs::metadata(&record).unwrap();
+    assert_eq!(
+        stored_identity(&db),
+        (live.dev(), live.ino()),
+        "the pin moved to the live device"
+    );
+
+    let kept_offset = {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().offset
+    };
+    renumber(&db);
+    std::fs::remove_file(&record).unwrap();
+    append(&record, &claude_assistant("r3", 9, 4, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r4", 2, 1, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r5", 1, 1, 0, 0, "end_turn"));
+    assert!(
+        std::fs::metadata(&record).unwrap().len() >= kept_offset,
+        "the recreated record is at least as long as the kept offset, so only the \
+         inode check, not the length guard, can start it over"
+    );
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 2)
+            .unwrap()
+            .input,
+        12,
+        "a record recreated with a new inode on the renumbered pin starts over"
+    );
+    let live = std::fs::metadata(&record).unwrap();
+    assert_eq!(stored_identity(&db), (live.dev(), live.ino()));
+}
+
+/// A home past the entry bound still counts the record written last, however its agent dates
+/// it, and its reading says it is partial until a scan reads the home whole. The walk orders
+/// by the inode change time, which no agent can set, and enters the folder changed last
+/// first. Here that record is the last entry of a folder of 1,100 records that a walk in
+/// plain directory order reaches last, and the agent set both to an old modification time.
+#[test]
+fn a_home_past_the_entry_bound_counts_the_record_written_last_and_reads_as_partial() {
     const FOLDERS: usize = 20;
     let (_root, db) = store();
     let home = tempfile::tempdir().unwrap();
@@ -995,25 +1154,630 @@ fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
     };
     let folders = listed(&projects);
     let last = folders[0].clone();
-    for dir in &folders[1..] {
-        std::fs::File::open(dir)
+    let live = listed(&last).pop().unwrap();
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    for path in [&live, &last] {
+        std::fs::File::open(path)
             .unwrap()
             .set_modified(at(0))
             .unwrap();
     }
-    let live = listed(&last).pop().unwrap();
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let added = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    let cut = partial(&db);
+    for dir in &folders[1..16] {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((added.input, added.output), cut, partial(&db)),
+        ((7, 3), Some(1), Some(0)),
+        "the record written last is counted, and the reading is partial only while the home is cut"
+    );
+}
+
+/// MSL2B-R3-1: a home of more records than one scan reads, all well inside the walk's
+/// bounds, reads as partial while a record the scan leaves out holds lines no scan counted,
+/// however many scans pass, and only then. An agent rewriting its other records keeps its
+/// live session record out of every scan; once a scan reads it, the records left out are
+/// all counted and the reading is complete again, as it is for a home that grows past the
+/// bound with records already counted.
+#[test]
+fn a_home_whose_scan_leaves_out_an_uncounted_record_reads_as_partial_until_it_is_read() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let live = folder.join("live.jsonl");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
     append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
-    let added = scan_home(
-        &db,
-        home.path(),
-        Format::Claude,
-        &attribution(RunKind::Agent, None),
-        NOW,
+    pause();
+    let others: Vec<PathBuf> = (0..FILES_PER_SCAN_MAX)
+        .map(|index| folder.join(format!("o{index:03}.jsonl")))
+        .collect();
+    for other in &others {
+        append(other, "\n");
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let scan = |at: i64| {
+        pause();
+        let added = scan_home(&db, home.path(), Format::Claude, &who, at).unwrap();
+        ((added.input, added.output), partial(&db))
+    };
+
+    assert_eq!(
+        scan(NOW),
+        ((0, 0), Some(1)),
+        "the first scan leaves out the live record, which no scan read"
+    );
+    assert_eq!(
+        scan(NOW + 1),
+        ((0, 0), Some(1)),
+        "a second scan that leaves it out unread still reads as partial"
+    );
+    append(&live, &claude_assistant("m2", 5, 2, 0, 0, "end_turn"));
+    assert_eq!(
+        scan(NOW + 2),
+        ((12, 5), Some(0)),
+        "the live record changed last is read whole, and the record left out was counted"
+    );
+    let grown = folder.join("grown.jsonl");
+    append(&grown, "\n");
+    assert_eq!(
+        scan(NOW + 3),
+        ((0, 0), Some(0)),
+        "a home that grows past the bound with counted records reads as complete"
+    );
+
+    append(&live, &claude_assistant("m3", 1, 1, 0, 0, "end_turn"));
+    pause();
+    for other in others.iter().chain([&grown]) {
+        append(other, "\n");
+    }
+    assert_eq!(
+        scan(NOW + 4),
+        ((0, 0), Some(1)),
+        "an agent rewriting its other records keeps the changed live record out, and the reading says so"
+    );
+    assert_eq!(
+        scan(NOW + 5),
+        ((0, 0), Some(1)),
+        "the next scan that leaves it out unread says so again"
+    );
+    std::fs::remove_file(&grown).unwrap();
+    std::fs::remove_file(&others[0]).unwrap();
+    assert_eq!(
+        scan(NOW + 6),
+        ((1, 1), Some(0)),
+        "once the home fits one scan the live record is read and the reading is complete"
+    );
+}
+
+/// MSL2B-R3-1: a home whose records were all counted, in which one scan leaves out a record
+/// for the first time because one more record arrived, reads as complete: the record left
+/// out was read when it was among the newest, so no usage is missing.
+#[test]
+fn a_home_that_grows_past_the_bound_with_counted_records_reads_as_complete() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    for index in 0..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        ((read.input, read.output), partial(&db)),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    append(
+        &folder.join("s256.jsonl"),
+        &claude_assistant("m256", 1, 1, 0, 0, "end_turn"),
+    );
+    let grown = scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((grown.input, grown.output), partial(&db)),
+        ((1, 1), Some(0)),
+        "the record left out was counted, so the reading is complete"
+    );
+}
+
+/// CUT-L1: a record left out of a scan whose bytes past its counted lines hold no line a scan
+/// could count reads as complete: a last line torn by a stopped agent, alone or after the
+/// rest of a line longer than one read that the next read would skip (CUTT-L1).
+#[test]
+fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    let torn_line = "{\"type\":\"assistant\",\"message\":{\"id\":\"t2\"";
+    let long = folder.join("long.jsonl");
+    append(&long, &claude_assistant("l1", 1, 1, 0, 0, "end_turn"));
+    append(
+        &long,
+        &format!(
+            "{{\"type\":\"assistant\",\"pad\":\"{}\"}}\n",
+            "x".repeat(READ_BYTES_MAX + 10)
+        ),
+    );
+    append(&long, torn_line);
+    pause();
+    let torn = folder.join("torn.jsonl");
+    append(&torn, &claude_assistant("t1", 1, 1, 0, 0, "end_turn"));
+    append(&torn, torn_line);
+    pause();
+    for index in 2..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let scan = |at: i64| {
+        pause();
+        let added = scan_home(&db, home.path(), Format::Claude, &who, at).unwrap();
+        ((added.input, added.output), partial(&db))
+    };
+
+    assert_eq!(
+        scan(NOW),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    assert_eq!(
+        scan(NOW + 1),
+        ((0, 0), Some(0)),
+        "the next read of the long record skips one read of its long line"
+    );
+    append(
+        &folder.join("n1.jsonl"),
+        &claude_assistant("n1", 1, 1, 0, 0, "end_turn"),
+    );
+    assert_eq!(
+        scan(NOW + 2),
+        ((1, 1), Some(0)),
+        "the long record left out while skipping holds only the rest of its skipped line and a torn line, so the reading is complete"
+    );
+    append(
+        &folder.join("n2.jsonl"),
+        &claude_assistant("n2", 1, 1, 0, 0, "end_turn"),
+    );
+    assert_eq!(
+        scan(NOW + 3),
+        ((1, 1), Some(0)),
+        "the record left out holds only a torn line past its counted lines, so the reading is complete"
+    );
+}
+
+/// CUT-L1: one scan reads at most `READ_BYTES_MAX` bytes of the tails of the records it left
+/// out; a home whose left-out tails pass that bound reads as partial rather than complete.
+#[test]
+fn a_home_whose_left_out_tails_pass_one_read_reads_as_partial() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    for name in ["a", "b"] {
+        let record = folder.join(format!("{name}.jsonl"));
+        append(&record, &claude_assistant(name, 1, 1, 0, 0, "end_turn"));
+        append(&record, &"x".repeat(READ_BYTES_MAX / 2 + 1));
+        pause();
+    }
+    for index in 2..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        ((read.input, read.output), partial(&db)),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    pause();
+    for name in ["n1", "n2"] {
+        append(
+            &folder.join(format!("{name}.jsonl")),
+            &claude_assistant(name, 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let grown = scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((grown.input, grown.output), partial(&db)),
+        ((2, 2), Some(1)),
+        "left-out tails past one read in all are not read through, so the reading stays partial"
+    );
+}
+
+/// One Codex rollout line recording a tool call of the given item type, name and payload.
+fn codex_call(kind: &str, name: &str, field: &str, value: serde_json::Value) -> String {
+    let mut payload = serde_json::json!({"type": kind, "name": name});
+    payload[field] = value;
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "response_item", "payload": payload})
+    )
+}
+
+fn tool_counts(db: &Connection, agent: i64) -> Vec<(String, i64)> {
+    let mut query = db
+        .prepare("SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool")
+        .unwrap();
+    query
+        .query_map(params![agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn codex_rollout_tool_calls_count_once_per_line() {
+    let (_root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+         VALUES ('alpha','sub','codex',1,'running',?1,?1,0)",
+        params![NOW],
     )
     .unwrap();
-    assert_eq!(
-        (added.input, added.output),
-        (7, 3),
-        "the record that changed last is counted"
+    let agent = db.last_insert_rowid();
+    let home = tempfile::tempdir().unwrap();
+    let record = home
+        .path()
+        .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-t.jsonl");
+    let graphify = serde_json::json!({"cmd": "graphify query \"who owns pools\""}).to_string();
+    let skill =
+        serde_json::json!({"cmd": "sed -n 1,80p /h/.codex/skills/tdd/SKILL.md"}).to_string();
+    let oversized =
+        serde_json::json!({"cmd": format!("graphify {}", "x".repeat(ARGUMENTS_BYTES_MAX))})
+            .to_string();
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            graphify.clone().into(),
+        ),
     );
+    append(
+        &record,
+        &codex_call("function_call", "exec_command", "arguments", skill.into()),
+    );
+    append(
+        &record,
+        &codex_call(
+            "custom_tool_call",
+            "apply_patch",
+            "input",
+            "*** Begin Patch".into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "local_shell_call",
+            "",
+            "action",
+            serde_json::json!({"type": "exec", "command": ["bash", "-lc", "ls"]}),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "mcp__context-mode__ctx_search",
+            "arguments",
+            "{}".into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            oversized.into(),
+        ),
+    );
+    append(
+        &record,
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+    );
+    append(&record, &codex_count(1000, 600, 50));
+    let mut who = attribution(RunKind::Agent, None);
+    who.harness = "codex".into();
+    let counted = vec![
+        ("Skill".to_owned(), 1),
+        ("apply_patch".to_owned(), 1),
+        ("ctx_search".to_owned(), 1),
+        ("exec_command".to_owned(), 1),
+        ("graphify".to_owned(), 1),
+        ("local_shell_call".to_owned(), 1),
+        ("skill:tdd".to_owned(), 1),
+    ];
+
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW).unwrap();
+    assert_eq!(tool_counts(&db, agent), counted);
+
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW + 1).unwrap();
+    assert_eq!(
+        tool_counts(&db, agent),
+        counted,
+        "a second scan of the same lines counts nothing again"
+    );
+
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            graphify.into(),
+        ),
+    );
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW + 2).unwrap();
+    let graphify_count = tool_counts(&db, agent)
+        .into_iter()
+        .find(|(tool, _)| tool == "graphify")
+        .map(|(_, count)| count);
+    assert_eq!(graphify_count, Some(2), "only the new line counts");
+
+    let other = tempfile::tempdir().unwrap();
+    append(
+        &other
+            .path()
+            .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-u.jsonl"),
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            "{\"cmd\":\"graphify\"}".into(),
+        ),
+    );
+    scan_home(&db, other.path(), Format::Codex, &who, NOW + 3).unwrap();
+    assert_eq!(
+        tool_counts(&db, agent)
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<i64>(),
+        8,
+        "a scan for no agent counts no tool calls"
+    );
+}
+
+/// One Claude Code transcript line of an assistant message that calls one tool.
+/// Inputs: the message id, the tool's name and its input. Output: the line.
+fn claude_call(id: &str, name: &str, input: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": id,
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": format!("toolu_{id}"), "name": name, "input": input}],
+                "usage": {"input_tokens": 10, "output_tokens": 2}
+            }
+        })
+    )
+}
+
+/// A Claude Code agent launched without hooks (DEC-104 bare-hooks) has its tool calls
+/// counted from its transcript, each call once however often the home is scanned, the way a
+/// Codex agent's rollout is. One with hooks counts its own through them, so its transcript
+/// counts tokens only.
+#[test]
+fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks() {
+    let (_root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let agent = |hookless: bool| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+             VALUES ('alpha','sub','claude-code',1,'running',?1,?1,?2)",
+            params![NOW, hookless],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let bare = agent(true);
+    let hooked = agent(false);
+    let lines = [
+        claude_call(
+            "m1",
+            "Bash",
+            serde_json::json!({"command": "graphify query \"pools\""}),
+        ),
+        claude_call("m2", "Skill", serde_json::json!({"skill": "tdd"})),
+        claude_call(
+            "m3",
+            "Edit",
+            serde_json::json!({"file_path": "/repo/a.rs", "old_string": "a", "new_string": "b"}),
+        ),
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_m3\",\"content\":\"ok\"}]}}\n".to_owned(),
+        claude_assistant("m4", 10, 2, 0, 0, "end_turn"),
+    ];
+    let homes = [bare, hooked].map(|agent| {
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("projects/-repo/s1.jsonl");
+        for line in &lines {
+            append(
+                &record,
+                &line.replace("\"id\":\"m", &format!("\"id\":\"{agent}-m")),
+            );
+        }
+        (agent, home)
+    });
+    let who = attribution(RunKind::Agent, None);
+    let scan = |at: i64| {
+        homes.each_ref().map(|(agent, home)| {
+            let added =
+                scan_agent_home(&db, home.path(), Format::Claude, &who, *agent, at).unwrap();
+            (added.input, added.output)
+        })
+    };
+
+    assert_eq!(
+        scan(NOW),
+        [(40, 8); 2],
+        "both transcripts count their tokens"
+    );
+    assert_eq!(scan(NOW + 1), [(0, 0); 2]);
+    assert_eq!(
+        tool_counts(&db, bare),
+        vec![
+            ("Edit".to_owned(), 1),
+            ("Skill".to_owned(), 1),
+            ("graphify".to_owned(), 1),
+            ("skill:tdd".to_owned(), 1),
+        ],
+        "each call of the agent without hooks counts once"
+    );
+    assert_eq!(
+        tool_counts(&db, hooked),
+        Vec::new(),
+        "the agent with hooks counts its calls through them"
+    );
+}
+
+#[test]
+fn one_harness_name_holds_claude_and_claude_code_rows() {
+    let (_root, db) = store();
+    let mut alias = attribution(RunKind::Agent, None);
+    alias.harness = "claude".into();
+    let named = attribution(RunKind::Agent, None);
+    let mut unknown = attribution(RunKind::Agent, None);
+    unknown.harness = "mystery-cli".into();
+    let tokens = Tokens {
+        input: 10,
+        output: 5,
+        ..Tokens::default()
+    };
+    count_reported(&db, &alias, tokens, "s1", NOW).unwrap();
+    count_reported(&db, &named, tokens, "s1", NOW).unwrap();
+    count_reported(&db, &unknown, tokens, "s1", NOW).unwrap();
+    let rows: Vec<(String, i64)> = db
+        .prepare("SELECT harness,input FROM usage_tokens ORDER BY harness")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("claude-code".to_owned(), 20),
+            ("mystery-cli".to_owned(), 10)
+        ]
+    );
+}
+
+#[test]
+fn a_tool_filed_before_a_rewind_is_not_collected_again() {
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("s1.jsonl");
+    let line = |name: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": name, "input": {}}
+            ]}})
+        )
+    };
+    append(&record, &line("Bash"));
+    let filed = std::fs::metadata(&record).unwrap().len();
+    append(&record, &line("Read"));
+    let mut progress = Progress {
+        identity: file_identity(&std::fs::metadata(&record).unwrap()),
+        filed_to: filed,
+        ..Progress::default()
+    };
+    let mut tools = Vec::new();
+    read_record_with(
+        &record,
+        Format::Claude,
+        &mut progress,
+        NOW,
+        Some(&mut tools),
+        None,
+    );
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(names, ["Read"]);
+}
+
+/// SECAUDIT usage/capture/progress-message-id-unbounded: a message id in an agent-written
+/// record is only ever compared, so a huge one is not kept whole in the shared database.
+#[test]
+fn a_huge_message_id_is_not_kept_whole_in_a_record_s_progress() {
+    let (_directory, db) = store();
+    let who = attribution(RunKind::Agent, None);
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s1.jsonl");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(
+        &record,
+        claude_assistant(&"a".repeat(3 * 1024 * 1024), 1, 0, 0, 0, "end_turn"),
+    )
+    .unwrap();
+    scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    let length: i64 = db
+        .query_row("SELECT length(progress) FROM usage_files", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(length < 1024, "{length}");
+}
+
+/// SECAUDIT usage/capture/progress-message-id-unbounded: an id at the bound is kept, so the
+/// second line of its message adds only growth; an id past the bound is not kept, and
+/// each line still counts whole, so no tokens are lost.
+#[test]
+fn a_message_id_is_kept_up_to_its_bound_and_tokens_count_past_it() {
+    for (length, counted) in [
+        (NAME_BYTES_MAX, 5),
+        (NAME_BYTES_MAX + 1, 10),
+        (3 * 1024 * 1024, 10),
+    ] {
+        let (_directory, db) = store();
+        let who = attribution(RunKind::Agent, None);
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("projects/-work-alpha/s1.jsonl");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let line = claude_assistant(&"a".repeat(length), 5, 0, 0, 0, "end_turn");
+        std::fs::write(&record, format!("{line}{line}")).unwrap();
+        for _ in 0..2 {
+            scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+        }
+        let input: i64 = db
+            .query_row("SELECT SUM(input) FROM usage_tokens", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(input, counted, "{length}");
+    }
 }

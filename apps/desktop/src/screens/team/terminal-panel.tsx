@@ -1,12 +1,13 @@
 import { Channel } from "@tauri-apps/api/core";
 import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
-import { Button, Icon, NotReady, isMac, sendsMessage } from "../../ui";
+import { readTerminalInput } from "../../state";
+import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
-import { nodeLine } from "./graph";
+import { nodeRole, nodeRunning, nodeStatus } from "./graph";
 import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
@@ -26,8 +27,9 @@ function token(name: string, fallback: string): string {
 
 /** The view's xterm settings: the app's mono font, the terminal tokens for every ANSI color
  * and the scrollbar, Option as Meta, Option-drag selecting text even while a full-screen app
- * reads the mouse, and `SCROLLBACK_LINES` of scrollback for the history the engine sends on
- * attach. Output: the options for a new terminal. */
+ * reads the mouse, a right-click that keeps the selection for the menu's Copy instead of
+ * picking the word under the pointer, and `SCROLLBACK_LINES` of scrollback for the history
+ * the engine sends on attach. Output: the options for a new terminal. */
 export function terminalOptions(): ITerminalOptions {
   return {
     cursorBlink: true,
@@ -35,6 +37,7 @@ export function terminalOptions(): ITerminalOptions {
     fontSize: 13,
     macOptionIsMeta: true,
     macOptionClickForcesSelection: true,
+    rightClickSelectsWord: false,
     scrollback: SCROLLBACK_LINES,
     theme: {
       background: token("--terminal-bg", "#161513"),
@@ -65,53 +68,77 @@ export function terminalOptions(): ITerminalOptions {
   };
 }
 
-/** The note under a live terminal: who reads what the owner types. Input: the node.
- * Output: one sentence. */
-export function typingNote(node: GraphNode): string {
-  return node.kind === "master"
-    ? "Typing goes straight to the master."
-    : "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
+/** The pane a terminal view shows instead of the whole terminal: a native teammate known
+ * only by its pane in its lead's terminal. Input: the node. Output: the pane id, or null. */
+export function teammatePane(node: GraphNode): string | null {
+  return node.kind === "teammate" && typeof node.agent !== "number" && node.pane ? node.pane : null;
 }
 
-/** The status line's note on where the owner's typing goes. Inputs: the node and the input
- * choice. Output: one sentence. */
+/** The note under a live terminal: who reads what the owner types. A native teammate known
+ * only by its pane gets it in that pane, with no master told. Only a terminal with a message
+ * box under it speaks of that box. Inputs: the node and whether the box is there. Output: the
+ * sentences. */
+export function typingNote(node: GraphNode, box: boolean): string {
+  if (node.kind === "master") return "Typing goes straight to the master.";
+  if (teammatePane(node)) return "Typing goes straight to this teammate's pane and is not kept or told to the master.";
+  const kept = "Typing goes straight to this agent and is not kept.";
+  return box ? `${kept} Only a prompt you send below is also told to its master.` : kept;
+}
+
+/** The status line's note on where the owner's typing goes. Inputs: the node and the owner's
+ * Terminal input. Output: the sentences. */
 export function inputNote(node: GraphNode, input: InputChoice): string {
   if (input === "box") return `The terminal shows ${node.label}; type in the message box below.`;
-  if (input === "terminal") return `${typingNote(node)} Enter sends, Shift+Enter adds a line.`;
-  return typingNote(node);
+  if (input === "terminal") return `${typingNote(node, false)} Enter sends, Shift+Enter adds a line.`;
+  return typingNote(node, true);
 }
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
 export function promptCopy(node: GraphNode): { label: string; placeholder: string } {
-  return node.kind === "master"
-    ? { label: "Prompt the master", placeholder: "Tell the master what to do next" }
-    : { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
+  if (node.kind === "master") return { label: "Prompt the master", placeholder: "Tell the master what to do next" };
+  if (teammatePane(node)) return { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. It goes to its pane only.` };
+  return { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
 }
+
+const SEND_HELP = "Sends the text as one message, then Enter. Enter to send, Shift+Enter for a new line.";
 
 /** The prompt box under an agent's terminal: Enter sends the text as one message, Shift+Enter
  * adds a line. The box always takes typing and keeps its draft, as a master turn's terminal
- * ends after each turn; only sending waits for a live terminal. Inputs: the node, whether the
- * terminal is live and the send action, which says whether the prompt was queued. Output: the
- * form. */
-export function Composer({ node, live, onSend }: { node: GraphNode; live: boolean; onSend: (text: string) => boolean }) {
+ * ends after each turn; only sending waits for a live terminal. `compact` is the mockup's
+ * one-line "Type to X..." box with Send beside it, where only a reason it can't send yet shows.
+ * Inputs: the node, whether the terminal is live, the send action, which says whether the
+ * prompt was queued, the layout and a ref to the box. Output: the form. */
+export function Composer({ node, live, onSend, compact = false, box }: {
+  node: GraphNode; live: boolean; onSend: (text: string) => boolean; compact?: boolean; box?: Ref<HTMLTextAreaElement>;
+}) {
   const [text, setText] = useState("");
   const id = `tg-prompt-${node.id}`;
   const copy = promptCopy(node);
   const check = promptText(text);
+  const blocked = !live ? "Sends once the terminal is live." : check.kind === "too_long" ? check.reason : null;
   const send = () => {
     if (!live || check.kind !== "ok") return;
     if (onSend(check.text)) setText("");
   };
-  return <form className="tg-composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
+  const input = <textarea ref={box} id={id} className="pj-input tg-composer-input" rows={compact ? 1 : 2} value={text}
+    placeholder={displayText(compact ? `Type to ${node.label}...` : copy.placeholder)}
+    aria-describedby={compact && blocked ? `${id}-help ${id}-note` : `${id}-help`}
+    onChange={(event) => setText(event.target.value)}
+    onKeyDown={(event) => { if (sendsMessage(event.nativeEvent)) { event.preventDefault(); send(); } }} />;
+  const submit = <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || check.kind !== "ok"}>Send</Button>;
+  return <form className={compact ? "tg-composer compact" : "tg-composer"} onSubmit={(event) => { event.preventDefault(); send(); }}>
     <label htmlFor={id} className="pj-sr">{displayText(copy.label)}</label>
-    <textarea id={id} className="pj-input tg-composer-input" rows={2} value={text}
-      placeholder={displayText(copy.placeholder)} aria-describedby={`${id}-help`}
-      onChange={(event) => setText(event.target.value)}
-      onKeyDown={(event) => { if (sendsMessage(event.nativeEvent)) { event.preventDefault(); send(); } }} />
-    <div className="tg-composer-foot">
-      <span className="tg-terminal-note" id={`${id}-help`}>{!live ? "Sends once the terminal is live." : check.kind === "too_long" ? check.reason : "Sends the text as one message, then Enter. Enter to send, Shift+Enter for a new line."}</span>
-      <Button type="submit" variant="primary" size="small" icon="send" disabled={!live || check.kind !== "ok"}>Send</Button>
-    </div>
+    {compact ? <>
+      <div className="tg-composer-row">{input}{submit}</div>
+      <span className="visually-hidden" id={`${id}-help`}>{displayText(`${copy.placeholder} ${SEND_HELP}`)}</span>
+      {blocked && <span className="tg-terminal-note" id={`${id}-note`}>{blocked}</span>}
+    </> : <>
+      {input}
+      <div className="tg-composer-foot">
+        <span className="tg-terminal-note" id={`${id}-help`}>{blocked ?? SEND_HELP}</span>
+        {submit}
+      </div>
+    </>}
   </form>;
 }
 
@@ -256,23 +283,76 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
   </div>;
 }
 
+/** The head over an agent's terminal, as the approved mockup draws it: the name with its
+ * harness and a state badge, Message, which puts the cursor in the box under the terminal,
+ * Stop when the agent can be stopped and Close when the view can be closed, then the agent's
+ * role, branch, account and harness report, and the swap hint for the one panel beside the
+ * graph. A wall tile shows Message and Stop as icons. With no box in the owner's Terminal
+ * input there is no Message at all. Inputs: the node, the harness lookup, the tile layout,
+ * whether this terminal has a message box, whether it can take a message now, the actions,
+ * the report and the hint. Output: the head. */
+function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, onClose, reported, swaps }: {
+  node: GraphNode; harness: (id: string) => string; tile: boolean; message: boolean; boxed: boolean; onMessage: () => void;
+  onStop?: () => void; onClose?: () => void; reported?: string; swaps: boolean;
+}) {
+  const status = nodeStatus(node);
+  const label = displayText(node.label);
+  const running = nodeRunning(node, Date.now());
+  return <div className="tg-terminal-head">
+    <span className="tg-terminal-title">
+      <Icon name="square-terminal" size={15} />
+      <span className="tg-terminal-name">{displayText(`${node.label} · ${harness(node.harness)}`)}</span>
+      {status && <StatusBadge word={displayText(status.word)} tone={status.tone} />}
+    </span>
+    <span className="tg-terminal-actions">
+      {message && (tile
+        ? <Button variant="quiet" size="small" icon="send" iconOnly={`Message ${label}`} disabled={!boxed} onClick={onMessage} />
+        : <Button size="small" icon="send" disabled={!boxed} onClick={onMessage}>Message</Button>)}
+      {onStop && (tile
+        ? <Button variant="danger-text" size="small" icon="circle-stop" iconOnly={`Stop ${label}`} onClick={onStop} />
+        : <Button variant="danger-text" size="small" icon="circle-stop" onClick={onStop}>Stop</Button>)}
+      {onClose && <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />}
+    </span>
+    <span className="tg-terminal-meta">
+      <span className="tg-terminal-fact"><Icon name="user-round" size={12} />{nodeRole(node)}</span>
+      {node.branch && <span className="tg-terminal-fact"><Icon name="git-branch" size={12} /><span className="tg-terminal-branch">{displayText(node.branch)}</span></span>}
+      {running && <span className="tg-terminal-fact"><Icon name="clock" size={12} />{running}</span>}
+      {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
+      {reported && <span className="tg-terminal-detail" title={displayText(reported)}>{displayText(reported)}</span>}
+      {swaps && <span className="tg-terminal-fact tg-terminal-hint"><Icon name="info" size={12} />Click another agent to show it here</span>}
+    </span>
+  </div>;
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel, with a way back to
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
  * status line. Closing it detaches the view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
- * closed, `embedded` when a console around it owns the head, where the owner types: the
- * terminal, the message box under it, or both, and `follow` when an ended terminal opens
- * again on its own, cleared, for an agent that restarts in a new pane. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", follow = false }: {
+ * closed, the stop action when the agent can be stopped, `embedded` when a console around
+ * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
+ * replaces, `follow` when an ended terminal opens again on its own, cleared, for an agent
+ * that restarts in a new pane, and the one-line report of what the agent's harness loaded and
+ * invoked, shown in the head, and the project id a wall window attaches for. Where the owner
+ * types (the terminal, the message box under it, or both) is the one Terminal input in
+ * Settings, for every agent on every screen. Output: the panel. */
+export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
+  onStop?: () => void;
   embedded?: boolean;
-  input?: InputChoice;
+  tile?: boolean;
+  swaps?: boolean;
   follow?: boolean;
+  reported?: string;
+  projectId?: string;
 }) {
+  if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
+  if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
+  const input = readTerminalInput();
   const mode = inputMode(input);
+  const box = useRef<HTMLTextAreaElement>(null);
   const following = useRef(follow);
   following.current = follow;
   const tries = useRef(0);
@@ -300,11 +380,13 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
   }).current;
   const [round, setRound] = useState(0);
   const name = node.terminal;
+  const pane = teammatePane(node);
 
   useEffect(() => {
     const element = screen.current;
     if (!name || !element) return;
     setView({ kind: "connecting" });
+    setMenu(null);
     let disposed = false;
     let serial: number | null = null;
     let again = 0;
@@ -406,7 +488,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         unsettle();
         terminal.dispose();
       };
-      const result = await attachTerminal(name, channel);
+      const result = await attachTerminal(name, channel, pane, projectId ?? null);
       if (disposed) {
         if (result.kind === "ok") void detachTerminal(name, result.value);
         return;
@@ -421,14 +503,12 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       release();
       if (serial !== null) void detachTerminal(name, serial);
     };
-  }, [name, round]);
+  }, [name, pane, projectId, round]);
 
-  return <section className={embedded ? "tg-terminal embedded" : "tg-terminal"} aria-label={`${node.label} terminal`}>
-    {!embedded && <div className="tg-terminal-head">
-      <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(nodeLine(node, harness))}</span>
-      {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
-      {onClose && <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />}
-    </div>}
+  const boxed = mode.box && Boolean(name) && view.kind !== "not_ready";
+  return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal wall-tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
+    {!embedded && <TerminalHead node={node} harness={harness} tile={tile} message={mode.box} boxed={boxed} onMessage={() => box.current?.focus()}
+      onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
     {view.kind === "not_ready" && <NotReady what="Agent terminals" compact />}
     {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Connecting to the terminal...</p>}
@@ -447,6 +527,6 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
       <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(term.current ? terminalOutput(term.current) : "", "Copied the output.")}>Copy output</Button>
     </div>}
-    {mode.box && name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
+    {boxed && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} compact={!embedded} box={box} />}
   </section>;
 }

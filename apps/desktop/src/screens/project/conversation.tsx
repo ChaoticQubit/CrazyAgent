@@ -1,6 +1,6 @@
 import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { formatRoute } from "../../ui";
 import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
@@ -14,10 +14,25 @@ import { useProjectFiles } from "./project-files";
 import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Menu, type Tone } from "../../ui";
+import { Button, Drawer, Menu, type Tone } from "../../ui";
+import { ACCESS_UNREADABLE, LiveTerminalSetting, MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
+import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordination";
+import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
+import { ApplySwitch } from "./settings";
 import { SessionsBar, ownerText, switchDivider, withOwnerLines } from "./sessions";
 
 const READ_ONLY = "Read-only: the master runs live in its terminal now.";
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+/** What the Master settings button takes from the drawer above it: the action that opens the
+ * drawer and the id the button wears so closing the drawer can find it. A button with no
+ * drawer above it fails when clicked. */
+const MasterSettingsHost = createContext<{ open: () => void; button?: string }>({
+  open: () => assert(false, "the Master settings button needs MasterSettingsDrawer above it"),
+});
 const sentByProject = new Map<string, Record<string, string>>();
 const sentAtByProject = new Map<string, Record<string, number>>();
 
@@ -283,12 +298,13 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
     {!readOnly && <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
+        <MasterSettingsButton />
         <Menu label="Conversation actions" items={[
           ...(active && !working ? [{ label: "End conversation", icon: "circle-stop" as const, onSelect: () => void end() }] : []),
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
     </div>}
-    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} onSwitched={() => { setSent({}); return refresh(); }} />}
+    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} mark={`${turns.length}:${turns.filter(turnSettled).length}`} onSwitched={() => { setSent({}); return refresh(); }} />}
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     {!readOnly && <>
       {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
@@ -305,4 +321,80 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
       canSend={gate !== "hold"} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
       onSend={offer} onStop={() => void stopReply()} onNavigate={(route) => data.navigate(formatRoute(route).slice(1))} />
   </div>;
+}
+
+const MASTER_GROUPS: readonly SettingGroupInfo[] = [
+  { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account", "Live terminal"] },
+  { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"] },
+  { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"] },
+  { id: "access", title: "Access", icon: "shield-check", rows: ["Full access"] },
+];
+
+/** The master's settings in the Agent settings layout, grouped as the approved mockup's drawer
+ * shows them: Master (its harness and account, picked in place and saved as project Settings
+ * saves them), Conversation, Messages and Access (Full access, kept in Agent settings). The
+ * shared rows save exactly as they do in Agent settings. Inputs: the project data, whether its
+ * master runs in a live terminal and what to do before a button leaves the drawer for another
+ * page. Output: the groups, or the team read's state. */
+export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data: ProjectData; liveHarness: boolean; onLeave?: () => void }) {
+  const harnessRows = useTeam(data);
+  const team = data.team.result;
+  if (team === undefined) return <p className="pj-muted" role="status">Loading...</p>;
+  if (team.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
+  if (team.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team)}</p>;
+  const status = team.value;
+  const claude = coordination(status).harnesses.find((row) => row.harness === "claude-code");
+  const base = `/projects/${encodeURIComponent(data.id)}`;
+  const prefix = `master-set-${data.id}`;
+  const go = (path: string) => { onLeave(); data.navigate(path); };
+  const [masterGroup, talk, messages, access] = MASTER_GROUPS;
+  return <div className="set-groups">
+    <SettingGroup group={masterGroup} prefix={prefix} level={3}>
+      <MasterHarnessSetting rows={harnessRows} data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
+      <AccountSetting data={data} id={`${prefix}-account`} />
+      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} liveHarness={liveHarness} />
+    </SettingGroup>
+    <SettingGroup group={talk} prefix={prefix} level={3}>
+      <OnSwitchSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      <MasterIdleSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      <SettingRow label="Apply a master harness change"><ApplySwitch data={data} /></SettingRow>
+    </SettingGroup>
+    <SettingGroup group={messages} prefix={prefix} level={3}>
+      <QuestionsSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      {claude && <DeliverySetting projectId={data.id} row={claude} status={status} reload={data.reloadTeam} />}
+      <ReaskSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+    </SettingGroup>
+    <SettingGroup group={access} prefix={prefix} level={3}>
+      <SettingRow label="Full access">
+        <span className="set-label">Full access</span>
+        <span className="set-ctl"><Button size="small" onClick={() => go(`${base}/agents?section=access`)}>Change in Agent settings</Button></span>
+        <span className="tg-terminal-note">{status.master_lands === "merges" ? "Full access: the master resolves conflicts and merges into main itself."
+          : status.master_lands === "waits" ? "Full access: the master resolves conflicts, then waits for your Accept."
+            : status.access_unreadable ? ACCESS_UNREADABLE
+              : "Not at Full access: the master's conflict fixes wait for your Accept."}</span>
+      </SettingRow>
+    </SettingGroup>
+  </div>;
+}
+
+/** Holds the project's Master settings drawer above the view that opens it, so a setting that
+ * swaps that view leaves the drawer and the owner's place in it alone, and closing the drawer
+ * returns to the button of the view now shown (DEC-117 Q4). Inputs: the project data, whether
+ * its master runs in a live terminal and the view. Output: the view and its drawer. */
+export function MasterSettingsDrawer({ data, liveHarness, children }: { data: ProjectData; liveHarness: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const button = useId();
+  return <MasterSettingsHost.Provider value={{ open: () => setOpen(true), button }}>
+    {children}
+    <Drawer open={open} title="Master settings" onClose={() => setOpen(false)} returnFocus={() => document.getElementById(button)}>
+      <MasterSettings data={data} liveHarness={liveHarness} onLeave={() => setOpen(false)} />
+    </Drawer>
+  </MasterSettingsHost.Provider>;
+}
+
+/** The Master settings button of a conversation head; it opens the drawer held above the
+ * view. Output: the button. */
+export function MasterSettingsButton() {
+  const host = useContext(MasterSettingsHost);
+  return <Button id={host.button} size="small" icon="settings" onClick={host.open}>Master settings</Button>;
 }

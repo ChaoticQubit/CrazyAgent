@@ -1,8 +1,13 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
+use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{
     InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    agent_env, tool_cache,
 };
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -68,6 +73,370 @@ fn quoted(path: &Path) -> String {
     let text = path.to_str().unwrap();
     assert!(!text.contains('\''));
     format!("'{text}'")
+}
+
+/// A tool cache prepared under an engine runtime folder beside the case, with the real uv
+/// the agent's PATH finds when `uv` is set. A machine without uv fails the rows that ask
+/// for it instead of skipping them (T8).
+fn tool_cache(case: &Case, uv: bool) -> tool_cache::Prepared {
+    let runtime = case.root.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let base = sandbox(case, SandboxNetwork::Only(Vec::new()));
+    let program = uv.then(|| base.tool_program("uv").expect("uv missing"));
+    tool_cache::prepare(&runtime, "project-1", "sandboxed-root", program.as_deref()).unwrap()
+}
+
+/// The variables a sandbox's commands start with, by name.
+fn command_env(sandbox: &ProjectSandbox, profile: &Path) -> BTreeMap<String, String> {
+    sandbox
+        .command(profile, Path::new("/usr/bin/true"))
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((
+                name.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// T8 row 1 and C1: the tool cache is one more writable root, listed as a non-working-tree
+/// root in the SM1-R rule, whose other lines stay as they were. The rule's closing
+/// parentheses ride on its last line, so the lines are compared without them.
+#[test]
+fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
+    let case = case();
+    let cache = tool_cache(&case, false);
+    let without = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let with = without
+        .clone()
+        .allow_tool_cache(&cache.root, cache.uv)
+        .unwrap();
+    let rule = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| line.contains("[gG][iI][tT](/.*)?$"))
+            .map(|line| line.trim_end_matches(')').to_owned())
+            .collect()
+    };
+    let (before, after) = (rule(&without.profile()), rule(&with.profile()));
+    let added: Vec<&String> = after.iter().filter(|line| !before.contains(line)).collect();
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(added.len(), 1, "{before:#?}\n{after:#?}");
+    assert!(added[0].contains("runtime") && added[0].contains("/(.+/)?"));
+    assert!(
+        with.profile()
+            .contains(&format!("(subpath \"{}\")", cache.root.display()))
+    );
+    assert!(with.writes(&cache.root.join("uv")) && !without.writes(&cache.root));
+}
+
+/// T8 C2 and R2: a launch's tool cache follows its policy, level and shape. Agents at one
+/// level writing the same kind of tree share one; the project folder, a linked worktree, a
+/// clone and a clone teammate never share at a level, nor do two levels; One per agent
+/// gives each agent its own; Full access gets none.
+#[test]
+fn a_launch_gets_the_tool_cache_of_its_policy_level_and_shape() {
+    let case = case();
+    let runtime = case.root.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let profile = case.profiles.join("grant.sb");
+    let granted = |policy: &AgentPolicy, shape: CacheShape, agent: &str| -> Option<PathBuf> {
+        let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+        let sandbox = tool_cache::grant(base, &runtime, &case.project, policy, shape, agent);
+        let store = command_env(&sandbox, &profile).remove("pnpm_config_store_dir")?;
+        Some(Path::new(&store).parent().unwrap().to_path_buf())
+    };
+    let at = |access, tool_cache| AgentPolicy {
+        access,
+        tool_cache,
+        ..AgentPolicy::default()
+    };
+    let shared = at(AgentAccess::Sandboxed, ToolCacheScope::Shared);
+    let worktree = granted(&shared, CacheShape::Worktree, "35").unwrap();
+    assert_eq!(
+        granted(&shared, CacheShape::Worktree, "52"),
+        Some(worktree.clone())
+    );
+    let mut roots = BTreeSet::from([worktree]);
+    for shape in [
+        CacheShape::ProjectRoot,
+        CacheShape::Clone,
+        CacheShape::Teammate,
+    ] {
+        assert!(roots.insert(granted(&shared, shape, "35").unwrap()));
+    }
+    let wider = at(AgentAccess::OwnBranch, ToolCacheScope::Shared);
+    assert!(roots.insert(granted(&wider, CacheShape::Worktree, "35").unwrap()));
+    let own = at(AgentAccess::Sandboxed, ToolCacheScope::PerAgent);
+    assert!(roots.insert(granted(&own, CacheShape::Worktree, "35").unwrap()));
+    assert!(roots.insert(granted(&own, CacheShape::Worktree, "52").unwrap()));
+    for scope in ToolCacheScope::ALL {
+        assert_eq!(
+            granted(&at(AgentAccess::Full, scope), CacheShape::Worktree, "35"),
+            None
+        );
+    }
+    assert_eq!(roots.len(), 7);
+    assert!(
+        roots
+            .iter()
+            .all(|root| root.starts_with(&runtime) && root.is_dir())
+    );
+}
+
+/// T8: a tool cache inside another root, or a second one, is refused.
+#[test]
+fn a_tool_cache_inside_another_root_or_a_second_one_is_refused() {
+    let case = case();
+    let cache = tool_cache(&case, false);
+    let inside = case.project.join("cache");
+    fs::create_dir(&inside).unwrap();
+    let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    assert!(base.clone().allow_tool_cache(&inside, false).is_err());
+    assert!(base.clone().allow_tool_cache(&case.home, false).is_err());
+    let once = base.allow_tool_cache(&cache.root, false).unwrap();
+    assert!(once.allow_tool_cache(&cache.root, false).is_err());
+}
+
+/// T8 row 5 and P5: a sandbox with a tool cache points `pnpm_config_store_dir` into it, and
+/// `UV_CACHE_DIR` only when its uv markers are in place; one without sets neither; and a
+/// harness's own values never replace the ones the cache set.
+#[test]
+fn a_tool_cache_sets_the_store_and_uv_cache_variables_a_harness_cannot_replace() {
+    let case = case();
+    let cache = tool_cache(&case, false);
+    let profile = case.profiles.join("env.sb");
+    let store = cache.root.join("pnpm-store").display().to_string();
+    let uv = cache.root.join("uv").display().to_string();
+    let none = command_env(&sandbox(&case, SandboxNetwork::Only(Vec::new())), &profile);
+    assert!(!none.contains_key("UV_CACHE_DIR") && !none.contains_key("pnpm_config_store_dir"));
+    let pnpm_only = command_env(
+        &sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .allow_tool_cache(&cache.root, false)
+            .unwrap(),
+        &profile,
+    );
+    assert_eq!(pnpm_only.get("pnpm_config_store_dir"), Some(&store));
+    assert!(!pnpm_only.contains_key("UV_CACHE_DIR"));
+    let both = command_env(
+        &sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .allow_tool_cache(&cache.root, true)
+            .unwrap(),
+        &profile,
+    );
+    assert_eq!(both.get("UV_CACHE_DIR"), Some(&uv));
+    assert_eq!(both.get("pnpm_config_store_dir"), Some(&store));
+    let base = [
+        ("UV_CACHE_DIR", OsStr::new(&uv)),
+        ("pnpm_config_store_dir", OsStr::new(&store)),
+    ];
+    let harness = [
+        (OsStr::new("UV_CACHE_DIR"), Some(OsStr::new("/elsewhere"))),
+        (OsStr::new("pnpm_config_store_dir"), None),
+    ];
+    let pinned = agent_env(&base, harness).unwrap();
+    for (name, value) in base {
+        assert!(pinned.contains(&(name.into(), value.to_owned())), "{name}");
+    }
+    let passed = agent_env(&[], harness).unwrap();
+    assert!(passed.contains(&("UV_CACHE_DIR".into(), "/elsewhere".into())));
+}
+
+/// T8 C3: the engine runs a program only from a read-only root the agent cannot write.
+#[test]
+fn the_engine_trusts_a_tool_only_outside_every_agent_root() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let planted = case.project.join("uv");
+    fs::write(&planted, "#!/bin/sh\n").unwrap();
+    assert_eq!(sandbox.trusted_program(&planted), None);
+    assert_eq!(
+        sandbox.trusted_program(&case.outside.join("fixture.txt")),
+        None
+    );
+    assert_eq!(
+        sandbox.trusted_program(Path::new("/usr/bin/true")),
+        Some(PathBuf::from("/usr/bin/true"))
+    );
+}
+
+/// T8 row 3 (P1b as a row): under the real agent profile uv runs on a primed tool cache,
+/// `tool list` and `lock` alike, and fails on its marker in a cache the engine did not
+/// prime. Fails, not skips, without uv.
+#[test]
+fn uv_runs_on_a_primed_tool_cache_under_the_agent_profile_and_fails_on_an_unprimed_one() {
+    let case = case();
+    let cache = tool_cache(&case, true);
+    assert!(cache.uv && cache.primed);
+    let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let uv = base.tool_program("uv").unwrap();
+    let sandbox = base.allow_tool_cache(&cache.root, cache.uv).unwrap();
+    let profile = case.profiles.join("uv.sb");
+    fs::write(
+        case.project.join("pyproject.toml"),
+        "[project]\nname = \"pkg\"\nversion = \"0.1.0\"\nrequires-python = \">=3.9\"\ndependencies = []\n",
+    )
+    .unwrap();
+    for args in ["tool list", "lock"] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("UV_OFFLINE=1 {} {args}", quoted(&uv)),
+        );
+        assert!(
+            output.status.success(),
+            "{args}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(case.project.join("uv.lock").is_file());
+    let unprimed = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "UV_OFFLINE=1 UV_CACHE_DIR={} {} tool list",
+            quoted(&case.tmp.join("fresh")),
+            quoted(&uv)
+        ),
+    );
+    assert!(!unprimed.status.success());
+    assert!(String::from_utf8_lossy(&unprimed.stderr).contains("Operation not permitted"));
+}
+
+/// T8 R1 (C1): the engine-made marker, the only `.git` entry in an agent root, cannot be
+/// removed, moved or pointed elsewhere under the agent profile, and writing through it
+/// changes nothing. A bucket moved into the agent's tree keeps it, and the owner's git
+/// stages the bucket's files as plain files, never a `.git` path or a gitlink.
+#[test]
+fn the_uv_marker_cannot_be_changed_and_a_moved_bucket_stages_as_plain_files() {
+    let case = case();
+    let cache = tool_cache(&case, true);
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_tool_cache(&cache.root, cache.uv)
+        .unwrap();
+    let profile = case.profiles.join("marker.sb");
+    let bucket = cache.root.join("uv").join("sdists-v10");
+    let marker = bucket.join(".git");
+    for script in [
+        format!("rm -f {}", quoted(&marker)),
+        format!("mv {} {}", quoted(&marker), quoted(&bucket.join("moved"))),
+        format!("ln -sfn /etc {}", quoted(&marker)),
+    ] {
+        assert!(
+            !run(&sandbox, &profile, &script).status.success(),
+            "{script}"
+        );
+    }
+    let _ = run(
+        &sandbox,
+        &profile,
+        &format!("printf 'gitdir: /x' > {}", quoted(&marker)),
+    );
+    assert_eq!(fs::read_link(&marker).unwrap(), Path::new("/dev/null"));
+    let git = |args: &[&str]| {
+        let output = owner_git(&case.project, &case.home, args);
+        assert!(output.status.success(), "{args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    let moved = case.project.join("moved");
+    let into = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mv {} {} && echo data > {}",
+            quoted(&bucket),
+            quoted(&moved),
+            quoted(&moved.join("a.txt"))
+        ),
+    );
+    assert!(
+        into.status.success(),
+        "{}",
+        String::from_utf8_lossy(&into.stderr)
+    );
+    assert!(
+        !run(
+            &sandbox,
+            &profile,
+            &format!("rm -f {}", quoted(&moved.join(".git")))
+        )
+        .status
+        .success()
+    );
+    git(&["add", "-A"]);
+    let staged = git(&["ls-files", "-s"]);
+    assert!(staged.contains("moved/a.txt"), "{staged}");
+    assert!(
+        !staged.contains(".git") && !staged.contains("160000"),
+        "{staged}"
+    );
+}
+
+/// land-19 r2 M1 and L1: in a project with no `.git/info` or `.git/objects/info`, as a clone
+/// or `init --template=` leaves it, no confined process makes `.git/info`, `.git/shallow` or
+/// an alternates file in any letter case, the long s included, from which the owner's git
+/// would read grafts, shallow cuts or other object stores through the case-insensitive
+/// volume.
+#[test]
+fn sandboxed_child_cannot_make_git_info_or_shallow_in_any_letter_case() {
+    let case = case();
+    let git = case.project.join(".git");
+    fs::create_dir_all(git.join("objects")).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("info.sb");
+    for script in [
+        format!("mkdir {}", quoted(&git.join("INFO"))),
+        format!("mkdir {}", quoted(&git.join("info"))),
+        format!("echo x > {}", quoted(&git.join("SHALLOW"))),
+        format!("echo x > {}", quoted(&git.join("shallow"))),
+        format!(
+            "echo x > {}",
+            quoted(&case.project.join(".GIT").join("Shallow"))
+        ),
+        format!("echo x > {}", quoted(&git.join("\u{17f}hallow"))),
+        format!(
+            "mkdir -p {0} && echo x > {0}/ALTERNATES",
+            quoted(&git.join("objects").join("INFO"))
+        ),
+        format!(
+            "mkdir -p {0} && echo x > {0}/Http-Alternates",
+            quoted(&git.join("objects").join("Info"))
+        ),
+    ] {
+        let output = run(&sandbox, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+    }
+    assert_eq!(fs::read_dir(&git).unwrap().count(), 1);
+    let info = git.join("objects").join("info");
+    assert!(!info.join("alternates").exists() && !info.join("http-alternates").exists());
+}
+
+/// land-19 r1 M1: no confined process writes a commit-graph file into the project's object
+/// store, in any letter case, since git answers ancestry from it without reading commits.
+#[test]
+fn sandboxed_child_cannot_write_a_commit_graph_in_any_letter_case() {
+    let case = case();
+    let info = case.project.join(".git").join("objects").join("info");
+    fs::create_dir_all(info.join("commit-graphs")).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("graph.sb");
+    for target in [
+        info.join("commit-graph"),
+        case.project.join(".git/OBJECTS/Info/Commit-Graph"),
+        info.join("commit-graphs").join("graph-0.graph"),
+        case.project
+            .join(".git/objects/INFO/COMMIT-GRAPHS/commit-graph-chain"),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("echo forged > {}", quoted(&target)),
+        );
+        assert!(!output.status.success(), "{}", target.display());
+    }
+    assert!(!info.join("commit-graph").exists());
+    assert_eq!(fs::read_dir(info.join("commit-graphs")).unwrap().count(), 0);
 }
 
 #[test]
@@ -173,6 +542,10 @@ fn sandboxed_child_cannot_read_outside_files_or_the_owner_codex_and_claude_dirs(
     }
 }
 
+/// A sandboxed child commits in a worktree inside the project that the engine's own git
+/// step added, since only that step's profile may register a worktree
+/// (SECAUDIT-WORKTREE-ADMIN-PLANT): the child's own `git worktree add` is refused. It
+/// still cannot write the project's hooks or config.
 #[test]
 fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
     let case = case();
@@ -202,8 +575,32 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
         .unwrap();
         assert!(status.success());
     }
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-one",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let planted = case.project.join("worktrees").join("agent-two");
+    let refused = run(
+        &sandbox,
+        &profile,
+        &format!("git worktree add -q -b agent-two {}", quoted(&planted)),
+    );
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Operation not permitted"),
+        "{refused:?}"
+    );
     let script = format!(
-        "git worktree add -q -b agent-one {wt} && cd {wt} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
+        "cd {wt} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
         wt = quoted(&worktree)
     );
     let output = run(&sandbox, &profile, &script);
@@ -438,6 +835,90 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     assert!(!root_commit.status.success());
 }
 
+/// One different-case rename: its name, the script that runs it and the path it must leave.
+type CaseRename = (&'static str, &'static str, fn(&Case) -> PathBuf);
+
+/// DEC-123 rv-secreview L2: on the case-insensitive disk a name may be typed in any letter
+/// case, so each move deny on the project, its worktrees folders, a checkout and a checkout's
+/// `.git` file holds whatever case a rename uses, and a different-case rename never carries
+/// one aside for a link to take its place before the engine removes it. A plain folder's
+/// different-case rename still goes, so each refusal is the sandbox's.
+#[test]
+fn a_different_case_rename_never_moves_the_worktrees_folders_or_a_checkout() {
+    let attacks: [CaseRename; 9] = [
+        ("WORKTREES", "mv WORKTREES w", |case| {
+            case.project.join("worktrees")
+        }),
+        (
+            "WORKTREES/engine-one",
+            "mv WORKTREES/engine-one w",
+            |case| case.project.join("worktrees/engine-one"),
+        ),
+        (
+            "worktrees/ENGINE-ONE",
+            "mv worktrees/ENGINE-ONE w",
+            |case| case.project.join("worktrees/engine-one"),
+        ),
+        (
+            "worktrees/engine-one/.GIT",
+            "mv worktrees/engine-one/.GIT g",
+            |case| case.project.join("worktrees/engine-one/.git"),
+        ),
+        (
+            ".crazyagent/WORKTREES",
+            "mv .crazyagent/WORKTREES .crazyagent/w",
+            |case| case.project.join(".crazyagent/worktrees"),
+        ),
+        (
+            ".CRAZYAGENT/worktrees",
+            "mv .CRAZYAGENT/worktrees .crazyagent/w",
+            |case| case.project.join(".crazyagent/worktrees"),
+        ),
+        (
+            ".crazyagent/WORKTREES/agent-1",
+            "mv .crazyagent/WORKTREES/agent-1 w",
+            |case| case.project.join(".crazyagent/worktrees/agent-1"),
+        ),
+        (".git/WORKTREES", "mv .git/WORKTREES .git/w", |case| {
+            case.project.join(".git/worktrees")
+        }),
+        ("PROJECT", "mv ../PROJECT ../moved", |case| {
+            case.project.clone()
+        }),
+    ];
+    let (case, sandbox, profile, _) = git_case();
+    fs::create_dir_all(case.project.join("plain")).unwrap();
+    let control = run(&sandbox, &profile, "mv PLAIN p");
+    assert!(control.status.success(), "{control:?}");
+    assert!(case.project.join("p").is_dir());
+    let mut moved = Vec::new();
+    for (name, script, target) in attacks {
+        let (case, sandbox, profile, _) = git_case();
+        let agent = case.project.join(".crazyagent/worktrees/agent-1");
+        fs::create_dir_all(&agent).unwrap();
+        let before = fs::symlink_metadata(target(&case)).unwrap();
+        let output = run(&sandbox, &profile, script);
+        let after = fs::symlink_metadata(target(&case));
+        let stayed = after.as_ref().is_ok_and(|after| {
+            std::os::unix::fs::MetadataExt::ino(after)
+                == std::os::unix::fs::MetadataExt::ino(&before)
+        });
+        let denied = String::from_utf8_lossy(&output.stderr).contains("not permitted");
+        if !stayed || !denied {
+            moved.push((
+                name,
+                stayed,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+    }
+    assert_eq!(
+        moved,
+        Vec::<(&str, bool, String)>::new(),
+        "a different-case rename moved these or failed without a sandbox deny"
+    );
+}
+
 /// Checks that `script`, run under `sandbox` and `profile`, cannot create `target`: the
 /// command fails and the file is absent. Input: the sandbox, the profile, the script and
 /// the target path.
@@ -445,6 +926,109 @@ fn write_refused(sandbox: &ProjectSandbox, profile: &Path, script: &str, target:
     let output = run(sandbox, profile, script);
     assert!(!output.status.success(), "{script}");
     assert!(!target.exists(), "{}", target.display());
+}
+
+/// SECAUDIT-GIT-STATE-FILES and SECAUDIT-IDE-SERVER-INDEX: a sandboxed process cannot take
+/// the project's index lock or plant git state that names a program or another repository,
+/// such as the cherry-pick and revert sequencer's merge strategy, by the plain name or a
+/// case variant. An agent's own git folder keeps its rebase and sequencer state.
+#[test]
+fn a_sandbox_refuses_git_state_that_names_a_program_or_another_repository() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let git = case.project.join(".git");
+    for below in [
+        "index.lock",
+        "rebase-merge/git-rebase-todo",
+        "rebase-apply/next",
+        "remotes/origin",
+        "branches/origin",
+        "sequencer/opts",
+        "REBASE-MERGE/git-rebase-todo",
+        "SEQUENCER/opts",
+    ] {
+        let target = git.join(below);
+        let script = format!(
+            "mkdir -p {} && : > {}",
+            quoted(target.parent().unwrap()),
+            quoted(&target)
+        );
+        write_refused(&sandbox, &profile, &script, &target);
+    }
+    let own = git.join("worktrees").join("engine-one");
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mkdir -p {own}/rebase-merge {own}/sequencer && : > {own}/rebase-merge/git-rebase-todo && : > {own}/sequencer/opts",
+            own = quoted(&own)
+        ),
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// SECAUDIT-WORKTREE-ADMIN-PLANT: a project-writable sandbox cannot plant a checkout in a
+/// worktrees folder, by a `.git` file naming git data it made or by moving that data in as
+/// `.git`, in any letter case, since the owner's git in that checkout would run the config
+/// it found there. Only the engine's worktree-add step makes a checkout's `.git`.
+#[test]
+fn a_sandbox_refuses_to_plant_a_checkout_the_owner_git_would_enter() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let evil = case.project.join("evil");
+    let made = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mkdir -p {evil}/objects {evil}/refs && echo 'ref: refs/heads/main' > {evil}/HEAD && : > {evil}/config",
+            evil = quoted(&evil)
+        ),
+    );
+    assert!(made.status.success(), "{made:?}");
+    for below in [
+        ".crazyagent/worktrees/linked/.git",
+        "worktrees/linked/.git",
+        "worktrees/cased/.GIT",
+        ".CRAZYAGENT/WORKTREES/linked/.git",
+    ] {
+        let link = case.project.join(below);
+        let script = format!(
+            "mkdir -p {} && printf 'gitdir: %s\\n' {} > {}",
+            quoted(link.parent().unwrap()),
+            quoted(&evil),
+            quoted(&link)
+        );
+        write_refused(&sandbox, &profile, &script, &link);
+    }
+    for below in [".crazyagent/worktrees/moved/.git", "worktrees/moved/.git"] {
+        let link = case.project.join(below);
+        let script = format!(
+            "mkdir -p {} && mv {} {}",
+            quoted(link.parent().unwrap()),
+            quoted(&evil),
+            quoted(&link)
+        );
+        write_refused(&sandbox, &profile, &script, &link);
+    }
+    assert!(evil.join("config").is_file());
+}
+
+/// SECAUDIT-WORKTREE-ADMIN-PLANT: a project-writable sandbox may make a folder in
+/// `.git/worktrees` but not the `gitdir` or `commondir` file that registers it, in any
+/// letter case, since the owner's `git worktree repair` would point a real checkout at it.
+#[test]
+fn a_sandbox_refuses_to_register_a_planted_worktree_admin_folder() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let admin = case.project.join(".git").join("worktrees").join("planted");
+    let made = run(&sandbox, &profile, &format!("mkdir {}", quoted(&admin)));
+    assert!(made.status.success(), "{made:?}");
+    for name in ["gitdir", "commondir", "GITDIR", "CommonDir"] {
+        let target = admin.join(name);
+        write_refused(
+            &sandbox,
+            &profile,
+            &format!(": > {}", quoted(&target)),
+            &target,
+        );
+    }
 }
 
 #[test]
@@ -708,6 +1292,26 @@ fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port()
     }
 }
 
+/// S4B-2W1: no Open-network agent listens on a port of the engine's model proxy block, at
+/// either end of it, on IPv4 or IPv6 loopback or any address. So no agent can take a kept
+/// pane's proxy port while the engine that held it is down, or wait on the wildcard for it.
+#[test]
+fn an_open_agent_never_listens_on_a_model_proxy_port() {
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    for port in [41_300, 41_427] {
+        for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
+            let name = format!("proxy-{port}-{}.sb", host.replace([':', '.'], "-"));
+            let (got, said) = listen(&open, &case, &name, host, port, false);
+            assert_eq!(got, "", "{host} {port}");
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from a model proxy: {said}"
+            );
+        }
+    }
+}
+
 /// One owner model connection in settings, at `url`. Input: its id and URL. Output: the
 /// connection as the settings file writes it.
 fn connection(id: &str, url: &str) -> String {
@@ -738,6 +1342,45 @@ fn local_model_access(case: &Case, port: u16) -> crazyagent::config::ModelAccess
         .unwrap()
 }
 
+/// OWNER-PORTS-FAIL-OPEN: the owner's ports read from the settings files are the configured
+/// local model ports, none while no file exists, and a file that does not read, as broken
+/// TOML, bytes that are not UTF-8, a file this user may not read or a folder, refuses
+/// instead of naming none.
+#[test]
+fn settings_owner_ports_fail_closed_on_a_file_that_does_not_read() {
+    use crazyagent::sandbox::{OWNER_PORTS_UNREADABLE, settings_owner_ports};
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let (global, project) = (
+        case.root.join("global.toml"),
+        case.root.join("project.toml"),
+    );
+    assert_eq!(settings_owner_ports(&global, &project), Ok(Vec::new()));
+    local_model_access(&case, 4321);
+    assert_eq!(settings_owner_ports(&global, &project), Ok(vec![4321]));
+    for broken in [&b"[[[\n"[..], &b"version = 1\n\xff\n"[..]] {
+        fs::write(&global, broken).unwrap();
+        assert_eq!(
+            settings_owner_ports(&global, &project),
+            Err(OWNER_PORTS_UNREADABLE)
+        );
+    }
+    local_model_access(&case, 4321);
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        settings_owner_ports(&global, &project),
+        Err(OWNER_PORTS_UNREADABLE),
+        "a file this user may not read is not a missing one"
+    );
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::remove_file(&global).unwrap();
+    fs::create_dir(&global).unwrap();
+    assert_eq!(
+        settings_owner_ports(&global, &project),
+        Err(OWNER_PORTS_UNREADABLE)
+    );
+}
+
 #[test]
 fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_on_it() {
     let case = case();
@@ -748,13 +1391,18 @@ fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_o
     let open = sandbox(&case, SandboxNetwork::Open)
         .keep_ports(&ports)
         .unwrap();
-    assert!(
-        open.profile().contains(&format!(
-            "(deny network-bind (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"))"
-        )),
-        "{}",
-        open.profile()
-    );
+    let block: String = (41_300..=41_427)
+        .map(|proxy| format!(" (local ip \"*:{proxy}\")"))
+        .collect();
+    for rule in ["network-bind", "network-inbound"] {
+        assert!(
+            open.profile().contains(&format!(
+                "(deny {rule} (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"){block})"
+            )),
+            "{}",
+            open.profile()
+        );
+    }
     let served = std::thread::spawn(move || {
         let (mut stream, _) = crazyagent::spawn_gate::accept_tcp_std(&server).unwrap();
         let mut got = String::new();
@@ -2097,4 +2745,1221 @@ fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     assert!(!committed.status.success(), "{committed:?}");
     let after = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
     assert_eq!(after.stdout, head.stdout);
+}
+
+#[test]
+fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let text = sandbox.profile();
+    let allow = text.find("(allow process-exec)\n").unwrap();
+    let deny = text.find("(deny process-exec\n").unwrap();
+    assert!(allow < deny, "{text}");
+    let blender = "/Applications/Blender.app/Contents/MacOS/Blender";
+    assert!(Path::new(blender).is_file(), "the probe needs {blender}");
+    let profile = case.profiles.join("apps.sb");
+    for app in [
+        blender,
+        "/applications/blender.APP/contents/MACOS/Blender",
+        "/System/Volumes/Data/Applications/Blender.app/Contents/MacOS/Blender",
+        "/system/volumes/data/Applications/Blender.app/Contents/MacOS/Blender",
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("{} --version", quoted(Path::new(app))),
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{app} ran");
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{app}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{app}");
+    }
+    for (tool, expected) in [
+        (
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+            "Docker version",
+        ),
+        (
+            "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+            "git version",
+        ),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("{} --version", quoted(Path::new(tool))),
+        );
+        assert!(
+            output.status.success(),
+            "{tool}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).starts_with(expected),
+            "{tool}"
+        );
+    }
+}
+
+/// OP-9 r1 (leader 14:29): a native lead's teammates write only the teammates' folder of the
+/// lead's clone and the git parts their own commits need. A teammate commits in the worktree
+/// the engine made for it on its own `<task>--<name>` branch, but never writes the lead's
+/// files, the clone's hooks, config or HEAD, the lead's task branch, the links that tie a
+/// teammate worktree to the clone, or a new worktree record.
+#[test]
+fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let task = "crazyagent/write-the-page";
+    let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
+    assert!(switched.status.success(), "{switched:?}");
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_clone(&clone)
+        .unwrap()
+        .lead_branch(task)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let (lead_profile, teammates_profile) = (
+        case.profiles.join("lead.sb"),
+        case.profiles.join("teammates.sb"),
+    );
+    let greet = clone
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let added = run(
+        &lead,
+        &lead_profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&clone),
+            quoted(&greet)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    let committed = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "cd {} && printf 'hello\\n' > greet.txt && {AGENT_GIT} add greet.txt && {AGENT_GIT} -c user.name=greet -c user.email=greet@local -c core.hooksPath=/dev/null commit -q -m greet",
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "a teammate commits in its own worktree: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let teammate_tip = owner_git(
+        &clone,
+        &case.home,
+        &["log", "-1", "--format=%s", &format!("{task}--greet")],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&teammate_tip.stdout).trim(),
+        "greet"
+    );
+    let git = clone.join(".git");
+    let kept: Vec<(PathBuf, Vec<u8>)> = [
+        git.join("config"),
+        git.join("HEAD"),
+        git.join("refs").join("heads").join(task),
+        greet.join(".git"),
+        git.join("worktrees").join("greet").join("gitdir"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    for (file, before) in &kept {
+        let output = run(
+            &teammates,
+            &teammates_profile,
+            &format!("printf 'x\\n' >> {}", quoted(file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(&fs::read(file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        clone.join("lead.txt"),
+        git.join("hooks").join("post-commit"),
+    ] {
+        write_refused(
+            &teammates,
+            &teammates_profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+    let admin = git.join("worktrees").join("other");
+    write_refused(
+        &teammates,
+        &teammates_profile,
+        &format!("mkdir {}", quoted(&admin)),
+        &admin,
+    );
+    let record = git.join("worktrees").join("greet");
+    let links: Vec<(PathBuf, Vec<u8>)> = [
+        record.join("gitdir"),
+        record.join("commondir"),
+        greet.join(".git"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    let lead_only = clone.join("lead-only");
+    fs::create_dir(&lead_only).unwrap();
+    let folder = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let [bob, carl, dave, erin] = ["bob", "carl", "dave", "erin"].map(|name| folder.join(name));
+    let planted = case.home.join("teams").join("planted.lock");
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "GITDIR",
+            format!("printf 'x\\n' >> {}", quoted(&record.join("GITDIR"))),
+        ),
+        (
+            "COMMONDIR",
+            format!("printf 'x\\n' >> {}", quoted(&record.join("COMMONDIR"))),
+        ),
+        (
+            ".GIT",
+            format!("printf 'x\\n' >> {}", quoted(&greet.join(".GIT"))),
+        ),
+        (
+            ".GIT made in a new teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {}",
+                quoted(&erin),
+                git.display(),
+                quoted(&erin.join(".GIT"))
+            ),
+        ),
+        (
+            "symlink at a teammate folder",
+            format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
+        ),
+        (
+            "symlink moved in as a teammate folder",
+            format!(
+                "ln -s {} {} && mv {} {}",
+                quoted(&lead_only),
+                quoted(&greet.join("link")),
+                quoted(&greet.join("link")),
+                quoted(&carl)
+            ),
+        ),
+        (
+            "team folder holding a .git moved in as a teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {} && mv {} {}",
+                quoted(&planted),
+                git.display(),
+                quoted(&planted.join(".git")),
+                quoted(&planted),
+                quoted(&dave)
+            ),
+        ),
+    ] {
+        if run(&teammates, &teammates_profile, &script)
+            .status
+            .success()
+        {
+            escaped.push(label.to_owned());
+        }
+    }
+    for (file, before) in &links {
+        if &fs::read(file).unwrap() != before {
+            escaped.push(format!("changed {}", file.display()));
+        }
+    }
+    for made in [&bob, &carl, &dave, &erin.join(".git")] {
+        if fs::symlink_metadata(made).is_ok() {
+            escaped.push(format!("made {}", made.display()));
+        }
+    }
+    let replaced = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "mv {} {} && ln -s {} {}",
+            quoted(&folder),
+            quoted(&record.join("moved")),
+            quoted(&lead_only),
+            quoted(&folder)
+        ),
+    );
+    if replaced.status.success() {
+        escaped.push("teammates folder entry replaced".to_owned());
+    }
+    if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
+        escaped.push(format!("moved {}", folder.display()));
+    }
+    escaped.extend(sibling_folder_escapes(
+        &teammates,
+        &teammates_profile,
+        &folder,
+        &tmp,
+    ));
+    assert!(
+        escaped.is_empty(),
+        "a teammate changes what ties its worktree to the clone: {escaped:?}"
+    );
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
+    );
+}
+
+/// AGENT-REF-ALLOW-NARROW, a tightening: a clone lead's teammates write only the refs of
+/// `<lead's branch>--<name>` teammate branches. The lead's branch has a teammate branch's
+/// shape here only to pin the rule, since a native lead is master-started on
+/// `crazyagent/<task>`. A teammate commits on its own branch, but never writes the lead's
+/// branch, its reflog or lock, nor another task's teammate branch.
+#[test]
+fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let task = "crazyagent/write-the-page--lead";
+    let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
+    assert!(switched.status.success(), "{switched:?}");
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .lead_branch(task)
+            .is_err(),
+        "only a clone lead's sandbox names its branch"
+    );
+    for branch in ["main", "agent/agent-1", "crazyagent/write-the-page/lead"] {
+        assert!(
+            sandbox(&case, SandboxNetwork::Only(Vec::new()))
+                .confine_to_clone(&clone)
+                .unwrap()
+                .lead_branch(branch)
+                .is_err(),
+            "{branch}"
+        );
+    }
+    let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_clone(&clone)
+        .unwrap()
+        .lead_branch(task)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let (lead_profile, teammates_profile) = (
+        case.profiles.join("lead.sb"),
+        case.profiles.join("teammates.sb"),
+    );
+    let greet = clone
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let added = run(
+        &lead,
+        &lead_profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&clone),
+            quoted(&greet)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    let committed = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "cd {} && printf 'hello\\n' > greet.txt && {AGENT_GIT} add greet.txt && {AGENT_GIT} -c user.name=greet -c user.email=greet@local -c core.hooksPath=/dev/null commit -q -m greet",
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "a teammate commits on its own branch: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let git = clone.join(".git");
+    let (heads, logs) = (
+        git.join("refs").join("heads"),
+        git.join("logs").join("refs").join("heads"),
+    );
+    for file in [heads.join(task), logs.join(task)] {
+        let before = fs::read(&file).unwrap();
+        let output = run(
+            &teammates,
+            &teammates_profile,
+            &format!("printf 'x\\n' >> {}", quoted(&file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        heads.join(format!("{task}.lock")),
+        heads.join("crazyagent").join("other-task--x"),
+        logs.join("crazyagent").join("other-task--x"),
+    ] {
+        write_refused(
+            &teammates,
+            &teammates_profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
+/// AGENT-REF-ALLOW-NARROW: the engine's setup git for a linked lead's native teammates
+/// writes the refs of that lead's own teammate branches, `<lead's branch>--<name>`, and
+/// nothing else under `crazyagent/`: not the lead's branch when it has a teammate branch's
+/// shape, its reflog or lock, nor another task's teammate branch.
+#[test]
+fn the_teammates_setup_git_writes_only_its_lead_s_teammate_branches() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let lead_worktree = worktrees.join("agent-1");
+    let task = "crazyagent/write-the-page--lead";
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            task,
+            lead_worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    for branch in ["main", "agent/agent-1", "crazyagent/write-the-page/lead"] {
+        assert!(
+            sandbox(&case, SandboxNetwork::Only(Vec::new()))
+                .confine_to_teammates_setup(&lead_worktree, branch)
+                .is_err(),
+            "{branch}"
+        );
+    }
+    let setup = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_teammates_setup(&lead_worktree, task)
+        .unwrap();
+    let profile = case.profiles.join("setup.sb");
+    let greet = lead_worktree
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let made = run(
+        &setup,
+        &profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&lead_worktree),
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        made.status.success(),
+        "the setup git adds a teammate's worktree: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let git = case.project.join(".git");
+    let (heads, logs) = (
+        git.join("refs").join("heads"),
+        git.join("logs").join("refs").join("heads"),
+    );
+    assert!(heads.join(format!("{task}--greet")).is_file());
+    for file in [heads.join(task), logs.join(task)] {
+        let before = fs::read(&file).unwrap();
+        let output = run(
+            &setup,
+            &profile,
+            &format!("printf 'x\\n' >> {}", quoted(&file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        heads.join(format!("{task}.lock")),
+        heads.join("crazyagent").join("other-task--x"),
+        logs.join("crazyagent").join("other-task--x"),
+    ] {
+        write_refused(
+            &setup,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
+/// OP-9b (plan step 2): a native lead in a linked worktree (the Sandboxed default) has
+/// teammates who write only the teammates' folder of the lead's worktree, where the engine
+/// made each one's linked worktree. The engine commits their turns, so they never write the
+/// lead's files, the lead's or their own worktree records, the object store or the links
+/// that tie a teammate worktree to the repository.
+#[test]
+fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let lead_worktree = worktrees.join("agent-1");
+    let greet = lead_worktree
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    for arguments in [
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lead_worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "crazyagent/write-the-page--greet",
+            greet.to_str().unwrap(),
+            "HEAD",
+        ],
+    ] {
+        let added = owner_git(&case.project, &case.home, &arguments);
+        assert!(added.status.success(), "{added:?}");
+    }
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let (_lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_worktree(&lead_worktree)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let profile = case.profiles.join("teammates.sb");
+    let wrote = run(
+        &teammates,
+        &profile,
+        &format!(
+            "printf 'hello\\n' > {} && mkdir -p {} && printf 'x\\n' > {}",
+            quoted(&greet.join("greet.txt")),
+            quoted(&greet.join("src")),
+            quoted(&greet.join("src").join("a.txt"))
+        ),
+    );
+    assert!(
+        wrote.status.success(),
+        "a teammate writes in its own worktree: {}",
+        String::from_utf8_lossy(&wrote.stderr)
+    );
+    let git = case.project.join(".git");
+    let kept: Vec<(PathBuf, Vec<u8>)> = [
+        greet.join(".git"),
+        git.join("worktrees").join("greet").join("gitdir"),
+        git.join("worktrees").join("greet").join("HEAD"),
+        git.join("worktrees").join("agent-1").join("commondir"),
+        git.join("worktrees").join("agent-1").join("HEAD"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    for (file, before) in &kept {
+        let output = run(
+            &teammates,
+            &profile,
+            &format!("printf 'x\\n' >> {}", quoted(file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(&fs::read(file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        lead_worktree.join("lead.txt"),
+        git.join("worktrees").join("agent-1").join("teammate-probe"),
+        git.join("worktrees").join("greet").join("index.lock"),
+        git.join("objects").join("teammate-probe"),
+    ] {
+        write_refused(
+            &teammates,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+    let lead_only = lead_worktree.join("lead-only");
+    fs::create_dir(&lead_only).unwrap();
+    let folder = lead_worktree.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let [bob, carl, dave] = ["bob", "carl", "dave"].map(|name| folder.join(name));
+    let planted = case.home.join("teams").join("planted.lock");
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "symlink at a teammate folder",
+            format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
+        ),
+        (
+            "symlink moved in as a teammate folder",
+            format!(
+                "ln -s {} {} && mv {} {}",
+                quoted(&lead_only),
+                quoted(&greet.join("link")),
+                quoted(&greet.join("link")),
+                quoted(&carl)
+            ),
+        ),
+        (
+            "team folder holding a .git moved in as a teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {} && mv {} {}",
+                quoted(&planted),
+                git.display(),
+                quoted(&planted.join(".git")),
+                quoted(&planted),
+                quoted(&dave)
+            ),
+        ),
+    ] {
+        if run(&teammates, &profile, &script).status.success() {
+            escaped.push(label.to_owned());
+        }
+    }
+    for made in [&bob, &carl, &dave] {
+        if fs::symlink_metadata(made).is_ok() {
+            escaped.push(format!("made {}", made.display()));
+        }
+    }
+    let replaced = run(
+        &teammates,
+        &profile,
+        &format!(
+            "mv {} {} && ln -s {} {}",
+            quoted(&folder),
+            quoted(&tmp.join("teammates-away")),
+            quoted(&lead_only),
+            quoted(&folder)
+        ),
+    );
+    if replaced.status.success() {
+        escaped.push("teammates folder entry replaced".to_owned());
+    }
+    if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
+        escaped.push(format!("moved {}", folder.display()));
+    }
+    escaped.extend(sibling_folder_escapes(&teammates, &profile, &folder, &tmp));
+    assert!(
+        escaped.is_empty(),
+        "a teammate changes where the engine adds a teammate worktree: {escaped:?}"
+    );
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
+    );
+}
+
+/// Tries from a native lead's teammates' profile to rename, move out or remove a teammate's
+/// worktree folder and to leave a stray entry beside them in the teammates' folder
+/// (OP9B-C1), also spelled in another letter case and as a hard link (OP9B-R3-L1), which
+/// one profile shared by all teammates would let one do to another. Takes
+/// the teammates' sandbox and profile, the teammates' folder and a temp folder outside it.
+/// Returns what got through, each named.
+fn sibling_folder_escapes(
+    teammates: &ProjectSandbox,
+    profile: &Path,
+    folder: &Path,
+    tmp: &Path,
+) -> Vec<String> {
+    let (frank, gina) = (folder.join("frank"), folder.join("gina"));
+    fs::create_dir(&frank).unwrap();
+    fs::write(frank.join("work.txt"), "Frank's work.\n").unwrap();
+    fs::create_dir(&gina).unwrap();
+    let upper = folder.with_file_name(crazyagent::agent_git::TEAMMATES_FOLDER.to_uppercase());
+    assert!(
+        upper.join("frank").is_dir(),
+        "the volume finds the teammates' folder in any letter case"
+    );
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "sibling folder renamed in another letter case",
+            format!(
+                "mv {} {}",
+                quoted(&upper.join("frank")),
+                quoted(&upper.join("frank-case"))
+            ),
+        ),
+        (
+            "stray folder in another letter case",
+            format!("mkdir {}", quoted(&upper.join("case-stray"))),
+        ),
+        (
+            "hard link beside the teammates' worktrees",
+            format!(
+                "ln {} {}",
+                quoted(&frank.join("work.txt")),
+                quoted(&folder.join("linked.txt"))
+            ),
+        ),
+        (
+            "sibling folder renamed",
+            format!(
+                "mv {} {}",
+                quoted(&frank),
+                quoted(&folder.join("frank-renamed"))
+            ),
+        ),
+        (
+            "sibling folder moved out",
+            format!("mv {} {}", quoted(&frank), quoted(&tmp.join("frank-away"))),
+        ),
+        (
+            "empty sibling folder removed",
+            format!("rmdir {}", quoted(&gina)),
+        ),
+        (
+            "stray file",
+            format!("printf x > {}", quoted(&folder.join("stray.txt"))),
+        ),
+        (
+            "stray folder",
+            format!("mkdir {}", quoted(&folder.join("stray"))),
+        ),
+    ] {
+        if run(teammates, profile, &script).status.success() {
+            escaped.push(label.to_owned());
+        }
+    }
+    if fs::read(frank.join("work.txt")).ok().as_deref() != Some(b"Frank's work.\n".as_slice()) {
+        escaped.push("sibling's work moved".to_owned());
+    }
+    if !gina.is_dir() {
+        escaped.push("empty sibling folder gone".to_owned());
+    }
+    for stray in [
+        "frank-renamed",
+        "stray.txt",
+        "stray",
+        "frank-case",
+        "case-stray",
+        "linked.txt",
+    ] {
+        if fs::symlink_metadata(folder.join(stray)).is_ok() {
+            escaped.push(format!("made {stray}"));
+        }
+    }
+    escaped
+}
+
+#[test]
+fn an_agent_cannot_exec_an_app_bundle_it_put_in_its_own_folders_but_bundle_tools_still_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("own-apps.sb");
+    let script = |root: &Path, path: &str| {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let chrome = script(
+        &case.home,
+        ".cache/puppeteer/chrome/mac_arm-131.0.6778.85/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    );
+    let apps = [
+        chrome.clone(),
+        script(
+            &case.home,
+            "Library/Caches/ms-playwright/chromium-1148/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        ),
+        script(
+            &case.project,
+            "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+        ),
+        script(&case.tmp, "unpacked/Some Tool.APP/contents/macos/Some Tool"),
+        Path::new("/System/Volumes/Data").join(chrome.strip_prefix("/").unwrap()),
+        PathBuf::from(chrome.to_str().unwrap().to_uppercase()),
+    ];
+    for app in &apps {
+        assert!(app.is_file(), "{}", app.display());
+        let output = run(&sandbox, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{}: {stderr}",
+            app.display()
+        );
+        assert!(output.stdout.is_empty(), "{}", app.display());
+    }
+    let tool = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/Resources/bin/tool",
+    );
+    let output = run(&sandbox, &profile, &quoted(&tool));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+}
+
+#[test]
+fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let teammates = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let bob = teammates.join("bob");
+    let added = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b agent/bob {} HEAD",
+            quoted(&clone),
+            quoted(&bob)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    assert!(bob.join(".git").is_file());
+    for target in [
+        teammates.join("dave").join(".git").join("config"),
+        bob.join("nested").join(".git"),
+        clone.join("sub").join(".git"),
+    ] {
+        write_refused(
+            &confined,
+            &profile,
+            &format!(
+                "mkdir -p {} && printf x > {}",
+                quoted(target.parent().unwrap()),
+                quoted(&target)
+            ),
+            &target,
+        );
+    }
+}
+
+#[test]
+fn a_confined_agent_cannot_exec_an_app_bundle_from_a_folder_it_only_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("read-only-apps.sb");
+    let script = |root: &Path, path: &str| {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let electron = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+    );
+    let apps = [
+        electron.clone(),
+        script(
+            &case.outside,
+            "tools/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        ),
+        script(
+            &case.outside,
+            "unpacked/Some Tool.APP/contents/macos/Some Tool",
+        ),
+        Path::new("/System/Volumes/Data").join(electron.strip_prefix("/").unwrap()),
+        PathBuf::from(electron.to_str().unwrap().to_uppercase()),
+    ];
+    let tool = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/Resources/bin/tool",
+    );
+    let confined = sandbox
+        .allow_read(&case.outside)
+        .unwrap()
+        .confine_to_worktree(&worktree)
+        .unwrap();
+    assert!(confined.read_roots().contains(&case.project));
+    assert!(!confined.writes(&electron));
+    for app in &apps {
+        assert!(app.is_file(), "{}", app.display());
+        let output = run(&confined, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{}: {stderr}",
+            app.display()
+        );
+        assert!(output.stdout.is_empty(), "{}", app.display());
+    }
+    let output = run(&confined, &profile, &quoted(&tool));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+}
+
+#[test]
+fn the_harness_the_engine_launches_from_an_app_bundle_still_starts_but_its_bundle_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let bundle = case
+        .outside
+        .join("Harness.app")
+        .join("Contents")
+        .join("MacOS");
+    fs::create_dir_all(&bundle).unwrap();
+    let program = |name: &str| {
+        let file = bundle.join(name);
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let harness = program("harness");
+    let sibling = program("Helper");
+    let fresh = || sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let allowed = fresh()
+        .allow_read(&case.outside)
+        .unwrap()
+        .allow_exec(&harness)
+        .unwrap()
+        .allow_exec(&harness)
+        .unwrap();
+    let profile = case.profiles.join("harness.sb");
+    allowed.install(&profile).unwrap();
+    let mut launched = allowed.command(&profile, &harness);
+    launched
+        .current_dir(allowed.project_root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut launched).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+    let own = case
+        .home
+        .join("Own.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("own");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&own, "#!/bin/sh\necho ran\n").unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
+    let writable = fresh().allow_exec(&own).unwrap();
+    assert!(writable.writes(&own));
+    for (sandbox, app) in [(&allowed, &sibling), (&writable, &own)] {
+        let output = run(sandbox, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(stderr.contains("Operation not permitted"), "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+    let refused = |result: Result<ProjectSandbox, SandboxError>| {
+        assert!(
+            matches!(result, Err(SandboxError::Invalid(_))),
+            "{:?}",
+            result.map(|sandbox| sandbox.profile())
+        );
+    };
+    refused(fresh().allow_exec(Path::new("Harness.app/Contents/MacOS/harness")));
+    refused(fresh().allow_exec(&bundle));
+    refused(fresh().allow_exec(&bundle.join("missing")));
+    refused(
+        fresh().allow_exec(
+            &case
+                .outside
+                .join("Harness.app/Contents/MacOS/../MacOS/harness"),
+        ),
+    );
+    let mut many = fresh();
+    for index in 0..4 {
+        many = many.allow_exec(&program(&format!("tool-{index}"))).unwrap();
+    }
+    many = many.allow_exec(&bundle.join("tool-0")).unwrap();
+    refused(many.allow_exec(&program("tool-4")));
+}
+
+#[test]
+fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("python.sb");
+    let python = Path::new("/opt/homebrew/bin/python3");
+    let real = fs::canonicalize(python).unwrap();
+    assert!(
+        real.to_str().unwrap().contains(".framework/Versions/"),
+        "the probe needs a framework build at {}",
+        python.display()
+    );
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!("{} -c 'print(\"ok\")'", quoted(python)),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
+/// the arguments nor the environment of a process outside its sandbox through either
+/// process-arguments sysctl, and still reads a process of its own sandbox and an ordinary
+/// sysctl value.
+#[test]
+fn a_confined_child_reads_no_process_arguments_by_sysctl() {
+    const NAME: &str = "a_confined_child_reads_no_process_arguments_by_sysctl";
+    const CANARY: &str = "DUMMY_CANARY=dummy-value";
+    const PLATFORM_ARGUMENT: &str = "30.0417";
+    const PROBE: &str = r#"$m=pack("i3",1,shift,shift);$b="\0"x262144;$l=pack("Q",262144);syscall(202,$m,3,$b,$l,0,0)==0 or exit 3;print $b"#;
+    const NCPU: &str = r#"$m=pack("i2",6,3);$b="\0"x4;$l=pack("Q",4);syscall(202,$m,2,$b,$l,0,0)==0 or exit 3;print "cpus=",unpack("i",$b)"#;
+    if std::env::var_os("DUMMY_PROCARGS_CHILD").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    let quiet = |command: &mut std::process::Command| {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crazyagent::spawn_gate::spawn(command).unwrap()
+    };
+    let mut dummy = quiet(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env_clear()
+            .env("DUMMY_PROCARGS_CHILD", "1")
+            .env("DUMMY_CANARY", "dummy-value"),
+    );
+    let mut apple = quiet(
+        std::process::Command::new("/usr/bin/env")
+            .env_clear()
+            .args(["DUMMY_CANARY=dummy-value", "/bin/sleep", PLATFORM_ARGUMENT]),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let holds =
+        |output: &Output, text: &str| String::from_utf8_lossy(&output.stdout).contains(text);
+    let mut problems = Vec::new();
+    for mib in [49, 38] {
+        let probe = |name: &str, target: u32| {
+            run(
+                &confined,
+                &case.profiles.join(format!("{name}-{mib}.sb")),
+                &format!("/usr/bin/perl -e '{PROBE}' {mib} {target}"),
+            )
+        };
+        let plain = |target: u32| {
+            crazyagent::spawn_gate::output(
+                std::process::Command::new("/usr/bin/perl")
+                    .args(["-e", PROBE, &mib.to_string(), &target.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let plain_platform = plain(apple.id());
+        if !plain_platform.status.success() || !holds(&plain_platform, PLATFORM_ARGUMENT) {
+            problems.push(format!(
+                "{mib}: inconclusive, the unconfined probe read no platform argument"
+            ));
+        }
+        let unconfined = plain(dummy.id());
+        if !unconfined.status.success() || !holds(&unconfined, NAME) {
+            problems.push(format!(
+                "{mib}: inconclusive, the unconfined probe read nothing"
+            ));
+        }
+        let across = probe("across", dummy.id());
+        if holds(&across, CANARY) || holds(&across, NAME) {
+            problems.push(format!("{mib}: read a process outside the sandbox"));
+        }
+        let platform = probe("apple", apple.id());
+        if holds(&platform, CANARY) || holds(&platform, PLATFORM_ARGUMENT) {
+            problems.push(format!(
+                "{mib}: read a platform binary's arguments or environment"
+            ));
+        }
+    }
+    let ordinary = run(
+        &confined,
+        &case.profiles.join("ncpu.sb"),
+        &format!("/usr/bin/perl -e '{NCPU}'"),
+    );
+    let inside = run(
+        &confined,
+        &case.profiles.join("inside.sb"),
+        &format!("/bin/sleep 30 & p=$!; /usr/bin/perl -e '{PROBE}' 49 $p; c=$?; kill $p; exit $c"),
+    );
+    for child in [&mut dummy, &mut apple] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if !inside.status.success() || !holds(&inside, "sleep") {
+        problems.push(format!(
+            "a process of the same sandbox was not readable: {inside:?}"
+        ));
+    }
+    if !ordinary.status.success() || !holds(&ordinary, "cpus=") {
+        problems.push(format!("an ordinary sysctl read failed: {ordinary:?}"));
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: `lsof` lists process ids
+/// before it reads one, so listing them stays open and a confined agent can still ask what
+/// its own process holds.
+#[test]
+fn a_confined_lsof_on_its_own_process_succeeds() {
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let output = run(
+        &confined,
+        &case.profiles.join("lsof.sb"),
+        "/usr/sbin/lsof -p $$",
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(text.contains("COMMAND") && text.contains("cwd"), "{text}");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: a confined shell lists its
+/// own running child, the list a harness walks to stop a tool's processes. The probe makes
+/// the `proc_info` list call with the parent-only filter, which `proc_listchildpids` wraps.
+#[test]
+fn a_confined_shell_lists_its_own_running_child() {
+    const LIST: &str = r#"$b="\0"x65536;$n=syscall(336,1,6,getppid(),0,$b,65536);$n>=0 or exit 3;print join(" ",grep{$_}unpack("i*",substr($b,0,$n))),"\n""#;
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let output = run(
+        &confined,
+        &case.profiles.join("children.sb"),
+        &format!(
+            "/bin/sleep 30 & p=$!; echo child=$p; /usr/bin/perl -e '{LIST}'; c=$?; kill $p; exit $c"
+        ),
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    let child = text
+        .lines()
+        .find_map(|line| line.strip_prefix("child="))
+        .unwrap();
+    let listed = text.lines().last().unwrap();
+    assert!(listed.split(' ').any(|pid| pid == child), "{text}");
 }

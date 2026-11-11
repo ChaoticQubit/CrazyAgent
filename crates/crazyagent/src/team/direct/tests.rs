@@ -173,3 +173,62 @@ fn typed_terminal_input_kept_by_older_engines_is_erased_when_the_database_opens(
         "the erased text is gone from the database files"
     );
 }
+
+/// An owner prompt to a sub-agent is kept in its Messages timeline with the owner as speaker
+/// (MSG-A2), plain, in the same transaction as its note, and still kept when the note queue is
+/// full; a prompt to a master keeps nothing.
+#[test]
+fn an_owner_prompt_is_kept_in_the_sub_agent_s_timeline_even_when_the_note_queue_is_full() {
+    use super::super::agent_messages::{EntryKind, Speaker, read};
+    let connection = database();
+    let sub = agent(&connection, "alpha", "sub", "codex", Some(1));
+    let master = agent(&connection, "alpha", "master", "claude", None);
+    let timeline = |agent: i64| {
+        read(&connection, &project("alpha"), agent, None, Some(200))
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| (entry.from, entry.kind, entry.text))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        record(&connection, sub, "Try the \u{1b}[1mother\u{202e} branch", 5)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        timeline(sub),
+        vec![(
+            Speaker::Owner,
+            EntryKind::Prompt,
+            Some("Try the (1mother branch".to_owned())
+        )]
+    );
+    assert_eq!(
+        record(&connection, master, "Plan the week", 6).unwrap(),
+        None
+    );
+    assert!(
+        timeline(master).is_empty(),
+        "a master's prompt keeps nothing"
+    );
+    for index in 1..PENDING_PER_PROJECT_MAX {
+        assert!(
+            record(&connection, sub, &format!("line {index}"), 10 + index)
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(record(&connection, sub, "one more", 999).unwrap(), None);
+    let kept = timeline(sub);
+    assert_eq!(kept.len(), 200);
+    assert_eq!(
+        kept[0],
+        (
+            Speaker::Owner,
+            EntryKind::Prompt,
+            Some("one more".to_owned())
+        ),
+        "the prompt reached the terminal, so it is kept though its note is not"
+    );
+}

@@ -11,6 +11,10 @@ use std::collections::BTreeSet;
 pub mod import;
 pub mod library;
 
+/// The memory rows an owner review or source retraction may fill, above every configured
+/// `records_max`, so agent writes that filled the store never block the owner.
+const OWNER_RECORDS_MAX: usize = 8192;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgePolicy {
@@ -626,7 +630,7 @@ pub(crate) fn hidden_text(text: &str) -> bool {
 /// Shows every character hidden_text finds as a visible escape, `\uXXXX` or `\u{XXXXX}`,
 /// the same form the desktop shows. Input: the text. Output: the text with those characters
 /// escaped; line breaks, tabs and an emoji selector or joiner inside an emoji stay as they are.
-pub(crate) fn visible_text(text: &str) -> String {
+pub fn visible_text(text: &str) -> String {
     if !hidden_text(text) {
         return text.to_owned();
     }
@@ -1536,7 +1540,9 @@ fn review(
     entry.version += 1;
     entry.human_reviewed = true;
     entry.revision = Cursor::new(revision + 1);
-    save_entry(tx, &config.settings.knowledge, &entry)
+    let mut reserved = config.settings.knowledge.clone();
+    reserved.records_max = OWNER_RECORDS_MAX;
+    save_entry(tx, &reserved, &entry)
 }
 
 fn approve(
@@ -1613,7 +1619,7 @@ fn revoke_source(
             entry.status = KnowledgeStatus::Retracted;
             entry.revision = Cursor::new(revision + 1);
             let mut reserved = config.settings.knowledge.clone();
-            reserved.records_max = 8192;
+            reserved.records_max = OWNER_RECORDS_MAX;
             save_entry(tx, &reserved, &entry)?;
         }
     }

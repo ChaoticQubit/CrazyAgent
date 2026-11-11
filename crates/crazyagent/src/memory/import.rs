@@ -154,3 +154,6 @@ pub fn without_frontmatter(text: &str) -> &str {
         None => text,
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

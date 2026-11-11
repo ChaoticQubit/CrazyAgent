@@ -27,6 +27,12 @@ fn token(expires: u64) -> String {
     )
 }
 
+fn id_claims(expires: u64) -> String {
+    let full = token(expires);
+    let (head, _) = full.rsplit_once('.').unwrap();
+    format!("{head}.unexchangeable")
+}
+
 fn codex_auth(expires: u64) -> Vec<u8> {
     json!({
         "OPENAI_API_KEY": "sk-unit-api-key",
@@ -99,7 +105,7 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
         json!({
             "OPENAI_API_KEY": null,
             "tokens": {
-                "id_token": token(expires),
+                "id_token": id_claims(expires),
                 "access_token": token(expires),
                 "refresh_token": "",
                 "account_id": "acct-unit"
@@ -112,6 +118,64 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
     drop(copy);
     assert!(entries(&agent).is_empty());
     assert_eq!(std::fs::read(&source).unwrap(), codex_auth(expires));
+}
+
+#[test]
+fn a_codex_copy_replaces_the_id_token_signature_but_keeps_its_claims_and_the_access_token() {
+    let mut case = UseCase::new();
+    let expires = now() + 3 * 86_400;
+    let part =
+        |value: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string());
+    let header = part(json!({"alg": "RS256", "typ": "JWT"}));
+    let payload = part(json!({
+        "exp": expires,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct-unit"}
+    }));
+    let id_token = format!("{header}.{payload}.ZXhjaGFuZ2VhYmxlc2lnbmF0dXJl");
+    let access = token(expires);
+    let source = case.home().join("auth.json");
+    private_file(
+        &source,
+        &json!({
+            "OPENAI_API_KEY": "sk-unit-api-key",
+            "tokens": {
+                "id_token": id_token,
+                "access_token": access,
+                "refresh_token": "unit-refresh-secret",
+                "account_id": "acct-unit"
+            },
+            "last_refresh": "2026-10-26T00:00:00Z"
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(agent.join("auth.json")).unwrap()).unwrap();
+    let copied = written["tokens"]["id_token"].as_str().unwrap();
+    let (claims_prefix, signature) = copied.rsplit_once('.').unwrap();
+    assert_eq!(claims_prefix, format!("{header}.{payload}"));
+    assert_ne!(copied, id_token);
+    assert!(!signature.is_empty());
+    assert_ne!(signature, "ZXhjaGFuZ2VhYmxlc2lnbmF0dXJl");
+    let claims_segment = copied.split('.').nth(1).unwrap();
+    let claims: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(claims_segment)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        claims["https://api.openai.com/auth"]["chatgpt_account_id"],
+        "acct-unit"
+    );
+    assert_eq!(claims["exp"], expires);
+    assert_eq!(written["tokens"]["access_token"], access);
+    drop(copy);
 }
 
 #[test]
@@ -155,6 +219,32 @@ fn scripted_codex(case: &UseCase, name: &str, script: &str, next: &[u8]) -> Path
     std::fs::write(&harness, script).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
     harness
+}
+
+/// CA-SEC-003: a running keeper leases the profile itself, so once the turn's own lease ends
+/// a sign-out or sign-in still waits for every renewal that could write the account's
+/// record, and stopping the keeper ends that lease.
+#[test]
+fn a_running_keeper_keeps_the_profile_leased_after_the_turn_s_lease_ended() {
+    let mut case = UseCase::new();
+    private_file(&case.home().join("auth.json"), &codex_auth(now() + 600));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert_busy(&case.manifest());
+    drop(copy);
+    let file = File::open(case.manifest()).unwrap();
+    let waited = Instant::now();
+    while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "the profile stayed leased after its keeper stopped"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
@@ -297,23 +387,152 @@ fn a_missing_or_unusable_codex_record_is_refused() {
         "native_profile_credential_unavailable"
     );
     drop(guard);
-    for record in [
-        b"not json".to_vec(),
-        json!({"OPENAI_API_KEY": "sk-unit-api-key"})
-            .to_string()
-            .into_bytes(),
-        json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}})
-            .to_string()
-            .into_bytes(),
+    let unreadable = "native_profile_codex_token_unreadable";
+    let api_key = "native_profile_codex_api_key";
+    let bytes = |record: Value| record.to_string().into_bytes();
+    for (record, code) in [
+        (b"not json".to_vec(), unreadable),
+        (bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key"})), api_key),
+        (
+            bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key", "tokens": null})),
+            api_key,
+        ),
+        (
+            bytes(json!({"OPENAI_API_KEY": "", "tokens": null})),
+            unreadable,
+        ),
+        (bytes(json!({"OPENAI_API_KEY": null})), unreadable),
+        (
+            bytes(
+                json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}}),
+            ),
+            unreadable,
+        ),
+        (
+            bytes(json!({"tokens": {"access_token": token(now() + 3600), "refresh_token": "r"}})),
+            unreadable,
+        ),
+        (
+            bytes(
+                json!({"tokens": {"id_token": token(now() + 3600), "access_token": "", "refresh_token": "r"}}),
+            ),
+            unreadable,
+        ),
     ] {
         private_file(&source, &record);
         let guard = execution(&mut case);
         assert_eq!(
             refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
-            "native_profile_credential_unavailable"
+            code
         );
+        assert_eq!(usage_refused(&guard, &no_harness(&case)), code);
         assert!(entries(&agent).is_empty());
     }
+}
+
+/// The refusal of a usage read of this account. Inputs: the held account and the harness.
+/// Output: the refusal code; panics when a credential was read.
+fn usage_refused(guard: &NativeProfileUse, executable: &Path) -> String {
+    match guard.usage_credential(executable) {
+        Ok(_) => panic!("the usage read got a credential"),
+        Err(problem) => problem.0,
+    }
+}
+
+#[test]
+fn a_codex_usage_read_whose_lapsed_token_the_renewal_cannot_refresh_says_the_sign_in_expired() {
+    let mut case = UseCase::new();
+    let harness = case.root.path().join("offline-codex");
+    std::fs::write(&harness, "#!/bin/sh\n: > \"$0.ran\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = case.home().join("auth.json");
+    private_file(&source, &codex_auth(now() + 3600));
+    let guard = execution(&mut case);
+    let read = guard.usage_credential(&harness).unwrap();
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
+    assert!(!case.root.path().join("offline-codex.ran").exists());
+    drop((read, guard));
+    let lapsing = codex_auth(now() + 30);
+    private_file(&source, &lapsing);
+    let guard = execution(&mut case);
+    assert_eq!(
+        usage_refused(&guard, &harness),
+        "native_profile_codex_sign_in_expired"
+    );
+    assert!(
+        case.root.path().join("offline-codex.ran").is_file(),
+        "the renewal never ran before the refusal"
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), lapsing);
+}
+
+/// An access token shaped like the ones ChatGPT issues Codex: an RS256 JWT whose claims
+/// name its audience, client, account, plan, profile, scopes and session and whose
+/// signature is 256 bytes, so it runs past 1 KiB. Input: its expiry. Output: the token.
+fn chatgpt_token(expires: u64) -> String {
+    let part = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let issued = expires - 864_000;
+    let header = json!({
+        "alg": "RS256",
+        "kid": "b1dd3f8f-9926-4f9b-b5a3-2f3c3f0e7a11",
+        "typ": "JWT"
+    });
+    let claims = json!({
+        "aud": ["https://api.openai.com/v1"],
+        "client_id": "app_unit00000000000000000000",
+        "exp": expires,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct-unit",
+            "chatgpt_plan_type": "pro",
+            "chatgpt_user_id": "user-unit00000000000000000000",
+            "user_id": "user-unit00000000000000000000"
+        },
+        "https://api.openai.com/profile": {"email": "unit@example.com", "email_verified": true},
+        "iat": issued,
+        "iss": "https://auth.openai.com",
+        "jti": "4f0e8c2a-7d6b-4c1e-9a3f-5b2d8e1c0a97",
+        "nbf": issued,
+        "pwd_auth_time": issued * 1000,
+        "scp": ["openid", "profile", "email", "offline_access"],
+        "session_id": "authsess_unit000000000000000000000",
+        "sub": "auth0|unit000000000000000000000000"
+    });
+    let signature: Vec<u8> = (0..=255).collect();
+    format!(
+        "{}.{}.{}",
+        part(header.to_string().as_bytes()),
+        part(claims.to_string().as_bytes()),
+        part(&signature)
+    )
+}
+
+/// R4 N-D16: a usage read of a Codex account gets its access token, although a ChatGPT
+/// access token is longer than the 1 KiB a stored secret may hold.
+#[test]
+fn a_codex_usage_read_gets_a_full_size_chatgpt_access_token() {
+    let mut case = UseCase::new();
+    let access = chatgpt_token(now() + 3600);
+    assert!(
+        access.len() > crate::credentials::SECRET_BYTES_MAX,
+        "a ChatGPT access token outgrows a stored secret: {} bytes",
+        access.len()
+    );
+    let mut record: Value = serde_json::from_slice(&codex_auth(now() + 3600)).unwrap();
+    record["tokens"]["access_token"] = json!(access);
+    private_file(
+        &case.home().join("auth.json"),
+        record.to_string().as_bytes(),
+    );
+    let guard = execution(&mut case);
+    let read = guard.usage_credential(&no_harness(&case));
+    assert_eq!(
+        read.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "the usage read refused the account's access token"
+    );
+    let read = read.unwrap();
+    assert_eq!(read.token.expose(), access);
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
 }
 
 #[test]
@@ -502,6 +721,110 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
     assert_eq!(written["claudeAiOauth"]["refreshToken"], Value::Null);
     assert!(written.get("mcpOAuth").is_none());
     drop(copy);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_when_the_sign_in_can_create_api_keys() {
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let mut record = claude_record(expires);
+    record["claudeAiOauth"]["scopes"] =
+        json!(["user:inference", "user:profile", "org:create_api_key"]);
+    let (_keychain, _service) = claude_keychain(&home, &record);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    assert_eq!(
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+        "native_profile_scope_too_wide"
+    );
+    assert!(entries(&agent).is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_a_claude_copy_for_a_real_subscription_sign_in() {
+    let subscription = json!([
+        "user:inference",
+        "user:profile",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload"
+    ]);
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let mut record = claude_record(expires);
+    record["claudeAiOauth"]["scopes"] = subscription.clone();
+    let (_keychain, _service) = claude_keychain(&home, &record);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(agent.join(".credentials.json")).unwrap()).unwrap();
+    assert_eq!(
+        written["claudeAiOauth"]["scopes"], subscription,
+        "the subscription's user scopes are kept, not narrowed away"
+    );
+    assert_eq!(written["claudeAiOauth"]["accessToken"], "sk-ant-oat01-unit");
+    assert_eq!(written["claudeAiOauth"]["refreshToken"], Value::Null);
+    drop(copy);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_for_any_org_scope() {
+    for scopes in [
+        json!(["org:create_api_key", "user:profile"]),
+        json!(["user:inference", "user:profile", "org:workspaces:create"]),
+    ] {
+        let mut case = UseCase::with_harness("claude-code");
+        let expires = (now() + 8 * 3600) * 1000;
+        let home = case.home();
+        let mut record = claude_record(expires);
+        record["claudeAiOauth"]["scopes"] = scopes.clone();
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let agent = agent_home(&case);
+        let guard = execution(&mut case);
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_scope_too_wide",
+            "{scopes}"
+        );
+        assert!(entries(&agent).is_empty(), "{scopes}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_for_a_malformed_or_inference_less_scope_set() {
+    for scopes in [
+        json!([]),
+        json!(["user:profile"]),
+        json!(["user:inference", 123]),
+        json!([" org:create_api_key ", "user:inference"]),
+        json!(["ORG:create_api_key", "user:inference"]),
+        json!(["Org:create_api_key", "user:inference"]),
+        json!(["oRg:create_api_key", "user:inference"]),
+    ] {
+        let mut case = UseCase::with_harness("claude-code");
+        let expires = (now() + 8 * 3600) * 1000;
+        let home = case.home();
+        let mut record = claude_record(expires);
+        record["claudeAiOauth"]["scopes"] = scopes.clone();
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let agent = agent_home(&case);
+        let guard = execution(&mut case);
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_scope_too_wide",
+            "{scopes}"
+        );
+        assert!(entries(&agent).is_empty(), "{scopes}");
+    }
 }
 
 #[cfg(target_os = "macos")]

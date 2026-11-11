@@ -67,11 +67,49 @@ pub enum Global {
     NextSection,
 }
 
+/// What Shift-←→ do while the master's terminal has the keys, a choice kept on this
+/// computer. Input: picked in Settings, Profile. Output: `SwitchTabs`, the default, leaves
+/// the master view for the project's previous or next tab; `SendToAgent` types them in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShiftArrows {
+    #[default]
+    SwitchTabs,
+    SendToAgent,
+}
+
+impl ShiftArrows {
+    /// Every choice with its label, in the order Settings shows them.
+    pub const ALL: [(ShiftArrows, &'static str); 2] = [
+        (Self::SwitchTabs, "Switch tabs"),
+        (Self::SendToAgent, "Send to the agent"),
+    ];
+}
+
+/// Whether the TUI asks the terminal for the enhanced keyboard protocol, so Shift-Enter
+/// reaches it as its own key: `Auto` asks at start and turns the protocol on when the
+/// terminal has it; `Off` never asks, and Ctrl-J stays the only new-line key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShiftEnter {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl ShiftEnter {
+    /// Every choice with its label, in the order Settings shows them.
+    pub const ALL: [(ShiftEnter, &'static str); 2] = [(Self::Auto, "Auto"), (Self::Off, "Off")];
+}
+
 impl Key {
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
     /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]
-    /// as byte 0x1d, which crossterm reports as Ctrl-5.
+    /// as byte 0x1d, which crossterm reports as Ctrl-5. Shift+Enter, where the
+    /// terminal reports it, is Ctrl-J: the new-line key, a line feed to an agent.
+    /// Ctrl chords a terminal reports under the enhanced keyboard protocol (Ctrl-Enter,
+    /// Ctrl-I, Ctrl-M, Ctrl-Tab, Ctrl-Backspace, Ctrl-Esc, Ctrl-[, Ctrl-3, Ctrl-8) give the
+    /// key the same chord gives from a legacy terminal, so the shell and an agent see the
+    /// same key and bytes.
     pub fn from_event(event: KeyEvent) -> Option<Self> {
         if event.kind == KeyEventKind::Release {
             return None;
@@ -83,15 +121,26 @@ impl Key {
         if modifiers.contains(KeyModifiers::CONTROL) {
             return match event.code {
                 KeyCode::Char(letter) if letter.is_ascii_alphabetic() => {
-                    Some(Self::Ctrl(letter.to_ascii_lowercase()))
+                    match letter.to_ascii_lowercase() {
+                        'i' => Some(Self::Tab),
+                        'm' => Some(Self::Enter),
+                        letter => Some(Self::Ctrl(letter)),
+                    }
                 }
                 KeyCode::Char(']' | '5') => Some(Self::Ctrl(']')),
+                KeyCode::Char('[' | '3') | KeyCode::Esc => Some(Self::Esc),
+                KeyCode::Char('8') => Some(Self::Backspace),
+                KeyCode::Backspace => Some(Self::Ctrl('h')),
+                KeyCode::Enter => Some(Self::Enter),
+                KeyCode::Tab => Some(Self::Tab),
+                KeyCode::BackTab => Some(Self::BackTab),
                 _ => None,
             };
         }
         let shift = modifiers.contains(KeyModifiers::SHIFT);
         Some(match event.code {
             KeyCode::Char(character) if !character.is_control() => Self::Char(character),
+            KeyCode::Enter if shift => Self::Ctrl('j'),
             KeyCode::Enter => Self::Enter,
             KeyCode::Esc => Self::Esc,
             KeyCode::Tab if shift => Self::BackTab,
@@ -183,6 +232,128 @@ mod tests {
         let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert_eq!(Key::from_event(release), None);
+    }
+
+    #[test]
+    fn shift_enter_is_the_new_line_key_a_terminal_sends_as_a_line_feed() {
+        assert_eq!(
+            press(KeyCode::Enter, KeyModifiers::SHIFT),
+            Some(Key::Ctrl('j')),
+            "a terminal reporting Shift+Enter (CSI 13;2u) gets a new line, never a send"
+        );
+        assert_eq!(press(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
+        let line_feed = crate::tui::terminal_pane::encode(&Key::Ctrl('j'), false, false);
+        assert_eq!(
+            line_feed, b"\n",
+            "the byte Claude Code and Codex read as a new line in the message"
+        );
+        assert_eq!(
+            crate::tui::terminal_pane::encode(&Key::Enter, false, false),
+            b"\r"
+        );
+    }
+
+    /// N-T1 C: a legacy terminal sends Ctrl-I and Ctrl-M as Tab and Enter; under the
+    /// enhanced keyboard protocol they arrive as Ctrl chords and still act as Tab and Enter
+    /// in the shell, while Ctrl-H and Ctrl-J stay the Ctrl keys they are today.
+    #[test]
+    fn ctrl_i_and_ctrl_m_from_the_enhanced_keyboard_protocol_act_as_tab_and_enter() {
+        let control = KeyModifiers::CONTROL;
+        let both = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(press(KeyCode::Char('i'), control), Some(Key::Tab));
+        assert_eq!(press(KeyCode::Char('I'), both), Some(Key::Tab));
+        assert_eq!(press(KeyCode::Char('m'), control), Some(Key::Enter));
+        assert_eq!(press(KeyCode::Char('M'), both), Some(Key::Enter));
+        assert_eq!(press(KeyCode::Char('h'), control), Some(Key::Ctrl('h')));
+        assert_eq!(press(KeyCode::Char('j'), control), Some(Key::Ctrl('j')));
+    }
+
+    /// N-T1 C: under the enhanced keyboard protocol (disambiguated escape codes) a terminal
+    /// reports Ctrl and Shift chords as CSI u, which crossterm 0.28 gives as the plain key
+    /// with the modifier; each reaches an agent's terminal as the bytes the same key sends
+    /// from a legacy terminal today.
+    #[test]
+    fn keys_from_the_enhanced_keyboard_protocol_reach_an_agent_as_legacy_bytes() {
+        let control = KeyModifiers::CONTROL;
+        let shift = KeyModifiers::SHIFT;
+        let none = KeyModifiers::NONE;
+        let pairs = [
+            (
+                "Ctrl-Enter",
+                press(KeyCode::Enter, control),
+                press(KeyCode::Enter, none),
+            ),
+            (
+                "Ctrl-Shift-Enter",
+                press(KeyCode::Enter, control | shift),
+                press(KeyCode::Enter, none),
+            ),
+            (
+                "Ctrl-Tab",
+                press(KeyCode::Tab, control),
+                press(KeyCode::Tab, none),
+            ),
+            (
+                "Ctrl-Shift-Tab",
+                press(KeyCode::BackTab, control | shift),
+                press(KeyCode::BackTab, shift),
+            ),
+            (
+                "Ctrl-Backspace",
+                press(KeyCode::Backspace, control),
+                press(KeyCode::Char('h'), control),
+            ),
+            (
+                "Ctrl-Esc",
+                press(KeyCode::Esc, control),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Ctrl-[",
+                press(KeyCode::Char('['), control),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Ctrl-3",
+                press(KeyCode::Char('3'), control),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Ctrl-8",
+                press(KeyCode::Char('8'), control),
+                press(KeyCode::Backspace, none),
+            ),
+            (
+                "Ctrl-]",
+                press(KeyCode::Char(']'), control),
+                press(KeyCode::Char('5'), control),
+            ),
+            (
+                "Ctrl-Shift-A",
+                press(KeyCode::Char('A'), control | shift),
+                press(KeyCode::Char('a'), control),
+            ),
+            (
+                "Shift-Esc",
+                press(KeyCode::Esc, shift),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Shift-Backspace",
+                press(KeyCode::Backspace, shift),
+                press(KeyCode::Backspace, none),
+            ),
+        ];
+        for (name, enhanced, legacy) in pairs {
+            let legacy = legacy.unwrap_or_else(|| panic!("{name}: a legacy terminal sends it"));
+            let enhanced =
+                enhanced.unwrap_or_else(|| panic!("{name}: dropped under the enhanced protocol"));
+            assert_eq!(
+                crate::tui::terminal_pane::encode(&enhanced, false, false),
+                crate::tui::terminal_pane::encode(&legacy, false, false),
+                "{name}"
+            );
+        }
     }
 
     #[test]
