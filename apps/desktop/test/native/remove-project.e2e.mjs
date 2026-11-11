@@ -225,7 +225,7 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
     await me.waitFor("Home after the delete", (text) => text.includes(`${name} was deleted`), 90000);
     await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/metrics` });
     for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS * 10)) {
-      const rows = await page.evaluate(`[...document.querySelectorAll(".mx-table tbody tr")].map((row) => row.children[0]?.innerText.trim())`).catch(() => []);
+      const rows = await page.evaluate(`[...document.querySelectorAll(".mx-table tbody tr")].map((row) => row.children[0]?.textContent.trim())`).catch(() => []);
       if (rows.includes("Removed projects")) break;
       assert.ok(Date.now() < deadline, `app Metrics never showed a Removed projects row: ${JSON.stringify(rows)}`);
     }

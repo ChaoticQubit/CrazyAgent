@@ -58,9 +58,11 @@ async function eventually(what, check) {
   }
 }
 
-/** Reads each figure on the page. Input: the page. Output: [main number, tooltip] pairs. */
+/** Reads each figure on the page, those in folded All columns tables too, whose rendered
+ * text is empty until the owner opens them. Input: the page. Output: [main number, tooltip]
+ * pairs. */
 function figures(page) {
-  return page.evaluate(`[...document.querySelectorAll(".mx-figure")].map((node) => [node.querySelector("b")?.innerText ?? "", node.title])`);
+  return page.evaluate(`[...document.querySelectorAll(".mx-figure")].map((node) => [node.querySelector("b")?.textContent ?? "", node.title])`);
 }
 
 /** Opens Metrics on a priced transcript, then runs the steps. Inputs: the test context, the
@@ -236,8 +238,7 @@ test("CB-E8 history fills the activity chart through the recount", OPTIONS, asyn
     editingTurn(runtime, "cb-h", new Date(Date.now() - 3_600_000).toISOString());
     asBeforeTheRecount(runtime, "no-such-session", 0);
     await me.click("Metrics", ".app-nav a.nav-item");
-    const panelText = () => page.evaluate(`document.querySelector(".mx-page").innerText`);
-    await eventually("the history in By activity", async () => /By activity[\s\S]*Feature/u.test(await panelText()));
+    await eventually("the history in By activity", async () => /By activity[\s\S]*Feature/u.test(await metricsText(page)));
     await me.capture("metrics-activity-history");
   });
 });
