@@ -282,6 +282,7 @@ test("deleting a context file uses the engine path and never the brief", () => {
   assert.equal(research.deletable({ path: "context/research/market_research.md", kind: "research", bytes: 1 }), true);
   assert.equal(research.deletable({ path: "context/documents/hours.csv", kind: "document", bytes: 1 }), true);
   assert.equal(research.deletable({ path: "context/brief.md", kind: "brief", bytes: 1 }), false);
+  assert.equal(research.deletable({ path: "repo/docs/market.md", kind: "research", bytes: 1, linked: true }), false, "a file linked from the repo is the owner's own file");
   assert.equal(research.deleteQuestion("context/research/market_research.md"), "Delete market_research.md?");
 });
 
@@ -396,6 +397,75 @@ test("Thinking shows the seconds since this window sent the message", () => {
   assert.equal(research.thinkingLine(0, 3 * 60_000 + 5_000), "Thinking... 3 min");
 });
 
+test("Thinking counts from the engine's start time when this window did not send the message", async () => {
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const running = { id: "t1", ordinal: 1, phase: "running", reason: null, reply: null, attempt: { connection: { account_ref: "main" }, selected_at_ms: 1_000 } };
+  const status = (turn, sentAt) => conversation.consoleLines([turn], {}, sentAt, 361_000).find((line) => line.id === "t1-status");
+  assert.deepEqual(status(running, {}), { id: "t1-status", kind: "engine", text: "Thinking... 6 min" });
+  assert.equal(status(running, undefined).text, "Thinking... 6 min", "a reloaded window has no send times at all");
+  assert.equal(status(running, { t1: 301_000 }).text, "Thinking... 1 min", "this window's own send time comes first");
+  assert.equal(status({ ...running, attempt: null }, {}).text, "Thinking...");
+  assert.equal(status({ ...running, attempt: { connection: { account_ref: "main" } } }, {}).text, "Thinking...");
+});
+
+test("the Thinking line names what the master last did and how long ago", () => {
+  const activity = [{ at_ms: 100_000, text: "Searching the code" }, { at_ms: 356_000, text: "Reading src/app/page.tsx" }];
+  assert.equal(research.thinkingLine(0, 360_000, activity), "Thinking... 6 min · Reading src/app/page.tsx, 4 s ago");
+  assert.equal(research.thinkingLine(undefined, 360_000, activity), "Thinking... · Reading src/app/page.tsx, 4 s ago");
+  assert.equal(research.thinkingLine(0, 350_000, activity), "Thinking... 5 min · Reading src/app/page.tsx, 0 s ago", "a line stamped after this window's clock counts as just seen");
+  assert.equal(research.thinkingLine(0, 360_000, []), "Thinking... 6 min");
+  assert.equal(research.thinkingLine(0, 360_000), "Thinking... 6 min");
+});
+
+test("past a minute without a new line, Thinking says how long nothing new came", () => {
+  const activity = [{ at_ms: 180_000, text: "Running a command" }];
+  assert.equal(research.ACTIVITY_QUIET_MS, 60_000);
+  assert.equal(research.thinkingLine(0, 239_999, activity), "Thinking... 3 min · Running a command, 59 s ago");
+  assert.equal(research.thinkingLine(0, 240_000, activity), "Thinking... 4 min · no new activity for 1 min");
+  assert.equal(research.thinkingLine(0, 540_000, activity), "Thinking... 9 min · no new activity for 6 min");
+  assert.doesNotMatch(research.thinkingLine(0, 540_000, activity), /Running a command/);
+});
+
+test("Show activity lists a running turn's last twenty lines in order, and is gone when the turn ends", async () => {
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const { Console } = await import("../src/screens/project/console.tsx");
+  const now = 100_000;
+  const activity = Array.from({ length: 25 }, (_, step) => ({ at_ms: now - (25 - step) * 1_000, text: `Step ${step}` }));
+  const running = { id: "t1", ordinal: 1, phase: "running", reason: null, reply: null, activity };
+  const listed = research.activityLines(activity, now);
+  assert.equal(research.ACTIVITY_LINES_MAX, 20);
+  assert.equal(listed.length, 20);
+  assert.equal(listed[0], "Step 5, 20 s ago");
+  assert.equal(listed[19], "Step 24, 1 s ago");
+  assert.deepEqual(research.activityLines(undefined, now), []);
+  assert.deepEqual(research.activityLines([{ at_ms: now + 5_000, text: "Working" }], now), ["Working, 0 s ago"]);
+  const status = (turn) => conversation.consoleLines([turn], {}, {}, now).find((line) => line.id === "t1-status");
+  assert.deepEqual(status(running).activity, listed);
+  assert.equal(status(running).text, "Thinking... · Step 24, 1 s ago");
+  const draw = (turn) => renderToStaticMarkup(createElement(Console, { projectId: "p-1", lines: conversation.consoleLines([turn], {}, {}, now), agents: [], onSend: () => {}, onStop: () => {}, onNavigate: () => {} }));
+  const html = draw(running);
+  assert.ok(html.includes('<details class="cs-activity"><summary>Show activity (20)</summary><ol><li>Step 5, 20 s ago</li><li>Step 6, 19 s ago</li>'), html);
+  assert.ok(html.includes("<li>Step 24, 1 s ago</li></ol></details>"), html);
+  assert.doesNotMatch(html, /Step 4,/);
+  assert.doesNotMatch(html, /<details[^>]* open/, "the list starts closed");
+  const hostile = draw({ ...running, activity: [{ at_ms: now, text: "<b>x</b>\u001b[31m" }] });
+  assert.ok(hostile.includes("<li>&lt;b&gt;x&lt;/b&gt;"), hostile);
+  assert.doesNotMatch(hostile, /<b>x<\/b>|\u001b/);
+  const ended = [
+    { ...running, phase: "succeeded", reply: { text: "Done." } },
+    { ...running, phase: "failed", reason: "transient_failure" },
+    { ...running, phase: "cancelled" },
+    { ...running, phase: "waiting_approval" },
+    { ...running, phase: "uncertain" },
+  ];
+  for (const turn of ended) {
+    assert.equal(conversation.consoleLines([turn], {}, {}, now).some((line) => "activity" in line), false, turn.phase);
+    assert.doesNotMatch(draw(turn), /Show activity|Step \d/, turn.phase);
+  }
+  assert.equal("activity" in status({ ...running, activity: [] }), false);
+  assert.doesNotMatch(draw({ ...running, activity: undefined }), /Show activity|<details/);
+});
+
 test("Stop targets the master turn that is still replying", () => {
   const turn = (ordinal, phase) => ({ id: `t${ordinal}`, ordinal, phase, reason: null, reply: null });
   assert.equal(research.replyingTurn([turn(1, "succeeded"), turn(2, "running")])?.id, "t2");
@@ -425,6 +495,30 @@ test("only the brief offers Edit, which opens the project details it is written 
   const documentOnly = { kind: "ok", value: { ...folder.value, items: [folder.value.items[1]] } };
   const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: documentOnly } }));
   assert.doesNotMatch(markup, />Edit</);
+});
+
+test("a file linked from the repo has its own group, says where it is from and cannot be deleted", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  const linked = { path: "repo/docs/plan-2026.md", kind: "plan", bytes: 15, linked: true };
+  const report = { path: "repo/notes/market.md", kind: "research", bytes: 9, linked: true };
+  assert.equal(context.shownPath(linked), "docs/plan-2026.md");
+  assert.equal(context.shownPath({ path: "context/brief.md", kind: "brief", bytes: 1 }), "context/brief.md");
+  assert.equal(context.shownPath({ path: "repo/kept.md", kind: "document", bytes: 1 }), "repo/kept.md", "only a linked item drops the prefix");
+  const only = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1/.crazyagent", items: [linked, report] } };
+  const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: only } }));
+  assert.match(markup, /From your repo/);
+  assert.match(markup, /<h2 class="pj-mono">docs\/plan-2026\.md<\/h2>/);
+  assert.match(markup, /Linked from your repo/);
+  assert.match(markup, />Open in default app</);
+  assert.doesNotMatch(markup, /class="btn danger-text">Delete<|>Edit</);
+  assert.equal(markup.split("notes/market.md").length - 1, 1, "a linked research file is listed once, in the repo group");
+  const mixed = { kind: "ok", value: { ...only.value, items: [{ path: "context/brief.md", kind: "brief", bytes: 120 }, linked] } };
+  const brief = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: mixed } }));
+  assert.match(brief, /<h2 class="pj-mono">context\/brief\.md<\/h2>/, "the brief still opens first");
+  assert.doesNotMatch(brief, /Linked from your repo/);
+  assert.match(brief, /From your repo/);
+  const none = { kind: "ok", value: { ...only.value, items: [{ path: "context/brief.md", kind: "brief", bytes: 120 }] } };
+  assert.doesNotMatch(renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: none } })), /From your repo/);
 });
 
 test("a project change shows a toast only when the engine applied it", () => {

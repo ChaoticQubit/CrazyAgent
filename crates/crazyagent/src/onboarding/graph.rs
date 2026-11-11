@@ -8,7 +8,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -209,9 +209,6 @@ pub(crate) fn update(
     for root in &roots {
         sandbox = sandbox.allow_read(root)?;
     }
-    if let Some(link) = &link {
-        sandbox = sandbox.allow_read_link(link)?;
-    }
     sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
     for folder in hidden {
         sandbox = sandbox.hide(folder)?;
@@ -221,6 +218,11 @@ pub(crate) fn update(
             Ok(sandbox) => sandbox,
             Err(_) => return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED)),
         };
+    }
+    if let Some(link) = &link
+        && let Ok(linked) = sandbox.clone().allow_read_link(link)
+    {
+        sandbox = linked;
     }
     let profile = state.join("profiles").join(format!("{name}.sb"));
     sandbox.install(&profile)?;
@@ -288,14 +290,7 @@ pub(crate) fn update(
     };
     running.stop().map_err(RunError::Uncertain)?;
     if ending == GraphEnding::Built {
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-            .open(out.join(KEPT_OUT_MARK))?
-            .write_all(mark.as_bytes())?;
+        write_mark(&out, &mark)?;
     }
     Ok(ending)
 }
@@ -344,15 +339,49 @@ fn kept_out_mark(kept: &[PathBuf], hidden: &[PathBuf]) -> String {
     format!("keep-out v1 {:x}\n", digest.finalize())
 }
 
-/// The mark the graph in `out` carries, read without following a link and within 128
-/// bytes. Takes the graph folder. Returns the mark's text, or `None` when it has none.
+/// Writes the keep-out mark into the graph in `out`, a folder agents can write: without
+/// following a link and without waiting on a FIFO placed at its name, which fails the open
+/// when it has no reader. Whatever opens is emptied and written only when it is a regular
+/// file with one name, so no FIFO, device or hard link to another file takes the mark.
+/// Takes the graph folder and the mark's text. Returns unit, or the error that makes the
+/// build count as failed.
 #[cfg(unix)]
-fn marked(out: &Path) -> Option<String> {
+pub(super) fn write_mark(out: &Path, mark: &str) -> std::io::Result<()> {
+    assert!(!mark.is_empty(), "a keep-out mark has text");
+    assert!(
+        mark.len() as u64 <= MARK_BYTES_MAX,
+        "a keep-out mark fits what is read back"
+    );
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o644)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(out.join(KEPT_OUT_MARK))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the graph keep-out mark is not a regular file of its own",
+        ));
+    }
+    file.set_len(0)?;
+    file.write_all(mark.as_bytes())
+}
+
+/// The mark the graph in `out` carries, read without following a link, without waiting on
+/// a FIFO or device placed at its name, only from a regular file and within 128 bytes.
+/// Takes the graph folder. Returns the mark's text, or `None` when it has none.
+#[cfg(unix)]
+pub(super) fn marked(out: &Path) -> Option<String> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(out.join(KEPT_OUT_MARK))
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut text = String::new();
     file.take(MARK_BYTES_MAX).read_to_string(&mut text).ok()?;
     Some(text)

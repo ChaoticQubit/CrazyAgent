@@ -60,6 +60,7 @@ fn context(paths: &[&str]) -> ProjectContext {
                 path: (*path).into(),
                 kind: ContextKind::Document,
                 bytes: 10,
+                linked: false,
             })
             .collect(),
     }

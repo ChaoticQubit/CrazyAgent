@@ -60,6 +60,25 @@ impl FileExt for std::fs::File {
 #[cfg(windows)]
 pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+/// The Windows open flag that lets a folder be opened as a handle.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// The Windows file attribute of a reparse point: a junction, a link or a mount point.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// What [`open_plain_beneath`] answers on Windows when the folder itself is a junction, a
+/// link or a mount point, so nothing below it is read. Callers that show a reason match it.
+#[cfg(windows)]
+pub(crate) const BENEATH_FOLDER_LINKED: &str = "beneath_folder_linked";
+
+/// What [`open_plain_beneath`] answers on Windows when a part below the folder is a
+/// junction, a link or a mount point, is no longer directly inside the part before it, or
+/// was opened under another name than the one asked for.
+#[cfg(windows)]
+pub(crate) const BENEATH_PATH_LINKED: &str = "beneath_path_linked";
+
 /// Reports whether the engine's effective user owns the file the metadata describes.
 /// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
 /// Unix owner to compare, so an ownership check refuses rather than passes.
@@ -320,8 +339,11 @@ pub(crate) fn open_beneath(
 }
 
 /// Opens a file below a folder the engine holds to read, with no link followed from that
-/// folder down and no FIFO waited on ([`open_beneath`]); on Windows through [`open_plain`].
-/// Inputs: the folder and the path below it. Output: the open file or the I/O error.
+/// folder down and no FIFO waited on ([`open_beneath`]). On Windows every part opens as
+/// itself ([`open_real_beneath`]), so a junction, link or mount point in any part, the
+/// folder itself included, is refused wherever it leads, inside the folder or out of it.
+/// Inputs: the folder and the path below it, plain names only. Output: the open file or the
+/// I/O error.
 pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -331,8 +353,125 @@ pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<s
     }
     #[cfg(windows)]
     {
-        open_plain(&base.join(below))
+        let plain = below
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+        if !plain || below.as_os_str().is_empty() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        open_real_beneath(base, below)
     }
+}
+
+/// The Windows way of [`open_plain_beneath`]: opens the folder and then each name below it
+/// as itself, never as a link's target, and goes on only while the opened thing is no
+/// reparse point, its real place, read from its handle, is directly inside the real place
+/// of the one before ([`name_child`]) and that place ends in the asked name
+/// ([`name_ends_in`]). A part swapped between two opens so gives nothing, and neither does
+/// a name Windows matches another way: an 8.3 short name, or a spelling with an ending dot
+/// or space. Inputs: the folder and at least one plain name below it. Output: the open
+/// file, `BENEATH_FOLDER_LINKED` when the folder itself is a reparse point,
+/// `BENEATH_PATH_LINKED` for a part below it, or the I/O error.
+#[cfg(windows)]
+fn open_real_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    let refused =
+        |code: &'static str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, code);
+    let folder = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    };
+    let mut held = folder(base)?;
+    if reparse_point(&held)? {
+        return Err(refused(BENEATH_FOLDER_LINKED));
+    }
+    let mut place = crazyagent_win_sandbox::final_name(&held)?;
+    let mut path = base.to_path_buf();
+    let mut parts = below.components().peekable();
+    assert!(parts.peek().is_some(), "a path below a folder has a name");
+    while let Some(part) = parts.next() {
+        assert!(matches!(part, Component::Normal(_)), "plain names only");
+        path.push(part);
+        let opened = if parts.peek().is_some() {
+            folder(&path)?
+        } else {
+            open_plain(&path)?
+        };
+        let found = crazyagent_win_sandbox::final_name(&opened)?;
+        let asked: Vec<u16> = part.as_os_str().encode_wide().collect();
+        let own = name_child(&place, &found) && name_ends_in(&found, &asked);
+        if reparse_point(&opened)? || !own {
+            return Err(refused(BENEATH_PATH_LINKED));
+        }
+        (held, place) = (opened, found);
+    }
+    Ok(held)
+}
+
+/// Tells whether an open file or folder is a reparse point: a junction, a link or a mount
+/// point, opened as itself. Takes the open handle. Returns the answer or the I/O error.
+#[cfg(windows)]
+fn reparse_point(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::fs::MetadataExt;
+    Ok(file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+/// Tells whether a real place is directly inside a folder's real place: below it
+/// ([`name_under`]) by exactly one name, with no further `\`. Inputs: the folder's name and
+/// the found name, as the device names Windows gives for open handles, in UTF-16 units.
+/// Output: the answer.
+#[cfg(any(windows, test))]
+fn name_child(folder: &[u16], found: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let start = folder.strip_suffix(&[SEPARATOR]).unwrap_or(folder).len() + 1;
+    let child = name_under(folder, found) && !found[start..].contains(&SEPARATOR);
+    assert!(!child || found.len() > start);
+    child
+}
+
+/// Tells whether a real place ends in the asked name: its last name, the units after its
+/// last `\`, is the asked name unit for unit, with ASCII letters taken in any case. A name
+/// Windows matched another way, an 8.3 short name or a spelling whose ending dot or space
+/// it drops, is never the asked name; a name that differs only in the case of a letter
+/// outside ASCII is refused too. Inputs: the found name, as the device name Windows gives
+/// for an open handle, and the asked name, both in UTF-16 units. Output: the answer.
+#[cfg(any(windows, test))]
+fn name_ends_in(found: &[u16], asked: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let last = found
+        .rsplit(|unit| *unit == SEPARATOR)
+        .next()
+        .unwrap_or(found);
+    let fold =
+        |unit: &u16| u8::try_from(*unit).map_or(*unit, |byte| u16::from(byte.to_ascii_lowercase()));
+    let same = !asked.is_empty()
+        && last.len() == asked.len()
+        && last
+            .iter()
+            .zip(asked)
+            .all(|(have, want)| fold(have) == fold(want));
+    assert!(!same || !asked.contains(&SEPARATOR));
+    same
+}
+
+/// Tells whether a real place lies below a folder's real place, both as the device names
+/// Windows gives for open handles: the folder's name, then a `\`, then at least one more
+/// unit. Names are compared unit for unit, so a sibling whose name only starts with the
+/// folder's, the folder itself and an empty folder name are never below. Inputs: the
+/// folder's name and the found name, in UTF-16 units. Output: the answer.
+#[cfg(any(windows, test))]
+fn name_under(folder: &[u16], found: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let folder = folder.strip_suffix(&[SEPARATOR]).unwrap_or(folder);
+    let under = !folder.is_empty()
+        && found.len() > folder.len() + 1
+        && found.starts_with(folder)
+        && found[folder.len()] == SEPARATOR;
+    assert!(!under || found.len() >= 3);
+    under
 }
 
 /// Opens a path to read as the reparse point itself, never a link's target.
@@ -453,6 +592,9 @@ fn explorer(target: &OsStr, select: bool) -> Result<Command, &'static str> {
     }
     Ok(command)
 }
+
+#[cfg(test)]
+mod beneath_tests;
 
 #[cfg(test)]
 mod tests {

@@ -47,9 +47,11 @@ pub enum Step {
 
 /// What the manifest scan and the mapping agent found that has no field in
 /// [`ProjectSetup`]: languages, build and test commands, entry points, the research the
-/// project's own documents already hold and its other documents, as paths below the
-/// folder. `shown` is the engine's own list of the documents the mapping prompt gave with
-/// their text, the only paths an answer may name; it never leaves the engine.
+/// project's own documents already hold, its other documents and the files that plan its
+/// versions, milestones or phases as `roadmap`, as paths below the folder. `shown` is the
+/// engine's own list of the documents the mapping prompt gave with their text, the only
+/// paths an answer may name, and `shown_roadmap` those the local heading scan took for a
+/// roadmap, in reading order; neither leaves the engine.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MappingFacts {
@@ -61,8 +63,12 @@ pub struct MappingFacts {
     pub research: Vec<FoundResearch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub documents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roadmap: Vec<String>,
     #[serde(skip)]
     pub(crate) shown: Vec<String>,
+    #[serde(skip)]
+    pub(crate) shown_roadmap: Vec<String>,
 }
 
 /// One kind of research the project's own documents already hold, as the mapping agent
@@ -647,6 +653,67 @@ fn restart(
         .map_err(error)?;
     assert_eq!(changed, 1);
     Ok(())
+}
+
+/// The files the setup mapping found that the owner kept, as the project's links: each
+/// roadmap file as a roadmap and each research file under its kind, a roadmap planning file
+/// as a roadmap too. A found file is linked only under a group the owner kept it in, so a
+/// file found as the roadmap and as research is not linked as the roadmap once the owner
+/// turned the roadmap off. A kept file the mapping did not find in that group, and a path
+/// the links store refuses, such as one in the engine folder, is left out, and at most
+/// [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX) links are kept. Takes the
+/// transaction, the project and the files the owner kept. Returns the links, none for a
+/// project that was not onboarded or whose mapping found nothing.
+pub(crate) fn found_links(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    kept: &[crate::project_setup::KeptFile],
+) -> Result<Vec<crate::project_setup::links::DocLink>, EngineError> {
+    use crate::project_setup::ResearchKind;
+    use crate::project_setup::links::{self, DocLink, LinkKind};
+    let column = tx
+        .query_row(
+            "SELECT mapping_found FROM onboarding WHERE project=?1",
+            [project_id.as_str()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(error)?
+        .flatten();
+    let mut facts = MappingFacts::default();
+    draft::restore_found(&mut facts, column.as_deref()).map_err(error)?;
+    let roadmap = facts
+        .roadmap
+        .iter()
+        .map(|path| (path, None, LinkKind::Roadmap));
+    let research = facts.research.iter().flat_map(|found| {
+        let kind = match found.kind {
+            ResearchKind::RoadmapPlanning => LinkKind::Roadmap,
+            kind => LinkKind::Research(kind),
+        };
+        found
+            .files
+            .iter()
+            .map(move |path| (path, Some(found.kind), kind))
+    });
+    let mut linked: Vec<DocLink> = Vec::new();
+    for (path, group, kind) in roadmap.chain(research) {
+        let link = DocLink {
+            path: path.clone(),
+            kind,
+        };
+        if linked.len() < links::LINKS_MAX
+            && kept
+                .iter()
+                .any(|file| file.research == group && file.path == *path)
+            && links::below_folder(path)
+            && !linked.contains(&link)
+        {
+            linked.push(link);
+        }
+    }
+    assert!(linked.len() <= links::LINKS_MAX);
+    Ok(linked)
 }
 
 /// The onboarding of `project_id`: both steps, the draft, its proposed name, the extra

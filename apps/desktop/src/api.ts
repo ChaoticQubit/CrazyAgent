@@ -676,6 +676,8 @@ export function poolSummaries(): Promise<Result<PoolSummary[]>> {
 
 export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
 export type AccountPin = "never_use" | "use_last";
+/** What a live master does once its pool's account order puts another account first (DEC-139). */
+export type LiveMasterAccount = "keep" | "move_when_idle";
 
 export interface AccountPlan {
   rank: number | null;
@@ -685,6 +687,7 @@ export interface AccountPlan {
 
 export interface AccountSchedule {
   strategy: AccountStrategy;
+  live_master: LiveMasterAccount;
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
@@ -693,6 +696,7 @@ export interface AccountSchedule {
 
 export type ScheduleChange =
   | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "live_master"; choice: LiveMasterAccount }
   | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
   | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
   | { kind: "account"; connection: string; plan: AccountPlan };

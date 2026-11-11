@@ -2133,6 +2133,7 @@ fn the_master_harness_picker_saves_the_picked_harness_through_the_project_setup(
         reply,
         TeamReply::Save(crate::project_setup::SetupAction::Update {
             project_id: project(),
+            kept: None,
             expected_revision: 7,
             name: None,
             setup: ProjectSetup {

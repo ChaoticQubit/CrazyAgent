@@ -3,7 +3,7 @@ import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { accountLabels, namedFailure } from "../../api";
-import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
+import { withCode, type IntentReceipt, type MasterActivityLine, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -669,10 +669,27 @@ export function accountLines(turn: MasterTurn, accounts: { id: string; name: str
     : `${accountName(accounts, item.connection)}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
 }
 
-/** The Thinking line for a master turn, with the time since this window sent the message.
- * Inputs: when it was sent in milliseconds, if this window sent it, and now. Output: the line. */
-export function thinkingLine(sentAt: number | undefined, now: number): string {
-  return sentAt === undefined ? "Thinking..." : `Thinking... ${elapsed(now - sentAt)}`;
+export const ACTIVITY_QUIET_MS = 60_000;
+export const ACTIVITY_LINES_MAX = 20;
+
+/** The Thinking line for a running master turn: the time since it started, then what the
+ * engine last saw it do and how long ago, or how long nothing new came once that is
+ * ACTIVITY_QUIET_MS old. Inputs: the start in milliseconds (when this window sent the
+ * message, else the engine's start time), now and the turn's activity lines, oldest first.
+ * Output: the line. */
+export function thinkingLine(start: number | undefined, now: number, activity: readonly MasterActivityLine[] = []): string {
+  const head = start === undefined ? "Thinking..." : `Thinking... ${elapsed(now - start)}`;
+  const last = activity[activity.length - 1];
+  if (last === undefined) return head;
+  const age = Math.max(0, now - last.at_ms);
+  return `${head} · ${age >= ACTIVITY_QUIET_MS ? `no new activity for ${elapsed(age)}` : `${last.text}, ${elapsed(age)} ago`}`;
+}
+
+/** The lines behind Show activity for a running master turn: its newest ACTIVITY_LINES_MAX
+ * activity lines, oldest first, each with how long ago the engine last saw it.
+ * Inputs: the turn's activity lines, oldest first, and now. Output: the lines. */
+export function activityLines(activity: readonly MasterActivityLine[] | undefined, now: number): string[] {
+  return (activity ?? []).slice(-ACTIVITY_LINES_MAX).map((line) => `${line.text}, ${elapsed(now - line.at_ms)} ago`);
 }
 
 const FOLLOW_SLACK_PX = 120;
@@ -786,10 +803,11 @@ export function memoryGroups(items: MemoryItem[]): { suggested: MemoryItem[]; sa
   };
 }
 
-/** Tells whether the owner may delete a context file; the brief always stays.
- * Input: the context item. Output: true for documents and research reports. */
+/** Tells whether the owner may delete a context file; the brief always stays, and so does a
+ * file linked from the repository, which is the owner's own file.
+ * Input: the context item. Output: true for documents and research reports kept in the context. */
 export function deletable(item: ContextItem): boolean {
-  return item.kind === "document" || item.kind === "research";
+  return item.linked !== true && (item.kind === "document" || item.kind === "research");
 }
 
 /** The delete confirmation title for a context file.

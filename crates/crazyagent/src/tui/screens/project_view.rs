@@ -11,6 +11,7 @@ use super::project::{
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
+use super::project_master::{activity_rows, last_activity};
 use super::project_time::{clock, duration};
 use super::sessions::Sessions;
 use crate::project_setup::{
@@ -818,6 +819,17 @@ fn roadmap_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
     )
 }
 
+/// Draws the roadmap status line under the planning line once the jobs are read.
+/// Takes the screen and the look. Returns the row, or none before the jobs are read.
+fn roadmap_status_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    screen.jobs.as_ref()?;
+    Some(
+        Row::of("  ", Style::new())
+            .cat(Row::of("Roadmap status", look.fg).pad(24))
+            .cat(screen.roadmap.value(look, screen.now_ms)),
+    )
+}
+
 fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> Vec<Row> {
     if screen.setup.is_none() {
         return vec![Row::of("Loading...", look.muted)];
@@ -1035,6 +1047,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         left.push(Row::of("Work", look.heading));
         left.extend(work_rows(screen, look, true, left_width));
         left.extend(roadmap_row(screen, look));
+        left.extend(roadmap_status_row(screen, look));
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -1109,6 +1122,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
     lines.push(Row::of("Work", look.heading));
     lines.extend(work_rows(screen, look, false, content));
     lines.extend(roadmap_row(screen, look));
+    lines.extend(roadmap_status_row(screen, look));
     lines.push(Row::default());
     lines.push(
         Row::of("Team", look.heading)
@@ -1202,17 +1216,21 @@ fn transcript_lines(
             }
         }
     }
-    if let MasterStatus::Thinking { since_ms } = transcript.status {
-        lines.push(
-            Row::of(SPINNER, look.running)
-                .push(" Thinking...", look.fg)
-                .push(
-                    since_ms
-                        .map(|since| format!("  {}", duration(screen.now_ms - since)))
-                        .unwrap_or_default(),
-                    look.muted,
-                ),
-        );
+    if let MasterStatus::Thinking { since_ms, activity } = &transcript.status {
+        let detail = since_ms
+            .map(|since| duration(screen.now_ms - since))
+            .into_iter()
+            .chain(last_activity(activity, screen.now_ms))
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+        let mut row = Row::of(SPINNER, look.running).push(" Thinking...", look.fg);
+        if !detail.is_empty() {
+            row = row.push(format!("  {detail}"), look.muted);
+        }
+        lines.push(row);
+        for (age, text) in activity_rows(activity, screen.activity_open, screen.now_ms) {
+            lines.push(Row::of(format!("  {age:>10}  {text}"), look.muted));
+        }
     }
     lines
 }
@@ -1509,6 +1527,14 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         if !screen.typing {
             let at = help.len().saturating_sub(2);
             help.splice(at..at, Sessions::conversation_help());
+        }
+        if screen.more_activity() {
+            let label = if screen.activity_open {
+                "Less activity"
+            } else {
+                "All activity"
+            };
+            help.insert(help.len().saturating_sub(2), ("Ctrl-O", label));
         }
         let input = if screen.typing {
             prompt
@@ -1817,7 +1843,13 @@ pub(in crate::tui) fn activity(
     steps
 }
 
+/// Where the Context tab says a file linked from the repository comes from.
+pub(in crate::tui) const LINKED_SOURCE: &str = "Linked from your repo";
+
 fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row) {
+    if item.linked {
+        return (Row::default(), Row::of(LINKED_SOURCE, look.muted));
+    }
     match item.kind {
         ContextKind::Brief => (Row::default(), Row::of("Project brief", look.muted)),
         ContextKind::Document => (Row::default(), Row::of("You added it", look.muted)),
@@ -2264,6 +2296,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
                 None => Row::of("Loading...", look.muted),
             },
         ),
+        entry("Status", screen.roadmap.value(look, screen.now_ms)),
     ];
     if room.saturating_sub(lines.len()) > screen.plugins.floor() {
         lines.push(Row::default());

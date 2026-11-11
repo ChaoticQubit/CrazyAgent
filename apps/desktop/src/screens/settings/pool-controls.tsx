@@ -1,5 +1,5 @@
 import { Component, useEffect, useRef, useState, type ReactNode } from "react";
-import { accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStrategy, type PoolSummary, type Result, type ScheduleChange } from "../../api";
+import { accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStrategy, type LiveMasterAccount, type PoolSummary, type Result, type ScheduleChange } from "../../api";
 import { useAppSession, useHeld, type Hold, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Segmented, TextField } from "../../ui";
 import { planFor, planLine, poolStrategy, rankInput, reserveInput, strategyLabel, strategyOptions, STRATEGIES } from "./account-choice";
@@ -16,6 +16,15 @@ type PinChoice = "none" | AccountPin;
 
 const PIN_LABEL: Record<PinChoice, string> = { none: "None", use_last: "Use last", never_use: "Never use" };
 const PIN_CHOICES = (["none", "use_last", "never_use"] as const).map((value) => ({ value, label: PIN_LABEL[value] }));
+
+const LIVE_MASTER_LABEL = "Live master account";
+
+/** What a live master does once another pool account is first (DEC-139), in the engine's own
+ * words, with what each pick does. The first is the default. */
+const LIVE_MASTER: { value: LiveMasterAccount; label: string; hint: string }[] = [
+  { value: "keep", label: "Keep start account", hint: "A live master stays on the account it started on until it restarts." },
+  { value: "move_when_idle", label: "Move when idle", hint: "An idle live master moves to its pool's top account once that account is clearly first (under Balanced: at least 5 points less weekly use), at most once every 15 minutes. The conversation carries over, as a summary unless both accounts are subscriptions." },
+];
 
 /** One change an owner made: a schedule change, built from the schedule as it stands, with the
  * line to say once the engine applied it, or a step of its own that answers with that line, null
@@ -220,13 +229,33 @@ export function PoolOrderPicker({ pool, schedule, apply }: { pool: PoolSummary; 
   }} />;
 }
 
-/** The order every pool follows by default. Inputs: the schedule read, the queue and the retry
- * action. Output: the card, or the state of the read. */
+/** The order every pool follows by default, then what a live master does once another account
+ * is first. Inputs: the schedule read, the queue and the retry action. Output: the two cards, or
+ * the state of the read. */
 export function AppOrder({ schedule, apply, onRetry }: { schedule: Loaded<AccountSchedule>; apply: ApplyChange; onRetry: () => void }) {
   if (schedule.kind === "loading") return null;
   if (schedule.kind === "not_ready") return <NotReady what="Account choice" compact />;
   if (schedule.kind === "error") return <LoadError message="Couldn't load account choice." onRetry={onRetry} />;
-  return <AppOrderChoice schedule={schedule.value} apply={apply} />;
+  return <>
+    <AppOrderChoice schedule={schedule.value} apply={apply} />
+    <LiveMasterChoice schedule={schedule.value} apply={apply} />
+  </>;
+}
+
+/** The Live master account choice for every project (DEC-139), with what the pick does. Inputs:
+ * the schedule and the queue. Output: the card. */
+function LiveMasterChoice({ schedule, apply }: { schedule: AccountSchedule; apply: ApplyChange }) {
+  const [shown, hold] = useHeld<LiveMasterAccount>(schedule.live_master, Object.is, schedule);
+  const choice = LIVE_MASTER.find((item) => item.value === shown);
+  return <section className="pool-app-order" aria-label={LIVE_MASTER_LABEL}>
+    <h3>{LIVE_MASTER_LABEL}</h3>
+    <Segmented label={LIVE_MASTER_LABEL} value={shown} options={LIVE_MASTER.map((item) => ({ value: item.value, label: item.label }))} onValue={(value) => {
+      if (value === shown) return;
+      const label = LIVE_MASTER.find((item) => item.value === value)?.label ?? value;
+      applyHeld(apply, hold, value, { change: () => ({ kind: "live_master", choice: value }), done: `${LIVE_MASTER_LABEL}: ${label}.` });
+    }} />
+    <span className="pool-app-hint">{choice?.hint}</span>
+  </section>;
 }
 
 /** The choice of the order every pool follows, with what the pick does. */

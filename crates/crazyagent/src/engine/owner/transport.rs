@@ -3,6 +3,7 @@ use super::*;
 mod barrier_tests;
 #[cfg(all(test, unix))]
 mod dispatch_identity_tests;
+pub(crate) mod master_activity;
 #[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
@@ -57,6 +58,7 @@ pub(crate) mod process;
 mod projects_home;
 pub(crate) mod questions;
 pub(crate) mod recovery;
+pub(crate) mod roadmap;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -1890,12 +1892,13 @@ impl Engine {
                     .await?,
             },
             OwnerOperation::Read { query } => OwnerResponse::Read {
-                state: self
-                    .kept_named(
+                state: self.with_master_activity(
+                    self.kept_named(
                         self.owner_job(|reply| Job::OwnerRead(a, query.clone(), reply))
                             .await?,
                     )
                     .await?,
+                ),
             },
             OwnerOperation::Reconcile {
                 operation_id,
@@ -2202,6 +2205,7 @@ enum Protocol {
     IdeExtensions,
     Recovery,
     Questions,
+    Roadmap,
     NativeAuth,
     Process,
     Ide,
@@ -2235,6 +2239,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
         ("questions", Protocol::Questions),
+        ("roadmap", Protocol::Roadmap),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
         ("ide", Protocol::Ide),
@@ -2306,6 +2311,7 @@ async fn serve_admitted(
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
+            Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2492,6 +2498,10 @@ async fn serve_admitted(
             let served = questions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
         }
+        Deferred::Roadmap(a) => {
+            let served = roadmap::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
+        }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
@@ -2558,10 +2568,11 @@ struct Tasks {
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, Usage requests, which read and write the usage store, iCloud
-/// downloads, which wait for macOS to bring a folder's files to this Mac, and Process
-/// proposals, which wait for an Edit with AI model run. Each carries the admission, and the
-/// projects home its validated request; the others read the request frame.
+/// copy skill folders, Roadmap requests, which read and write the roadmap status store,
+/// Usage requests, which read and write the usage store, iCloud downloads, which wait for
+/// macOS to bring a folder's files to this Mac, and Process proposals, which wait for an
+/// Edit with AI model run. Each carries the admission, and the projects home its validated
+/// request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2574,6 +2585,7 @@ enum Deferred {
     Process(Admission),
     IdeTab(Admission),
     Questions(Admission),
+    Roadmap(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
@@ -2619,6 +2631,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::Questions => questions::refusal(code)?,
+        Protocol::Roadmap => roadmap::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         Protocol::Ide => ide::refusal(code)?,
@@ -2814,7 +2827,11 @@ fn dispatch_directory(path: &Path) -> Result<(u64, u64), EngineError> {
     let file = File::from(
         rustix::fs::open(
             path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY
+                | OFlags::DIRECTORY
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(io_error)?,
@@ -2829,12 +2846,17 @@ fn dispatch_directory(path: &Path) -> Result<(u64, u64), EngineError> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+/// Reads one small file of a leased worktree or its git folder that an agent may have
+/// replaced: opened without following a link and without waiting on a FIFO or device, kept
+/// only when it is this user's own regular file with one name, not group or world
+/// writable, within `limit` bytes and unchanged while it was read. Inputs: the path and
+/// the limit. Output: the bytes, or the refusal.
 #[cfg(unix)]
 fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     let file = File::from(
         rustix::fs::open(
             path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(io_error)?,
@@ -2864,6 +2886,7 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     {
         return Err(failure("dispatch_file_changed"));
     }
+    assert!(bytes.len() <= limit);
     Ok(bytes)
 }
 

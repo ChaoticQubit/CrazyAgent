@@ -3092,6 +3092,7 @@ mod turn_line_tests {
             cause: None,
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         let mut lines = Vec::new();
         turn_lines(&turn, &[], &mut lines);
@@ -3116,6 +3117,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -3165,6 +3167,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         for (reason, cause, expected) in [
             (
@@ -3205,6 +3208,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         };
@@ -3283,6 +3287,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         };

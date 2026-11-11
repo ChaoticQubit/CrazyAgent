@@ -25,6 +25,7 @@ mod process;
 mod project_setup;
 mod questions;
 mod recovery;
+mod roadmap;
 mod scheduling;
 mod setup;
 mod team;

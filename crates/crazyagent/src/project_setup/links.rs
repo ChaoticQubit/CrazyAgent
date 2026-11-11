@@ -213,7 +213,7 @@ fn read_beneath(folder: &Path, below: &Path) -> Option<String> {
 /// engine's own folder in any letter case: not empty, not absolute, no `.`, `..` or empty
 /// names, no control characters, `\` or `:`, within [`LINK_PATH_BYTES_MAX`]. Input: the
 /// path. Output: the answer.
-fn below_folder(path: &str) -> bool {
+pub(crate) fn below_folder(path: &str) -> bool {
     let names: Vec<&str> = path.split('/').collect();
     !path.is_empty()
         && path.len() <= LINK_PATH_BYTES_MAX

@@ -1130,3 +1130,27 @@ fn holders_of_an_account_are_named_until_their_hold_ends() {
     drop(elsewhere);
     assert!(agents.holders(&account("claude-account-d")).is_empty());
 }
+
+#[test]
+fn an_output_log_that_is_a_fifo_is_no_probe_and_is_not_waited_on() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let plain = folder.path().join("output.log");
+    std::fs::write(&plain, "line\n").unwrap();
+    assert!(log_probe(&plain).is_some());
+    let fifo = folder.path().join("planted.log");
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
+        .unwrap();
+    assert!(made.success());
+    let (sent, probed) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = sent.send(log_probe(&path).is_some());
+    });
+    let answer = probed.recv_timeout(std::time::Duration::from_secs(5));
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(&fifo);
+    assert_eq!(answer, Ok(false), "the probe waited on the FIFO");
+}

@@ -9,8 +9,8 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, StoredProject};
 use crazyagent::scheduling::{
-    AccountEntry, AccountPlan, Pin, PoolRanking, RankedAccount, Schedule, ScheduleChange,
-    ScopedStrategy, Standing, Strategy,
+    AccountEntry, AccountPlan, LiveMasterAccount, Pin, PoolRanking, RankedAccount, Schedule,
+    ScheduleChange, ScopedStrategy, Standing, Strategy,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -230,6 +230,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     );
     let expected = Schedule {
         strategy: Strategy::ManualRank,
+        live_master: LiveMasterAccount::Keep,
         pools: vec![ScopedStrategy {
             id: reference("pool-claude"),
             strategy: Strategy::Balanced,
@@ -263,6 +264,59 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     case.restart().await;
     let mut controller = case.controller().await;
     assert_eq!(controller.account_schedule().await.unwrap(), expected);
+    drop(controller);
+    case.close().await;
+}
+
+/// The live master account setting (DEC-139) reads Keep start account until the owner
+/// changes it, takes each option through the engine with the schedule's version, refuses a
+/// change made on a stale version and keeps the choice over an engine restart.
+#[tokio::test]
+async fn the_live_master_account_setting_defaults_to_keep_and_stores_each_option() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let first = controller.account_schedule().await.unwrap();
+    assert_eq!(first.live_master, LiveMasterAccount::Keep);
+    let set = |choice| ScheduleChange::LiveMaster { choice };
+    assert_eq!(
+        send(&mut controller, set(LiveMasterAccount::MoveWhenIdle)).await,
+        OwnerResult::Applied
+    );
+    let moved = controller.account_schedule().await.unwrap();
+    assert_eq!(moved.live_master, LiveMasterAccount::MoveWhenIdle);
+    assert_eq!(moved.version, first.version + 1);
+    assert_eq!(
+        applied(
+            controller
+                .set_account_schedule(set(LiveMasterAccount::Keep), first.version, 1)
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Rejected {
+            code: "stale_revision".into()
+        },
+        "a change built on the schedule before the last change is refused"
+    );
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.account_schedule().await.unwrap(),
+        Schedule {
+            live_master: LiveMasterAccount::MoveWhenIdle,
+            version: first.version + 1,
+            ..Schedule::default()
+        },
+        "the choice outlives the engine and the refused change stored nothing"
+    );
+    assert_eq!(
+        send(&mut controller, set(LiveMasterAccount::Keep)).await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        controller.account_schedule().await.unwrap().live_master,
+        LiveMasterAccount::Keep
+    );
     drop(controller);
     case.close().await;
 }

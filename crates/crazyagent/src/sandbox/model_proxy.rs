@@ -19,9 +19,22 @@ pub const HOSTS_MAX: usize = 8;
 /// The loopback ports a model proxy takes when no saved port is given (S4B-2W1). The block is
 /// fixed, so every Open-network sandbox, whenever it started, denies binding all of it: no
 /// sandboxed agent can take a proxy's port, not even while the engine that held it is down.
-/// It lies below macOS's ephemeral ports, which start at 49152.
+/// It lies below the ports the system hands out by itself ([`PICKED_PORTS_START`]).
+#[cfg(not(target_os = "linux"))]
 pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 41_300..=41_427;
-const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < 49_152);
+/// The same block on Linux, which hands out ports from 32768 up by itself: a bind to port 0
+/// or a listen with no bind gets such a port with no Landlock check, so the block lies
+/// below them (LPF1-M1), and below the 30000 to 32767 that Kubernetes node ports use.
+#[cfg(target_os = "linux")]
+pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 29_300..=29_427;
+/// Where the ports the system hands out by itself start unless an administrator moved
+/// them: 49152 on macOS and Windows, 32768 on Linux.
+#[cfg(not(target_os = "linux"))]
+pub const PICKED_PORTS_START: u16 = 49_152;
+/// Where the ports Linux hands out by itself start unless an administrator moved them.
+#[cfg(target_os = "linux")]
+pub const PICKED_PORTS_START: u16 = 32_768;
+const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < PICKED_PORTS_START);
 const _: () = {
     let mut index = 0;
     while index < super::OWNER_PORTS.len() {
@@ -204,7 +217,8 @@ impl std::fmt::Debug for ModelProxy {
 impl ModelProxy {
     /// Starts one agent's proxy on 127.0.0.1 and ::1, on `port` when a kept pane needs the
     /// port its profile names again, otherwise on a [`PROXY_PORTS`] port that no socket holds
-    /// and that is none of `kept`, or refuses with `AddrInUse` when there is none. Inputs:
+    /// and that is none of `kept`, or refuses with `AddrInUse` when there is none and with
+    /// `InvalidInput` when `port` is not one of [`PROXY_PORTS`]. Inputs:
     /// the agent id its refusal lines name, its hosts (1 to `HOSTS_MAX`), the port and the
     /// owner's model ports. Output: the running proxy, or the bind error.
     pub fn bind(
@@ -248,6 +262,7 @@ impl ModelProxy {
         let listeners = loopback_pair(port, kept)?;
         let bound = listeners[0].local_addr()?.port();
         assert!(bound != 0 && port.is_none_or(|port| port == bound));
+        assert!(PROXY_PORTS.contains(&bound));
         assert!(port.is_some() || !kept.contains(&bound));
         for listener in &listeners {
             let address = listener.local_addr()?;
@@ -288,10 +303,17 @@ static NEXT_PROXY_PORT: AtomicUsize = AtomicUsize::new(0);
 /// Binds 127.0.0.1 and ::1 on one port: `port` when given, with `std`'s bind so a restarted
 /// engine binds its saved port while the old tunnels' connections sit in TIME_WAIT,
 /// otherwise the [`free_pair`] of [`PROXY_PORTS`] from a start that moves with each proxy and
-/// process. Inputs: the port and the owner's model ports. Output: the two listeners,
-/// 127.0.0.1 first, or the bind error.
+/// process. A given port outside [`PROXY_PORTS`] is refused with `InvalidInput` and binds
+/// nothing, since no sandbox keeps agents off it. Inputs: the port and the owner's model
+/// ports. Output: the two listeners, 127.0.0.1 first, or the bind error.
 fn loopback_pair(port: Option<u16>, kept: &[u16]) -> io::Result<[TcpListener; 2]> {
     if let Some(port) = port {
+        if !PROXY_PORTS.contains(&port) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a saved model proxy port outside the model proxy ports",
+            ));
+        }
         return bound_pair(port, spawn_gate::bind_tcp_std);
     }
     let block: Vec<u16> = PROXY_PORTS.collect();

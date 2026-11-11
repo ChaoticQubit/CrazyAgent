@@ -1794,6 +1794,7 @@ impl TeamView {
         }
         let action = SetupAction::Update {
             project_id: stored.project_id.clone(),
+            kept: None,
             expected_revision: stored.revision,
             name: None,
             setup: ProjectSetup {

@@ -1322,9 +1322,10 @@ export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
 /** One kind of research the project's own documents already hold, read from their text:
- * the kind and the files below the project folder that hold it. */
+ * the kind and the files below the project folder that hold it. A setup mapped by an engine
+ * up to 2.2.0 may hold a roadmap planning group, whose files are roadmap files. */
 export interface FoundResearch {
-  kind: ResearchKind;
+  kind: JobKind;
   files: string[];
 }
 
@@ -1335,6 +1336,7 @@ export interface MappingFacts {
   entry_points: string[];
   research?: FoundResearch[];
   documents?: string[];
+  roadmap?: string[];
 }
 
 /** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or
@@ -2257,7 +2259,7 @@ export interface MasterTurn {
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
-  attempt?: { connection: { id: string; account_ref: string } } | null;
+  attempt?: { connection: { id: string; account_ref: string }; selected_at_ms?: number } | null;
   accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;
@@ -2265,6 +2267,15 @@ export interface MasterTurn {
   changes?: string | null;
   engine_request?: MasterEngineRequest | null;
   input_cursor?: string;
+  activity?: MasterActivityLine[];
+}
+
+/** One line of what a running master turn is doing, as the engine words it: a fixed phrase
+ * with at most one project-relative path, and the engine's clock in milliseconds when it
+ * last saw it. The engine sends the lines oldest first, only while the turn is outstanding. */
+export interface MasterActivityLine {
+  at_ms: number;
+  text: string;
 }
 
 /** What the engine asked the master in a turn Ask agent to update started: the change set,
