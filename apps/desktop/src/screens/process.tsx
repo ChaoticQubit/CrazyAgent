@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { listSkills, type Result } from "../api";
+import { listSkills, poolSummaries, type Result } from "../api";
 import { loadTeamStatus } from "../api-projects";
 import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, REPEATED_LINES, commitInstructionImport, committedMessage, confirmInstructionImport,
+  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, REPEATED_LINES, lineDiff, loadAppInstructionSettings, proposeProcess, saveAppInstructionSettings, commitInstructionImport, committedMessage, confirmInstructionImport,
   defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
   processTextError, repeatedNote, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
-  type InstructionSettings, type InstructionView, type SavedText, type SkillEntry, type EditDelivery,
+  type AppInstructionSettings, type InstructionSettings, type InstructionView, type Proposal, type SavedText, type SkillEntry, type EditDelivery,
 } from "../api-process";
 import { sameJson, useAppSession, useHeld, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
@@ -93,6 +93,94 @@ export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Confli
   return { opened: stale.version, version: stale.current.version, current: stale.current.text, writer: stale.writer };
 }
 
+/** Where Edit with AI stands: reading the pools, asking which pool runs it (the app text
+ * only, every time), waiting for the model, or showing the proposal to accept or discard. */
+export type Cleanup =
+  | { kind: "pools" }
+  | { kind: "choosing"; pools: readonly { id: string; name: string }[]; picked: string | null }
+  | { kind: "running" }
+  | { kind: "proposed"; proposal: Proposal };
+
+/** Saves an accepted proposal at the version it was made from, never as Keep mine, so a save
+ * that landed since comes back as stale. Inputs: the proposal, null for the app text or the
+ * project id, and the save call. Output: the save's result. */
+export function acceptProposal(proposal: Proposal, projectId: string | null, save: typeof saveProcess): Promise<Result<SavedText>> {
+  if (!Number.isInteger(proposal.base_version) || proposal.base_version < 0) throw new Error(`acceptProposal: ${proposal.base_version} is not a version`);
+  return save(projectId, proposal.text, proposal.base_version, null);
+}
+
+/** Edit with AI's steps as a pure view: the pool question, the waiting line, or the proposal
+ * as a line diff with Accept and Discard. Inputs: the step, the saved text the proposal is
+ * compared with, whether a save runs and the actions. Nothing is saved by showing it. */
+function CleanupView({ cleanup, saved, saving, onPick, onPropose, onAccept, onDiscard }: {
+  cleanup: Cleanup;
+  saved: string;
+  saving: boolean;
+  onPick: (pool: string) => void;
+  onPropose: () => void;
+  onAccept: () => void;
+  onDiscard: () => void;
+}) {
+  if (cleanup.kind === "pools") return null;
+  if (cleanup.kind === "running") {
+    return <p className="small muted" role="status">A model is cleaning up the saved instructions. This can take up to 5 minutes. Nothing changes until you accept.</p>;
+  }
+  if (cleanup.kind === "choosing") {
+    return <Panel title="Edit with AI">
+      <div className="stack-small">
+        <fieldset className="pr-ai-pools">
+          <legend>Which pool runs this edit?</legend>
+          <p className="small muted">The app instructions are sent to a model on the pool you pick. You are asked every time.</p>
+          {cleanup.pools.length === 0 && <Notice>No pool yet. Add one under Pools, then try again.</Notice>}
+          {cleanup.pools.map((pool) => <label key={pool.id} className="pr-ai-pool">
+            <input type="radio" name="pr-ai-pool" value={pool.id} checked={cleanup.picked === pool.id} onChange={() => onPick(pool.id)} />
+            <span>{pool.name}</span>
+          </label>)}
+        </fieldset>
+        <span className="row">
+          <Button variant="primary" disabled={cleanup.picked === null} onClick={onPropose}>Propose</Button>
+          <Button onClick={onDiscard}>Cancel</Button>
+        </span>
+      </div>
+    </Panel>;
+  }
+  const rows = lineDiff(saved, cleanup.proposal.text);
+  const removed = rows?.filter((row) => row.kind === "removed").length ?? 0;
+  const added = rows?.filter((row) => row.kind === "added").length ?? 0;
+  if (rows !== null && removed + added === 0) {
+    return <Panel title="Proposed instructions">
+      <div className="stack-small">
+        <p className="secondary">The model found nothing to change.</p>
+        <span className="row"><Button onClick={onDiscard}>Close</Button></span>
+      </div>
+    </Panel>;
+  }
+  return <Panel title="Proposed instructions">
+    <div className="stack-small">
+      {rows !== null
+        ? <>
+          <p className="secondary">{`${removed} ${removed === 1 ? "line" : "lines"} removed, ${added} added. Nothing changes until you accept.`}</p>
+          <div className="process-text pr-diff" role="group" aria-label="Proposed changes">
+            {rows.map((row, index) => row.kind === "same" ? <span key={index} className="pr-diff-row">{row.text}</span>
+              : row.kind === "removed" ? <del key={index} className="pr-diff-row removed"><span className="visually-hidden">Removed: </span>{row.text}</del>
+              : <ins key={index} className="pr-diff-row added"><span className="visually-hidden">Added: </span>{row.text}</ins>)}
+          </div>
+        </>
+        : <>
+          <p className="secondary">Too many lines to mark each change, so both texts are shown whole. Nothing changes until you accept.</p>
+          <div className="pr-sides">
+            <div><h3>Saved now</h3><pre className="process-text">{saved}</pre></div>
+            <div><h3>Proposed</h3><pre className="process-text">{cleanup.proposal.text}</pre></div>
+          </div>
+        </>}
+      <span className="row">
+        <Button variant="primary" icon="check" pending={saving} pendingLabel="Saving..." disabled={saving} onClick={onAccept}>Accept</Button>
+        <Button disabled={saving} onClick={onDiscard}>Discard</Button>
+      </span>
+    </div>
+  </Panel>;
+}
+
 /** The Process page as a pure view: the editor with Save, the text with skill tags, and at
  * app level the two seeds, each opening a preview first. After a stale save it shows the
  * conflict, whose Reload and Keep mine are then the only ways on. Inputs: where it applies,
@@ -101,7 +189,9 @@ export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Confli
  * actions. The editor is read-only while saving. Nothing reads the owner's files or saves
  * without the matching click. */
 export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, given = { kind: "loading" }, mode = "both", subtitle = MODE_SUBTITLES.both, editNote: note = "",
-  onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay, onView, onAll, onUseDefault }: {
+  cleanup = null, editWithAi = true, aiSetting = null,
+  onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay, onView, onAll, onUseDefault,
+  onEditWithAi, onPickPool, onPropose, onAccept, onDiscardProposal, onAiSetting }: {
   scope: ProcessScope;
   saved: Loaded<string>;
   draft: string;
@@ -117,6 +207,9 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   mode?: InstructionMode | null;
   subtitle?: string;
   editNote?: string;
+  cleanup?: Cleanup | null;
+  editWithAi?: boolean;
+  aiSetting?: { failure: string; saving: boolean } | null;
   onDraft: (text: string) => void;
   onSave: () => void;
   onImport: () => void;
@@ -132,6 +225,12 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onView?: (view: InstructionsView) => void;
   onAll?: () => void;
   onUseDefault?: () => void;
+  onEditWithAi?: () => void;
+  onPickPool?: (pool: string) => void;
+  onPropose?: () => void;
+  onAccept?: () => void;
+  onDiscardProposal?: () => void;
+  onAiSetting?: (on: boolean) => void;
 }) {
   if (saved.kind === "loading") return <Skeleton shape="card" count={2} />;
   if (saved.kind === "not_ready") return <NotReady what="Instructions" />;
@@ -139,6 +238,15 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   const invalid = processTextError(draft)
     ?? (scope.kind === "project" && mode === "project_only" && draft.trim() === "" ? "Under Project only an empty file leaves agents with no instructions." : undefined);
   const changed = draft !== saved.value;
+  const waits = changed ? "Save or discard your edits to use Edit with AI."
+    : saved.value.trim() === "" ? "Write some instructions first; Edit with AI cleans up what is saved." : "";
+  const ai = editWithAi && <>
+    <Button icon="sparkles" pending={cleanup?.kind === "pools" || cleanup?.kind === "running"} pendingLabel={cleanup?.kind === "pools" ? "Reading pools..." : "Proposing..."}
+      disabled={busy !== null || cleanup !== null || Boolean(conflict) || waits !== ""} onClick={() => onEditWithAi?.()}>Edit with AI</Button>
+    {waits && <span className="small muted">{waits}</span>}
+  </>;
+  const proposal = cleanup && <CleanupView cleanup={cleanup} saved={saved.value} saving={busy === "save"} onPick={(pool) => onPickPool?.(pool)}
+    onPropose={() => onPropose?.()} onAccept={() => onAccept?.()} onDiscard={() => onDiscardProposal?.()} />;
   const leave = <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
     cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
     Your instructions changes will be lost.
@@ -158,6 +266,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
       {conflict && <ConflictView conflict={conflict} busy={busy === "save"} onReload={onReload} onKeepMine={onKeepMine}>
         <TaggedText text={conflict.current} skills={skills} />
       </ConflictView>}
+      {proposal}
       <Panel title={<div className="pr-head"><h2>Instructions</h2><p className="small muted">{subtitle}{given.kind === "ok" ? ` · ${lines} lines` : ""}</p></div>}
         actions={<Segmented label="How the instructions show" value={editing ? "edit" : "read"} options={INSTRUCTION_VIEWS} onValue={(next) => onView?.(next)} />}>
         {editing
@@ -172,9 +281,10 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
                 ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick App and project or App only under Delivery.</span>
                 : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
               <span className="small muted">{note}</span>
+              {ai}
             </span>
           </form>
-          : <div className="stack-small">{read}</div>}
+          : <div className="stack-small">{read}{ai && <span className="row">{ai}</span>}</div>}
       </Panel>
       {leave}
     </div>;
@@ -184,6 +294,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
     {conflict && <ConflictView conflict={conflict} busy={busy === "save"} onReload={onReload} onKeepMine={onKeepMine}>
       <TaggedText text={conflict.current} skills={skills} />
     </ConflictView>}
+    {proposal}
     <SettingSection title="Start from" about="Both open a preview first. Nothing changes until you save.">
       <SettingLine label="Your own file" help="Read a text file into the editor.">
         <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import from file</Button>
@@ -200,9 +311,19 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
             disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
           {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
+          {ai}
         </span>
       </form>
     </SettingSection>
+    {aiSetting && <SettingSection title="Edit with AI" about="A model proposes a cleaned file. You review every change before anything is saved.">
+      <SettingLine label="Edit with AI" help={aiSetting.failure || (editWithAi
+        ? "On. Each use asks which pool runs it."
+        : "Off. The app instructions are never sent to a model for editing.")}>
+        <Switch id="process-edit-with-ai" label="Edit with AI for the app instructions" hideLabel checked={editWithAi}
+          disabledReason={aiSetting.saving ? "Saving..." : cleanup !== null ? "Edit with AI is running" : undefined}
+          onChecked={(on) => onAiSetting?.(on)} />
+      </SettingLine>
+    </SettingSection>}
     {draft.trim() && <SettingSection title="As agents read it" about="Highlighted names are skills. Each opens its own details.">
       <div className="set-body"><TaggedText text={draft} skills={skills} onOpen={onOpenSkill} /></div>
     </SettingSection>}
@@ -270,6 +391,15 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
         options={REPEATED_LINES.map(({ value, label }) => ({ value, label }))}
         onValue={(value) => save({ ...current, repeated: value })} />
       <span className="small muted pr-del-note" id="agent-repeated-note">{repeatedNote({ ...current, repeated: repeated.value }, repeats)}</span>
+    </div>
+    <div className="pr-del-row pr-del-toggle">
+      <span className="pr-del-label"><strong>Edit with AI</strong><span className="small muted">Proposes a cleaned file you review</span></span>
+      <Switch id="agent-edit-with-ai" label="Edit with AI for this project's instructions" hideLabel checked={current.edit_with_ai !== false}
+        describedBy="agent-edit-with-ai-note" disabledReason={busy ? "Saving..." : undefined}
+        onChecked={(edit_with_ai) => save({ ...current, edit_with_ai })} />
+      <span className="small muted pr-del-note" id="agent-edit-with-ai-note">{current.edit_with_ai !== false
+        ? "The editor offers Edit with AI. It runs on this project's pool."
+        : "Off. This project's instructions are never sent to a model for editing."}</span>
     </div>
     <div className="pr-del-row pr-del-toggle">
       <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless Claude runs</span></span>
@@ -490,6 +620,9 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const [preview, setPreview] = useState<ProcessPreview | null>(null);
   const [conflict, setConflict] = useState<Conflict<string> | null>(null);
   const [leaving, setLeaving] = useState<SkillEntry | null>(null);
+  const [cleanup, setCleanup] = useState<Cleanup | null>(null);
+  const [appSettings, readAppSettings] = useLoad<AppInstructionSettings | null>(() => projectId === null ? loadAppInstructionSettings() : Promise.resolve({ kind: "ok", value: null }), [projectId]);
+  const [savingAi, setSavingAi] = useState(false);
   const lastRead = useRef<string | null>(null);
   const savedText = saved.kind === "ok" ? saved.value : null;
   useEffect(() => {
@@ -537,6 +670,63 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     reload();
     reloadGiven();
   };
+  const propose = async (pool: string | null) => {
+    setFailure("");
+    setCleanup({ kind: "running" });
+    const result = session.noteResult(await proposeProcess(projectId, pool));
+    if (result.kind !== "ok") {
+      setCleanup(null);
+      fail(result);
+      return;
+    }
+    if (loaded.kind === "ok" && loaded.value.version !== result.value.base_version) reload();
+    setCleanup({ kind: "proposed", proposal: result.value });
+  };
+  const editWithAi = async () => {
+    setFailure("");
+    if (projectId !== null) return propose(null);
+    setCleanup({ kind: "pools" });
+    const pools = session.noteResult(await poolSummaries());
+    if (pools.kind !== "ok") {
+      setCleanup(null);
+      fail(pools);
+      return;
+    }
+    setCleanup({ kind: "choosing", pools: pools.value.map(({ id, name }) => ({ id, name })), picked: null });
+  };
+  const accept = async () => {
+    if (cleanup?.kind !== "proposed") return;
+    const proposal = cleanup.proposal;
+    setFailure("");
+    setBusy("save");
+    const result = session.noteResult(await acceptProposal(proposal, projectId, saveProcess));
+    setBusy(null);
+    if (result.kind !== "ok") {
+      fail(result);
+      return;
+    }
+    setCleanup(null);
+    if (result.value.kind === "stale") {
+      setDraft(proposal.text);
+      setConflict(conflictOf(result.value));
+      return;
+    }
+    setConflict(null);
+    session.showToast(savedMessage(result.value.size));
+    reload();
+    reloadGiven();
+  };
+  const setAi = async (on: boolean) => {
+    setFailure("");
+    setSavingAi(true);
+    const result = session.noteResult(await saveAppInstructionSettings({ edit_with_ai: on }));
+    setSavingAi(false);
+    if (result.kind !== "ok") fail(result);
+    readAppSettings();
+  };
+  const appAi = appSettings.kind === "ok" && appSettings.value !== null ? appSettings.value.edit_with_ai : false;
+  const aiSetting = projectId !== null || appSettings.kind === "loading" || appSettings.kind === "not_ready" ? null
+    : { failure: appSettings.kind === "ok" ? "" : "The Edit with AI setting could not be read, so it stays off. Reload to try again.", saving: savingAi };
   const current = settings.kind === "ok" && settings.value !== null ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
   const reloadSettings = () => { readSettings(); reloadGiven(); };
   const mode = settings.kind === "ok" && settings.value !== null ? settings.value.settings.mode : null;
@@ -546,6 +736,11 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
     onReload={reloadConflict} onKeepMine={() => void save(conflict)}
+    cleanup={cleanup} editWithAi={projectId === null ? appAi : settings.kind === "ok" && current.edit_with_ai !== false}
+    aiSetting={aiSetting} onAiSetting={(on) => void setAi(on)} onEditWithAi={() => void editWithAi()}
+    onPickPool={(picked) => setCleanup((old) => old?.kind === "choosing" ? { ...old, picked } : old)}
+    onPropose={() => { if (cleanup?.kind === "choosing" && cleanup.picked !== null) void propose(cleanup.picked); }}
+    onAccept={() => void accept()} onDiscardProposal={() => setCleanup(null)}
     leaving={leaving} onOpenSkill={openSkill} onLeave={() => { if (leaving) open(leaving); setLeaving(null); }} onStay={() => setLeaving(null)} />;
   if (scope.kind === "app") return editor;
   return <div className="pr">

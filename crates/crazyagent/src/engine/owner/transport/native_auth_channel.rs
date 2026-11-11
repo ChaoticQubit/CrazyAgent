@@ -109,6 +109,26 @@ pub(super) struct NativeAuthHostRegistration {
     disabled: bool,
 }
 
+impl NativeAuthHostRegistration {
+    /// The Codex and Claude Code executables registered for this engine, for a confined
+    /// model run outside a team. Output: the two, none for a harness that is not installed
+    /// and both none once registration was disabled; the caller checks each path.
+    pub(super) fn model_harnesses(
+        &self,
+    ) -> (
+        Option<Arc<RegisteredNativeAuthHost>>,
+        Option<Arc<RegisteredNativeAuthHost>>,
+    ) {
+        if self.disabled {
+            return (None, None);
+        }
+        (
+            self.codex_executable.clone(),
+            self.claude_executable.clone(),
+        )
+    }
+}
+
 pub(crate) struct NativeAuthDispatchHost {
     #[cfg(unix)]
     engine: Arc<Engine>,

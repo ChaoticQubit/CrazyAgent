@@ -2306,6 +2306,9 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Process if process::deferred(body) => {
+                return Ok(Some(Deferred::Process(a)));
+            }
             Protocol::Process => {
                 return process::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2466,6 +2469,10 @@ async fn serve_admitted(
             let served = ide::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
         }
+        Deferred::Process(a) => {
+            let served = process::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(process::PROPOSE_TIMEOUT, served).await;
+        }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
@@ -2536,9 +2543,9 @@ struct Tasks {
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, and Usage requests, which read and write the usage store. Each
-/// carries the admission, and the projects home its validated request; the others read
-/// the request frame.
+/// copy skill folders, Usage requests, which read and write the usage store, and Process
+/// proposals, which wait for an Edit with AI model run. Each carries the admission, and the
+/// projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2548,6 +2555,7 @@ enum Deferred {
     IdeExtensions(Admission),
     Recovery(Admission),
     Ide(Admission),
+    Process(Admission),
     IdeTab(Admission),
     Questions(Admission),
     Cleanup(Admission),

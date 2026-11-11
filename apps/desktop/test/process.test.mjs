@@ -232,7 +232,7 @@ test("the tags read the engine's one-line description when the catalog carries i
 test("every engine refusal a Process action can show has a plain sentence", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
   const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
-  const codes = [...listed.matchAll(/"((?:process|agent_instructions|instruction_settings)_[a-z_]+)"/g)].map((match) => match[1]);
+  const codes = [...listed.matchAll(/"((?:process|agent_instructions|instruction_settings|instructions_cleanup)_[a-z_]+)"/g)].map((match) => match[1]);
   for (const code of client.PROCESS_REFUSALS) assert.ok(codes.includes(code), `${code} is not an engine code`);
   for (const code of ["process_text_too_large", "process_text_invalid", "process_text_unsafe", "process_project_folder_missing", "process_import_missing"]) {
     assert.ok(client.PROCESS_REFUSALS.includes(code), code);
@@ -342,7 +342,7 @@ test("Delivery is compact rows with dividers, each choice with its chosen option
   const note = (id, text) => new RegExp(`<span class="small muted pr-del-note" id="${id}">${escaped(html(text))}</span>`);
   for (const transcripts of [true, false]) {
     const markup = agentSettings(ok({ transcripts }));
-    assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 4, "four rows: instructions, edits, repeated lines, transcripts");
+    assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 5, "five rows: instructions, edits, repeated lines, Edit with AI, transcripts");
     const at = (text) => markup.indexOf(text);
     assert.ok(at(">Instructions agents get<") >= 0 && at(">Instructions agents get<") < at(">When you edit instructions<"), "instructions first");
     assert.ok(at(">When you edit instructions<") < at(">Lines the project file repeats<"), "edits before repeated lines");
@@ -479,9 +479,15 @@ test("picking an instructions mode, the transcript switch or an edit choice save
     const third = await evaluate("Fixture.saves()");
     await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, repeated: "keep" })})`);
     clicks.push(await evaluate(`Fixture.click("Leave out")`));
-    return { clicks, saves: [...first, ...second, ...third, ...await evaluate("Fixture.saves()")] };
+    const fourth = await evaluate("Fixture.saves()");
+    await evaluate(`Fixture.mount(${JSON.stringify(client.DEFAULT_INSTRUCTION_SETTINGS)})`);
+    clicks.push(await evaluate(`Fixture.click("agent-edit-with-ai")`));
+    const fifth = await evaluate("Fixture.saves()");
+    await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, edit_with_ai: false })})`);
+    clicks.push(await evaluate(`Fixture.click("agent-edit-with-ai")`));
+    return { clicks, saves: [...first, ...second, ...third, ...fourth, ...fifth, ...await evaluate("Fixture.saves()")] };
   });
-  assert.deepEqual(seen.clicks, [true, true, true, true, true, true, true, true]);
+  assert.deepEqual(seen.clicks, [true, true, true, true, true, true, true, true, true, true]);
   assert.deepEqual(seen.saves, [
     { mode: "project_only", transcripts: true, edits: "next_message" },
     { mode: "app_only", transcripts: true, edits: "next_message" },
@@ -491,6 +497,8 @@ test("picking an instructions mode, the transcript switch or an edit choice save
     { mode: "both", transcripts: true, edits: "next_message" },
     { mode: "both", transcripts: true, edits: "next_message", repeated: "keep" },
     { mode: "both", transcripts: true, edits: "next_message", repeated: "leave_out" },
+    { mode: "both", transcripts: true, edits: "next_message", edit_with_ai: false },
+    { mode: "both", transcripts: true, edits: "next_message", edit_with_ai: true },
   ]);
 });
 
@@ -650,4 +658,197 @@ test("a save the engine refuses because agents would get no instructions says so
   assert.equal(refused, "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.");
   assert.ok(client.PROCESS_REFUSALS.includes("process_instructions_would_be_empty"));
   assert.match(agentSettings({ failure: refused }), /class="notice danger" role="alert">.*That would leave agents with no instructions, so nothing was saved; write the instructions they should get first\./s);
+});
+
+test("the line diff marks removed and added lines and keeps the rest", () => {
+  assert.deepEqual(client.lineDiff("a\nb\nc\n", "a\nc\nd\n"), [
+    { kind: "same", text: "a" }, { kind: "removed", text: "b" }, { kind: "same", text: "c" }, { kind: "added", text: "d" },
+  ]);
+  assert.deepEqual(client.lineDiff("a\nb\n", "a\nb"), [{ kind: "same", text: "a" }, { kind: "same", text: "b" }], "a last line break is not a line");
+  assert.deepEqual(client.lineDiff("", "a\n"), [{ kind: "added", text: "a" }]);
+  assert.deepEqual(client.lineDiff("a\n\nb\n", "b\n"), [{ kind: "removed", text: "a" }, { kind: "removed", text: "" }, { kind: "same", text: "b" }], "a blank line is a line");
+  assert.deepEqual(client.lineDiff("x\na\nb\ny\n", "x\nb\na\ny\n").map((row) => row.kind).filter((kind) => kind !== "same").sort(), ["added", "removed"], "a swap is one line out and one in");
+  for (const [before, after] of [["a\nb\nc\nd\n", "d\nc\nb\na\n"], ["one\ntwo\n", ""], ["k\nk\nk\n", "k\n"]]) {
+    const rows = client.lineDiff(before, after);
+    assert.equal(rows.filter((row) => row.kind !== "added").map((row) => `${row.text}\n`).join(""), before, "same and removed rows give the old text");
+    assert.equal(rows.filter((row) => row.kind !== "removed").map((row) => `${row.text}\n`).join(""), after, "same and added rows give the new text");
+  }
+});
+
+test("the line diff gives up past its bound, per side, instead of freezing the page", () => {
+  assert.equal(client.DIFF_LINES_MAX, 2000);
+  const full = "x\n".repeat(client.DIFF_LINES_MAX);
+  assert.equal(client.lineDiff(full, "y\n").length, client.DIFF_LINES_MAX + 1, "the bound itself is diffed");
+  assert.equal(client.lineDiff(`${full}x\n`, "y\n"), null);
+  assert.equal(client.lineDiff("y\n", `${full}x\n`), null);
+  const shared = "s\n".repeat(client.DIFF_LINES_MAX);
+  assert.equal(client.lineDiff(`${shared}a\n`, `${shared}b\n`), null, "the bound counts whole texts, not only the changed middle");
+});
+
+test("Accept saves the proposal at the version it was made from", async () => {
+  const sent = [];
+  const result = await view.acceptProposal({ text: "- Run make check.\n", base_version: 7 }, null, (projectId, text, version, opened) => {
+    sent.push([projectId, text, version, opened]);
+    return Promise.resolve({ kind: "ok", value: { kind: "saved", version: 8, size: { bytes: 18, claude_bytes_max: 65536 } } });
+  });
+  assert.deepEqual(sent, [[null, "- Run make check.\n", 7, null]], "the save names the proposal's base version and never Keep mine");
+  assert.equal(result.value.kind, "saved");
+  await view.acceptProposal({ text: "x\n", base_version: 2 }, "alpha", (projectId, text, version) => { sent.push([projectId, text, version]); return Promise.resolve({ kind: "error", code: "process_save_unavailable", message: "" }); });
+  assert.deepEqual(sent[1], ["alpha", "x\n", 2]);
+});
+
+test("Edit with AI shows in both the app and the project editor", () => {
+  assert.match(page({ scope: { kind: "app" } }), />Edit with AI</);
+  assert.match(page({ scope: { kind: "project", id: "alpha", name: "Alpha" } }), />Edit with AI</);
+  assert.match(page({ scope: { kind: "project", id: "alpha", name: "Alpha" }, view: "edit" }), />Edit with AI</);
+});
+
+test("Edit with AI turned off hides the button: a project's setting for its editor, the app-wide one for the app editor", () => {
+  const project = { kind: "project", id: "alpha", name: "Alpha" };
+  for (const shown of ["read", "edit"]) {
+    assert.doesNotMatch(page({ scope: project, view: shown, editWithAi: false }), /Edit with AI/, `project Off, ${shown}`);
+    assert.match(page({ scope: project, view: shown, editWithAi: true }), />Edit with AI<\/button>/, `project On, ${shown}`);
+  }
+  const setting = { failure: "", saving: false };
+  const on = page({ scope: { kind: "app" }, editWithAi: true, aiSetting: setting });
+  assert.match(on, />Edit with AI<\/button>/, "app On shows the button");
+  assert.match(on, /<button id="process-edit-with-ai"[^>]*role="switch"[^>]*aria-checked="true"/);
+  assert.match(on, /On\. Each use asks which pool runs it\./);
+  const off = page({ scope: { kind: "app" }, editWithAi: false, aiSetting: setting });
+  assert.doesNotMatch(off, />Edit with AI<\/button>/, "app Off hides the button");
+  assert.match(off, /<button id="process-edit-with-ai"[^>]*role="switch"[^>]*aria-checked="false"/, "the switch stays, so the owner can turn it back on");
+  assert.match(off, /Off\. The app instructions are never sent to a model for editing\./);
+  assert.doesNotMatch(page({ scope: project, editWithAi: true, aiSetting: null }), /process-edit-with-ai/, "a project's switch lives under Delivery");
+  const unread = page({ scope: { kind: "app" }, editWithAi: false, aiSetting: { failure: "The Edit with AI setting could not be read, so it stays off. Reload to try again.", saving: false } });
+  assert.match(unread, /could not be read, so it stays off/);
+  assert.doesNotMatch(unread, />Edit with AI<\/button>/);
+});
+
+test("the app-wide and the project Edit with AI settings and the proposal each go through their own engine command", () => {
+  const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
+  assert.match(api, /call<AppInstructionSettings>\("desktop_app_instruction_settings"\)/);
+  assert.match(api, /call<AppInstructionSettings>\("desktop_save_app_instruction_settings", \{ settings \}\)/);
+  assert.match(api, /call<Proposal>\("desktop_process_propose", \{ projectId, pool \}\)/);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const build = readFileSync(new URL("../src-tauri/build.rs", import.meta.url), "utf8");
+  for (const command of ["desktop_app_instruction_settings", "desktop_save_app_instruction_settings", "desktop_process_propose"]) {
+    assert.match(lib, new RegExp(`async fn ${command}\\(`));
+    assert.match(lib, new RegExp(`\\n\\s+${command},\\n`), `${command} is registered`);
+    assert.ok(build.includes(`"${command}"`), `${command} is in the build's command list`);
+  }
+  assert.throws(() => client.proposeProcess(null, null), /the app text needs a picked pool/);
+  assert.throws(() => client.proposeProcess("alpha", "pool-a"), /a project takes none/);
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /editWithAi=\{projectId === null \? appAi : settings\.kind === "ok" && current\.edit_with_ai !== false\}/, "each editor follows its own setting, and one that could not be read counts as off");
+  assert.match(source, /saveAppInstructionSettings\(\{ edit_with_ai: on \}\)/);
+  assert.match(source, /if \(projectId !== null\) return propose\(null\);/, "a project sends no pool");
+  assert.match(source, /picked: null \}\)/, "every app run starts with no pool picked");
+});
+
+test("Edit with AI waits for saved text: unsaved edits, an empty file, a conflict or a running step disable it", () => {
+  const button = (markup) => {
+    const end = markup.indexOf("Edit with AI</button>");
+    assert.ok(end >= 0, "the page has an Edit with AI button");
+    return markup.slice(markup.lastIndexOf("<button", end), markup.indexOf(">", markup.lastIndexOf("<button", end)) + 1);
+  };
+  assert.doesNotMatch(button(page()), /disabled/);
+  const unsaved = page({ draft: "Use tdd.\nAnd more.\n" });
+  assert.match(button(unsaved), /disabled=""/);
+  assert.match(unsaved, /Save or discard your edits to use Edit with AI\./);
+  const empty = page({ saved: { kind: "ok", value: " \n" }, draft: " \n" });
+  assert.match(button(empty), /disabled=""/);
+  assert.match(empty, /Write some instructions first; Edit with AI cleans up what is saved\./);
+  assert.match(button(page({ busy: "save" })), /disabled=""/);
+  assert.match(button(page({ cleanup: { kind: "choosing", pools: [], picked: null } })), /disabled=""/);
+});
+
+test("Edit with AI on the app instructions asks for a pool every time and sends nothing until one is picked", () => {
+  const markup = page({ scope: { kind: "app" }, cleanup: { kind: "choosing", pools: [{ id: "pool-a", name: "Pool A" }], picked: null } });
+  assert.match(markup, /Which pool runs this edit\?/);
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Propose<\/button>/);
+  assert.match(markup, /The app instructions are sent to a model on the pool you pick\. You are asked every time\./);
+  assert.match(markup, /<input type="radio" name="pr-ai-pool" value="pool-a"\/>/);
+  assert.doesNotMatch(markup, /<input type="radio" name="pr-ai-pool"[^>]*checked=""/, "no pool is picked for the owner");
+  const two = page({ scope: { kind: "app" }, cleanup: { kind: "choosing", pools: [{ id: "pool-a", name: "Pool A" }, { id: "pool-b", name: "<Pool B>" }], picked: "pool-b" } });
+  assert.match(two, /<input type="radio" name="pr-ai-pool" checked="" value="pool-b"\/>/);
+  assert.match(two, /<input type="radio" name="pr-ai-pool" value="pool-a"\/>/);
+  assert.match(two, /&lt;Pool B&gt;/, "a pool name is text, never markup");
+  assert.match(two, /<button[^>]*class="btn primary"[^>]*>Propose<\/button>/);
+  assert.doesNotMatch(two.match(/<button[^>]*>Propose<\/button>/)[0], /disabled/);
+  const none = page({ scope: { kind: "app" }, cleanup: { kind: "choosing", pools: [], picked: null } });
+  assert.match(none, /No pool yet\. Add one under Pools, then try again\./);
+  assert.match(none, /<button[^>]*disabled=""[^>]*>Propose<\/button>/);
+  assert.match(none, />Cancel<\/button>/);
+});
+
+test("Edit with AI says what it waits for while it reads the pools and while the model works", () => {
+  assert.match(page({ cleanup: { kind: "pools" } }), /aria-busy="true"[^>]*>.*Reading pools\.\.\.<\/button>/);
+  const running = page({ cleanup: { kind: "running" } });
+  assert.match(running, /aria-busy="true"[^>]*>.*Proposing\.\.\.<\/button>/);
+  assert.match(running, /role="status"[^>]*>A model is cleaning up the saved instructions\. This can take up to 5 minutes\. Nothing changes until you accept\./);
+});
+
+test("a proposal shows as a line diff with Accept and Discard, and nothing is saved by showing it", () => {
+  const project = { kind: "project", id: "alpha", name: "Alpha" };
+  for (const scope of [{ kind: "app" }, project]) {
+    const markup = page({ scope, saved: { kind: "ok", value: "- Use TDD.\n- Use TDD.\n- <b>Run</b> make check.\n" }, draft: "- Use TDD.\n- Use TDD.\n- <b>Run</b> make check.\n",
+      cleanup: { kind: "proposed", proposal: { text: "- Use TDD.\n- <b>Run</b> make check.\n- Keep commits small.\n", base_version: 3 } } });
+    assert.match(markup, /Proposed instructions/);
+    assert.match(markup, /1 line removed, 1 added\. Nothing changes until you accept\./);
+    assert.equal((markup.match(/<del class="pr-diff-row removed">/g) ?? []).length, 1);
+    assert.equal((markup.match(/<ins class="pr-diff-row added">/g) ?? []).length, 1);
+    assert.equal((markup.match(/<span class="pr-diff-row">/g) ?? []).length, 2);
+    assert.match(markup, /<ins class="pr-diff-row added"><span class="visually-hidden">Added: <\/span>- Keep commits small\.<\/ins>/);
+    assert.match(markup, /<del class="pr-diff-row removed"><span class="visually-hidden">Removed: <\/span>- Use TDD\.<\/del>/);
+    assert.match(markup, /&lt;b&gt;Run&lt;\/b&gt; make check\./, "the model's text is text, never markup");
+    assert.match(markup, /<button[^>]*class="btn primary"[^>]*>(?:<svg[^>]*>.*?<\/svg>)?Accept<\/button>/);
+    assert.match(markup, />Discard<\/button>/);
+  }
+});
+
+test("a proposal that changes nothing says so and offers no Accept; one too long to diff shows both texts", () => {
+  const same = page({ cleanup: { kind: "proposed", proposal: { text: "Use tdd.\n", base_version: 1 } } });
+  assert.match(same, /The model found nothing to change\./);
+  assert.doesNotMatch(same, />Accept<\/button>/);
+  assert.match(same, />Close<\/button>/);
+  const long = `${"x\n".repeat(client.DIFF_LINES_MAX)}x\n`;
+  const sides = page({ saved: { kind: "ok", value: long }, draft: long, cleanup: { kind: "proposed", proposal: { text: "y\n", base_version: 1 } } });
+  assert.match(sides, /Too many lines to mark each change, so both texts are shown whole\./);
+  assert.match(sides, /<h3>Saved now<\/h3>/);
+  assert.match(sides, /<h3>Proposed<\/h3>/);
+  assert.match(sides, />Accept<\/button>/);
+});
+
+test("every Edit with AI refusal reads as a plain sentence that says nothing changed or what to do", () => {
+  const codes = ["instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
+    "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",
+    "instructions_cleanup_timed_out", "instructions_cleanup_no_proposal", "instructions_cleanup_too_large", "instructions_cleanup_off", "instructions_cleanup_unavailable"];
+  for (const code of codes) {
+    assert.ok(client.PROCESS_REFUSALS.includes(code), `${code} has its own words`);
+    const words = client.processMessage({ kind: "error", code, message: "raw engine words" });
+    assert.doesNotMatch(words, /raw engine words|instructions_cleanup/, code);
+    assert.match(words, /\.$/, code);
+  }
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
+  const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
+  for (const code of codes) assert.ok(listed.includes(`"${code}"`), `${code} is a code the engine lets through`);
+  assert.equal(client.processMessage({ kind: "error", code: "instructions_cleanup_timed_out", message: "" }), "The model took longer than 5 minutes, so nothing changed. Try again.");
+});
+
+test("Edit with AI is a project setting, On unless the owner turned it off, and its row says what Off does", () => {
+  assert.equal(client.DEFAULT_INSTRUCTION_SETTINGS.edit_with_ai, undefined, "an engine reply without the choice reads as On");
+  const shown = (settings) => agentSettings({ settings: { kind: "ok", value: { settings: { ...client.DEFAULT_INSTRUCTION_SETTINGS, ...settings }, version: 0 } } });
+  const note = (text) => new RegExp(`<span class="small muted pr-del-note" id="agent-edit-with-ai-note">${escaped(html(text))}</span>`);
+  for (const markup of [agentSettings(), shown({ edit_with_ai: true })]) {
+    assert.match(markup, /<strong>Edit with AI<\/strong>/);
+    assert.match(markup, /<button id="agent-edit-with-ai"[^>]*role="switch"[^>]*aria-checked="true"/);
+    assert.match(markup, note("The editor offers Edit with AI. It runs on this project's pool."));
+  }
+  const off = shown({ edit_with_ai: false });
+  assert.match(off, /<button id="agent-edit-with-ai"[^>]*role="switch"[^>]*aria-checked="false"/);
+  assert.match(off, note("Off. This project's instructions are never sent to a model for editing."));
+  const markup = agentSettings();
+  assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 5, "five rows");
+  assert.ok(markup.indexOf(">Lines the project file repeats<") < markup.indexOf("<strong>Edit with AI</strong>"), "after the repeated lines row");
+  assert.ok(markup.indexOf("<strong>Edit with AI</strong>") < markup.indexOf("<strong>Keep transcripts</strong>"), "before transcripts");
 });

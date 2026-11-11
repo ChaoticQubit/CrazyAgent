@@ -90,12 +90,32 @@ function ownerRepo(folder) {
   }
 }
 
-/** Writes the stand-in Codex the engine is started with. Input: the test root. Output: its
- * absolute path. */
-function standInHarness(root) {
+/** The Codex stand-in that also answers a tools-off run, the kind Edit with AI and onboarding's
+ * mapping start with "codex exec": it reads the prompt to its end and leaves the reply as its
+ * last message. Input: the reply. Output: the script. */
+export function answering(reply) {
+  assert.ok(typeof reply === "string" && reply.trim() !== "" && !reply.includes("\0"), "a stand-in reply is some text");
+  const quoted = reply.replaceAll("'", String.raw`'\''`);
+  const answer = String.raw`if [ "$1" = exec ]; then
+  out=
+  while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done
+  while IFS= read -r line; do :; done
+  [ -n "$out" ] || exit 1
+  printf '%s\n' '${quoted}' > "$out" || exit 1
+  exit 0
+fi
+`;
+  const [first, ...rest] = COUNTING_CODEX.split("\n");
+  assert.equal(first, "#!/bin/sh", "the stand-in starts with its interpreter line");
+  return [first, answer + rest.join("\n")].join("\n");
+}
+
+/** Writes the stand-in Codex the engine is started with. Inputs: the test root and the
+ * script. Output: its absolute path. */
+function standInHarness(root, script) {
   mkdirSync(join(root, "bin"), { recursive: true, mode: 0o700 });
   const path = join(root, "bin", "codex");
-  writeFileSync(path, COUNTING_CODEX, { mode: 0o700 });
+  writeFileSync(path, script, { mode: 0o700 });
   return path;
 }
 
@@ -143,10 +163,11 @@ async function addProject(bridge, repo, generation) {
  * the owner's repositories, serves the built app to a browser page on the first project's
  * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
  * folder prefix, the steps (given the first project, every project, the engine root, the
- * owner on the page, the page, the served app and the bridge) and how many projects, one to
- * four. Output: none. */
-export async function onEngine(t, prefix, steps, count = 1) {
+ * owner on the page, the page, the served app and the bridge), how many projects, one to
+ * four, and the stand-in Codex script. Output: none. */
+export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX) {
   assert.ok(Number.isInteger(count) && count >= 1 && count <= 4, `one to four projects, not ${count}`);
+  assert.ok(typeof codex === "string" && codex.startsWith("#!/bin/sh\n"), "the stand-in Codex is a shell script");
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -178,7 +199,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   let site;
   try {
     ({ child: engine } = await launch(engineBinary,
-      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", "--codex-executable", standInHarness(root)],
+      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", "--codex-executable", standInHarness(root, codex)],
       { ...env }, evidence, "engine", /^ready$/m));
     const started = await launch(bridgeBinary, [join(runtime, "engine.sock")], { ...env }, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
     bridgeProcess = started.child;

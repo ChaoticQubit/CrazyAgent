@@ -231,8 +231,142 @@ fn the_repeated_lines_choice_is_stored_and_a_table_from_before_it_reads_leave_ou
             ..Settings::default()
         })
         .unwrap(),
-        r#"{"mode":"both","transcripts":true,"edits":"next_message","repeated":"keep"}"#
+        r#"{"mode":"both","transcripts":true,"edits":"next_message","repeated":"keep","edit_with_ai":true}"#
     );
+}
+
+#[test]
+fn the_edit_with_ai_choice_is_stored_per_project_and_a_table_from_before_it_reads_on() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE agent_instruction_settings (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                transcripts INTEGER NOT NULL,
+                edits TEXT NOT NULL DEFAULT 'next_message',
+                repeated TEXT NOT NULL DEFAULT 'leave_out'
+            );
+            INSERT INTO agent_instruction_settings VALUES ('kept', 'app_only', 0, 'badge', 'keep');",
+        )
+        .unwrap();
+    let project = ProjectId::new("kept").unwrap();
+    assert!(Settings::default().edit_with_ai);
+    assert!(
+        load(&connection, &project).unwrap().edit_with_ai,
+        "a read-only reader of a table made before the column"
+    );
+    initialize(&connection).unwrap();
+    initialize(&connection).unwrap();
+    let stored = load(&connection, &project).unwrap();
+    assert_eq!(
+        stored,
+        Settings {
+            mode: Mode::AppOnly,
+            transcripts: false,
+            edits: EditDelivery::Badge,
+            repeated: Repeated::Keep,
+            edit_with_ai: true,
+        },
+        "adding the column keeps every stored choice"
+    );
+    for edit_with_ai in [false, true] {
+        let chosen = Settings {
+            edit_with_ai,
+            ..stored
+        };
+        save(&connection, &project, chosen).unwrap();
+        assert_eq!(load(&connection, &project).unwrap(), chosen);
+    }
+    let other = ProjectId::new("other").unwrap();
+    save(
+        &connection,
+        &project,
+        Settings {
+            edit_with_ai: false,
+            ..stored
+        },
+    )
+    .unwrap();
+    assert!(
+        load(&connection, &other).unwrap().edit_with_ai,
+        "one project's Off never turns another project off"
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE agent_instruction_settings SET edit_with_ai=2 WHERE project=?1",
+                [project.as_str()],
+            )
+            .is_err(),
+        "the table refuses a value that is neither on nor off"
+    );
+    let wire: Settings = serde_json::from_str(
+        r#"{"mode":"both","transcripts":true,"edits":"badge","repeated":"keep"}"#,
+    )
+    .unwrap();
+    assert!(wire.edit_with_ai, "an older client's save leaves it on");
+    let off: Settings =
+        serde_json::from_str(r#"{"mode":"both","transcripts":true,"edit_with_ai":false}"#).unwrap();
+    assert!(!off.edit_with_ai);
+}
+
+#[test]
+fn the_app_wide_edit_with_ai_choice_is_on_until_stored_off_and_is_its_own_row() {
+    let connection = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        load_app(&connection).unwrap(),
+        AppSettings { edit_with_ai: true },
+        "a database from before the table"
+    );
+    initialize(&connection).unwrap();
+    assert!(load_app(&connection).unwrap().edit_with_ai, "never stored");
+    let project = ProjectId::new("kept").unwrap();
+    for edit_with_ai in [false, true, false] {
+        save_app(&connection, AppSettings { edit_with_ai }).unwrap();
+        assert_eq!(load_app(&connection).unwrap(), AppSettings { edit_with_ai });
+        assert!(
+            load(&connection, &project).unwrap().edit_with_ai,
+            "the app-wide choice never changes a project's"
+        );
+    }
+    let rows: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM agent_instruction_app_settings",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+    save(
+        &connection,
+        &project,
+        Settings {
+            edit_with_ai: true,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !load_app(&connection).unwrap().edit_with_ai,
+        "a project's On never turns the app-wide Off back on"
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE agent_instruction_app_settings SET edit_with_ai=2",
+                []
+            )
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_string(&AppSettings {
+            edit_with_ai: false
+        })
+        .unwrap(),
+        r#"{"edit_with_ai":false}"#
+    );
+    assert!(serde_json::from_str::<AppSettings>(r#"{"edit_with_ai":true,"more":1}"#).is_err());
 }
 
 #[test]

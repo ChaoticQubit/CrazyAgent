@@ -150,9 +150,10 @@ impl EditDelivery {
 
 /// One project's agent instruction settings: which instruction texts its agents get,
 /// whether headless Claude runs keep their transcript, how an instruction edit reaches
-/// agents already running and whether project lines the app text already has are left out
-/// of the joined text. A project the owner never changed gets both texts, keeps transcripts,
-/// sends an edit in each running agent's next task and leaves repeated lines out.
+/// agents already running, whether project lines the app text already has are left out
+/// of the joined text and whether Edit with AI may send the project's instructions to a
+/// model. A project the owner never changed gets both texts, keeps transcripts, sends an
+/// edit in each running agent's next task, leaves repeated lines out and has Edit with AI on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -162,6 +163,12 @@ pub struct Settings {
     pub edits: EditDelivery,
     #[serde(default)]
     pub repeated: Repeated,
+    #[serde(default = "on")]
+    pub edit_with_ai: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -171,7 +178,22 @@ impl Default for Settings {
             transcripts: true,
             edits: EditDelivery::NextMessage,
             repeated: Repeated::LeaveOut,
+            edit_with_ai: true,
         }
+    }
+}
+
+/// The owner's app-wide instruction settings: whether Edit with AI may send the app
+/// instructions to a model. On until the owner turns it off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSettings {
+    pub edit_with_ai: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { edit_with_ai: true }
     }
 }
 
@@ -680,7 +702,12 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
             mode TEXT NOT NULL,
             transcripts INTEGER NOT NULL,
             edits TEXT NOT NULL DEFAULT 'next_message',
-            repeated TEXT NOT NULL DEFAULT 'leave_out'
+            repeated TEXT NOT NULL DEFAULT 'leave_out',
+            edit_with_ai INTEGER NOT NULL DEFAULT 1 CHECK(edit_with_ai IN (0, 1))
+        );
+        CREATE TABLE IF NOT EXISTS agent_instruction_app_settings (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            edit_with_ai INTEGER NOT NULL CHECK(edit_with_ai IN (0, 1))
         );
         CREATE TABLE IF NOT EXISTS instruction_imports (
             project TEXT PRIMARY KEY,
@@ -713,15 +740,20 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE agent_instruction_settings ADD COLUMN repeated TEXT NOT NULL DEFAULT 'leave_out';",
         )?;
     }
+    if !column(connection, "edit_with_ai")? {
+        connection.execute_batch(
+            "ALTER TABLE agent_instruction_settings ADD COLUMN edit_with_ai INTEGER NOT NULL DEFAULT 1 CHECK(edit_with_ai IN (0, 1));",
+        )?;
+    }
     Ok(())
 }
 
 /// Tells whether the settings table holds a column added after its first shape: the edit
-/// delivery column tables made before DEC-111 QR1 lack, or the repeated lines column tables
-/// made before v2.2.1 lack. Inputs: a connection to `engine.db` and the column name.
-/// Output: the answer.
+/// delivery column tables made before DEC-111 QR1 lack, or the repeated lines and Edit with
+/// AI columns tables made before v2.2.1 lack. Inputs: a connection to `engine.db` and the
+/// column name. Output: the answer.
 fn column(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
-    assert!(matches!(name, "edits" | "repeated"));
+    assert!(matches!(name, "edits" | "repeated" | "edit_with_ai"));
     connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name=?1)",
         [name],
@@ -753,25 +785,34 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
         true => "repeated",
         false => "'leave_out'",
     };
-    let stored: Option<(String, i64, String, String)> = connection
+    let edit_with_ai = match column(connection, "edit_with_ai").map_err(unavailable)? {
+        true => "edit_with_ai",
+        false => "1",
+    };
+    let stored: Option<(String, i64, String, String, i64)> = connection
         .query_row(
             &format!(
-                "SELECT mode, transcripts, {edits}, {repeated} FROM agent_instruction_settings WHERE project=?1"
+                "SELECT mode, transcripts, {edits}, {repeated}, {edit_with_ai} FROM agent_instruction_settings WHERE project=?1"
             ),
             [project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((mode, transcripts, edits, repeated)) = stored else {
+    let Some((mode, transcripts, edits, repeated, edit_with_ai)) = stored else {
         return Ok(Settings::default());
     };
     let mode = Mode::parse(&mode).ok_or("instruction_settings_invalid")?;
-    let transcripts = match transcripts {
-        0 => false,
-        1 => true,
-        _ => return Err("instruction_settings_invalid"),
-    };
+    let transcripts = switch(transcripts).ok_or("instruction_settings_invalid")?;
+    let edit_with_ai = switch(edit_with_ai).ok_or("instruction_settings_invalid")?;
     let edits = EditDelivery::parse(&edits).ok_or("instruction_settings_invalid")?;
     let repeated = Repeated::parse(&repeated).ok_or("instruction_settings_invalid")?;
     Ok(Settings {
@@ -779,7 +820,64 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
         transcripts,
         edits,
         repeated,
+        edit_with_ai,
     })
+}
+
+/// Reads a stored on or off. Input: the stored number. Output: the choice, none for a number
+/// that is neither 0 nor 1.
+fn switch(stored: i64) -> Option<bool> {
+    match stored {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+/// Reads the app-wide instruction settings; a database that never stored any gets the
+/// defaults. Input: a connection to `engine.db`, read-only is enough. Output: the settings,
+/// `instruction_settings_invalid` for a stored value outside the options, or
+/// `instruction_settings_unavailable`.
+pub fn load_app(connection: &Connection) -> Result<AppSettings, &'static str> {
+    let unavailable = |_| "instruction_settings_unavailable";
+    let table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_instruction_app_settings')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !table {
+        return Ok(AppSettings::default());
+    }
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT edit_with_ai FROM agent_instruction_app_settings WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    match stored {
+        None => Ok(AppSettings::default()),
+        Some(stored) => Ok(AppSettings {
+            edit_with_ai: switch(stored).ok_or("instruction_settings_invalid")?,
+        }),
+    }
+}
+
+/// Stores the app-wide instruction settings whole, creating the table first when it is
+/// missing. Inputs: a writable connection to `engine.db` and the settings. Output: unit.
+pub fn save_app(connection: &Connection, settings: AppSettings) -> rusqlite::Result<()> {
+    initialize(connection)?;
+    let changed = connection.execute(
+        "INSERT INTO agent_instruction_app_settings(singleton, edit_with_ai) VALUES (1, ?1)
+         ON CONFLICT(singleton) DO UPDATE SET edit_with_ai=excluded.edit_with_ai",
+        params![i64::from(settings.edit_with_ai)],
+    )?;
+    assert_eq!(changed, 1);
+    assert!(load_app(connection) == Ok(settings));
+    Ok(())
 }
 
 /// Stores one project's settings whole, creating the table first when it is missing.
@@ -792,14 +890,15 @@ pub fn save(
 ) -> rusqlite::Result<()> {
     initialize(connection)?;
     let changed = connection.execute(
-        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits, repeated) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits, repeated=excluded.repeated",
+        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits, repeated, edit_with_ai) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits, repeated=excluded.repeated, edit_with_ai=excluded.edit_with_ai",
         params![
             project.as_str(),
             settings.mode.as_str(),
             i64::from(settings.transcripts),
             settings.edits.as_str(),
-            settings.repeated.as_str()
+            settings.repeated.as_str(),
+            i64::from(settings.edit_with_ai)
         ],
     )?;
     assert_eq!(changed, 1);

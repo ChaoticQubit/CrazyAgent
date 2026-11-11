@@ -2935,6 +2935,37 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.instruction_settings(project_id)?; call.await }.await;
             routed(result)
         }
+        "desktop_process_propose" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+                pool: Option<String>,
+            }
+            let Args { project_id, pool } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.propose_process(project_id, pool)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_instruction_settings" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_instruction_settings()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_save_app_instruction_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: crazyagent::engine::owner::AppInstructionSettings,
+            }
+            let Args { settings } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .save_app_instruction_settings(settings)?; call.await }.await;
+            routed(result)
+        }
         "desktop_retry_recovery" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

@@ -50,6 +50,20 @@ const REFUSALS: Record<string, string> = {
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
   process_save_unavailable: "The engine couldn't save right now, so nothing was saved. Save again.",
+  instructions_cleanup_pool_needed: "Pick the pool that runs this edit first.",
+  instructions_cleanup_pool_not_asked: "A project's edit runs on the project's own pool, so nothing was sent. Try again.",
+  instructions_cleanup_pool_unknown: "That pool no longer exists, so nothing was sent. Pick another one.",
+  instructions_cleanup_project_pool_missing: "This project has no pool yet, so nothing was sent. Give it one under Pools, then try again.",
+  instructions_cleanup_no_account: "No account in the pool can run this edit, so nothing was sent. Sign one in under Pools, then try again.",
+  instructions_cleanup_paused: "Every account in the pool hit its limit, so nothing was sent. Try again later.",
+  instructions_cleanup_busy: "Another Edit with AI is still running. Wait for it, then try again.",
+  instructions_cleanup_empty: "There is nothing saved to clean up yet. Write the instructions first.",
+  instructions_cleanup_failed: "The model run failed, so nothing changed. Try again.",
+  instructions_cleanup_timed_out: "The model took longer than 5 minutes, so nothing changed. Try again.",
+  instructions_cleanup_no_proposal: "The model gave no file back, so nothing changed. Try again.",
+  instructions_cleanup_too_large: "The model's file is over 64 KB, so nothing changed. Try again.",
+  instructions_cleanup_off: "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.",
+  instructions_cleanup_unavailable: "Edit with AI can't run in this engine, so nothing was sent.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
   process_agent_unknown: "This agent isn't part of this project's team.",
   process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",
@@ -278,13 +292,15 @@ export type EditDelivery = "next_message" | "restart" | "badge";
 export type Repeated = "leave_out" | "keep";
 
 /** One project's agent settings: which instructions its agents get, whether headless
- * Claude runs keep their transcript, how an instruction edit reaches running agents and
- * whether project lines the app instructions already have are left out. */
+ * Claude runs keep their transcript, how an instruction edit reaches running agents,
+ * whether project lines the app instructions already have are left out and whether the
+ * editor offers Edit with AI (on unless false). */
 export interface InstructionSettings {
   mode: InstructionMode;
   transcripts: boolean;
   edits?: EditDelivery;
   repeated?: Repeated;
+  edit_with_ai?: boolean;
 }
 
 /** One project's agent settings, the version they were read at, which a save names, and how
@@ -499,4 +515,75 @@ export interface Adoption {
 /** Reads one project's workflow adoption. Input: the project id. Output: the view. */
 export function loadAdoption(projectId: string): Promise<Result<Adoption>> {
   return call<Adoption>("desktop_adoption", { projectId });
+}
+
+/** The owner's app-wide instruction settings: whether Edit with AI may send the app
+ * instructions to a model. */
+export interface AppInstructionSettings {
+  edit_with_ai: boolean;
+}
+
+/** Reads the app-wide instruction settings. Output: the settings, on when never stored. */
+export function loadAppInstructionSettings(): Promise<Result<AppInstructionSettings>> {
+  return call<AppInstructionSettings>("desktop_app_instruction_settings");
+}
+
+/** Stores the app-wide instruction settings whole. Input: the settings. Output: the settings
+ * as stored. */
+export function saveAppInstructionSettings(settings: AppInstructionSettings): Promise<Result<AppInstructionSettings>> {
+  return call<AppInstructionSettings>("desktop_save_app_instruction_settings", { settings });
+}
+
+/** A cleaned instructions file a model proposes and the version of the saved file it was made
+ * from, which Accept names so a newer save is never lost. */
+export interface Proposal {
+  text: string;
+  base_version: number;
+}
+
+/** Asks the engine for a cleaned version of the saved instructions (DEC-132 Q6). Inputs: null
+ * for the app text or the project id, and the pool the owner picked for this run, which the
+ * app text needs and a project never takes. Output: the proposal; nothing is saved. */
+export function proposeProcess(projectId: string | null, pool: string | null): Promise<Result<Proposal>> {
+  if ((projectId === null) !== (pool !== null)) throw new Error("proposeProcess: the app text needs a picked pool and a project takes none");
+  return call<Proposal>("desktop_process_propose", { projectId, pool });
+}
+
+/** One line of a proposal beside the saved text: kept, added by the proposal or removed by it. */
+export type DiffRow = { kind: "same" | "added" | "removed"; text: string };
+
+/** The most lines either text may have for a line diff; past it the page shows both whole. */
+export const DIFF_LINES_MAX = 2000;
+
+/** Splits a text into its lines; a last line break ends the last line and adds none. */
+function linesOf(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** Compares two texts line by line with a longest common subsequence. Inputs: the saved text
+ * and the proposed one. Output: the rows in reading order, removed lines before the added
+ * ones that replace them, or null when either text has more than DIFF_LINES_MAX lines. */
+export function lineDiff(before: string, after: string): DiffRow[] | null {
+  const old = linesOf(before);
+  const next = linesOf(after);
+  if (old.length > DIFF_LINES_MAX || next.length > DIFF_LINES_MAX) return null;
+  const width = next.length + 1;
+  const common = new Uint16Array((old.length + 1) * width);
+  for (let a = old.length - 1; a >= 0; a -= 1) {
+    for (let b = next.length - 1; b >= 0; b -= 1) {
+      common[a * width + b] = old[a] === next[b] ? common[(a + 1) * width + b + 1] + 1 : Math.max(common[(a + 1) * width + b], common[a * width + b + 1]);
+    }
+  }
+  const rows: DiffRow[] = [];
+  let a = 0;
+  let b = 0;
+  while (a < old.length || b < next.length) {
+    if (a < old.length && b < next.length && old[a] === next[b]) { rows.push({ kind: "same", text: old[a] }); a += 1; b += 1; }
+    else if (a < old.length && (b === next.length || common[(a + 1) * width + b] >= common[a * width + b + 1])) { rows.push({ kind: "removed", text: old[a] }); a += 1; }
+    else { rows.push({ kind: "added", text: next[b] }); b += 1; }
+  }
+  if (rows.length < Math.max(old.length, next.length) || rows.length > old.length + next.length) throw new Error("lineDiff: the rows do not cover both texts");
+  return rows;
 }

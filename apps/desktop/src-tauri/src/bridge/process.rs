@@ -1,8 +1,9 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionSettings, InstructionView,
-    OwnerClient, PROCESS_CODES, ProcessText, SavedText, UncommittedImport,
+    Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile,
+    InstructionSettings, InstructionView, OwnerClient, PROCESS_CODES, ProcessText, Proposal,
+    SavedText, UncommittedImport,
 };
 use crazyagent::protocol::ProjectId;
 use std::path::PathBuf;
@@ -247,6 +248,60 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             client
                 .save_instruction_settings(project, settings, version)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Asks the engine for a cleaned version of the saved instructions, run without the
+    /// bridge lock; nothing is saved. Inputs: none for the app text, or the project id; and
+    /// the id of the pool the owner picked for this run, needed for the app text and never
+    /// taken for a project. Output: the proposal with the version it was made from.
+    pub fn propose_process(
+        &self,
+        project_id: Option<String>,
+        pool: Option<String>,
+    ) -> Result<Unlocked<Proposal>, BridgeError> {
+        let project = project(project_id)?;
+        let pool = pool
+            .map(|id| {
+                crazyagent::protocol::CredentialRef::new(id)
+                    .map_err(|_| failure("instructions_cleanup_pool_unknown"))
+            })
+            .transpose()?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .propose_process(project, pool)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Reads the app-wide instruction settings, run without the bridge lock. Output: the
+    /// settings, on when never stored.
+    pub fn app_instruction_settings(
+        &self,
+    ) -> Result<Unlocked<AppInstructionSettings>, BridgeError> {
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_instruction_settings()
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Stores the app-wide instruction settings whole, run without the bridge lock. Input:
+    /// the settings. Output: the settings as stored.
+    pub fn save_app_instruction_settings(
+        &self,
+        settings: AppInstructionSettings,
+    ) -> Result<Unlocked<AppInstructionSettings>, BridgeError> {
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .save_app_instruction_settings(settings)
                 .await
                 .map_err(process_error)
         }))
