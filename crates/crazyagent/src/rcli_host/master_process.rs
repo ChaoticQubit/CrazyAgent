@@ -9,7 +9,10 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitSta
 use std::thread;
 use std::time::{Duration, Instant};
 
-const STDOUT_BYTES_MAX: usize = 16_777_216;
+/// The bytes of frames one rcli master host may write in its run, the same total a Claude
+/// Code master has for its output (OB-5 final). Past it the run ends with the output limit
+/// code. It bounds the bytes read, not the frames: no count of frames ends a run.
+const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 const WRITE_TIME: Duration = Duration::from_secs(1);
 const CLEANUP_TIME: Duration = Duration::from_secs(6);
 const INTERVAL: Duration = Duration::from_millis(5);
@@ -470,5 +473,55 @@ mod tests {
         assert!(reaper.join().unwrap().success());
         assert!(process.status.is_some());
         assert!(process.group_absent);
+    }
+
+    /// A stand-in host that writes 1,100 frames of the largest size, 65,536 bytes after the
+    /// four byte length, and then waits on its input.
+    const FLOODING_HOST: &str = r#"i=0
+while [ "$i" -lt 1100 ]; do
+  printf '\000\001\000\000%065536d' 0
+  i=$((i + 1))
+done
+read -r _
+"#;
+
+    /// The frames of one run are bounded by 64 MiB of bytes, as a Claude Code master's
+    /// output is, and not by the 16 MiB an rcli master had (OB-5 final). Every whole frame
+    /// under the bound is handed over: 1,023 of the largest size, where the old bound gave
+    /// 255. The frame that crosses it ends the run with the output limit code.
+    #[test]
+    fn frames_up_to_sixty_four_mebibytes_are_read_and_the_next_ends_with_the_output_code() {
+        const FRAME: usize = FRAME_BYTES_MAX + 4;
+        assert_eq!(STDOUT_BYTES_MAX, 64 * 1024 * 1024);
+        assert_eq!(FRAME, 65_540);
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", FLOODING_HOST])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut frames = 0;
+        let failure = loop {
+            assert!(Instant::now() < deadline, "{frames} frames read in time");
+            match process.frame() {
+                Ok(Some(frame)) => {
+                    assert_eq!(frame.len(), FRAME);
+                    assert_eq!(frame[..4], [0, 1, 0, 0]);
+                    frames += 1;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(1)),
+                Err(failure) => break failure,
+            }
+        };
+        assert_eq!(failure.0, "rcli_master_output_limit");
+        assert_eq!(frames, STDOUT_BYTES_MAX / FRAME);
+        assert_eq!(frames, 1023);
+        assert!(frames > 16_777_216 / FRAME);
+        assert!(process.stdout_bytes > STDOUT_BYTES_MAX);
+        assert!(process.stdout_bytes <= STDOUT_BYTES_MAX + 4096);
+        process.cleanup().unwrap();
     }
 }
