@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { nextGeneration, pickFolder } from "../../api";
 import {
   ADD_WARNINGS, addExistingFolder, cancelIcloudDownload, downloadFromIcloud, intakeCopy, loadFolderSize, loadIcloudProgress, loadProjectsHome,
@@ -11,8 +11,8 @@ import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  ICLOUD_PROGRESS_MS, ICLOUD_STOPPED, addWay, anywayIssues, anywayOverrides, asksAgain, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
-  icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayWarning,
+  ICLOUD_PROGRESS_MS, addWay, anywayIssues, anywayOverrides, asksAgain, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  icloudOutcome, icloudPlaceholders, icloudProgressLine, icloudRun, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -209,8 +209,9 @@ export function AddFolder() {
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<IcloudProgress | null>(null);
   const [stopping, setStopping] = useState(false);
-  const stopped = useRef(false);
+  const run = useRef<ReturnType<typeof icloudRun> | null>(null);
   const downloaded = useRef<string | null>(null);
+  useEffect(() => () => run.current?.leave(), []);
   const root = home.kind === "ok" ? home.value.path : null;
   const way = addWay(mode, size);
 
@@ -274,25 +275,26 @@ export function AddFolder() {
     setDownloading(true);
     setProgress(null);
     setProblem("");
-    stopped.current = false;
-    const timer = setInterval(() => {
-      if (stopped.current) void cancelIcloudDownload();
-      void loadIcloudProgress().then((read) => { if (read.kind === "ok" && read.value) setProgress(read.value); });
-    }, ICLOUD_PROGRESS_MS);
+    const watching = icloudRun(
+      () => void cancelIcloudDownload(),
+      () => void loadIcloudProgress().then((read) => { if (read.kind === "ok" && read.value) setProgress(read.value); }),
+      ICLOUD_PROGRESS_MS,
+    );
+    run.current = watching;
     const result = await downloadFromIcloud(source);
-    clearInterval(timer);
+    const outcome = icloudOutcome(watching.end(), result);
+    run.current = null;
+    if (outcome.next === "none") return;
     setDownloading(false);
     setStopping(false);
     setIcloud(null);
-    if (result.kind === "ok") { downloaded.current = source; proceed(chosen); return; }
-    if (result.kind === "not_ready") { setProblem("Downloading from iCloud isn't in this build."); return; }
-    setProblem(stopped.current && result.code === "home_icloud_not_downloaded" ? ICLOUD_STOPPED : result.message);
+    if (outcome.next === "add") { downloaded.current = source; proceed(chosen); return; }
+    setProblem(outcome.text);
   };
 
   const stop = () => {
-    stopped.current = true;
     setStopping(true);
-    void cancelIcloudDownload();
+    run.current?.stop();
   };
 
   const anyway = () => {

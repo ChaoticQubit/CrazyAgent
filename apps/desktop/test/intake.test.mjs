@@ -958,3 +958,51 @@ test("the iCloud lines count files, name the iCloud place and read progress", ()
   assert.equal(intake.icloudPlaceholders({ kind: "loading" }), 0);
   assert.equal(intake.icloudPlaceholders(null), 0);
 });
+
+test("a running iCloud download reads progress each tick and goes on to the add only when nobody stopped it", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls = [];
+  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, ["read", "read"]);
+  assert.equal(run.end(), "go");
+  t.mock.timers.tick(5000);
+  assert.deepEqual(calls, ["read", "read"]);
+  assert.throws(() => intake.icloudRun(() => {}, () => {}, 0));
+});
+
+test("Stop download asks the engine to stop at once and again each tick until the download returns", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls = [];
+  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
+  run.stop();
+  assert.deepEqual(calls, ["cancel"]);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(calls, ["cancel", "cancel", "read"]);
+  assert.equal(run.end(), "stopped");
+  t.mock.timers.tick(3000);
+  assert.equal(calls.length, 3);
+});
+
+test("leaving Add folder mid-download stops it and reads no more progress", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls = [];
+  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
+  run.leave();
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, ["cancel", "cancel", "cancel"]);
+  assert.equal(run.end(), "left");
+});
+
+test("after an iCloud download Add folder adds only when it finished and was neither stopped nor left", () => {
+  const ok = { kind: "ok", value: 3 };
+  const ended = { kind: "error", code: "home_icloud_not_downloaded", message: "Some files are still only in iCloud." };
+  const denied = { kind: "error", code: "home_permission_denied", message: "Allow it in System Settings." };
+  assert.deepEqual(intake.icloudOutcome("go", ok), { next: "add" });
+  assert.deepEqual(intake.icloudOutcome("stopped", ok), { next: "say", text: intake.ICLOUD_STOPPED });
+  assert.deepEqual(intake.icloudOutcome("stopped", ended), { next: "say", text: intake.ICLOUD_STOPPED });
+  assert.deepEqual(intake.icloudOutcome("stopped", denied), { next: "say", text: denied.message });
+  assert.deepEqual(intake.icloudOutcome("go", ended), { next: "say", text: ended.message });
+  assert.deepEqual(intake.icloudOutcome("go", { kind: "not_ready" }), { next: "say", text: "Downloading from iCloud isn't in this build." });
+  for (const result of [ok, ended, { kind: "not_ready" }]) assert.deepEqual(intake.icloudOutcome("left", result), { next: "none" });
+});
