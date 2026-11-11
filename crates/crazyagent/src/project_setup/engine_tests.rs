@@ -2280,6 +2280,46 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
     );
 }
 
+/// A removed project takes its linked repository files with it, so a project added again
+/// under the same id starts with no links into a folder it may no longer have.
+#[tokio::test]
+async fn a_removed_project_forgets_its_doc_links() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let mut db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(ENGINE_WAIT).unwrap();
+    let tx = db.transaction().unwrap();
+    crate::project_setup::links::set(
+        &tx,
+        &project,
+        &[crate::project_setup::links::DocLink {
+            path: "docs/plan.md".into(),
+            kind: crate::project_setup::links::LinkKind::Roadmap,
+        }],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(db);
+    let links = "SELECT COUNT(*) FROM project_doc_links WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(links), 1);
+
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(engine.rows(links), 0);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn a_removed_projects_run_in_project_terminal_setting_goes_with_it() {
     use crate::ide::bridge::run_command::{RunMode, mode, set_mode};

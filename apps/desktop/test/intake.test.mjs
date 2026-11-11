@@ -258,18 +258,55 @@ test("the review form starts from the mapping agent's draft and keeps the saved 
   assert.equal(intake.onboardingDraft(view({ name: undefined }), stored()).name, "shop");
 });
 
+test("a failed graph alone does not make the form ready while the mapping waits", () => {
+  const waiting = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "waiting" } });
+  assert.equal(intake.confirmReady(waiting).ready, false);
+  assert.equal(intake.settled(waiting), false);
+  const running = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "running" } });
+  assert.equal(intake.confirmReady(running).ready, false);
+  assert.equal(intake.settled(running), false);
+});
+
+test("a saved empty setup with a finished mapping offers the mapping's answers", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"] }) });
+  assert.equal(intake.offerProposed(saved), true);
+  assert.equal(intake.offerProposed(view({ finished: true })), false);
+  assert.equal(intake.offerProposed(view({ finished: false, proposed: setup({ about: "A research reader." }) })), false);
+  assert.equal(intake.offerProposed(view({ finished: true, proposed: setup({ about: "  ", tech_stack: [] }) })), false);
+  const before = intake.onboardingDraft(saved, stored());
+  const used = intake.withProposed(before, saved);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.equal(intake.withProposed(before, view()), before);
+});
+
+test("using the mapping's answers keeps the owner's unsaved name, research and pool", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"], platforms: ["website"] }) });
+  const edited = { ...intake.onboardingDraft(saved, stored()), name: "ScholarScope", research: ["market_research"], pool: "work", poolChosen: true };
+  const used = intake.withProposed(edited, saved);
+  assert.equal(used.name, "ScholarScope");
+  assert.deepEqual(used.research, ["market_research"]);
+  assert.equal(used.pool, "work");
+  assert.equal(used.poolChosen, true);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.deepEqual(used.platforms, ["website"]);
+});
+
 test("confirm waits for the mapping agent unless a step failed", () => {
   assert.deepEqual(intake.confirmReady(view()), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "failed", reason: "x" } })), { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })),
-    { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." });
+    { ready: false, line: "The code graph couldn't be built. The mapping agent still reads the project; the form fills in when it finishes." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" } })),
+    { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "running" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." });
   assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "running" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.equal(intake.settled(view()), true);
   assert.equal(intake.settled(view({ mapping: { kind: "running" } })), false);
-  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), true);
+  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), false);
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" } })), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
@@ -677,6 +714,16 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.match(found, /The mapping agent did not write this: it came with the folder or was changed since\./);
   assert.match(found, /From the repository\./);
   assert.doesNotMatch(found, />Overview</);
+});
+
+test("a setup saved without the mapping's answers offers them in the review", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
+  const proposed = setup({ about: "A research reader.", tech_stack: ["Rust"] });
+  const offered = html(OnboardingReviewView, { ...base, view: ok(view({ finished: true, draft: setup(), proposed })), onUseProposed: noop });
+  assert.match(offered, /This setup was saved without the mapping&#x27;s description and tech stack\./);
+  assert.match(offered, />Use the mapping&#x27;s answers</);
+  assert.doesNotMatch(html(OnboardingReviewView, { ...base, view: ok(view({ finished: true })), onUseProposed: noop }), /Use the mapping/);
 });
 
 test("the setup review shows each research toggle the repo already covers and the documents found", () => {
