@@ -777,10 +777,10 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent, each research run of its jobs and, on macOS, the tool caches of
-    /// its folders (T8), with the identity of the folder that holds it. A folder that is no
-    /// real run, or that is not there, is left out. Input: the project's research jobs.
-    /// Output: the records.
+    /// writes: each agent, each research run of its jobs, each roadmap status run and, on
+    /// macOS, the tool caches of its folders (T8), with the identity of the folder that
+    /// holds it. A folder that is no real run, or that is not there, is left out. Input: the
+    /// project's research jobs. Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -798,6 +798,7 @@ impl DeletePlan {
                 if research
                     .iter()
                     .any(|job| name.starts_with(&format!("job-{job}-")))
+                    || crate::roadmap_status::names_run(&self.project, &name)
                 {
                     names.push(name);
                 }
@@ -868,6 +869,7 @@ const TOOL_CACHE_DIGEST_BYTES: usize = 32;
 enum EngineFile {
     Agent(i64),
     Run,
+    StatusRun,
     ToolCache,
 }
 
@@ -877,7 +879,7 @@ impl EngineFile {
     fn folder(&self, root: &Path, name: &str) -> PathBuf {
         match self {
             Self::Agent(_) => root.join("team").join("agents").join(name),
-            Self::Run => root.join("research").join("agents").join(name),
+            Self::Run | Self::StatusRun => root.join("research").join("agents").join(name),
             Self::ToolCache => root
                 .join(TOOL_CACHE_FOLDER)
                 .join(&name[TOOL_CACHE_PREFIX.len()..]),
@@ -887,9 +889,17 @@ impl EngineFile {
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
 /// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
-/// or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input: the name. Output: what
-/// it names, or None for anything else.
+/// or `roadmap-status-<project>-<time>`, or `tool-cache-<digest>` with 32 lowercase hex
+/// digits (T8). Input: the name. Output: what it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
+    if let Some(run) = name.strip_prefix(crate::roadmap_status::RUN_NAME_HEAD) {
+        let (project, time) = run.rsplit_once('-')?;
+        let plain = !project.is_empty()
+            && project
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        return (plain && plain_number(time).is_some()).then_some(EngineFile::StatusRun);
+    }
     if let Some(digest) = name.strip_prefix(TOOL_CACHE_PREFIX) {
         let plain = digest.len() == TOOL_CACHE_DIGEST_BYTES
             && digest
@@ -903,6 +913,26 @@ fn engine_file(name: &str) -> Option<EngineFile> {
     let parts: Vec<&str> = name.strip_prefix("job-")?.split('-').collect();
     (matches!(parts.len(), 2 | 3) && parts.iter().all(|part| plain_number(part).is_some()))
         .then_some(EngineFile::Run)
+}
+
+/// Removes the Seatbelt profile of a research run a delete recorded; a profile that is not
+/// there is fine. Inputs: the engine root and the run's exact name. Output: unit, or
+/// `project_files_left` when the profile is there and cannot be removed.
+fn remove_run_profile(root: &Path, name: &str) -> Result<(), crate::engine::EngineError> {
+    assert!(engine_file(name).is_some());
+    let profile = root
+        .join("research")
+        .join("profiles")
+        .join(format!("{name}.sb"));
+    assert_eq!(
+        profile.parent(),
+        Some(root.join("research/profiles").as_path())
+    );
+    match std::fs::remove_file(&profile) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(crate::engine::EngineError("project_files_left".into())),
+    }
 }
 
 fn plain_number(text: &str) -> Option<i64> {
@@ -924,8 +954,9 @@ fn folder_inode(folder: &Path) -> Option<i64> {
 }
 
 /// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
-/// and teammates' records, a research run's folder, or a project's tool caches, which an
-/// agent may have closed or pinned inside and are cleared of that first. Only the
+/// and teammates' records, a research run's folder, a roadmap status run's folder and
+/// Seatbelt profile, or a project's tool caches, which an agent may have closed or pinned
+/// inside and are cleared of that first. Only the
 /// folder the record was written for goes: under any other identity it stays, logged as
 /// `project_files_kept`, and the record is finished. A name that is no engine file removes
 /// nothing. A file left behind is logged as `project_files_left` and keeps its record.
@@ -947,6 +978,9 @@ pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<Strin
                     crate::team::cleanup::remove_agent_files(&root.join("team"), id)
                 } else if matches!(file, EngineFile::ToolCache) {
                     crate::team::cleanup::remove_agent_tree(&folder)
+                } else if matches!(file, EngineFile::StatusRun) {
+                    crate::team::cleanup::remove_tree(&folder)
+                        .and_then(|()| remove_run_profile(root, name))
                 } else {
                     crate::team::cleanup::remove_tree(&folder)
                 }

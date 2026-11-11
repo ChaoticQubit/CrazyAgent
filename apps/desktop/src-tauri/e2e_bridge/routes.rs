@@ -1423,6 +1423,46 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.plan_roadmap(&id, generation).await }.await;
             routed(result)
         }
+        "desktop_roadmap_status" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.roadmap_status(id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_refresh_roadmap_status" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.refresh_roadmap_status(id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_set_roadmap_refresh" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                refresh: String,
+            }
+            let Args { id, refresh } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.set_roadmap_refresh(id, refresh)?; call.await }.await;
+            routed(result)
+        }
         "desktop_research_log" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

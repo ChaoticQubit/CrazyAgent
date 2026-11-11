@@ -352,3 +352,8 @@ dialog.dialog[open]:has(.pj-remove) > .dialog-body { display: flex; flex-directi
 .set-row > button.set-label { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; padding: 0; border: 0; background: none; color: var(--text); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
 .set-row > button.set-label:hover { color: var(--accent-text); }
 .set-body { display: grid; gap: 8px; margin: 0; padding: 12px 16px; border-top: 1px solid var(--border); }
+.rs-items { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rs-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.rs-evidence { flex-basis: 100%; color: var(--text-3); }
+.rs-evidence summary { cursor: pointer; }
+.rs-evidence p { margin: 4px 0 0; white-space: pre-wrap; }

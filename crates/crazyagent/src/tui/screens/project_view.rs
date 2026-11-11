@@ -818,6 +818,17 @@ fn roadmap_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
     )
 }
 
+/// Draws the roadmap status line under the planning line once the jobs are read.
+/// Takes the screen and the look. Returns the row, or none before the jobs are read.
+fn roadmap_status_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    screen.jobs.as_ref()?;
+    Some(
+        Row::of("  ", Style::new())
+            .cat(Row::of("Roadmap status", look.fg).pad(24))
+            .cat(screen.roadmap.value(look, screen.now_ms)),
+    )
+}
+
 fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> Vec<Row> {
     if screen.setup.is_none() {
         return vec![Row::of("Loading...", look.muted)];
@@ -1035,6 +1046,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         left.push(Row::of("Work", look.heading));
         left.extend(work_rows(screen, look, true, left_width));
         left.extend(roadmap_row(screen, look));
+        left.extend(roadmap_status_row(screen, look));
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -1109,6 +1121,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
     lines.push(Row::of("Work", look.heading));
     lines.extend(work_rows(screen, look, false, content));
     lines.extend(roadmap_row(screen, look));
+    lines.extend(roadmap_status_row(screen, look));
     lines.push(Row::default());
     lines.push(
         Row::of("Team", look.heading)
@@ -2270,6 +2283,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
                 None => Row::of("Loading...", look.muted),
             },
         ),
+        entry("Status", screen.roadmap.value(look, screen.now_ms)),
     ];
     if room.saturating_sub(lines.len()) > screen.plugins.floor() {
         lines.push(Row::default());
