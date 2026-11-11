@@ -249,6 +249,14 @@ impl Repo {
         }
     }
 
+    /// The `-c` arguments that switch off the filter drivers this repository's config
+    /// names, as every git call here carries them, for a test to read. Output: the
+    /// arguments, eight for each driver.
+    #[cfg(test)]
+    pub(super) fn overrides(&self) -> &[String] {
+        &self.overrides
+    }
+
     /// Points every later git call at a private index file the engine owns, so reading a
     /// work tree, such as an agent's own clone, neither reads nor writes an index in it.
     /// Input: the index path, which git creates. Output: the repository.
