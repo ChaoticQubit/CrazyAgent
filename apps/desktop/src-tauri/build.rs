@@ -277,6 +277,9 @@ fn main() {
         "desktop_engine_versions",
         "desktop_restart_engine",
         "desktop_ide_focus",
+        "desktop_ide_run",
+        "desktop_ide_run_mode",
+        "desktop_ide_set_run_mode",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");
