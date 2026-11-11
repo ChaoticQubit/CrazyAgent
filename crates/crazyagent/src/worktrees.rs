@@ -3110,4 +3110,40 @@ mod tests {
             "git_operation_failed_or_output_capacity"
         );
     }
+
+    /// Fills a folder inside a repository's .git with empty files, as a long-used
+    /// repository's `rr-cache` or `logs` holds them. Inputs: the repository, the folder's
+    /// name and how many files. Output: none.
+    #[cfg(unix)]
+    fn fill_git_folder(repository: &Path, name: &str, count: usize) {
+        let folder = repository.join(".git").join(name);
+        std::fs::create_dir(&folder).unwrap();
+        for entry in 0..count {
+            std::fs::write(folder.join(format!("{entry:06}")), b"").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_git_folder_holds_more_than_8192_entries_is_inspected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        fill_git_folder(&repository, "rr-cache", 9000);
+        let admission = inspect(repository.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&admission.repository), repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_git_folder_past_the_metadata_bound_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        fill_git_folder(&repository, "rr-cache", METADATA_ENTRIES_MAX + 1);
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "git_metadata_capacity"
+        );
+    }
 }
