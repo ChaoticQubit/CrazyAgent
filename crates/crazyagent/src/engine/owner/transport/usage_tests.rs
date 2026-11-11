@@ -159,6 +159,7 @@ async fn a_money_choice_is_stored_and_reaches_the_report() {
     let settings = MoneySettings {
         main_number: MainNumber::Tokens,
         prices: PriceSource::Off,
+        ..MoneySettings::default()
     };
     usage.client.usage_set_money(settings).await.unwrap();
     let report = usage.client.usage_report(None, None, 0).await.unwrap();

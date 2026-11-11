@@ -223,3 +223,33 @@ test("words about usage not reported leave every row's name its width at 1100 px
     assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
   });
 });
+
+test("the project Metrics tab asks the engine for that project's report and metrics only", async () => {
+  await withPage(async (page) => {
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mountProject(${JSON.stringify(CSS)}, ${JSON.stringify(ANSWERS)}, "alpha")`);
+    const reports = await page.evaluate(`Fixture.sentTo("desktop_usage_report")`);
+    const metrics = await page.evaluate(`Fixture.sentTo("desktop_usage_metrics")`);
+    assert.ok(reports.length > 0, "the tab read its report");
+    assert.ok(metrics.length > 0, "the tab read its metrics");
+    assert.deepEqual([...new Set([...reports, ...metrics].map((sent) => sent.projectId))], ["alpha"]);
+    assert.equal(await page.evaluate(`document.querySelectorAll(".usage-limits").length`), 0, "the tab shows no account limits");
+  });
+});
+
+test("picking a project on the app page reads that project, hides Account limits and sends Shown with the other money choices", async () => {
+  await withPage(async (page) => {
+    await open(page, "light", 1440, { ...ANSWERS, desktop_usage_set_money: null });
+    assert.equal(await page.evaluate(`document.querySelectorAll(".usage-limits").length`), 1, "every project shows the account limits");
+    await page.evaluate(`Fixture.pick("mx-project", "alpha")`);
+    const reports = await page.evaluate(`Fixture.sentTo("desktop_usage_report")`);
+    const metrics = await page.evaluate(`Fixture.sentTo("desktop_usage_metrics")`);
+    assert.equal(reports.at(0).projectId, null);
+    assert.equal(reports.at(-1).projectId, "alpha");
+    assert.equal(metrics.at(-1).projectId, "alpha");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".usage-limits").length`), 0, "a picked project hides the account limits");
+    assert.match(await page.evaluate(`document.getElementById("mount").textContent`), /Limits belong to accounts, not projects\./);
+    await clickOn(page, "[role=radio]", "Shown");
+    assert.deepEqual(await page.evaluate(`Fixture.sentTo("desktop_usage_set_money")`), [{ settings: { main_number: "tokens", prices: "off", project_limits: "shown" } }]);
+  });
+});

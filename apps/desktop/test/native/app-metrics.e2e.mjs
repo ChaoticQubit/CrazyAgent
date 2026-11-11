@@ -146,3 +146,86 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     assert.match(shown.line, /^2 projects · /);
   }, 2);
 });
+
+const LIMITS_SWITCH = '[role=radiogroup][aria-label="Account limits here"]';
+const LIMITS_NOTE = "Limits belong to accounts, not projects. Pick All projects to see them, or show them here.";
+
+/** Reads what the app Metrics page shows of the account-wide blocks: the Account limits
+ * panel, the line that says where it went, the switch's checked option and the picked
+ * project. Input: the page. Output: the reading. */
+function limitsShown(page) {
+  return page.evaluate(`(() => {
+    const text = document.querySelector(".mx-page")?.innerText ?? "";
+    const group = document.querySelector(${JSON.stringify(LIMITS_SWITCH)});
+    return {
+      panel: text.includes("Account limits") && text.includes("Check limits now"),
+      note: text.includes(${JSON.stringify(LIMITS_NOTE)}),
+      choice: group ? (group.querySelector('[aria-checked="true"]')?.textContent ?? "").trim() : null,
+      filter: document.getElementById("mx-project")?.value ?? null,
+    };
+  })()`);
+}
+
+/** Waits until the account-wide reading passes the check. Inputs: the page, the check and
+ * what it waits for. Output: the reading. */
+async function limitsBecome(page, ready, what) {
+  for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
+    const shown = await limitsShown(page).catch(() => null);
+    if (shown && ready(shown)) return shown;
+    assert.ok(Date.now() < deadline, `the Metrics page never showed ${what}: ${JSON.stringify(shown)}`);
+  }
+}
+
+test("Account limits on a picked project: Hidden by default, Shown brings them back, All projects shows them under either option (DEC-132 item 1)", { timeout: 900000 }, async (t) => {
+  await onEngine(t, "ca-app-metrics-limits-", async ({ projects, me, page, bridge }) => {
+    await pricesOff(bridge);
+    assert.equal(projects.length, 2);
+    const [first, second] = projects;
+    await me.click("Metrics", '.app-nav a[href="#/metrics"]');
+    await limitsBecome(page, (shown) => shown.filter === "" && shown.panel, "every project's account limits");
+
+    await t.test("All projects under Hidden shows the account limits and no switch", async () => {
+      const every = await limitsShown(page);
+      assert.deepEqual(every, { panel: true, note: false, choice: null, filter: "" });
+    });
+
+    await t.test("Hidden: a picked project shows no account limits and the line that says where they went", async () => {
+      await pick(page, first);
+      const hidden = await limitsBecome(page, (shown) => shown.filter === first && shown.choice !== null, "the picked project with its switch");
+      await me.capture("app-metrics-limits-hidden");
+      assert.deepEqual(hidden, { panel: false, note: true, choice: "Hidden", filter: first });
+    });
+
+    await t.test("Shown: the account limits come back for the picked project and for the next one picked", async () => {
+      await me.click("Shown", `${LIMITS_SWITCH} [role=radio]`);
+      const shown = await limitsBecome(page, (reading) => reading.choice === "Shown" && reading.panel, "the account limits after Shown");
+      await me.capture("app-metrics-limits-shown");
+      assert.deepEqual(shown, { panel: true, note: false, choice: "Shown", filter: first });
+      await pick(page, second);
+      const other = await limitsBecome(page, (reading) => reading.filter === second && reading.choice !== null, "the second project picked");
+      assert.deepEqual(other, { panel: true, note: false, choice: "Shown", filter: second });
+    });
+
+    await t.test("Shown survives a reload: the engine keeps the choice", async () => {
+      await page.send("Page.reload", { ignoreCache: true });
+      await limitsBecome(page, (reading) => reading.filter === "" && reading.panel, "every project again after the reload");
+      await pick(page, first);
+      const kept = await limitsBecome(page, (reading) => reading.filter === first && reading.choice !== null, "the picked project after the reload");
+      assert.deepEqual(kept, { panel: true, note: false, choice: "Shown", filter: first });
+    });
+
+    await t.test("All projects under Shown shows the account limits and no switch", async () => {
+      await pick(page, "");
+      const every = await limitsBecome(page, (reading) => reading.filter === "", "every project picked again");
+      assert.deepEqual(every, { panel: true, note: false, choice: null, filter: "" });
+    });
+
+    await t.test("Hidden again: the account limits leave the picked project", async () => {
+      await pick(page, first);
+      await limitsBecome(page, (reading) => reading.filter === first && reading.choice === "Shown", "the picked project still on Shown");
+      await me.click("Hidden", `${LIMITS_SWITCH} [role=radio]`);
+      const hidden = await limitsBecome(page, (reading) => reading.choice === "Hidden" && !reading.panel, "the account limits gone after Hidden");
+      assert.deepEqual(hidden, { panel: false, note: true, choice: "Hidden", filter: first });
+    });
+  }, 2);
+});

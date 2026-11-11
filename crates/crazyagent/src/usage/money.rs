@@ -10,6 +10,10 @@ pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_money (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     main_number TEXT NOT NULL CHECK(main_number IN ('dollars','tokens')),
     prices TEXT NOT NULL CHECK(prices IN ('bundled','off'))
+);
+CREATE TABLE IF NOT EXISTS usage_project_limits (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    choice TEXT NOT NULL CHECK(choice IN ('hidden','shown'))
 );";
 
 /// Which number leads the charts and tables.
@@ -30,12 +34,25 @@ pub enum PriceSource {
     Off,
 }
 
-/// The owner's choices for dollars.
+/// Whether the app Metrics page with one project picked still shows every account's limits,
+/// usage notices and next accounts, which belong to accounts, not projects. Hidden by
+/// default (DEC-129 item 1, DEC-132).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLimits {
+    #[default]
+    Hidden,
+    Shown,
+}
+
+/// The owner's choices for dollars and for the Metrics page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoneySettings {
     pub main_number: MainNumber,
     pub prices: PriceSource,
+    #[serde(default)]
+    pub project_limits: ProjectLimits,
 }
 
 /// What the charts and tables show for dollars over a range.
@@ -49,8 +66,9 @@ pub struct MoneyView {
     pub unpriced_tokens: u64,
 }
 
-/// Reads the owner's choices, the defaults until one was made. Input: the store. Output: the
-/// settings, or `usage_unavailable`.
+/// Reads the owner's choices, the defaults until one was made; a store made before the
+/// account limits choice reads it as Hidden. Input: the store. Output: the settings, or
+/// `usage_unavailable`.
 pub fn read(db: &Connection) -> Result<MoneySettings, EngineError> {
     let row: Option<(String, String)> = db
         .query_row(
@@ -60,25 +78,52 @@ pub fn read(db: &Connection) -> Result<MoneySettings, EngineError> {
         )
         .optional()
         .map_err(storage)?;
-    Ok(
-        row.map_or_else(MoneySettings::default, |(main, source)| MoneySettings {
-            main_number: if main == "tokens" {
-                MainNumber::Tokens
-            } else {
-                MainNumber::Dollars
-            },
-            prices: if source == "off" {
-                PriceSource::Off
-            } else {
-                PriceSource::Bundled
-            },
-        }),
-    )
+    let limits: Option<String> = db
+        .query_row(
+            "SELECT choice FROM usage_project_limits WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let (main, source) = row.unwrap_or_default();
+    Ok(MoneySettings {
+        main_number: if main == "tokens" {
+            MainNumber::Tokens
+        } else {
+            MainNumber::Dollars
+        },
+        prices: if source == "off" {
+            PriceSource::Off
+        } else {
+            PriceSource::Bundled
+        },
+        project_limits: if limits.as_deref() == Some("shown") {
+            ProjectLimits::Shown
+        } else {
+            ProjectLimits::Hidden
+        },
+    })
 }
 
-/// Stores the owner's choices. Inputs: the store and the settings. Output: done, or
+/// Stores the owner's choices, all of them or none: a choice that cannot be stored leaves
+/// the others as they were. Inputs: the store and the settings. Output: done, or
 /// `usage_unavailable`.
 pub fn write(db: &Connection, settings: MoneySettings) -> Result<(), EngineError> {
+    db.execute_batch("SAVEPOINT usage_money_write")
+        .map_err(storage)?;
+    let stored = store(db, settings);
+    let closed = match stored {
+        Ok(()) => db.execute_batch("RELEASE usage_money_write"),
+        Err(_) => db.execute_batch("ROLLBACK TO usage_money_write; RELEASE usage_money_write"),
+    };
+    closed.map_err(storage)?;
+    stored
+}
+
+/// Writes the two rows the owner's choices live in, inside the caller's savepoint. Inputs:
+/// the store and the settings. Output: done, or `usage_unavailable`.
+fn store(db: &Connection, settings: MoneySettings) -> Result<(), EngineError> {
     let main = match settings.main_number {
         MainNumber::Dollars => "dollars",
         MainNumber::Tokens => "tokens",
@@ -91,6 +136,16 @@ pub fn write(db: &Connection, settings: MoneySettings) -> Result<(), EngineError
         "INSERT INTO usage_money (singleton,main_number,prices) VALUES (1,?1,?2)
          ON CONFLICT(singleton) DO UPDATE SET main_number=excluded.main_number,prices=excluded.prices",
         params![main, source],
+    )
+    .map_err(storage)?;
+    let limits = match settings.project_limits {
+        ProjectLimits::Hidden => "hidden",
+        ProjectLimits::Shown => "shown",
+    };
+    db.execute(
+        "INSERT INTO usage_project_limits (singleton,choice) VALUES (1,?1)
+         ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
+        params![limits],
     )
     .map_err(storage)?;
     Ok(())
