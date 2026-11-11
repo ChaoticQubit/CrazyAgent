@@ -73,14 +73,12 @@ test("every release, dev or stable, builds only after the whole CI workflow pass
   assert(block(release, 2, "build").includes("    needs: [prepare, ci]"));
   assert(block(release, 2, "publish").includes("    needs: [prepare, build]"));
   assert(!/^ {4}if: .*(always|cancelled|failure)\(\)/m.test(release), "no job runs after a failed or cancelled dependency");
-  assert.deepEqual(release.split("\n").filter((line) => /^\s+if: .*(always|cancelled|failure)\(\)/.test(line)).map((line) => line.trim()), ["if: always() && matrix.os == 'macos'"], "only the keychain cleanup step runs after a failure");
+  assert.deepEqual(release.split("\n").filter((line) => /^\s+if: .*(always|cancelled|failure)\(\)/.test(line)).map((line) => line.trim()), ["if: always() && matrix.os == 'macos'", "if: always() && runner.environment != 'github-hosted'"], "only the keychain cleanup and the owner's runner cleanup run after a failure");
 });
 
-const OWN_REPO = "github.event.pull_request.head.repo.full_name == github.repository";
-const GUARD = `(github.event_name == 'push' || (github.event_name == 'pull_request' && ${OWN_REPO}))`;
 const RUNNERS = Object.freeze({
   linux: "ubuntu-22.04",
-  macos: `\${{ fromJSON(${GUARD} && '["self-hosted","macOS","badal"]' || '"macos-15"') }}`,
+  macos: "macos-15",
   windows: "windows-2022",
 });
 const ROSETTA = "Refuse to run under Rosetta";
@@ -93,35 +91,32 @@ function steps(workflowText, job) {
   return block(block(workflowText, 0, "jobs").join("\n"), 2, job).join("\n").split(/\n(?= {6}- )/).slice(1);
 }
 
-test("CI runs macOS on the owner's runner for pushes and same-repository pull requests, and a fork pull request stays on GitHub", async () => {
+test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no workflow picks its runner from a pull request", async () => {
   const ci = await workflow("ci.yml");
   const jobs = block(ci, 0, "jobs").join("\n");
   for (const [job, runner] of Object.entries(RUNNERS)) assert(block(jobs, 2, job).includes(`    runs-on: ${runner}`), job);
   for (const name of ["ci.yml", "release.yml"]) {
     const text = await workflow(name);
-    assert.doesNotMatch(text, /pull_request_target/, name);
-    assert.deepEqual(text.split("\n").filter((line) => line.includes("head.repo")), name === "ci.yml" ? [`    runs-on: ${RUNNERS.macos}`] : [],
-      `${name}: only the macOS runner choice reads a pull request's head repository`);
-    assert.deepEqual(text.split("\n").filter((line) => line.includes("github.event_name == 'push'")), name === "ci.yml" ? [`    runs-on: ${RUNNERS.macos}`] : [],
-      `${name}: the runner choice is made once; badal steps follow runner.environment`);
-    for (const line of text.split("\n").filter((line) => /^\s+runs-on:/.test(line) && line.includes("self-hosted"))) {
-      assert(line.includes(`fromJSON(${GUARD} && `), `${name}: ${line.trim()}`);
-      assert(/\|\| '"(ubuntu|macos|windows)-[0-9.]+"'\) \}\}$/.test(line), `${name}: pull requests fall back to a GitHub-hosted runner`);
+    assert.doesNotMatch(text, /pull_request_target|head\.repo|self-hosted/, name);
+    for (const line of text.split("\n").filter((line) => /^\s+runs-on:/.test(line))) {
+      assert.match(line.trim(), /^runs-on: (?:ubuntu-22\.04|macos-15|windows-2022|\$\{\{ matrix\.runner \}\})$/, `${name}: ${line.trim()}`);
     }
   }
 });
 
-test("release builds macOS on badal only for pushes, and every other release job stays on GitHub", async () => {
+test("release builds both macOS targets on GitHub's macos-15 and Linux on ubuntu-22.04, with room for a cold build on three cores", async () => {
   const release = await workflow("release.yml");
   assert.deepEqual(block(release, 0, "on").filter((line) => /^ {2}\S/.test(line)), ["  push:"], "no pull request can start a release");
-  const matrix = block(block(release, 2, "build").join("\n"), 6, "matrix").join("\n");
+  const build = block(release, 2, "build");
+  const matrix = block(build.join("\n"), 6, "matrix").join("\n");
   const entries = matrix.split(/\n(?= {10}- )/).slice(1);
   const macos = entries.filter((entry) => entry.includes("os: macos"));
   assert.deepEqual(macos.map((entry) => entry.match(/target: (\S+)/)[1]).sort(), ["aarch64-apple-darwin", "x86_64-apple-darwin"]);
   for (const entry of entries) {
-    assert.equal(entry.includes("runner: [self-hosted, macOS, badal]"), entry.includes("os: macos"), entry);
+    assert.equal(entry.split("\n")[0], entry.includes("os: macos") ? "          - runner: macos-15" : "          - runner: ubuntu-22.04", entry);
   }
-  assert.equal(release.split("\n").filter((line) => line.includes("self-hosted")).length, 2);
+  assert(build.includes("    runs-on: ${{ matrix.runner }}"));
+  assert(build.includes("    timeout-minutes: 300"));
 });
 
 test("the update manifests cover exactly the targets the release matrix builds, and no Windows target ships until its sandbox holds", async () => {
@@ -364,8 +359,13 @@ test("a release on the owner's runner signs with pinned, checksum-checked Node, 
   assert.match(all[bun], /bun-darwin-aarch64\.zip/);
   assert(node < at(/\bnode scripts\//) && node < at(/\bnpm ci\b/), "no node or npm run comes before the pinned Node");
   assert(at(/name: Install pinned Rust/) < at(/\bcargo build\b/), "no cargo run comes before the pinned Rust");
-  assert.match(all[at(/name: Use a clean Rust build folder/)], /echo "BUN_INSTALL_CACHE_DIR=\$RUNNER_TEMP\/crazyagent-release\/bun-cache" >> "\$GITHUB_ENV"/);
+  const clean = all[at(/name: Use a clean Rust build folder/)];
+  for (const line of ['echo "BUN_INSTALL_CACHE_DIR=$RUNNER_TEMP/crazyagent-release/bun-cache"', 'echo "npm_config_cache=$RUNNER_TEMP/crazyagent-release/npm-cache"']) {
+    assert(clean.includes(`\n            ${line}\n`), line);
+  }
+  assert.match(clean, /\n {10}\} >> "\$GITHUB_ENV"$/, "the clean folder settings reach every later step");
   assert(at(/name: Use a clean Rust build folder/) < at(/install --frozen-lockfile/), "bun installs into a fresh cache");
+  assert(at(/name: Use a clean Rust build folder/) < at(/\bnpm ci\b/), "npm installs into a fresh cache, never the runner user's home");
 });
 
 /**
@@ -422,7 +422,7 @@ test("macOS CI on the owner's runner builds with the release's pinned, checksum-
   assert.match(rust, /\n\s+test "\$\(command -v cargo-clippy\)" = "\$work\/bin\/cargo-clippy"\n/);
   assert.match(rust, /\n\s+test -d "\$\(rustc --print sysroot\)\/lib\/rustlib\/aarch64-apple-darwin\/lib"\n/);
   assert.match(rust, /\n\s+for config in "\$CARGO_HOME\/config\.toml" "\$CARGO_HOME\/config"; do\n\s+\[ ! -e "\$config" \] \|\| \{ echo "::error::[^\n]+"; exit 1; \}\n\s+done\n/,
-    "Cargo settings left in the Cargo home CI keeps across runs stop the job");
+    "Cargo settings a step left in the job's Cargo home stop the job");
   assert(all.findIndex((step) => step.includes('echo "CARGO_HOME=')) < at(/name: Install pinned Rust/), "the Rust step checks the Cargo home CI set");
   const node = at(/name: Install pinned Node on the owner's runner/);
   const bun = at(/id: bun-arm64\n/);
@@ -443,7 +443,7 @@ test("nothing macOS CI runs on the owner's runner installs globally or reads or 
   assert.match(home, /^ {6}- name: Keep CI state out of the runner user's home\n {8}if: runner\.environment != 'github-hosted'\n/, "the second step, right after the Rosetta check");
   assert.match(home, /\n\s+state="\$RUNNER_TOOL_CACHE\/crazyagent-ci"\n/);
   assert.match(home, /\n\s+home="\$RUNNER_TEMP\/home"\n/);
-  assert.match(home, /\n\s+if \(\( size_kib > 20 \* 1024 \* 1024 \)\); then\n[^\n]+\n\s+rm -rf "\$state"\n\s+fi\n/, "the kept CI state stays under 20 GiB");
+  assert.match(home, /\n\s+rm -rf "\$state"\n\s+mkdir -p "\$state"\n/, "nothing an earlier job left is kept");
   for (const line of ['echo "HOME=$home"', 'echo "CARGO_HOME=$state/cargo-home"', 'echo "CARGO_TARGET_DIR=$target"',
     'echo "npm_config_cache=$state/npm-cache"', 'echo "BUN_INSTALL_CACHE_DIR=$state/bun-cache"']) {
     assert(home.includes(`\n            ${line}\n`), line);
@@ -461,7 +461,40 @@ test("nothing macOS CI runs on the owner's runner installs globally or reads or 
   }
 });
 
-test("macOS CI on the owner's runner builds with line tables only, shows the free disk, refuses below 15 GiB free and trims only its own cache to 10 GiB at the end", async () => {
+/**
+ * Asserts that the last step of a job deletes, on the owner's runner and after any failure or cancel, every
+ * tool cache and RUNNER_TEMP folder named by a step that can run there, then the checkout's contents.
+ * Inputs: the job's steps and a label for the messages. Output: none; it throws on the first gap.
+ */
+function assertDeletesEverything(all, label) {
+  const last = all.at(-1);
+  assert.match(last, /^ {6}- name: [^\n]+\n {8}if: always\(\) && runner\.environment != 'github-hosted'\n {8}run: \|\n {10}set -uo pipefail\n/,
+    `${label}: it runs after a failed or cancelled step, only on the owner's runner, and one failed delete does not stop the rest`);
+  assert.match(last, /\n {10}for folder in "\$RUNNER_TOOL_CACHE" "\$RUNNER_TEMP"; do\n {12}case "\$folder" in \/\?\*\) ;; \*\) echo "::error::[^"\n]+"; exit 1 ;; esac\n {10}done\n/, `${label}: no relative runner folder`);
+  assert.match(last, /\n {10}case "\$GITHUB_WORKSPACE" in "\$\(dirname "\$RUNNER_TEMP"\)"\/\?\*\) ;; \*\) echo "::error::[^"\n]+"; exit 1 ;; esac\n/, `${label}: only a checkout inside the runner's work folder is emptied`);
+  const list = (name) => {
+    const found = last.match(new RegExp(`\\n {10}${name}=\\(([a-z0-9 -]+)\\)\\n`));
+    assert(found, `${label}: one ${name} list`);
+    return found[1].split(" ");
+  };
+  const tools = list("tools");
+  const temp = list("temp");
+  const reachable = all.filter((step) => !HOSTED_ONLY.test(step) && !/\n {8}if: matrix\.os == '(?:linux|windows)'\n/.test(step));
+  const named = (pattern) => new Set(reachable.flatMap((step) => [...step.matchAll(pattern)].map((match) => match[1])));
+  for (const name of named(/\$RUNNER_TOOL_CACHE\/([A-Za-z0-9._-]+)/g)) assert(tools.includes(name), `${label}: the tool cache folder ${name} is deleted`);
+  for (const name of named(/\$RUNNER_TEMP\/([A-Za-z0-9._-]+)/g)) assert(temp.includes(name), `${label}: the RUNNER_TEMP folder ${name} is deleted`);
+  assert(last.includes([
+    '          for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done',
+    '          for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done',
+    "          while IFS= read -r -d '' entry; do made+=(\"$entry\"); done < <(find \"$GITHUB_WORKSPACE\" -mindepth 1 -maxdepth 1 -print0)",
+  ].join("\n")), `${label}: the listed folders and the checkout's contents are what goes`);
+  const removals = last.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
+  assert.deepEqual(removals, ['rm -rf "$path" 2>/dev/null || { chmod -R u+w "$path" 2>/dev/null; rm -rf "$path"; }'], `${label}: one delete, retried once a read-only folder is made writable`);
+  assert.match(last, /\n {10}if \[ "\$\{#left\[@\]\}" -gt 0 \]; then echo "::error::[^"\n]+"; exit 1; fi\n?$/, `${label}: anything still on the runner fails the job`);
+  assert.doesNotMatch(last, /\.\.\/|\$HOME\b|~\/|\bsudo\b/, `${label}: nothing outside the runner's own folders`);
+}
+
+test("macOS CI on the owner's runner builds with line tables only, starts with nothing kept, refuses below 10 GiB free and deletes every file it made at the end", async () => {
   const ci = await workflow("ci.yml");
   const all = steps(ci, "macos");
   const home = all[1];
@@ -470,26 +503,26 @@ test("macOS CI on the owner's runner builds with line tables only, shows the fre
     assert(home.includes(`\n            ${line}\n`), line);
   }
   assert.match(home, /\n\s+target="\$state\/target-line-tables"\n/);
-  assert.match(home, /\n\s+find "\$state" -mindepth 1 -maxdepth 1 -name 'target\*' ! -name target-line-tables -exec rm -rf \{\} \+\n/, "a target built with other debug settings goes");
+  assert.match(home, /\n\s+case "\$RUNNER_TOOL_CACHE" in \/\?\*\) ;; \*\) echo "::error::[^"\n]+"; exit 1 ;; esac\n/);
+  assert(home.indexOf('rm -rf "$state"') < home.indexOf("df -Pk"), "the free space is read once what an earlier job left is gone");
+  assert.doesNotMatch(home, /size_kib|find "\$state"/, "no kept state to bound");
   assert.match(home, /\n\s+free_kib="\$\(df -Pk "\$RUNNER_TOOL_CACHE" \| awk 'NR == 2 \{ print \$4 \}'\)"\n\s+echo "[^"\n]*\$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*"\n/, "the free space shows before the build");
-  assert.match(home, /\n\s+if \(\( free_kib < 15 \* 1024 \* 1024 \)\); then\n\s+echo "::error::badal has \$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*needs 15 GiB[^"\n]*free disk on badal[^"\n]*"\n\s+exit 1\n\s+fi\n/);
-  assert(home.indexOf("free_kib < 15") < home.indexOf('>> "$GITHUB_ENV"'), "the refusal comes before the job sets anything up");
-  const last = all.at(-1);
+  assert.match(home, /\n\s+if \(\( free_kib < 10 \* 1024 \* 1024 \)\); then\n\s+echo "::error::badal has \$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*needs 10 GiB[^"\n]*free disk on badal[^"\n]*"\n\s+exit 1\n\s+fi\n/);
+  assert(home.indexOf("free_kib < 10") < home.indexOf('>> "$GITHUB_ENV"'), "the refusal comes before the job sets anything up");
   const tests = all.findIndex((step) => /- name: Test Bun suites\n/.test(step));
-  assert(tests > 0 && tests === all.length - 2, "the trim is the last step, right after the tests");
-  assert.match(last, /^ {6}- name: [^\n]+\n {8}if: always\(\) && runner\.environment != 'github-hosted'\n/, "it runs even when a step failed, only on the owner's runner");
-  assert.match(last, /\n\s+state="\$RUNNER_TOOL_CACHE\/crazyagent-ci"\n/);
-  assert.match(last, /\n\s+case "\$RUNNER_TOOL_CACHE" in \/\?\*\) ;; \*\) echo "::error::[^"\n]+"; exit 1 ;; esac\n/);
-  assert.match(last, /\n\s+if \[ -d "\$state" \] && \[ ! -L "\$state" \]; then\n/);
+  assert(tests > 0 && tests === all.length - 2, "the cleanup is the last step, right after the tests");
+  const last = all.at(-1);
   assert.equal((last.match(/df -Pk "\$RUNNER_TOOL_CACHE"/g) ?? []).length, 1, "one free-space reader");
-  assert.equal((last.match(/\$\(free_gib\) GiB free/g) ?? []).length, 2, "free space after the tests and after the trim");
-  assert.match(last, /\n\s+target="\$state\/target-line-tables"\n/);
-  assert.match(last, /\n\s+if \[ -d "\$target" \]; then\n\s+du -sk "\$target" \| awk '\{ printf "Rust target: %\.1f GiB\\n", \$1 \/ 1048576 \}'\n\s+fi\n/, "the target size shows, so the floor can follow the real need");
-  assert(last.indexOf('du -sk "$target"') < last.indexOf("-exec rm -rf"), "the size is read before the trim");
-  assert.equal((last.match(/\(\( size_kib > 10 \* 1024 \* 1024 \)\)/g) ?? []).length, 2, "targets first, then everything, down to 10 GiB");
-  const removals = last.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
-  assert.deepEqual(removals, ["find \"$state\" -mindepth 1 -maxdepth 1 -name 'target*' -exec rm -rf {} +", 'rm -rf "$state"'], "nothing outside this runner's crazyagent-ci folder");
-  assert.doesNotMatch(last, /\$RUNNER_TOOL_CACHE\/(?!crazyagent-ci")|\.\.\//);
+  assert.equal((last.match(/\$\(free_gib\) GiB free/g) ?? []).length, 2, "free space after the tests and after the cleanup");
+  assert.match(last, /\n\s+target="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/target-line-tables"\n\s+if \[ -d "\$target" \]; then\n\s+du -sk "\$target" \| awk '\{ printf "Rust target: %\.1f GiB\\n", \$1 \/ 1048576 \}'\n\s+fi\n/, "the target size shows, so the floor can follow the real need");
+  assert(last.indexOf('du -sk "$target"') < last.indexOf("rm -rf"), "the size is read before anything goes");
+  assertDeletesEverything(all, "CI");
+});
+
+test("a release on the owner's runner deletes every file it made after the last upload, even after a failure or cancel", async () => {
+  const all = steps(await workflow("release.yml"), "build");
+  assert.match(all.at(-2), /^ {6}- uses: actions\/upload-artifact@[0-9a-f]{40}\n {8}with:\n {10}name: signing-/, "the cleanup comes after the last upload");
+  assertDeletesEverything(all, "release");
 });
 
 test("Linux CI frees the hosted runner's unused toolsets first, builds with line tables only and shows the free disk and target size at the end", async () => {
@@ -582,14 +615,15 @@ test("macOS release signing keeps the certificate in a job keychain under RUNNER
   assert.equal(release.split("\n").filter((line) => edits.test(line)).length, 4, "no other step edits the keychain search list");
 });
 
-test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", async () => {
+test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun under Rosetta, which only a GitHub-hosted runner may install", async () => {
   const release = await workflow("release.yml");
   assert.match(release, /^ {2}BUN_DARWIN_X64_SHA256: [0-9a-f]{64}$/m);
   const all = steps(release, "build");
   const bun = all.find((step) => step.includes("id: bun-x64"));
   assert.match(bun, /if: matrix\.target == 'x86_64-apple-darwin'/);
   assert.match(bun, /echo "\$BUN_DARWIN_X64_SHA256  \$work\/bun\.zip" \| shasum -a 256 -c -/);
-  assert.match(bun, /"\$RUNNER_TOOL_CACHE\/bun\/\$BUN_VERSION\/x64"/);
+  assert.match(bun, /"\$RUNNER_TOOL_CACHE\/crazyagent-release\/bun\/\$BUN_VERSION\/x64"/, "the x86_64 bun stays in the release's own tool cache folder");
+  assert.match(bun, /\n\s+if ! arch -x86_64 \/usr\/bin\/true 2>\/dev\/null; then\n\s+if \[ "\$RUNNER_ENVIRONMENT" != github-hosted \]; then\n[^\n]+::error::[^\n]+\n\s+exit 1\n\s+fi\n\s+sudo softwareupdate --install-rosetta --agree-to-license\n\s+arch -x86_64 \/usr\/bin\/true\n\s+fi\n/);
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
     assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
   }
