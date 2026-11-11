@@ -340,7 +340,7 @@ async fn relay(
                 ) => {
                     break "terminal_request_invalid";
                 }
-                Some(TerminalRequest::Input { bytes }) if bytes.is_empty() || bytes.len() > INPUT_BYTES_MAX => {
+                Some(TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes }) if bytes.is_empty() || bytes.len() > INPUT_BYTES_MAX => {
                     break "terminal_request_invalid";
                 }
                 Some(TerminalRequest::Resize { cols, rows })
@@ -385,7 +385,9 @@ async fn act(
 ) -> Result<(), HostError> {
     let (host, name) = (host.clone(), name.clone());
     tokio::task::spawn_blocking(move || match request {
-        TerminalRequest::Input { bytes } => host.input(&name, &bytes),
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            host.input(&name, &bytes)
+        }
         TerminalRequest::Resize { cols, rows } => host.resize(&name, cols, rows),
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }

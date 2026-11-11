@@ -806,13 +806,17 @@ pub(crate) fn unsent_line(
 
 /// Records keys the owner typed into a team agent's terminal, the owner typing signal that
 /// holds engine input to a live master back. Takes the engine database, the team agent id,
-/// the typed bytes and the time. Returns any SQLite failure; other agents are ignored.
+/// the typed bytes and the time. Returns any SQLite failure; other agents are ignored, and
+/// bytes that hold only a view's own reports (see `pressed`) change nothing.
 pub fn owner_typed(
     connection: &Connection,
     agent: i64,
     bytes: &[u8],
     now_ms: i64,
 ) -> Result<(), EngineError> {
+    if !pressed(bytes) {
+        return Ok(());
+    }
     write_typed(connection, agent, Typed::of(bytes, now_ms)).map_err(state)?;
     Ok(())
 }
@@ -907,8 +911,12 @@ impl OwnerTyping {
 
     /// Records keys the owner typed into one team agent's terminal, in memory only; the
     /// keys themselves are not kept. Takes the team agent id, the keys and the time in
-    /// milliseconds. A signal already holding `TYPED_AGENTS_MAX` recent agents drops it.
+    /// milliseconds. A signal already holding `TYPED_AGENTS_MAX` recent agents drops it, and
+    /// bytes that hold only a view's own reports (see `pressed`) change nothing.
     pub fn record(&self, agent: i64, bytes: &[u8], now_ms: i64) {
+        if !pressed(bytes) {
+            return;
+        }
         let typed = Typed::of(bytes, now_ms);
         let mut state = self.shared.state();
         let Typing {
@@ -1073,6 +1081,39 @@ fn write_typed(connection: &Connection, agent: i64, typed: Typed) -> rusqlite::R
          WHERE agent=?1 AND live=1",
         params![agent, typed.at_ms, typed.draft],
     )
+}
+
+/// Says whether bytes from a terminal view hold a key the owner pressed, not only reports
+/// the view sends by itself: focus in and out as the owner switches tabs (`ESC [ I`,
+/// `ESC [ O`) and SGR or X10 mouse reports (OB-10). Takes the bytes. Returns true once any
+/// other byte or sequence is found, false for none or only reports.
+fn pressed(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        let Some(report) = report_len(&bytes[index..]) else {
+            return true;
+        };
+        assert!(report >= 3 && index + report <= bytes.len());
+        index += report;
+    }
+    false
+}
+
+/// The length of the view report that bytes start with: a focus report, an X10 mouse report
+/// of three raw bytes, or an SGR mouse report of digits and `;` ending in `M` or `m`. Takes
+/// the bytes. Returns the length, none when they start with anything else.
+fn report_len(bytes: &[u8]) -> Option<usize> {
+    match bytes {
+        [0x1b, b'[', b'I' | b'O', ..] => Some(3),
+        [0x1b, b'[', b'M', _, _, _, ..] => Some(6),
+        [0x1b, b'[', b'<', rest @ ..] => {
+            let end = rest
+                .iter()
+                .position(|byte| !byte.is_ascii_digit() && *byte != b';')?;
+            matches!(rest[end], b'M' | b'm').then_some(3 + end + 1)
+        }
+        _ => None,
+    }
 }
 
 /// Reads what typed bytes do to the owner's unsent line: whether they submit or clear it

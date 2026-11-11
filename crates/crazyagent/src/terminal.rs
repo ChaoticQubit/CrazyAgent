@@ -1017,7 +1017,10 @@ pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
 /// `Input`, `Prompt`, `Resize` and `Detach` follow on the same
 /// connection and go to that pane. `Input` bytes, at most `INPUT_BYTES_MAX`, are typed as given and never kept.
 /// `Prompt` text, at most `PROMPT_BYTES_MAX`, is the owner's explicit message: it is typed as
-/// one submission, and a sub-agent's master later hears a note of it.
+/// one submission, and a sub-agent's master later hears a note of it. `Scroll` bytes, bound
+/// as `Input`, are keys the viewer made from the owner's mouse wheel, such as the arrow keys a
+/// full-screen app reads in place of a scroll; they are typed as `Input` is but never count
+/// as the owner typing, which holds engine input to a live master back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalRequest {
@@ -1035,6 +1038,9 @@ pub enum TerminalRequest {
         rows: u16,
     },
     Input {
+        bytes: Vec<u8>,
+    },
+    Scroll {
         bytes: Vec<u8>,
     },
     Prompt {

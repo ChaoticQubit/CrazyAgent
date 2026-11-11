@@ -10,6 +10,7 @@ let input = null;
 let held = [];
 let hold = false;
 export const sent = [];
+export const wheeled = [];
 export const stats = { queued: 0, finished: 0, most: 0, stopped: 0, wheels: 0 };
 
 /** Mounts one agent terminal view wired as the team panel wires it, with a send that the
@@ -18,6 +19,7 @@ export function mount(rows, cols, keys = true) {
   input?.dispose();
   terminal?.dispose();
   sent.length = 0;
+  wheeled.length = 0;
   held = [];
   hold = false;
   Object.assign(stats, { queued: 0, finished: 0, most: 0, stopped: 0, wheels: 0 });
@@ -41,8 +43,9 @@ export function mount(rows, cols, keys = true) {
     stats.most = Math.max(stats.most, stats.queued - stats.finished);
     return true;
   };
-  input = connectInput(terminal, counted, (chunk) => {
+  input = connectInput(terminal, counted, (chunk, wheel) => {
     sent.push(chunk);
+    wheeled.push(wheel);
     if (!hold) return Promise.resolve(true);
     return new Promise((done) => held.push(done));
   }, () => true, () => keys);
@@ -75,6 +78,7 @@ export function view() {
     y: Math.round(box.top + box.height / 2),
     sends: sent.length,
     text: sent.map((chunk) => String.fromCharCode(...chunk)).join(""),
+    lanes: sent.map((chunk, index) => `${wheeled[index] ? "wheel" : "keys"}:${String.fromCharCode(...chunk)}`),
     stats: { ...stats },
   };
 }

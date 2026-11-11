@@ -161,16 +161,21 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
  * reports that arrive while earlier input is still being sent wait as one batch that later
  * reports join, so a fast scroll costs a few sends rather than one per wheel event and never
  * fills the queue. Typed bytes close the batch, so keys and scrolling keep their order.
- * Inputs: the queue and the send call for one chunk. Output: the two lanes. */
-export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
-  const keys = keyQueue(run, send);
+ * Inputs: the queue and the send call for one chunk, told whether the wheel made it.
+ * Output: the two lanes. */
+export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
+  const keys = keyQueue(run, (chunk) => send(chunk, false));
+  const scrolls = keyQueue(run, (chunk) => send(chunk, true));
   let batch: number[] | null = null;
   const typed = (bytes: Uint8Array) => {
     batch = null;
     keys(bytes);
   };
   const wheel = (bytes: Uint8Array) => {
-    if (bytes.length > INPUT_BYTES_MAX) return typed(bytes);
+    if (bytes.length > INPUT_BYTES_MAX) {
+      batch = null;
+      return scrolls(bytes);
+    }
     if (batch && batch.length + bytes.length <= INPUT_BYTES_MAX) {
       batch.push(...bytes);
       return;
@@ -178,7 +183,7 @@ export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: 
     const waiting = Array.from(bytes);
     batch = run(() => {
       if (batch === waiting) batch = null;
-      return send(waiting);
+      return send(waiting, true);
     }) ? waiting : null;
   };
   return { typed, wheel };
