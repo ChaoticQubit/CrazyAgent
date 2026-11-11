@@ -13,6 +13,7 @@ import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
 import { ConversationTab, MasterSettingsButton, MasterSettingsDrawer } from "./conversation";
 import { accountName } from "./research";
+import { LiveConversation } from "./session-messages";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
@@ -392,7 +393,8 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * engine's line while that terminal waits to start, or a line while it starts, can't or is
  * stopped, with Start again, the start of coming back to the tab, after an idle stop; a
  * stopped team (Stop all) says so and offers Start all. An engine that says the master has no terminal app
- * gets today's conversation instead. Inputs: the project data, the master harness id, the
+ * gets today's conversation instead. Under the Sessions bar the session's stored
+ * conversation can be shown, so what an earlier master said stays readable. Inputs: the project data, the master harness id, the
  * state, the start action, the session check Start all sends once the team runs again, the
  * area's sessions when its owner already holds them and why the owner's Open opened no
  * session, if it did not. Output: the area. */
@@ -423,6 +425,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     data.reloadTeam();
   };
   const state = liveWord(live);
+  const mark = live.kind === "running" ? live.node?.status ?? null : null;
   const accountId = live.kind === "running" ? live.node?.account ?? null : null;
   const account = accountId === null ? null : accountName(accounts.kind === "ok" ? accounts.value : [], accountId);
   const head = masterHead(harness, live.kind === "running" && live.node ? runningHarness(data.team.result, data.id, live.node.agent) : null, name);
@@ -434,7 +437,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       {head.waits && <span className="pj-console-detail" data-testid="master-switch-waits">{displayText(head.waits)}</span>}
       <span className="pj-console-actions"><MasterSettingsButton /></span>
     </div>
-    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={live.kind === "running" ? live.node?.status ?? null : null} onSwitched={async () => {
+    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={mark} harnesses={harnesses} onSwitched={async () => {
       await sessions.reread();
       if (off) await onStart();
       data.reloadTeam();
@@ -443,6 +446,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     {moved && <div className="pj-row pj-small pj-muted" role="status" data-testid="master-moved">
       <span>{displayText(moved)}</span>
     </div>}
+    {live.kind !== "not_ready" && <LiveConversation ticket={sessions.ticket} sessionId={sessions.liveId} mark={mark} harnesses={harnesses} />}
     {openNote && <div className="pj-note warn" role="alert">
       <p>{`${NO_SESSION} ${displayText(openNote)}`}</p>
     </div>}

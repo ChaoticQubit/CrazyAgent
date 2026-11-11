@@ -35,3 +35,217 @@ fn leaving_the_project_while_a_new_session_waits_says_it_was_not_started() {
         "New session not started. You left the project before the settings were read."
     );
 }
+
+/// One stored message of a live terminal turn, for the rows about the held messages.
+/// Inputs: its sequence number and its text, if read. Output: the row.
+fn stored_row(seq: u64, text: Option<&str>) -> SessionMessage {
+    SessionMessage {
+        seq,
+        speaker: crate::master_sessions::MessageSpeaker::Owner,
+        mode: crate::master_sessions::MasterMode::Live,
+        harness: Some("claude-code".into()),
+        text: text.map(str::to_owned),
+        at_ms: 1_000 + seq,
+        source: crate::master_sessions::MessageSource::Terminal,
+    }
+}
+
+/// A run of stored rows with texts naming their sequence numbers. Input: the sequence
+/// numbers. Output: the rows.
+fn stored_rows(seqs: std::ops::RangeInclusive<u64>) -> Vec<SessionMessage> {
+    seqs.map(|seq| stored_row(seq, Some(&format!("message {seq}"))))
+        .collect()
+}
+
+#[test]
+fn stored_messages_join_page_by_page_and_show_only_once_the_first_message_is_held() {
+    let session = SessionId::new("session-1").unwrap();
+    let mut held = Stored::default();
+    assert!(held.whole(&session).is_empty());
+    assert_eq!(held.wanted(), None);
+
+    held.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(5..=6),
+            newest_next: Some(5),
+            older: None,
+        },
+    );
+    assert!(
+        held.whole(&session).is_empty(),
+        "older messages are not held yet"
+    );
+    assert_eq!(held.wanted(), Some(5));
+
+    held.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(5..=7),
+            newest_next: Some(5),
+            older: Some((5, stored_rows(3..=4), Some(3))),
+        },
+    );
+    assert_eq!(held.wanted(), Some(3));
+    assert!(held.whole(&session).is_empty());
+
+    held.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(6..=7),
+            newest_next: Some(6),
+            older: Some((3, stored_rows(1..=2), None)),
+        },
+    );
+    assert_eq!(held.wanted(), None);
+    assert_eq!(held.whole(&session), stored_rows(1..=7).as_slice());
+    let other = SessionId::new("session-2").unwrap();
+    assert!(
+        held.whole(&other).is_empty(),
+        "one session's rows never show under another"
+    );
+}
+
+#[test]
+fn a_terminal_turn_s_owner_row_gains_its_words_and_a_stale_older_page_is_left_out() {
+    let session = SessionId::new("session-1").unwrap();
+    let mut held = Stored::default();
+    held.take(
+        &session,
+        StoredRead {
+            newest: vec![stored_row(1, Some("plan")), stored_row(2, None)],
+            newest_next: None,
+            older: None,
+        },
+    );
+    assert_eq!(held.whole(&session)[1].text, None);
+    held.take(
+        &session,
+        StoredRead {
+            newest: vec![stored_row(2, Some("ship it")), stored_row(3, Some("done"))],
+            newest_next: Some(2),
+            older: Some((9, stored_rows(7..=8), Some(7))),
+        },
+    );
+    let rows = held.whole(&session);
+    assert_eq!(
+        rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [1, 2, 3],
+        "a page asked below a cursor the client no longer holds adds nothing"
+    );
+    assert_eq!(rows[1].text.as_deref(), Some("ship it"));
+}
+
+#[test]
+fn a_newest_page_that_does_not_reach_the_held_rows_or_is_of_another_session_starts_again() {
+    let session = SessionId::new("session-1").unwrap();
+    let mut held = Stored::default();
+    held.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(1..=3),
+            newest_next: None,
+            older: None,
+        },
+    );
+    held.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(70..=72),
+            newest_next: Some(70),
+            older: None,
+        },
+    );
+    assert!(held.whole(&session).is_empty(), "rows 4 to 69 are not held");
+    assert_eq!(held.wanted(), Some(70));
+
+    let next = SessionId::new("session-2").unwrap();
+    held.take(
+        &next,
+        StoredRead {
+            newest: stored_rows(1..=2),
+            newest_next: None,
+            older: None,
+        },
+    );
+    assert_eq!(held.whole(&next), stored_rows(1..=2).as_slice());
+    assert!(held.whole(&session).is_empty());
+}
+
+#[test]
+fn a_session_with_more_stored_messages_than_the_client_keeps_never_counts_as_whole() {
+    let session = SessionId::new("session-1").unwrap();
+    let mut held = Stored::default();
+    let many = u64::try_from(MESSAGES_HELD_MAX).unwrap() + 10;
+    held.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(1..=many),
+            newest_next: None,
+            older: None,
+        },
+    );
+    assert!(held.whole(&session).is_empty());
+    assert_eq!(
+        held.wanted(),
+        None,
+        "the client stops asking for older pages"
+    );
+    assert_eq!(held.rows.len(), MESSAGES_HELD_MAX);
+    assert_eq!(
+        held.rows.last().map(|row| row.seq),
+        Some(many),
+        "the newest rows are the ones kept"
+    );
+}
+
+#[test]
+fn an_opened_session_shows_the_rows_it_holds_before_its_first_message_is_read() {
+    let session = SessionId::new("session-1").unwrap();
+    let mut state = State::default();
+    assert_eq!(state.opened_messages(), None);
+    state.open_messages(Some(session.clone()));
+    assert_eq!(state.opened_messages(), None, "no read arrived yet");
+    assert_eq!(state.opened_stored.wanted(), None);
+
+    state.opened_stored.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(5..=6),
+            newest_next: Some(5),
+            older: None,
+        },
+    );
+    assert_eq!(
+        state.opened_messages(),
+        Some((stored_rows(5..=6).as_slice(), false)),
+        "the newest rows show while older ones are still read"
+    );
+    assert_eq!(state.opened_stored.wanted(), Some(5));
+    state.opened_stored.take(
+        &session,
+        StoredRead {
+            newest: stored_rows(5..=6),
+            newest_next: Some(5),
+            older: Some((5, stored_rows(1..=4), None)),
+        },
+    );
+    assert_eq!(
+        state.opened_messages(),
+        Some((stored_rows(1..=6).as_slice(), true))
+    );
+
+    state.open_messages(Some(session.clone()));
+    assert!(
+        state.opened_messages().is_some(),
+        "opening the same session again keeps its rows"
+    );
+    state.open_messages(Some(SessionId::new("session-2").unwrap()));
+    assert_eq!(
+        state.opened_messages(),
+        None,
+        "another session starts empty"
+    );
+    state.open_messages(None);
+    assert_eq!(state.opened_messages(), None);
+}

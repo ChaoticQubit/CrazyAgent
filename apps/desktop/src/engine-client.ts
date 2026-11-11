@@ -2315,6 +2315,59 @@ export interface MasterSessionSummary {
   last_line: string | null;
   agents: string[];
   results_waiting: number;
+  mode?: MasterMode | null;
+  harness?: string | null;
+}
+
+/** Which kind of master ran a message or a session: the one the engine runs one turn at a
+ * time, or the one that runs live in its terminal. */
+export type MasterMode = "one_turn" | "live";
+
+/** One stored message of a master conversation. `seq` orders a session's messages from 1.
+ * `speaker` "engine" is a request the engine typed itself and "switch" the divider where
+ * another master took the conversation over, whose `text` is the whole divider line.
+ * `harness` is a live master's catalog id or alias, or a one-turn master's backend (`rcli`,
+ * `codex`, `claude`). `text` is null for a terminal turn whose typed words were not read.
+ * `source` tells where the row comes from (see `MessageSource`). */
+export interface SessionMessage {
+  seq: number;
+  speaker: "owner" | "engine" | "master" | "switch";
+  mode: MasterMode;
+  harness: string | null;
+  text: string | null;
+  at_ms: number;
+  source: MessageSource;
+}
+
+/** Where a stored message comes from: a turn the engine ran ("turn"), a turn in the live
+ * terminal ("terminal"), a master switch ("switch") or the divider an upgrade placed
+ * ("backfill"). "record" is text read from the harness's own record and "counter" a row that
+ * stands for a terminal turn an older engine only counted: the engine did not see those
+ * words typed, so a view marks them. */
+export type MessageSource = "turn" | "terminal" | "record" | "counter" | "switch" | "backfill";
+
+/** One page of a session's stored messages, oldest first. `next` is the `before` of the page
+ * of older messages, null once the page holds the session's first message; `count` is every
+ * stored message of the session. */
+export interface MasterMessagePage {
+  project_id: string;
+  session_id: string;
+  messages: SessionMessage[];
+  next: number | null;
+  count: number;
+}
+
+export interface MasterMessages {
+  ticket: string;
+  revision: string;
+  page: MasterMessagePage;
+}
+
+/** Reads one page of the stored messages of any session of the selected project, in either
+ * master mode: the newest when `before` is null, else those with a sequence number below it.
+ * Inputs: the selection ticket, the session id, the cursor and the page size, 1 to 64. */
+export function masterMessages(ticket: string, sessionId: string, before: number | null, limit: number): Promise<MasterMessages> {
+  return invoke<MasterMessages>("desktop_master_messages", { ticket, sessionId, before, limit });
 }
 
 export interface MasterSessions {

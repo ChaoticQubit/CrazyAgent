@@ -21,6 +21,7 @@ import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordin
 import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
 import { ApplySwitch } from "./settings";
 import { SessionsBar, ownerText, switchDivider, withOwnerLines } from "./sessions";
+import { TOO_LONG, conversationLines, useSessionMessages } from "./session-messages";
 
 const READ_ONLY = "Read-only: the master runs live in its terminal now.";
 
@@ -83,37 +84,43 @@ export function queuedLines(queued: string | null, openFailed: boolean): Console
   ];
 }
 
-/** The console lines of the master conversation: each turn's opening (the owner's message as
- * this window sent it or as read back from the engine, the engine's line for a turn it asked
- * for, or a placeholder for a message whose text is not read yet), the reply or the turn's
- * status line (a running turn's with its activity behind Show activity), its task and account
- * lines, then the messages this window sent that no turn shows yet. Inputs: the turns, the
- * texts this window sent by turn id, when each was sent, the current time, the owner lines
- * read back by input cursor and the owner's account names for the account lines. Output: the
- * lines in order, each with an id that stays the same while it is shown. */
-export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {},
+/** The console lines of one master turn: its opening (the owner's message as this window
+ * sent it or as read back from the engine, the engine's line for a turn it asked for, or a
+ * placeholder for a message whose text is not read yet), the reply or the turn's status
+ * line (a running turn's with its activity behind Show activity), then its task, changes
+ * and account lines. Inputs: the turn, the texts this window sent by turn id, when each was
+ * sent, the current time, the owner lines read back by input cursor and the owner's account
+ * names for the account lines. Output: the lines, each with an id that stays the same while
+ * it is shown. */
+export function turnLines(turn: MasterTurn, sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {},
   accounts: { id: string; name: string }[] = []): ConsoleLine[] {
   const lines: ConsoleLine[] = [];
-  for (const turn of turns) {
-    const engine = engineLine(turn);
-    const id = `${turn.id}-owner`;
-    const owner = ownerText(turn, sent, held);
-    lines.push(owner !== undefined ? { id, kind: "owner", text: owner }
-      : { id, kind: "engine", text: engine ?? `Your message ${turn.ordinal} (its text stays in the window that sent it)` });
-    if (turn.reply) lines.push({ id: `${turn.id}-reply`, kind: "reply", text: turn.reply.text });
-    else {
-      const failed = turnSettled(turn) && turn.phase !== "succeeded";
-      const running = turn.phase === "running";
-      const activity = running ? activityLines(turn.activity, now) : [];
-      lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine",
-        text: running ? thinkingLine(sentAt?.[turn.id] ?? turn.attempt?.selected_at_ms, now, turn.activity) : turnLine(turn),
-        ...(activity.length > 0 ? { activity } : {}) });
-    }
-    taskLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-task-${index}`, kind: "delegate", text }));
-    const changes = changesLine(turn);
-    if (changes !== null) lines.push({ id: `${turn.id}-changes`, kind: "tool", text: changes });
-    accountLines(turn, accounts).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
+  const engine = engineLine(turn);
+  const id = `${turn.id}-owner`;
+  const owner = ownerText(turn, sent, held);
+  lines.push(owner !== undefined ? { id, kind: "owner", text: owner }
+    : { id, kind: "engine", text: engine ?? `Your message ${turn.ordinal} (its text stays in the window that sent it)` });
+  if (turn.reply) lines.push({ id: `${turn.id}-reply`, kind: "reply", text: turn.reply.text });
+  else {
+    const failed = turnSettled(turn) && turn.phase !== "succeeded";
+    const running = turn.phase === "running";
+    const activity = running ? activityLines(turn.activity, now) : [];
+    lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine",
+      text: running ? thinkingLine(sentAt?.[turn.id] ?? turn.attempt?.selected_at_ms, now, turn.activity) : turnLine(turn),
+      ...(activity.length > 0 ? { activity } : {}) });
   }
+  taskLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-task-${index}`, kind: "delegate", text }));
+  const changes = changesLine(turn);
+  if (changes !== null) lines.push({ id: `${turn.id}-changes`, kind: "tool", text: changes });
+  accountLines(turn, accounts).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
+  return lines;
+}
+
+/** The console lines of the messages this window sent that no turn shows yet: each message
+ * and a line saying the master is thinking. Inputs: the turns, the sent texts by turn id,
+ * when each was sent and the current time. Output: the lines. */
+export function unseenLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number): ConsoleLine[] {
+  const lines: ConsoleLine[] = [];
   for (const [id, text] of Object.entries(sent)) {
     if (turns.some((turn) => turn.id === id)) continue;
     lines.push({ id: `${id}-owner`, kind: "owner", text }, { id: `${id}-status`, kind: "engine", text: thinkingLine(sentAt?.[id], now) });
@@ -121,8 +128,21 @@ export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, 
   return lines;
 }
 
+/** The console lines of the master's turns alone: each turn's lines in order, then the
+ * messages this window sent that no turn shows yet. Inputs: the turns, the texts this window
+ * sent by turn id, when each was sent, the current time, the owner lines read back by
+ * input cursor and the owner's account names for the account lines. Output: the lines in
+ * order. */
+export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {},
+  accounts: { id: string; name: string }[] = []): ConsoleLine[] {
+  return [...turns.flatMap((turn) => turnLines(turn, sent, sentAt, now, held, accounts)), ...unseenLines(turns, sent, sentAt, now)];
+}
+
 /** Conversation tab: the project's master conversation as a terminal-style console with `/`
- * commands and `@` tags for the team's agents. Inputs: the project data and whether the
+ * commands and `@` tags for the team's agents. The conversation is the session's one stored
+ * conversation: the turns of this master with their state, and between them what a live
+ * terminal master said in the same session and the divider of each master switch; before
+ * the stored messages are read, or without them, it is the turns alone. Inputs: the project data and whether the
  * conversation is only read, as the one from before a live master. Output: the console and,
  * unless read-only, the conversation's actions; it polls every two seconds while a reply is
  * still coming. */
@@ -155,6 +175,8 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const handedOff = delegating(turns);
   const noPool = needsPool || (data.pools?.kind === "ok" && data.assigned === null);
   const status = noPool ? "Needs a pool" : masterStatus(session, turns);
+  const mark = `${turns.length}:${turns.filter(turnSettled).length}`;
+  const stored = useSessionMessages(ticket, session?.session_id ?? null, mark, true);
 
   const setSent = (next: Record<string, string>) => {
     sentByProject.set(data.id, next);
@@ -281,7 +303,12 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
-  const told = [...consoleLines(turns, sent, sentAtByProject.get(data.id), now, held, accounts.kind === "ok" ? accounts.value : []), ...queuedLines(queued, openFailed && !ticket)];
+  const sentAt = sentAtByProject.get(data.id);
+  const accountNames = accounts.kind === "ok" ? accounts.value : [];
+  const spoken = stored.whole && stored.rows.length > 0
+    ? [...conversationLines(stored.rows, turns, (turn) => turnLines(turn, sent, sentAt, now, held, accountNames)), ...unseenLines(turns, sent, sentAt, now)]
+    : consoleLines(turns, sent, sentAt, now, held, accountNames);
+  const told = [...(stored.capped ? [{ id: "messages-too-long", kind: "engine" as const, text: TOO_LONG }] : []), ...spoken, ...queuedLines(queued, openFailed && !ticket)];
   const switched = readOnly ? switchDivider(data.team.result) : null;
   const lines: ConsoleLine[] = [...(told.length > 0 ? told : [{ id: "empty", kind: "engine" as const, text: readOnly
     ? "No earlier conversation. Messages sent to the master before it ran live stay here to read."
@@ -312,7 +339,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
     </div>}
-    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} mark={`${turns.length}:${turns.filter(turnSettled).length}`} onSwitched={() => { setSent({}); return refresh(); }} />}
+    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} mark={mark} harnesses={harnesses} onSwitched={() => { setSent({}); return refresh(); }} />}
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     {!readOnly && <>
       {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>

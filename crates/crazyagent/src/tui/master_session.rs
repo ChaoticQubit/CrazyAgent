@@ -14,7 +14,7 @@ use crate::master_session::{
     MasterSessionPhase, MasterSessionView, MasterTurnPhase, MasterTurnView,
     RcliProfileRegistration, RcliProfileRegistrationMetadata,
 };
-use crate::master_sessions::MasterSessionSummary;
+use crate::master_sessions::{MasterSessionSummary, SessionMessage};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
 use crate::routing::{ResourceBudget, RouteRequest};
 use crate::tui::screens::project_master::TURNS_SHOWN_MAX as INPUTS_SHOWN_MAX;
@@ -83,11 +83,113 @@ pub(super) enum Job {
         confirmation: Option<Box<Confirmation>>,
         sessions: bool,
         known: Vec<Cursor>,
+        before: Option<u64>,
+        opened: Option<(SessionId, Option<u64>)>,
     },
     Mutation {
         submission: Submission,
         delivery: MutationDelivery,
     },
+}
+
+/// The most stored messages one read asks the engine for.
+const MESSAGES_PER_READ: u8 = crate::master_sessions::MESSAGES_PAGE_MAX;
+/// The most stored messages of the session in view the client holds.
+const MESSAGES_HELD_MAX: usize = 1024;
+
+/// One read of the stored messages of the session in view: its newest page with the cursor
+/// of the page before it, and the older page the client asked for, with the cursor it
+/// asked below and the cursor of the page before that one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredRead {
+    newest: Vec<SessionMessage>,
+    newest_next: Option<u64>,
+    older: Option<(u64, Vec<SessionMessage>, Option<u64>)>,
+}
+
+/// The stored messages the client holds for the session in view, oldest first, whatever
+/// master ran them. `older` is the cursor of the next older page to read, absent once the
+/// session's first message is held. `read` says a read of `session` arrived.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Stored {
+    session: Option<SessionId>,
+    rows: Vec<SessionMessage>,
+    older: Option<u64>,
+    read: bool,
+}
+
+impl Stored {
+    /// Takes one read for a session. A read for another session, one whose newest page
+    /// does not reach the held rows, or one that finds no row held starts the held rows
+    /// again from that page. A row with
+    /// a held sequence number replaces the held one, since a terminal turn's owner row
+    /// gains its words when the turn ends. An older page counts only when it was asked
+    /// below the cursor still held. Inputs: the session and the read.
+    fn take(&mut self, session: &SessionId, read: StoredRead) {
+        let gap = read.newest.first().is_some_and(|first| {
+            self.rows
+                .last()
+                .is_some_and(|last| first.seq > last.seq + 1)
+        });
+        let fresh =
+            self.session.as_ref() != Some(session) || gap || !self.read || self.rows.is_empty();
+        if fresh {
+            *self = Self {
+                session: Some(session.clone()),
+                rows: Vec::new(),
+                older: read.newest_next,
+                read: true,
+            };
+        }
+        let mut rows = std::mem::take(&mut self.rows);
+        if let Some((before, older, next)) = read.older
+            && !fresh
+            && self.older == Some(before)
+        {
+            rows.extend(older);
+            self.older = next;
+        }
+        rows.extend(read.newest);
+        rows.sort_by_key(|row| row.seq);
+        rows.reverse();
+        rows.dedup_by_key(|row| row.seq);
+        rows.reverse();
+        if rows.len() > MESSAGES_HELD_MAX {
+            rows.drain(..rows.len() - MESSAGES_HELD_MAX);
+            self.older = Some(rows[0].seq);
+        }
+        assert!(rows.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+        assert!(rows.len() <= MESSAGES_HELD_MAX);
+        self.rows = rows;
+    }
+
+    /// The cursor of the older page the next read asks for. Output: none once the first
+    /// message is held or the client holds as many rows as it keeps.
+    fn wanted(&self) -> Option<u64> {
+        if self.rows.len() < MESSAGES_HELD_MAX {
+            self.older
+        } else {
+            None
+        }
+    }
+
+    /// The rows held for `session`, oldest first, and whether they start at its first
+    /// message. Input: the session. Output: none before a read of that session arrived.
+    fn held(&self, session: &SessionId) -> Option<(&[SessionMessage], bool)> {
+        (self.read && self.session.as_ref() == Some(session))
+            .then(|| (self.rows.as_slice(), self.older.is_none()))
+    }
+
+    /// Every stored message of `session`, oldest first. Input: the session in view.
+    /// Output: the rows, or none unless the client holds that session from its first
+    /// message on.
+    fn whole(&self, session: &SessionId) -> &[SessionMessage] {
+        if self.read && self.older.is_none() && self.session.as_ref() == Some(session) {
+            &self.rows
+        } else {
+            &[]
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -127,6 +229,8 @@ pub(super) struct View {
     input: Option<ConversationEntry>,
     inputs: Vec<ConversationEntry>,
     sessions: Option<Vec<MasterSessionSummary>>,
+    stored: Option<StoredRead>,
+    opened: Option<(SessionId, StoredRead)>,
 }
 
 struct Form {
@@ -177,6 +281,9 @@ pub(super) struct State {
     home_confirmation: Option<RcliProfileRegistration>,
     registered_home: Option<RegisteredHome>,
     sessions_shown: bool,
+    stored: Stored,
+    opened: Option<SessionId>,
+    opened_stored: Stored,
     accounts: Vec<AccountRow>,
     pub notice: String,
 }
@@ -201,6 +308,9 @@ impl Default for State {
             home_confirmation: None,
             registered_home: None,
             sessions_shown: false,
+            stored: Stored::default(),
+            opened: None,
+            opened_stored: Stored::default(),
             accounts: Vec::new(),
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
@@ -911,6 +1021,35 @@ impl State {
             .map_or(&[], |view| view.inputs.as_slice())
     }
 
+    /// The stored messages of the session in view, oldest first, whatever master ran them:
+    /// the one-turn master's turns, what a live terminal master said and the divider of each
+    /// master switch. Output: empty before the client holds the session from its first
+    /// message on, and for a session with no stored message.
+    pub fn messages(&self) -> &[SessionMessage] {
+        match self.view.as_ref().and_then(|view| view.session.as_ref()) {
+            Some(session) => self.stored.whole(&session.session_id),
+            None => &[],
+        }
+    }
+
+    /// Opens one session of the project for reading its stored messages, or closes the one
+    /// open. While one is open each master read also reads its messages, newest first, then
+    /// one older page a read. Input: the session, or none to close.
+    pub fn open_messages(&mut self, session: Option<SessionId>) {
+        if self.opened != session {
+            self.opened = session;
+            self.opened_stored = Stored::default();
+            self.next_read = Instant::now();
+        }
+    }
+
+    /// The stored messages held for the session the owner opened, oldest first, and
+    /// whether they start at its first message. Output: none while no session is open or
+    /// before its first read arrived.
+    pub fn opened_messages(&self) -> Option<(&[SessionMessage], bool)> {
+        self.opened_stored.held(self.opened.as_ref()?)
+    }
+
     /// The project's sessions as last read, live one included, newest activity first.
     /// Output: None while the list is hidden or before its first read.
     pub fn sessions(&self) -> Option<&[MasterSessionSummary]> {
@@ -1000,6 +1139,11 @@ impl State {
             confirmation: confirmation.map(Box::new),
             sessions: self.sessions_shown,
             known,
+            before: self.stored.wanted(),
+            opened: self
+                .opened
+                .clone()
+                .map(|session| (session, self.opened_stored.wanted())),
         })
     }
 
@@ -1089,6 +1233,18 @@ impl State {
                 if current {
                     let mut view = *view;
                     view.inputs = shown_inputs(&view.turns, self.inputs(), view.inputs);
+                    match (view.session.as_ref(), view.stored.take()) {
+                        (Some(session), Some(read)) => {
+                            self.stored.take(&session.session_id, read);
+                        }
+                        (Some(_), None) => {}
+                        (None, _) => self.stored = Stored::default(),
+                    }
+                    if let Some((session, read)) = view.opened.take()
+                        && self.opened.as_ref() == Some(&session)
+                    {
+                        self.opened_stored.take(&session, read);
+                    }
                     self.view = Some(view);
                 }
                 if let Some(submission) = completed {
@@ -2316,6 +2472,8 @@ pub(super) async fn read_view(
     confirmation: Option<&Confirmation>,
     sessions: bool,
     known: &[Cursor],
+    before: Option<u64>,
+    opened: Option<&(SessionId, Option<u64>)>,
 ) -> Result<View, String> {
     let state = controller
         .read(OwnerRead::ProjectMaster {
@@ -2334,6 +2492,8 @@ pub(super) async fn read_view(
         input: None,
         inputs: Vec::new(),
         sessions: None,
+        stored: None,
+        opened: None,
     };
     if let Some(session) = &view.session {
         if session.project_id != context.project
@@ -2359,6 +2519,12 @@ pub(super) async fn read_view(
             (&view.revision, &state.config_id),
         )
         .await?;
+        view.stored = read_stored(controller, context, &session.session_id, before).await?;
+    }
+    if let Some((session_id, before)) = opened {
+        view.opened = read_stored(controller, context, session_id, *before)
+            .await?
+            .map(|read| (session_id.clone(), read));
     }
     if let Some(confirmation) = confirmation
         && let MasterOwnerAction::Submit { .. } = confirmation.submission.action
@@ -2376,6 +2542,72 @@ pub(super) async fn read_view(
         view.sessions = Some(read_sessions(controller, &context.project).await?);
     }
     Ok(view)
+}
+
+/// Reads the stored messages of one session of the project: its newest page, and the page
+/// below `before` when the client asks for older ones. Inputs: the controller, context,
+/// session id and the cursor. Output: the read; none when the engine gave no page, so the
+/// view shows its turns alone; or the problem of a page that is not of this session.
+async fn read_stored(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &SessionId,
+    before: Option<u64>,
+) -> Result<Option<StoredRead>, String> {
+    let Some((newest, newest_next)) = stored_page(controller, context, session, None).await? else {
+        return Ok(None);
+    };
+    let older = match before {
+        Some(before) => stored_page(controller, context, session, Some(before))
+            .await?
+            .map(|(rows, next)| (before, rows, next)),
+        None => None,
+    };
+    Ok(Some(StoredRead {
+        newest,
+        newest_next,
+        older,
+    }))
+}
+
+/// Reads one page of a session's stored messages. Inputs: the controller, context,
+/// session id and the sequence number to read below, or none for the newest page. Output:
+/// the rows, oldest first, with the cursor of the page before them; none when the read
+/// itself failed; or the problem of a reply that is not that page.
+async fn stored_page(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &SessionId,
+    before: Option<u64>,
+) -> Result<Option<(Vec<SessionMessage>, Option<u64>)>, String> {
+    let Ok(reply) = controller
+        .read(OwnerRead::ProjectMasterMessages {
+            project_id: context.project.clone(),
+            session_id: session.clone(),
+            before,
+            limit: MESSAGES_PER_READ,
+        })
+        .await
+    else {
+        return Ok(None);
+    };
+    let OwnerData::ProjectMasterMessages { page } = reply.data else {
+        return Err("master_messages_read_required".into());
+    };
+    let rising = page
+        .messages
+        .windows(2)
+        .all(|pair| pair[0].seq < pair[1].seq);
+    let below = before.is_none_or(|before| page.messages.iter().all(|row| row.seq < before));
+    if page.project_id != context.project
+        || &page.session_id != session
+        || page.messages.len() > usize::from(MESSAGES_PER_READ)
+        || !rising
+        || !below
+    {
+        return Err("master_messages_read_context".into());
+    }
+    Ok(Some((page.messages, page.next)))
 }
 
 /// Reads the owner's messages of the shown turns the client does not hold yet, so a

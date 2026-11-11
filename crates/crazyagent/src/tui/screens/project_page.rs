@@ -674,6 +674,15 @@ impl ProjectPage {
         if let Some(listed) = self.master.sessions() {
             self.screen.sessions.set(super::sessions::rows_of(listed));
         }
+        let reading = self
+            .screen
+            .sessions
+            .reading()
+            .and_then(|session| crate::protocol::SessionId::new(session).ok());
+        self.master.open_messages(reading);
+        self.screen
+            .sessions
+            .set_messages(self.master.opened_messages());
     }
 
     fn transcript(&self) -> Option<Transcript> {
@@ -682,6 +691,7 @@ impl ProjectPage {
             session: session.map(|session| session.phase),
             turns,
             inputs: self.master.inputs(),
+            messages: self.master.messages(),
         };
         let harness = match session {
             Some(session) => backend_name(session.selection.backend),
