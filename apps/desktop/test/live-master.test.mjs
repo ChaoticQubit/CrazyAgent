@@ -226,6 +226,25 @@ test("only an idle stop in this project's read offers Start again", async () => 
   assert.equal(idleStopped({ kind: "not_ready" }, "alpha"), false);
 });
 
+test("the master area shows the engine's move line while it is the newest engine note, and only on a running master (DEC-139)", async () => {
+  const { LiveMasterView, movedNote } = await import("../src/screens/project/live-master.tsx");
+  const MOVED = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
+  const note = (id, text, author = "engine", state = "note") => ({ id, author, text, state, created_ms: id });
+  const status = (messages) => ({ kind: "ok", value: teamStatus({ messages }) });
+  assert.equal(movedNote(undefined, "alpha"), null, "not read yet");
+  assert.equal(movedNote(status([]), "alpha"), null, "nothing moved");
+  assert.equal(movedNote(status([note(1, "Seeded from earlier turns."), note(2, MOVED)]), "alpha"), MOVED);
+  assert.equal(movedNote(status([note(1, MOVED), note(2, "hello", "owner", "answered")]), "alpha"), MOVED, "an owner message does not hide it");
+  assert.equal(movedNote(status([note(1, MOVED), note(2, "The live master was turned off: it was idle for 15 min.")]), "alpha"), null, "a newer engine note replaces it");
+  assert.equal(movedNote(status([note(1, MOVED, "master")]), "alpha"), null, "only the engine's own note counts");
+  assert.equal(movedNote(status([note(1, MOVED)]), "beta"), null, "another project's read");
+  assert.equal(movedNote({ kind: "not_ready" }, "alpha"), null);
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  assert.match(source, /const moved = live\.kind === "running" \? movedNote\(data\.team\.result, data\.id\) : null;/u, "a stopped master shows why it stopped, not an old move");
+  assert.match(source, /\{moved && <div className="pj-row pj-small pj-muted" role="status" data-testid="master-moved">/u);
+  assert.equal(typeof LiveMasterView, "function");
+});
+
 test("the live master switch is read from the team status, and a switch never set reads as null", async () => {
   const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
   const status = (patch) => ({ kind: "ok", value: teamStatus(patch) });

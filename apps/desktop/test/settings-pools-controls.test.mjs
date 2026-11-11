@@ -216,6 +216,34 @@ for (const [option, strategy, start, hint] of [
   });
 }
 
+const LIVE_LABEL = "Live master account";
+const LIVE = `[role="radiogroup"][aria-label="${LIVE_LABEL}"] [role="radio"]`;
+const LIVE_HINT = `Fixture.wordsOf(${JSON.stringify(`section[aria-label="${LIVE_LABEL}"] .pool-app-hint`)})`;
+const KEEP_HINT = "A live master stays on the account it started on until it restarts.";
+const MOVE_HINT = "An idle live master moves to its pool's top account and starts again there.";
+
+test("Live master account reads Keep start account until the owner picks another, under the order card", async () => {
+  const seen = await onPools({}, async (page) => ({ checked: await checked(page, LIVE_LABEL), hint: await page.evaluate(LIVE_HINT), options: await page.evaluate(`Fixture.optionsOf(${JSON.stringify(LIVE_LABEL)})`), cards: await page.evaluate("[...document.querySelectorAll('.pool-app-order h3')].map((head) => head.textContent)"), sent: await sent(page) }));
+  assert.deepEqual(seen, { checked: "Keep start account", hint: KEEP_HINT, options: ["Keep start account", "Move when idle"], cards: [APP_LABEL, LIVE_LABEL], sent: [] });
+});
+
+for (const [option, choice, start, hint] of [
+  ["Move when idle", "move_when_idle", {}, MOVE_HINT],
+  ["Keep start account", "keep", { live_master: "move_when_idle" }, KEEP_HINT],
+]) {
+  test(`Live master account: ${option} sends one change, says so and shows its hint`, async () => {
+    const seen = await onPools({ start }, async (page) => {
+      await press(page, LIVE, option);
+      return { sent: await sent(page), saved: await savedLine(page), checked: await checked(page, LIVE_LABEL), hint: await page.evaluate(LIVE_HINT), order: await checked(page, APP_LABEL) };
+    });
+    assert.deepEqual(seen.sent, [{ change: { kind: "live_master", choice }, version: 4 }]);
+    assert.equal(seen.saved, `${LIVE_LABEL}: ${option}.`);
+    assert.equal(seen.checked, option);
+    assert.equal(seen.hint, hint);
+    assert.equal(seen.order, "Use it or lose it", "the order every pool follows is left alone");
+  });
+}
+
 test("Rank moves a row under Manual rank", async () => {
   const seen = await onPools({ ranking: "live", start: MANUAL_MAIN }, async (page) => {
     const before = await rowNames(page);
