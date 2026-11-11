@@ -10,7 +10,8 @@ use crazyagent::terminal::{
     AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, agent, channel_message, graph_shows, pane, plain_code, request_valid,
+    Terminals, VIEWERS_MAX, agent, channel_message, graph_shows, input_request, pane, plain_code,
+    request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -320,6 +321,16 @@ fn only_input_prompts_and_resize_inside_the_engine_limits_are_sent() {
     assert!(request_valid(&input(INPUT_BYTES_MAX)));
     assert!(!request_valid(&input(0)));
     assert!(!request_valid(&input(INPUT_BYTES_MAX + 1)));
+    let scroll = |len: usize| input_request(vec![b'a'; len], true);
+    assert_eq!(
+        scroll(1),
+        TerminalRequest::Scroll { bytes: vec![b'a'] },
+        "wheel keys go as Scroll, which the engine never counts as the owner typing"
+    );
+    assert_eq!(input_request(vec![b'a'], false), input(1));
+    assert!(request_valid(&scroll(INPUT_BYTES_MAX)));
+    assert!(!request_valid(&scroll(0)));
+    assert!(!request_valid(&scroll(INPUT_BYTES_MAX + 1)));
     let resize = |cols, rows| TerminalRequest::Resize { cols, rows };
     assert!(request_valid(&resize(SIZE_MIN, SIZE_MAX)));
     assert!(request_valid(&resize(80, 24)));

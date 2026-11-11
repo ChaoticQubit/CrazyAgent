@@ -1590,19 +1590,21 @@ async fn desktop_terminal_attach(
     room.attach(session, output)
 }
 
+/// Types a view's keys into an attached agent terminal. Inputs: the window, the terminals,
+/// the terminal name, the bytes and whether the view made them from the owner's mouse
+/// wheel, which never counts as the owner typing. Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_input(
     webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     bytes: Vec<u8>,
+    wheel: Option<bool>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
-    terminals
-        .0
-        .send(webview.label(), &agent, TerminalRequest::Input { bytes })
-        .await
+    let request = bridge::terminal::input_request(bytes, wheel.unwrap_or(false));
+    terminals.0.send(webview.label(), &agent, request).await
 }
 
 #[tauri::command]

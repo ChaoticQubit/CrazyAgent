@@ -204,9 +204,10 @@ export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: 
 /** Routes an opened terminal's input to its send queue while the view is live: typed keys,
  * pastes and mouse reports in order, with the reports xterm makes from a wheel event sent on
  * the wheel lane, so a fast scroll on a full-screen agent is batched. Inputs: the terminal,
- * the send queue, the send call for one chunk, the live check and whether keys may reach
- * the terminal; without keys only the wheel does. Output: the subscription. */
-export function connectInput(terminal: Terminal, run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>, live: () => boolean, keys: () => boolean = () => true): IDisposable {
+ * the send queue, the send call for one chunk, told whether the wheel made it, the live
+ * check and whether keys may reach the terminal; without keys only the wheel does. Output:
+ * the subscription. */
+export function connectInput(terminal: Terminal, run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>, live: () => boolean, keys: () => boolean = () => true): IDisposable {
   const lanes = inputLanes(run, send);
   let wheeling = false;
   terminal.attachCustomWheelEventHandler(() => {
@@ -485,7 +486,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
         sendSize();
       });
       const run = jobQueue(() => end(STOPPED_TYPING));
-      const typing = connectInput(terminal, run, async (chunk) => (await typeIntoTerminal(name, chunk)).kind === "ok", () => live, () => keys.current);
+      const typing = connectInput(terminal, run, async (chunk, wheel) => (await typeIntoTerminal(name, chunk, wheel)).kind === "ok", () => live, () => keys.current);
       prompt.current = (text) => {
         if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
         terminal.focus();

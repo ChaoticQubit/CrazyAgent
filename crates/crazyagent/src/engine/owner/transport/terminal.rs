@@ -69,6 +69,16 @@ impl TerminalControl {
         self.send(&TerminalRequest::Input { bytes }).await
     }
 
+    /// Types keys the view made from the owner's mouse wheel into the agent's terminal, as
+    /// `input` types keys. Takes at most `INPUT_BYTES_MAX` bytes.
+    /// Returns once the request is sent.
+    pub async fn scroll(&mut self, bytes: Vec<u8>) -> Result<(), EngineError> {
+        if bytes.len() > INPUT_BYTES_MAX {
+            return Err(failure("terminal_input_bounds"));
+        }
+        self.send(&TerminalRequest::Scroll { bytes }).await
+    }
+
     /// Sends the owner's explicit message to the agent: the engine types it as one submission
     /// and Enter, and a sub-agent's master hears a note of it on its next turn.
     /// Takes non-blank text of at most `PROMPT_BYTES_MAX` bytes.
@@ -351,7 +361,9 @@ async fn act(
     let host = host.clone();
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || match request {
-        TerminalRequest::Input { bytes } => host.input(&agent, &bytes),
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            host.input(&agent, &bytes)
+        }
         TerminalRequest::Prompt { text } => type_prompt(host.as_ref(), &agent, &text).map(drop),
         TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
         TerminalRequest::Attach { .. }
@@ -467,11 +479,16 @@ const PROMPT_SENT: &[u8] = b"\r";
 /// The keys an owner request puts into a team agent's terminal, for the owner typing
 /// signal: the typed keys, or for a prompt a line sent with Enter, since a prompt is the
 /// owner's own text too and can answer a box on that screen. Takes the request. Returns
-/// the keys, or none for a request that types nothing.
+/// the keys, or none for a request that types nothing or only the view's wheel keys, which
+/// are the owner reading, not typing (OB-10). A wheel request holding any other byte counts
+/// as typed keys (OB10-L1).
 #[cfg(unix)]
 fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
     match request {
-        TerminalRequest::Input { bytes } => Some(bytes.as_slice()),
+        TerminalRequest::Scroll { bytes } if crate::team::master::wheel_only(bytes) => None,
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            Some(bytes.as_slice())
+        }
         TerminalRequest::Prompt { .. } => Some(PROMPT_SENT),
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }

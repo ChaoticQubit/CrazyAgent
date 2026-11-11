@@ -1249,10 +1249,11 @@ export function attachTerminal(agent: string, output: Channel<TerminalMessage>, 
   return call<number>("desktop_terminal_attach", { agent, pane, output, id: project });
 }
 
-/** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
- * 1 to 4096 bytes. Output: ok once queued in order. */
-export function typeIntoTerminal(agent: string, bytes: number[]): Promise<Result<void>> {
-  return call<void>("desktop_terminal_input", { agent, bytes });
+/** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name, 1 to
+ * 4096 bytes and whether the view made them from the mouse wheel, which the engine never
+ * counts as the owner typing. Output: ok once queued in order. */
+export function typeIntoTerminal(agent: string, bytes: number[], wheel: boolean = false): Promise<Result<void>> {
+  return call<void>("desktop_terminal_input", { agent, bytes, wheel });
 }
 
 /** Sends the owner's explicit prompt to an attached agent terminal: the engine types it as one

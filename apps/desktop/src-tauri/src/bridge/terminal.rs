@@ -261,13 +261,26 @@ fn json(frame: &TerminalFrame) -> InvokeResponseBody {
     InvokeResponseBody::Json(text)
 }
 
+/// The request that types a view's bytes: `Scroll` for keys the view made from the owner's
+/// mouse wheel, which the engine never counts as the owner typing, else `Input`.
+/// Inputs: the bytes and whether the wheel made them. Output: the request.
+pub fn input_request(bytes: Vec<u8>, wheel: bool) -> TerminalRequest {
+    if wheel {
+        TerminalRequest::Scroll { bytes }
+    } else {
+        TerminalRequest::Input { bytes }
+    }
+}
+
 /// Checks one input, prompt or resize request from the window before it reaches the engine.
 /// Takes the request; attach and detach never come through this path.
 /// Returns whether the bytes, the prompt or the size are inside the engine's limits.
 pub fn request_valid(request: &TerminalRequest) -> bool {
     let size = SIZE_MIN..=SIZE_MAX;
     match request {
-        TerminalRequest::Input { bytes } => !bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX,
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            !bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX
+        }
         TerminalRequest::Prompt { text } => {
             !text.trim().is_empty() && text.len() <= PROMPT_BYTES_MAX
         }
@@ -606,6 +619,7 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
     while let Some(request) = queue.recv().await {
         let sent = match request {
             TerminalRequest::Input { bytes } => control.input(bytes).await,
+            TerminalRequest::Scroll { bytes } => control.scroll(bytes).await,
             TerminalRequest::Prompt { text } => control.prompt(text).await,
             TerminalRequest::Resize { cols, rows } => control.resize(cols, rows).await,
             TerminalRequest::Attach { .. }
