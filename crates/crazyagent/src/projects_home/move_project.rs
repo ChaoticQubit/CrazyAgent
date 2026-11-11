@@ -6,6 +6,7 @@ use crate::engine::EngineError;
 use crate::landing::RepositoryHolds;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 pub const MOVE_STOP_WAIT: Duration = super::DELETE_STOP_WAIT;
 
 const MOVE_POLL: Duration = Duration::from_millis(100);
+const LANDING_REPOSITORIES_MAX: usize = 16;
 const COPIES_MAX: i64 = 4096;
 
 /// Every stored column that holds an absolute path inside a project's folder and must
@@ -165,11 +167,14 @@ impl ProjectMove {
         Ok(Moved { placed, landing })
     }
 
-    /// Waits until no agent of the project runs, then asks again, under the move's hold,
-    /// what [`busy`] asked at the plan: work that started since (a master session's working
+    /// Waits until no agent of the project runs and no landing work runs in its
+    /// repositories, takes the landing holds, then asks again, under the move's hold, what
+    /// [`busy`] asked at the plan: work that started since (a master session's working
     /// copy, a change set step, an onboarding step, research) refuses the move before
-    /// anything moves. Input: the wait. Output: Ok when the folder may move now,
-    /// `move_project_busy` past the wait, or the code of the work found.
+    /// anything moves. Landing work that began before the plan has ended by then, and none
+    /// starts until the caller drops the holds, after the record. Input: the wait. Output:
+    /// the landing holds when the folder may move now, `move_project_busy` past the wait,
+    /// or the code of the work found.
     fn ready(&self, wait: Duration) -> Result<RepositoryHolds, EngineError> {
         let unavailable = |_| refused("move_project_unavailable");
         let db =
@@ -191,7 +196,7 @@ impl ProjectMove {
             .ok_or_else(|| refused("move_project_unavailable"))?;
         assert!(self.add.source().is_absolute());
         let landing = crate::landing::hold_repositories(
-            &std::collections::BTreeSet::new(),
+            &landing_repositories(&db, &self.project, self.add.source())?,
             deadline.saturating_duration_since(Instant::now()),
         )
         .ok_or_else(|| refused("move_project_busy"))?;
@@ -265,6 +270,43 @@ pub(crate) fn pending(connection: &Connection) -> Result<Option<Pending>, Engine
         })
     })
     .transpose()
+}
+
+/// The owner repositories landing work of the project runs in: the project's folder, and
+/// each repository one of its change sets names that is that folder or inside it, under
+/// the spelling the change set stores, since landing work takes its hold by that. Inputs:
+/// an engine connection, the project and its real folder. Output: the roots, or
+/// `move_project_unavailable` (also for more than [`LANDING_REPOSITORIES_MAX`]).
+fn landing_repositories(
+    db: &Connection,
+    project: &ProjectId,
+    origin: &Path,
+) -> Result<BTreeSet<PathBuf>, EngineError> {
+    let mut roots = BTreeSet::from([origin.to_path_buf()]);
+    if !present(db, "landing_change_sets").map_err(sql)? {
+        return Ok(roots);
+    }
+    let mut statement = db
+        .prepare("SELECT DISTINCT repository FROM landing_change_sets WHERE project=?1 LIMIT ?2")
+        .map_err(sql)?;
+    let stored = statement
+        .query_map(
+            params![project.as_str(), LANDING_REPOSITORIES_MAX as i64 + 1],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sql)?;
+    for repository in stored {
+        let repository = PathBuf::from(repository.map_err(sql)?);
+        let inside = repository.starts_with(origin)
+            || std::fs::canonicalize(&repository).is_ok_and(|real| real.starts_with(origin));
+        if inside {
+            roots.insert(repository);
+        }
+    }
+    if roots.len() > LANDING_REPOSITORIES_MAX {
+        return Err(refused("move_project_unavailable"));
+    }
+    Ok(roots)
 }
 
 /// Tells whether a pending project move holds `folder`: the folder is the project's old
