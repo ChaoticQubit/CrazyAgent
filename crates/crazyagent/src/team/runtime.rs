@@ -443,7 +443,9 @@ enum Report {
         text: String,
     },
     /// The turn a live master's pane was in is none: it stayed open with no new byte in the
-    /// session record on a pane whose app waits (OB-1). Its start was counted once for the
+    /// session record on a pane whose app works on nothing, or a takeover found it so
+    /// (OB-1). The master is idle again whatever its screen shows, and engine input to it is
+    /// held until `master::input_released` lets it go. Its start was counted once for the
     /// Sessions list, so the next turn that starts takes that count and adds none.
     NoTurn,
     Own {
@@ -8336,6 +8338,7 @@ impl TeamRuntime {
                 Ok(false)
             }
             Report::NoTurn => {
+                super::master::turn_dropped(&self.connection, id)?;
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 if worker.turn_started.take().is_none() {
                     return Ok(false);
@@ -8345,7 +8348,6 @@ impl TeamRuntime {
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(false);
                 }
-                super::master::turn_dropped(&self.connection, id)?;
                 self.mark_agent(id, AgentStatus::Idle, None)?;
                 Ok(false)
             }
@@ -9220,9 +9222,15 @@ fn work(
                 agent,
                 record,
                 limits,
+                live,
                 ..
             } = *adoption;
-            AgentSession::adopt(host.clone(), agent.clone(), &record, limits).map_err(|problem| {
+            let taken = if live {
+                AgentSession::adopt_live(host.clone(), agent.clone(), &record, limits)
+            } else {
+                AgentSession::adopt(host.clone(), agent.clone(), &record, limits)
+            };
+            taken.map_err(|problem| {
                 let ended = problem.0 == "launch_adopt_unsettled"
                     || matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(true));
                 if !ended {
@@ -9391,7 +9399,7 @@ fn live_adopted(
         }
     };
     let held = Some((credential, profile));
-    match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+    match AgentSession::adopt_live(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
             live_serve(*session, orders, reports, cancel, leave, true, held)
         }
@@ -9441,6 +9449,9 @@ fn live_serve(
         group: session.process_group(),
         pane: session.record().filter(|_| keep).cloned().map(Box::new),
     });
+    if session.took_none() {
+        let _ = reports.send(Report::NoTurn);
+    }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
     let mut problem = None;

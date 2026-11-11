@@ -46,7 +46,8 @@ const _: () = assert!(crate::questions::PENDING_PER_PROJECT_MAX == 64);
 const _: () = assert!(crate::questions::PENDING_PER_ASKER_MAX == 8);
 
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
-/// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
+/// runs. `Busy`: a turn is open, an earlier engine input has not started its turn yet, or
+/// a dropped turn still holds input (see `input_released`).
 /// `OwnerTyping`: the owner typed within the quiet window or left an unsent draft.
 /// `Unready`: the master's app does not read keys yet (bracketed paste off).
 /// `Invalid`: the text is empty or too long. `Failed`: the pane or state could not be used.
@@ -116,6 +117,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_master_live_terminal (
                 project TEXT PRIMARY KEY,
                 terminal INTEGER NOT NULL CHECK(terminal IN (0,1))
+            );
+            CREATE TABLE IF NOT EXISTS team_master_input_holds (
+                agent INTEGER PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS team_master_turns (
                 agent INTEGER NOT NULL,
@@ -386,7 +390,7 @@ pub(crate) fn pane_ready(
             params![project.as_str(), agent],
         )
         .map_err(state)?;
-    Ok(())
+    release_input(connection, agent)
 }
 
 /// Records that a live master's pane ended; another agent's entry is left alone.
@@ -402,7 +406,7 @@ pub(crate) fn pane_ended(
             params![project.as_str(), agent],
         )
         .map_err(state)?;
-    Ok(())
+    release_input(connection, agent)
 }
 
 /// Tells whether a project's live master is answering a turn now, so a session switch asks
@@ -441,12 +445,13 @@ pub(crate) fn turn_started(connection: &Connection, agent: i64) -> Result<(), En
             [agent],
         )
         .map_err(state)?;
-    Ok(())
+    release_input(connection, agent)
 }
 
 /// Records that a live master's open turn was none: it closes with no number, no
-/// `team_master_turns` row and no count, so engine input reaches the master again. Takes
-/// the engine database and the agent. Returns any SQLite failure.
+/// `team_master_turns` row and no count, whatever its screen shows, and engine input to
+/// the master is held until `input_released` lets it go. Takes the engine database and the
+/// agent. Returns any SQLite failure.
 pub(crate) fn turn_dropped(connection: &Connection, agent: i64) -> Result<(), EngineError> {
     let closed = connection
         .execute(
@@ -455,7 +460,55 @@ pub(crate) fn turn_dropped(connection: &Connection, agent: i64) -> Result<(), En
         )
         .map_err(state)?;
     assert!(closed <= 1);
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO team_master_input_holds(agent) VALUES (?1)",
+            [agent],
+        )
+        .map_err(state)?;
     Ok(())
+}
+
+/// Ends the hold a dropped turn left on engine input to an agent, if any. Takes the engine
+/// database and the agent. Returns any SQLite failure.
+fn release_input(connection: &Connection, agent: i64) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "DELETE FROM team_master_input_holds WHERE agent=?1",
+            [agent],
+        )
+        .map_err(state)?;
+    Ok(())
+}
+
+/// Says whether engine input may be typed into an agent after a turn of its was dropped as
+/// none: no hold is left, or its screen now shows the app's own input prompt (see
+/// `events::idle_prompt`), which ends the hold. A turn that starts in the pane ends it too.
+/// Takes the engine database, the terminal host and the agent. Returns the answer, no for a
+/// screen that cannot be read, or any SQLite failure.
+pub(crate) fn input_released(
+    connection: &Connection,
+    host: &dyn Host,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    let held: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_master_input_holds WHERE agent=?1)",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if !held {
+        return Ok(true);
+    }
+    let pane = AgentId::team(agent).map_err(EngineError::from)?;
+    let prompt = host
+        .screen(&pane)
+        .is_ok_and(|screen| super::events::idle_prompt(&screen));
+    if prompt {
+        release_input(connection, agent)?;
+    }
+    Ok(prompt)
 }
 
 /// Records that a live master's turn ended: the turn closes and one `team_master_turns`
@@ -571,6 +624,11 @@ fn master_input_at_when(
         .map_err(|problem| InputRefused::Failed(problem.0))?
     {
         return Err(InputRefused::Unready);
+    }
+    if !input_released(connection, host, agent)
+        .map_err(|problem| InputRefused::Failed(problem.0))?
+    {
+        return Err(InputRefused::Busy);
     }
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(failed)?;

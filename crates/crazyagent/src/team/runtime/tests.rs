@@ -15561,10 +15561,22 @@ fn a_live_master_turn_reported_as_none_closes_without_counting() {
     assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
     assert!(super::super::master::turn_running(&fixture.connection, &project).unwrap());
 
+    let held = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_master_input_holds WHERE agent=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(held(&fixture), 0);
     team.apply(agent, Report::NoTurn).unwrap();
     assert_eq!(shown(&fixture), ("idle".to_owned(), false, 0, 0));
     assert!(!super::super::master::turn_running(&fixture.connection, &project).unwrap());
     assert_eq!(team.workers[&agent].turn_started, None);
+    assert_eq!(held(&fixture), 1, "engine input is held after the drop");
 
     fixture
         .connection
@@ -15577,11 +15589,13 @@ fn a_live_master_turn_reported_as_none_closes_without_counting() {
     assert_eq!(
         shown(&fixture),
         ("starting".to_owned(), false, 0, 0),
-        "with no turn open the report changes nothing"
+        "with no turn open the report changes no status"
     );
+    assert_eq!(held(&fixture), 1);
 
     team.apply(agent, started()).unwrap();
     assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
+    assert_eq!(held(&fixture), 0, "a turn that starts ends the hold");
     team.workers.clear();
 }
 
@@ -15644,44 +15658,51 @@ const LIVE_CODEX_READY: &str = r"Codex stand-in ready\n'";
 #[cfg(target_os = "macos")]
 const LIVE_CODEX_COMPOSER: &str = "Codex stand-in ready\\n\u{203a} Ask Codex to do anything\\n'";
 
-/// A live Codex stand-in that shows a composer row as its idle prompt, whose turn on a line
-/// with "never ends" opens and writes no end, and whose line with "late end" writes a reply
-/// and an end with no start before them. Takes nothing. Returns the script.
+/// A live Codex stand-in whose turn on a line with "never ends" opens and writes no end,
+/// and whose line with "late end" writes a reply and an end with no start before them. With
+/// `composer` it shows a composer row as its idle prompt; without, a screen the engine
+/// cannot read as one. Takes that choice. Returns the script.
 #[cfg(target_os = "macos")]
-fn unclosed_codex() -> String {
+fn unclosed_codex(composer: bool) -> String {
     let started = format!(
         "  case \"$line\" in *\"late end\"*) ;; *)\n{LIVE_CODEX_STARTED}  ;; esac\n  case \"$line\" in *\"never ends\"*) continue ;; esac\n"
     );
     assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_STARTED).count(), 1);
     assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_READY).count(), 1);
+    let ready = if composer {
+        LIVE_CODEX_COMPOSER
+    } else {
+        LIVE_CODEX_READY
+    };
     LIVE_CODEX
         .replace(LIVE_CODEX_STARTED, &started)
-        .replace(LIVE_CODEX_READY, LIVE_CODEX_COMPOSER)
+        .replace(LIVE_CODEX_READY, ready)
 }
 
-/// OB-1 in a real pane: a live master's turn that opens and that nothing closes, on an app
-/// that waits, goes back to idle after the runtime's `stale_turn` with no turn counted or
-/// kept. An end the app writes for it later still counts as one turn.
+/// Runs a live master on `unclosed_codex` until a turn the owner's line opened, which
+/// nothing closes, was dropped after a 4 second `stale_turn`: the master is idle, the
+/// project counts no agent as working, and no turn is counted or kept. Takes the fixture,
+/// its host and whether the app shows its idle prompt. Returns the runtime and the master.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_live_master_turn_nothing_closes_goes_idle_and_a_late_end_still_counts() {
-    let fixture = Fixture::new(1);
-    let host = fixture.host();
+fn dropped_live_turn(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    composer: bool,
+) -> (TeamRuntime, i64) {
     let limits = TeamLimits {
         stale_turn: Duration::from_secs(4),
         master_idle_stop: Duration::from_secs(3600),
         ..TeamLimits::default()
     };
-    let mut team = limited_runtime(&fixture, &host, &unclosed_codex(), limits);
+    let mut team = limited_runtime(fixture, host, &unclosed_codex(composer), limits);
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
     fixture.until(&mut team, "the live master runs idle", |f| {
         live_agent(&f.connection)
             .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
     });
     let master = masters(&fixture.connection)[0];
-    let agent = AgentId::team(master).unwrap();
-
-    host.input(&agent, b"never ends\r").unwrap();
+    host.input(&AgentId::team(master).unwrap(), b"never ends\r")
+        .unwrap();
     fixture.until(&mut team, "the turn opens", |f| {
         live_turns(&f.connection) == (0, true) && f.agent_status(master).0 == AgentStatus::Working
     });
@@ -15691,15 +15712,88 @@ fn a_live_master_turn_nothing_closes_goes_idle_and_a_late_end_still_counts() {
     assert_eq!(
         count(
             &fixture.connection,
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status='working'"
+        ),
+        0,
+        "the project counts no agent as working"
+    );
+    assert_eq!(
+        count(
+            &fixture.connection,
             "SELECT COUNT(*) FROM team_master_turns WHERE project=?1"
         ),
         0,
         "a dropped turn is kept for no usage"
     );
+    (team, master)
+}
 
-    host.input(&agent, b"late end\r").unwrap();
+/// Types engine input into the fixture's live master as the engine does. Takes the
+/// fixture, its host and the text. Returns Ok once typed, or why it was not.
+#[cfg(target_os = "macos")]
+fn engine_input(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    text: &str,
+) -> Result<(), super::super::master::InputRefused> {
+    let input = Connection::open(fixture.base.join("engine.db")).unwrap();
+    super::super::master::master_input(&input, host.as_ref(), None, &fixture.setup.project_id, text)
+}
+
+/// OB-1 in a real pane, on an app that shows its idle prompt: a live master's turn that
+/// opens and that nothing closes goes back to idle after the runtime's `stale_turn`, and
+/// engine input reaches the master at once, since its screen shows the prompt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_dropped_live_master_turn_on_an_idle_prompt_releases_engine_input() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, master) = dropped_live_turn(&fixture, &host, true);
+    assert_eq!(
+        engine_input(&fixture, &host, "[owner] status please"),
+        Ok(())
+    );
+    fixture.until(&mut team, "the engine's input turn is counted", |f| {
+        live_turns(&f.connection) == (1, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    team.shutdown().unwrap();
+}
+
+/// OB1R2-F1 in a real pane, on an app whose screen the engine cannot read as an idle
+/// prompt: the turn nothing closes is dropped all the same, so the master is idle and the
+/// project counts no agent as working, yet engine input stays held and nothing is typed.
+/// The owner's line ends the hold: the dropped turn starts again with the model's text, its
+/// late end counts as one turn, and engine input reaches the master after it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_dropped_live_master_turn_on_an_unknown_screen_is_idle_and_holds_engine_input() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, master) = dropped_live_turn(&fixture, &host, false);
+    assert_eq!(
+        engine_input(&fixture, &host, "[owner] status please"),
+        Err(super::super::master::InputRefused::Busy),
+        "engine input is held on a screen that is no idle prompt"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        live_turns(&fixture.connection),
+        (0, false),
+        "nothing was typed"
+    );
+    assert_eq!(fixture.agent_status(master).0, AgentStatus::Idle);
+
+    host.input(&AgentId::team(master).unwrap(), b"late end\r")
+        .unwrap();
     fixture.until(&mut team, "the late end counts as a turn", |f| {
         live_turns(&f.connection) == (1, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    assert_eq!(
+        engine_input(&fixture, &host, "[owner] status please"),
+        Ok(())
+    );
+    fixture.until(&mut team, "the engine's input turn is counted", |f| {
+        live_turns(&f.connection) == (2, false)
     });
     team.shutdown().unwrap();
 }

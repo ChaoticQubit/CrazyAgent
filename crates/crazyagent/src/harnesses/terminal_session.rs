@@ -65,6 +65,7 @@ pub struct TerminalSession {
     live: bool,
     own: bool,
     grown: (u64, Instant),
+    took_none: bool,
     facts: VecDeque<TranscriptEvent>,
     background: BTreeSet<String>,
     exited: bool,
@@ -164,17 +165,18 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
         .transpose()
 }
 
-/// Says whether an agent's app waits for a message in its pane: it drew nothing for
-/// `APP_QUIET`, no question or permission prompt is on its screen, and the screen shows the
-/// app's own input prompt (see `idle_prompt`), so a still dialog the question rule does not
-/// know never counts as waiting. A host that cannot tell and a failed look say no. Takes
-/// the host and the pane name. Returns the answer.
-fn waits(host: &dyn Host, agent: &AgentId) -> bool {
+/// Says whether an agent's app works on nothing in its pane: it drew nothing for
+/// `APP_QUIET` and no question or permission prompt is on its screen. With `prompted` the
+/// screen must also show the app's own input prompt (see `idle_prompt`), so a still dialog
+/// the question rule does not know does not count. A host that cannot tell and a failed
+/// look say no. Takes the host, the pane name and whether the prompt is needed. Returns
+/// the answer.
+fn waits(host: &dyn Host, agent: &AgentId, prompted: bool) -> bool {
     use crate::team::events::{idle_prompt, question};
     matches!(host.quiet(agent), Ok(Some(quiet)) if quiet >= APP_QUIET)
         && host
             .screen(agent)
-            .is_ok_and(|screen| question(&screen).is_none() && idle_prompt(&screen))
+            .is_ok_and(|screen| question(&screen).is_none() && (!prompted || idle_prompt(&screen)))
 }
 
 fn host_failure(error: HostError) -> LaunchError {
@@ -352,6 +354,7 @@ impl TerminalSession {
             live: false,
             own: false,
             grown: (0, Instant::now()),
+            took_none: false,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
             exited: false,
@@ -569,22 +572,30 @@ impl TerminalSession {
     }
 
     /// Says whether the open turn of a session that follows every turn is no turn any more:
-    /// its record got no byte for the launch's `stale_turn` and its app waits in the pane
-    /// (see `waits`). A pane that does not wait restarts the wait. On a yes the turn is
-    /// dropped here and in the record's reader, so the model at work in it later starts it
-    /// again as a turn. Takes the session. Returns the answer.
+    /// its record got no byte for the launch's `stale_turn` and its app works on nothing in
+    /// the pane (see `waits`), whatever else its screen shows. A pane that does not wait
+    /// restarts the wait. On a yes the turn is dropped here and in the record's reader, so
+    /// the model at work in it later starts it again as a turn. Takes the session. Returns
+    /// the answer.
     pub fn turn_stale(&mut self) -> bool {
         assert!(self.live);
         if !self.turn || self.grown.1.elapsed() < self.limits.stale_turn {
             return false;
         }
-        if !waits(self.host.as_ref(), &self.agent) {
+        if !waits(self.host.as_ref(), &self.agent, false) {
             self.grown.1 = Instant::now();
             return false;
         }
         self.reader.drop_turn();
         self.turn = false;
         true
+    }
+
+    /// Says whether taking this pane over dropped an open turn as none, so the caller that
+    /// follows a live master holds engine input as after any dropped turn. Takes the session.
+    /// Returns the answer, no for a session the engine started.
+    pub fn took_none(&self) -> bool {
+        self.took_none
     }
 
     /// Ends the pane and every process its harness started, then removes the key file and

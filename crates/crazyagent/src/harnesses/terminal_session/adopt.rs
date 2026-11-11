@@ -233,26 +233,54 @@ fn replay(
 }
 
 impl TerminalSession {
-    /// Takes over an agent pane a previous engine left running, without starting the harness
-    /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work. An open turn whose record the harness last
-    /// wrote the launch's `stale_turn` ago, on a pane whose app waits (see `waits`), is no
-    /// turn: nothing is typed and the pane is taken over idle. A turn that does not end on
-    /// a pane whose app waits is taken over idle as well, and either is dropped in the
-    /// record's reader (see `TranscriptReader::drop_turn`); on any other pane it ends the
-    /// pane, with `launch_adopt_unsettled` once its processes are confirmed gone and
-    /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
-    /// budget go on counting from its start. A Codex pane still on its folder access screen
-    /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
-    /// failed look at the screen counts as not on it, so it cannot end the pane. The
-    /// key and context files are removed when the session stops, or at once when the pane
-    /// cannot be taken over. Takes the host, the pane name, the stored record and the limits.
+    /// Takes over a sub-agent's pane; see `adopt_as`, whose rule for a pane that is no live
+    /// master applies. Takes the host, the pane name, the stored record and the limits.
     /// Returns the idle session, or a plain code.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
         record: &PaneRecord,
         limits: LaunchLimits,
+    ) -> Result<Self, LaunchError> {
+        Self::adopt_as(host, agent, record, limits, false)
+    }
+
+    /// Takes over a live master's pane; see `adopt_as`, whose rule for a live master
+    /// applies. Takes the host, the pane name, the stored record and the limits. Returns the
+    /// idle session, or a plain code.
+    pub fn adopt_live(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        record: &PaneRecord,
+        limits: LaunchLimits,
+    ) -> Result<Self, LaunchError> {
+        Self::adopt_as(host, agent, record, limits, true)
+    }
+
+    /// Takes over an agent pane a previous engine left running, without starting the harness
+    /// again. A turn still running in it is stopped with Escape, since its result can no
+    /// longer be matched to the engine's work. An open turn whose record the harness last
+    /// wrote the launch's `stale_turn` ago, on a pane whose app works on nothing (see
+    /// `waits`), is no turn: nothing is typed and the pane is taken over idle. A turn that
+    /// does not end on such a pane is taken over idle as well, and either is dropped in the
+    /// record's reader (see `TranscriptReader::drop_turn`) and told by `took_none`. A live
+    /// master's pane counts whatever else its screen shows, since its caller holds engine
+    /// input after a dropped turn; any other pane must show the app's input prompt. On a
+    /// pane that does not count, a turn that does not end ends the pane, with
+    /// `launch_adopt_unsettled` once its processes are confirmed gone and
+    /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
+    /// budget go on counting from its start. A Codex pane still on its folder access screen
+    /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
+    /// failed look at the screen counts as not on it, so it cannot end the pane. The
+    /// key and context files are removed when the session stops, or at once when the pane
+    /// cannot be taken over. Takes the host, the pane name, the stored record, the limits
+    /// and whether the pane is a live master's. Returns the idle session, or a plain code.
+    fn adopt_as(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        record: &PaneRecord,
+        limits: LaunchLimits,
+        live: bool,
     ) -> Result<Self, LaunchError> {
         let context = record.context.as_ref().map(Installed::adopt).transpose()?;
         if let Some(code) = super::agent_pane_unavailable(std::env::consts::OS) {
@@ -273,11 +301,11 @@ impl TerminalSession {
             && reader
                 .silent()
                 .is_some_and(|silent| silent >= limits.stale_turn)
-            && super::waits(host.as_ref(), &agent);
+            && super::waits(host.as_ref(), &agent, !live);
+        let mut settled = false;
         if open && !stale {
             host.input(&agent, ESCAPE).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;
-            let mut settled = false;
             while !settled && Instant::now() < deadline {
                 std::thread::sleep(POLL);
                 let facts = reader.read()?;
@@ -289,7 +317,7 @@ impl TerminalSession {
                     )
                 });
             }
-            if !settled && !super::waits(host.as_ref(), &agent) {
+            if !settled && !super::waits(host.as_ref(), &agent, !live) {
                 return Err(failure(
                     match super::end_left_pane(host.as_ref(), &agent, "adopt") {
                         Ok(true) => "launch_adopt_unsettled",
@@ -299,11 +327,10 @@ impl TerminalSession {
             }
             if settled {
                 replay(&mut reader, &limits, &mut events)?;
-            } else {
-                reader.drop_turn();
             }
         }
-        if stale {
+        let took_none = open && !settled;
+        if took_none {
             reader.drop_turn();
         }
         let unkept = host.unkept(&agent);
@@ -336,6 +363,7 @@ impl TerminalSession {
             live: false,
             own: false,
             grown: (0, Instant::now()),
+            took_none,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
             exited: false,
@@ -386,6 +414,19 @@ impl AgentSession {
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
         TerminalSession::adopt(host, agent, record, limits)
+            .map(|session| Self::Terminal(Box::new(session)))
+    }
+
+    /// Takes over a live master's pane a previous engine left running; see
+    /// `TerminalSession::adopt_live`. Takes the host, the pane name, the stored record and
+    /// the limits. Returns the idle session, or a plain code.
+    pub fn adopt_live(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        record: &PaneRecord,
+        limits: LaunchLimits,
+    ) -> Result<Self, LaunchError> {
+        TerminalSession::adopt_live(host, agent, record, limits)
             .map(|session| Self::Terminal(Box::new(session)))
     }
 

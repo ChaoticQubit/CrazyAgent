@@ -121,7 +121,7 @@ fn an_idle_pane_is_adopted_as_it_is() {
     assert_eq!(session.record(), Some(&record));
     assert_eq!(session.process_group(), record.pid);
     assert!(
-        session.ready && !session.turn,
+        session.ready && !session.turn && !session.took_none(),
         "the adopted agent waits for its next prompt"
     );
     assert_eq!(lines(&file), 2, "nothing was typed into an idle agent");
@@ -236,9 +236,9 @@ fn a_turn_that_does_not_stop_on_a_pane_that_still_draws_leaves_no_pane_behind() 
     assert!(host.alive().unwrap().is_empty());
 }
 
-/// OB-1 r1 (OB1-F1): a turn that does not stop on a still pane that shows no idle prompt
-/// ends the pane as before: what the screen shows cannot be told from a dialog, so the
-/// pane is not taken over idle, where engine input could be typed into it.
+/// OB-1 r1 (OB1-F1): a sub-agent's turn that does not stop on a still pane that shows no
+/// idle prompt ends the pane as before: what the screen shows cannot be told from a dialog,
+/// so the pane is not taken over idle, where a task could be typed into it.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_turn_that_does_not_stop_on_a_still_pane_with_no_idle_prompt_leaves_no_pane_behind() {
@@ -260,6 +260,35 @@ fn a_turn_that_does_not_stop_on_a_still_pane_with_no_idle_prompt_leaves_no_pane_
     assert!(host.alive().unwrap().is_empty());
 }
 
+/// OB1R2-F1: a live master's turn that does not stop on a still pane is taken over idle
+/// whatever its screen shows, here no idle prompt: the pane keeps running, and the session
+/// says a turn was dropped so its caller holds engine input.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_turn_that_does_not_stop_on_a_still_pane_is_adopted_idle_whatever_it_shows() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(15).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+
+    let mut session = TerminalSession::adopt_live(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .unwrap();
+    assert!(session.ready && !session.turn && session.took_none());
+    follows_a_typed_command(&mut session, &file);
+    session.leave();
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "the live master's pane was not ended over a turn that could not be settled"
+    );
+}
+
 /// OB-1: a turn that does not stop on a pane whose app waits does not end the pane. The
 /// pane is taken over idle and keeps running.
 #[cfg(target_os = "macos")]
@@ -278,7 +307,7 @@ fn a_turn_that_does_not_stop_on_a_waiting_pane_is_adopted_idle() {
         LaunchLimits::default(),
     )
     .unwrap();
-    assert!(session.ready && !session.turn);
+    assert!(session.ready && !session.turn && session.took_none());
     assert_eq!(lines(&file), 1);
     follows_a_typed_command(&mut session, &file);
     session.leave();

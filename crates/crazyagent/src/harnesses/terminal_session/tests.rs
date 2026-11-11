@@ -444,15 +444,31 @@ mod own_turns {
         never_stale("stale-turn-3", &showing(&asked, READS));
     }
 
-    /// OB-1 r1 (OB1-F1): a turn is never stale while its still screen shows a dialog that is
-    /// neither a known question nor the app's idle prompt, so the turn keeps engine input
-    /// held and nothing is typed into the dialog.
+    /// OB1R2-F1: a turn with a silent record goes stale on a still screen whatever it shows
+    /// besides a question: a dialog the engine cannot read, or no prompt at all. Its status
+    /// must clear; holding engine input for such a screen is its caller's part.
     #[test]
-    fn an_open_turn_is_never_stale_while_its_screen_shows_no_idle_prompt() {
+    fn an_open_turn_goes_stale_on_a_still_screen_that_shows_no_idle_prompt() {
         let dialog =
             format!("{RULE}\\r\\n Tell the agent what to do differently:\\r\\n{RULE}\\r\\n");
-        never_stale("stale-turn-4", &showing(&dialog, READS));
-        never_stale("stale-turn-5", STAND_IN);
+        for (name, script) in [
+            ("stale-turn-4", showing(&dialog, READS)),
+            ("stale-turn-5", STAND_IN.to_owned()),
+        ] {
+            let mut pane = start_with(name, false, &script);
+            pane.session.follow_every_turn();
+            pane.session.limits.stale_turn = Duration::from_secs(4);
+            pane.write(&[&user("go")]);
+            assert_eq!(
+                pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+                Some(TranscriptEvent::TurnStarted)
+            );
+            stale(&mut pane);
+            assert!(
+                !pane.session.took_none(),
+                "{name}: the engine started this pane"
+            );
+        }
     }
 
     const BACKGROUND_USE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 40","run_in_background":true}}],"stop_reason":"tool_use"}}"#;
