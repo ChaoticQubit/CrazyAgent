@@ -267,7 +267,8 @@ pub(super) async fn serve(
 }
 
 /// Reads and checks a usage request, and builds a report or metrics outside the owner
-/// barrier.
+/// barrier, each from one read transaction, so a usage scan that commits meanwhile never
+/// leaves the total and the rows of one reply at two different moments.
 /// Inputs: the engine, authority, packet, admission and request body.
 /// Output: the prepared request, or the refusal.
 async fn prepare(
@@ -298,9 +299,10 @@ async fn prepare(
             let held = held_accounts(engine, admission).await?;
             Prepared::Report(Box::new(
                 tokio::task::spawn_blocking(move || {
-                    let db = usage::open(&root)?;
+                    let mut db = usage::open(&root)?;
+                    let snapshot = db.transaction().map_err(|_| failure("usage_unavailable"))?;
                     usage::report::report(
-                        &db,
+                        &snapshot,
                         project.as_ref(),
                         since_ms,
                         offset_minutes,
@@ -314,8 +316,9 @@ async fn prepare(
         }
         Action::Metrics { project, since_ms } => Prepared::Metrics(Box::new(
             tokio::task::spawn_blocking(move || {
-                let db = usage::open(&root)?;
-                usage::metrics::read(&db, project.as_ref(), since_ms, crate::team::now_ms())
+                let mut db = usage::open(&root)?;
+                let snapshot = db.transaction().map_err(|_| failure("usage_unavailable"))?;
+                usage::metrics::read(&snapshot, project.as_ref(), since_ms, crate::team::now_ms())
             })
             .await
             .map_err(|_| failure("usage_unavailable"))??,
