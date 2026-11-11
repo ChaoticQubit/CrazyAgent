@@ -56,6 +56,7 @@ pub(crate) mod process;
 mod projects_home;
 pub(crate) mod questions;
 pub(crate) mod recovery;
+pub(crate) mod roadmap;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -2199,6 +2200,7 @@ enum Protocol {
     IdeExtensions,
     Recovery,
     Questions,
+    Roadmap,
     NativeAuth,
     Process,
     Ide,
@@ -2231,6 +2233,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
         ("questions", Protocol::Questions),
+        ("roadmap", Protocol::Roadmap),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
         ("ide", Protocol::Ide),
@@ -2301,6 +2304,7 @@ async fn serve_admitted(
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
+            Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2474,6 +2478,10 @@ async fn serve_admitted(
             let served = questions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
         }
+        Deferred::Roadmap(a) => {
+            let served = roadmap::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
+        }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
@@ -2536,7 +2544,8 @@ struct Tasks {
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, and Usage requests, which read and write the usage store. Each
+/// copy skill folders, Roadmap requests, which read and write the roadmap status store,
+/// and Usage requests, which read and write the usage store. Each
 /// carries the admission, and the projects home its validated request; the others read
 /// the request frame.
 enum Deferred {
@@ -2550,6 +2559,7 @@ enum Deferred {
     Ide(Admission),
     IdeTab(Admission),
     Questions(Admission),
+    Roadmap(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
@@ -2594,6 +2604,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::Questions => questions::refusal(code)?,
+        Protocol::Roadmap => roadmap::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         Protocol::Ide => ide::refusal(code)?,
