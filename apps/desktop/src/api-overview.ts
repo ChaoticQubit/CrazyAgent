@@ -5,8 +5,9 @@ import { failureCopy } from "./api-projects";
 export type OverviewTabId = "quick_info" | "features" | "competitors" | "install_and_use";
 
 /** One generated tab: its Markdown or null before the first run, the version a save or an
- * accept must name, whether the owner edited it, and a refresh's proposal waiting for review. */
-export interface TabState { tab: OverviewTabId; text: string | null; version: string; edited: boolean; proposal: string | null }
+ * accept must name, whether the owner edited it, a refresh's proposal waiting for review, and
+ * why its file can't be shown (`blank`, `too_large` or `not_utf8`), null when it can. */
+export interface TabState { tab: OverviewTabId; text: string | null; version: string; edited: boolean; proposal: string | null; blocked: string | null }
 
 /** The project's own README: its path in the project, its text and whether only the first
  * part of a long file is held. */
@@ -23,8 +24,9 @@ export type OverviewRefresh = "after_landing" | "refresh_only" | "off";
 /** What a refresh does with a tab: always propose, or replace a tab the owner has not edited. */
 export type OverviewApply = "always_ask" | "when_unedited";
 
-/** Everything the Overview tabs show for one project. */
-export interface ProjectOverview { readme: Readme | null; tabs: TabState[]; competitors: CompetitorState; running: boolean; stale: boolean; checked_ms: number | null; failure: string | null; refresh: OverviewRefresh; apply: OverviewApply }
+/** Everything the Overview tabs show for one project. `needs_home` is true for a project kept
+ * outside the CrazyAgent folder, whose tabs cannot be written until it is moved there. */
+export interface ProjectOverview { readme: Readme | null; tabs: TabState[]; competitors: CompetitorState; running: boolean; stale: boolean; checked_ms: number | null; failure: string | null; refresh: OverviewRefresh; apply: OverviewApply; needs_home: boolean }
 
 /** How often the tabs are read again while a run is going or a change set landed, in milliseconds. */
 export const OVERVIEW_POLL_MS = 5_000;
@@ -38,6 +40,7 @@ const OVERVIEW_FAILURES: Record<string, string> = {
   overview_off: "Overview tabs are off for this project. Turn them on in Project settings.",
   overview_project_unknown: "CrazyAgent doesn't know this project any more.",
   overview_unavailable: "The Overview tabs can't be read right now. Try again in a moment.",
+  overview_needs_project_home: "Overview tabs need this project in the CrazyAgent folder. Move it there in Project settings.",
 };
 
 /** Says why an Overview call was refused; every refusal has its own sentence. Input: the

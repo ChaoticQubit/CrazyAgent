@@ -13,27 +13,32 @@ const TAB_IDS = ["quick_info", "features", "competitors", "install_and_use"];
 const NOW = 10 * 60_000;
 
 const base = () => ({
-  readme: null, tabs: TAB_IDS.map((tab) => ({ tab, text: null, version: "", edited: false, proposal: null })),
-  competitors: { kind: "missing" }, running: false, stale: false, checked_ms: null, failure: null, refresh: "after_landing", apply: "always_ask",
+  readme: null, tabs: TAB_IDS.map((tab) => ({ tab, text: null, version: "", edited: false, proposal: null, blocked: null })),
+  competitors: { kind: "missing" }, running: false, stale: false, checked_ms: null, failure: null, refresh: "after_landing", apply: "always_ask", needs_home: false,
 });
+const blockedTab = (overview, id, blocked) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, blocked } : tab) });
 const withTab = (overview, id, text) => ({ ...overview, tabs: overview.tabs.map((tab) => tab.tab === id ? { ...tab, text, version: `v-${id}` } : tab) });
 const job = (kind, status) => ({
   id: 1, project_id: "alpha", kind, kind_label: "Competitor research", status, status_label: "", report_path: `context/research/${kind}.md`,
   harness: "codex", tools: true, attempts: 0, claimer: null, error: null, cancel_requested: false, output_bytes: 0,
   created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null,
 });
-const projectData = (jobs = []) => ({
-  id: "alpha", name: "Alpha", setup: undefined, research: { kind: "ok", value: { project_id: "alpha", jobs } }, context: undefined,
+const stored = (research) => ({
+  project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research, pool: null,
+  team: { master: "codex", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 }, documents: [], folder: "/tmp/alpha", created_ms: 0, revision: 4,
+});
+const projectData = (jobs = [], research = ["market_research"]) => ({
+  id: "alpha", name: "Alpha", setup: { kind: "ok", value: stored(research) }, research: { kind: "ok", value: { project_id: "alpha", jobs } }, context: undefined,
   pools: undefined, harnesses: undefined, assigned: null, now: NOW, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
   team: { result: undefined, at: 0 }, reloadTeam: () => {},
 });
 const idle = () => Promise.resolve({ kind: "ok", value: undefined });
 const actions = { refresh: idle, save: idle, accept: idle, reject: idle, reload: () => {} };
 
-function page({ selected, overview, about = "", mappingOverview = null, researchRunning = false, problem }) {
-  const data = projectData(researchRunning ? [job("competitor_research", "running")] : []);
+function page({ selected, overview, about = "", mappingOverview = null, researchRunning = false, jobs, research, runMode = "off", problem }) {
+  const data = projectData(jobs ?? (researchRunning ? [job("competitor_research", "running")] : []), research ?? (researchRunning || jobs ? ["market_research", "competitor_research"] : ["market_research"]));
   return renderToStaticMarkup(createElement(view.OverviewTabs, {
-    data, overview, problem, now: NOW, selected, onSelect: () => {}, actions,
+    data, overview, problem, now: NOW, selected, onSelect: () => {}, actions, runMode,
     quickInfo: (text) => createElement(screen.OverviewFacts, { about, overview: text ?? mappingOverview }),
     activity: createElement("p", null, "Today's activity"),
   }));
@@ -163,4 +168,191 @@ test("every Overview refusal has its own plain sentence", () => {
   }
   assert.equal(new Set(codes.map((code) => api.overviewCopy(code))).size, codes.length, "no two refusals share a sentence");
   assert.equal(api.overviewCopy("overview_tab_changed"), "Someone changed this tab since you opened it. Your text is kept below; compare and save again.");
+});
+
+test("Competitors without research explains and offers Run research, and nothing starts on its own", () => {
+  const html = page({ selected: "competitors", overview: base() });
+  assert.match(html, /There is no competitor research for this project yet\. This tab is written from it: who the competitors are, what differs, where this project is better and where it is not\./);
+  assert.match(html, /<button[^>]*>Run research<\/button>/);
+});
+
+test("Run research turns competitor research on through the project setup save, then reads the project again", async () => {
+  const saved = [];
+  const told = [];
+  let reloads = 0;
+  const data = { ...projectData(), notify: (text) => told.push(text), reload: () => { reloads += 1; } };
+  const applied = { kind: "ok", value: { outcome: "applied", pending: false } };
+  const note = await view.runResearch(data, (id, research) => { saved.push([id, research]); return Promise.resolve(applied); });
+  assert.deepEqual(saved, [["alpha", ["market_research", "competitor_research"]]]);
+  assert.equal(note, "");
+  assert.equal(reloads, 1);
+  assert.equal(told.length, 1);
+  assert.match(told[0], /Competitor research is on\./);
+});
+
+test("a refused Run research says why and does not read the project again", async () => {
+  let reloads = 0;
+  const data = { ...projectData(), reload: () => { reloads += 1; } };
+  const note = await view.runResearch(data, () => Promise.resolve({ kind: "error", code: "setup_revision_changed" }));
+  assert.notEqual(note, "");
+  assert.equal(reloads, 0);
+  assert.notEqual(await view.runResearch(data, () => Promise.resolve({ kind: "not_ready" })), "");
+});
+
+test("Competitors with linked research names the files, and with no tab yet says it is written on the next refresh", () => {
+  const html = page({ selected: "competitors", overview: { ...base(), competitors: { kind: "linked", paths: ["docs/research-competitors.md"] } } });
+  assert.match(html, /docs\/research-competitors\.md/);
+  assert.match(html, /Choose Refresh to write this tab from it\./);
+  assert.doesNotMatch(html, />Run research</);
+});
+
+test("Competitors with a research report offers the report and shows the tab", () => {
+  const overview = { ...withTab(base(), "competitors", "- Beta: cheaper, no offline mode\n"), competitors: { kind: "report", path: "context/research/competitor_research.md" } };
+  const html = page({ selected: "competitors", overview });
+  assert.match(html, /Written from the competitor research report\./);
+  assert.match(html, /<button[^>]*>Open report<\/button>/);
+  assert.match(html, /Beta: cheaper, no offline mode/);
+  assert.doesNotMatch(html, />Run research</);
+});
+
+test("Competitors while research runs, waits for a pool or did not finish says so and hides Run research", () => {
+  const running = page({ selected: "competitors", overview: base(), researchRunning: true });
+  assert.match(running, /Competitor research is running\./);
+  assert.doesNotMatch(running, />Run research</);
+  const queued = page({ selected: "competitors", overview: base(), jobs: [job("competitor_research", "queued")] });
+  assert.match(queued, /Competitor research is running\./);
+  const waiting = page({ selected: "competitors", overview: base(), jobs: [job("competitor_research", "needs_pool")] });
+  assert.match(waiting, /Competitor research is waiting for a pool\./);
+  assert.doesNotMatch(waiting, />Run research</);
+  const failed = page({ selected: "competitors", overview: base(), jobs: [job("market_research", "done"), job("competitor_research", "failed")] });
+  assert.match(failed, /Competitor research didn&#x27;t finish\. Try it again on the Activity tab\./);
+  assert.match(failed, /<button[^>]*>Open Activity<\/button>/);
+  assert.doesNotMatch(failed, />Run research</);
+});
+
+test("each command line on Install & use gets Copy and Run in project terminal", () => {
+  const overview = withTab(base(), "install_and_use", "## Install\n\n```sh\ncargo install alpha\nalpha init\n```\n");
+  const html = page({ selected: "install_and_use", overview, runMode: "type_and_run" });
+  assert.equal((html.match(/>Copy</g) ?? []).length, 2);
+  assert.equal((html.match(/>Run in project terminal</g) ?? []).length, 2);
+  assert.match(html, /<code>cargo install alpha<\/code>/);
+  assert.match(html, /<code>alpha init<\/code>/);
+});
+
+test("a line with shell syntax gets Copy only and says why", () => {
+  const overview = withTab(base(), "install_and_use", "```sh\ncurl -fsSL https://example.com/install.sh | sh\n```\n");
+  const html = page({ selected: "install_and_use", overview, runMode: "type_and_run" });
+  assert.match(html, />Copy</);
+  assert.doesNotMatch(html, />Run in project terminal</);
+  assert.match(html, /This line has shell syntax CrazyAgent won&#x27;t type for you\. Copy it and run it yourself\./);
+});
+
+test("with Run in project terminal off, commands get Copy only", () => {
+  const overview = withTab(base(), "install_and_use", "```sh\ncargo install alpha\n```\n");
+  const html = page({ selected: "install_and_use", overview, runMode: "off" });
+  assert.match(html, />Copy</);
+  assert.doesNotMatch(html, />Run in project terminal</);
+});
+
+test("command lines skip blank lines, comments and a leading prompt sign, and stop at the bound", () => {
+  assert.deepEqual(view.commandLines("$ cargo build\n\n  alpha init  \n"), ["cargo build", "alpha init"]);
+  assert.deepEqual(view.commandLines("# build it\ncargo build\n   # then\n"), ["cargo build"]);
+  assert.deepEqual(view.commandLines("$ $ odd\n"), ["$ odd"], "only one prompt sign is dropped");
+  assert.deepEqual(view.commandLines(""), []);
+  assert.equal(view.COMMAND_LINES_MAX, 200);
+  assert.equal(view.commandLines("ls\n".repeat(view.COMMAND_LINES_MAX + 5)).length, view.COMMAND_LINES_MAX);
+});
+
+test("a command line with a hidden character is the shown text, so Copy takes what the page shows and Run is not offered", () => {
+  const hidden = `echo a${String.fromCodePoint(0x200b)}b`;
+  const shown = `echo a${String.fromCharCode(92)}u200bb`;
+  assert.deepEqual(view.commandLines(hidden), [shown]);
+  const html = page({ selected: "install_and_use", overview: withTab(base(), "install_and_use", `~~~sh\n${hidden}\n~~~\n`), runMode: "type_and_run" });
+  assert.match(html, />Copy</);
+  assert.doesNotMatch(html, />Run in project terminal</);
+  assert.ok(!html.includes(String.fromCodePoint(0x200b)), "the hidden character is not in the page");
+});
+
+test("a code block on the README tab gets Copy only", () => {
+  const html = page({ selected: "readme", overview: { ...base(), readme: { path: "README.md", text: "```sh\ncargo install alpha\n```\n", cut: false } }, runMode: "type_and_run" });
+  assert.match(html, />Copy</);
+  assert.doesNotMatch(html, />Run in project terminal</);
+});
+
+test("only shell blocks get command actions, and a console block only on its prompt lines", () => {
+  const data = withTab(base(), "install_and_use", "```json\n{ \"name\": \"alpha\" }\n```\n\n```\nplain text\n```\n");
+  assert.doesNotMatch(page({ selected: "install_and_use", overview: data, runMode: "type_and_run" }), />Copy</);
+  const session = withTab(base(), "install_and_use", "```console\n$ alpha --version\nalpha 1.2.0\n```\n");
+  const html = page({ selected: "install_and_use", overview: session, runMode: "type_and_run" });
+  assert.equal((html.match(/>Copy</g) ?? []).length, 1);
+  assert.equal((html.match(/>Run in project terminal</g) ?? []).length, 1);
+  assert.match(html, /alpha 1\.2\.0/);
+  for (const language of ["sh", "bash", "zsh", "shell", "SH"]) {
+    const block = withTab(base(), "install_and_use", `\`\`\`${language}\nalpha init\n\`\`\`\n`);
+    assert.equal((page({ selected: "install_and_use", overview: block, runMode: "type_and_run" }).match(/>Copy</g) ?? []).length, 1, language);
+  }
+});
+
+test("a blocked tab says why in plain words, names its file and what to do", () => {
+  const blank = page({ selected: "features", overview: blockedTab(base(), "features", "blank") });
+  assert.match(blank, /CrazyAgent can&#x27;t show this tab: its file is empty\./);
+  assert.match(blank, /\.crazyagent\/overview\/features\.md/);
+  assert.match(blank, /Fix or delete the file, then choose Refresh\./);
+  assert.match(page({ selected: "features", overview: blockedTab(base(), "features", "too_large") }), /CrazyAgent can&#x27;t show this tab: its file is larger than 64 KB\./);
+  assert.match(page({ selected: "install_and_use", overview: blockedTab(base(), "install_and_use", "not_utf8") }), /CrazyAgent can&#x27;t show this tab: its file is not plain text\./);
+  assert.match(page({ selected: "install_and_use", overview: blockedTab(base(), "install_and_use", "not_utf8") }), /\.crazyagent\/overview\/install-and-use\.md/);
+  const unknown = page({ selected: "features", overview: blockedTab(base(), "features", "something_new") });
+  assert.match(unknown, /CrazyAgent can&#x27;t show this tab: its file can&#x27;t be read\./);
+  assert.doesNotMatch(unknown, /something_new/);
+  assert.doesNotMatch(blank, /Not written yet/);
+});
+
+test("a blocked Quick info keeps the About and the mapping's overview under the reason", () => {
+  const html = page({ selected: "quick_info", about: "A research reader.", mappingOverview: "Reads papers.\n", overview: blockedTab(base(), "quick_info", "blank") });
+  assert.match(html, /CrazyAgent can&#x27;t show this tab: its file is empty\./);
+  assert.match(html, /\.crazyagent\/overview\/quick-info\.md/);
+});
+
+test("a blocked Competitors tab says why and does not offer Run research in its place", () => {
+  const html = page({ selected: "competitors", overview: blockedTab({ ...base(), competitors: { kind: "report", path: "context/research/competitor_research.md" } }, "competitors", "too_large") });
+  assert.match(html, /CrazyAgent can&#x27;t show this tab: its file is larger than 64 KB\./);
+  assert.doesNotMatch(html, /Choose Refresh to write this tab from it\./);
+});
+
+test("a project outside the CrazyAgent folder says the tabs need it there and offers the move, on every generated tab", () => {
+  const overview = { ...base(), needs_home: true, stale: true };
+  for (const selected of TAB_IDS) {
+    const html = page({ selected, overview });
+    assert.match(html, /Overview tabs need this project in the CrazyAgent folder\./, selected);
+    assert.match(html, /<button[^>]*>Move into CrazyAgent folder<\/button>/, selected);
+    assert.doesNotMatch(html, /Not written yet/, selected);
+    assert.doesNotMatch(html, />Run research</, selected);
+    assert.match(html, /<button[^>]*disabled=""[^>]*>Refresh<\/button>/, selected);
+  }
+  assert.equal(view.pollEvery(overview), null, "no run can start, so nothing is waited for");
+});
+
+test("a project outside the CrazyAgent folder keeps README and Activity as they are", () => {
+  const overview = { ...base(), needs_home: true, readme: { path: "README.md", text: "# Alpha\n\nReads papers.\n", cut: false } };
+  const readme = page({ selected: "readme", overview });
+  assert.match(readme, /Reads papers\./);
+  assert.doesNotMatch(readme, /Overview tabs need this project/);
+  const activity = page({ selected: "activity", overview });
+  assert.match(activity, /Today&#x27;s activity/);
+  assert.doesNotMatch(activity, /Overview tabs need this project/);
+});
+
+test("the move button opens Project settings, where Move into CrazyAgent folder lives", () => {
+  assert.equal(view.moveRoute("alpha beta"), "/projects/alpha%20beta/settings?section=remove");
+});
+
+test("the needs-home refusal has its own sentence", () => {
+  assert.equal(api.overviewCopy("overview_needs_project_home"), "Overview tabs need this project in the CrazyAgent folder. Move it there in Project settings.");
+  assert.notEqual(api.overviewCopy("overview_needs_project_home"), api.overviewCopy("something_else"));
+});
+
+test("a shell block on a tab without commands shows whole, with no actions", () => {
+  const html = page({ selected: "features", overview: withTab(base(), "features", "```sh\ncargo install alpha\nalpha init\n```\n"), runMode: "type_and_run" });
+  assert.match(html, /<pre><code>cargo install alpha\nalpha init<\/code><\/pre>/);
+  assert.doesNotMatch(html, />Copy</);
 });
