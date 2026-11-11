@@ -2285,7 +2285,7 @@ fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_the_edit_gua
         .parse()
         .unwrap();
     let hooks = config["hooks"].as_table().unwrap();
-    assert_eq!(hooks.keys().collect::<Vec<_>>(), ["PreToolUse"]);
+    assert_eq!(hooks.keys().collect::<Vec<_>>(), ["PreToolUse", "state"]);
     let group = &hooks["PreToolUse"].as_array().unwrap()[0];
     assert_eq!(group["matcher"].as_str(), Some("apply_patch|Bash"));
     let handler = &group["hooks"].as_array().unwrap()[0];
@@ -2311,6 +2311,66 @@ fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_the_edit_gua
         .parse()
         .unwrap();
     assert!(!config.contains_key("hooks"), "no relay, no guard hook");
+    drop(installed);
+}
+
+/// PA1213 security F1: a Codex launch never lifts hook review. Its `config.toml` pins the
+/// trust hash of each hook the engine wrote, under the key Codex 0.167.1 reads
+/// (`<canonical home>/config.toml:<label>:<group>:<handler>`), so a hook an agent adds in
+/// its worktree stays held for review. The hashes match vectors proven live on Codex
+/// 0.167.1 with a stand-in home, and Codex's matcher and timeout normalizing is kept.
+#[test]
+fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
+    let pinned = |event: &str, matcher: Option<&str>, timeout: Option<u32>| {
+        codex_hook_hash(&codex_hook(event, matcher, "echo hi".to_owned(), timeout).unwrap())
+    };
+    assert_eq!(
+        pinned("PreToolUse", Some("apply_patch|Bash"), Some(15)),
+        "sha256:fb1e14c710eaa3bd057e6917169ae3318e54399b7bc942693b8595fdb7ccabb3"
+    );
+    assert_eq!(
+        pinned("SessionStart", None, None),
+        "sha256:a245b9b8493f2be82aea06c373ef42709b417c1b701a54e5ab76ab728777f4ad"
+    );
+    assert_eq!(
+        pinned("Stop", Some("ignored"), None),
+        "sha256:f2aa169c7a1cf9b7cc9b61ce5ecec0315e0f7d13ac35935b1aa74440f9a839f8"
+    );
+    assert!(codex_hook("Notification", None, "echo hi".to_owned(), None).is_none());
+    let end = codex_hook("SessionEnd", None, "echo hi".to_owned(), Some(30)).unwrap();
+    assert_eq!(end.timeout, 3);
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = root.join("bin").join("crazyagent");
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_relay(&engine, &root.join("mailbox-codex"))
+        .install("codex", &codex, true)
+        .unwrap();
+    let text = fs::read_to_string(codex.join("config.toml")).unwrap();
+    assert!(!text.contains("bypass"), "{text}");
+    let config: toml::Table = text.parse().unwrap();
+    let hooks = config["hooks"].as_table().unwrap();
+    let group = &hooks["PreToolUse"].as_array().unwrap()[0];
+    let handler = &group["hooks"].as_array().unwrap()[0];
+    let written = CodexHook {
+        event: "PreToolUse",
+        label: "pre_tool_use",
+        matcher: group["matcher"].as_str().map(str::to_owned),
+        command: handler["command"].as_str().unwrap().to_owned(),
+        timeout: u32::try_from(handler["timeout"].as_integer().unwrap()).unwrap(),
+    };
+    let key = format!(
+        "{}:pre_tool_use:0:0",
+        codex.canonicalize().unwrap().join("config.toml").display()
+    );
+    let state = hooks["state"].as_table().unwrap();
+    assert_eq!(state.keys().collect::<Vec<_>>(), [&key]);
+    assert_eq!(
+        state[&key]["trusted_hash"].as_str(),
+        Some(codex_hook_hash(&written).as_str())
+    );
     drop(installed);
 }
 
@@ -2949,7 +3009,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     let events = config["hooks"].as_table().unwrap();
     assert_eq!(
         events.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["PreToolUse", "SessionStart"],
+        ["PreToolUse", "SessionStart", "state"],
         "Notification is a Claude Code event Codex has not"
     );
     let search = &events["PreToolUse"].as_array().unwrap()[0];

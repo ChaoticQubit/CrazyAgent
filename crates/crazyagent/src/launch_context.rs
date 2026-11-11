@@ -11,6 +11,7 @@ use rusqlite::{Connection, Transaction};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs::{self, File};
 #[cfg(unix)]
@@ -1071,21 +1072,30 @@ impl AgentContext {
             if let Some((engine, mailbox)) = &self.relay {
                 let command = crate::coord::relay::codex_edit_hook(mailbox, engine)
                     .map_err(|problem| LaunchError(problem.0, None))?;
-                config_hooks.push(CodexHook {
-                    event: "PreToolUse".to_owned(),
-                    matcher: Some(crate::coord::relay::CODEX_EDIT_MATCHER.to_owned()),
+                config_hooks.extend(codex_hook(
+                    "PreToolUse",
+                    Some(crate::coord::relay::CODEX_EDIT_MATCHER),
                     command,
-                    timeout: Some(crate::coord::hook::Event::CodexEdit.timeout_seconds()),
-                });
+                    Some(crate::coord::hook::Event::CodexEdit.timeout_seconds()),
+                ));
                 installed.relay = true;
             }
             let owner = codex_hooks(&state, hooks)?;
             installed.hooks = !owner.is_empty();
             config_hooks.extend(owner);
+            let source = std::fs::canonicalize(home)
+                .map_err(|_| failure("launch_context_hook_unavailable"))?
+                .join("config.toml");
             remove(&config);
             write_secret(
                 &config,
-                codex_config(&developer, servers, &self.off_tools, &config_hooks)?,
+                codex_config(
+                    &developer,
+                    servers,
+                    &self.off_tools,
+                    &config_hooks,
+                    &source.to_string_lossy(),
+                )?,
             )?;
         } else {
             installed.denied = denied_tools(servers, &self.off_tools);
@@ -1215,8 +1225,8 @@ impl Installed {
     }
 
     /// Tells whether this launch holds hooks, the ones the owner turned on or the message
-    /// relay's, so Claude Code must run with hooks allowed and Codex with its hook trust
-    /// prompt passed (PA-12).
+    /// relay's, so Claude Code must run with hooks allowed; a Codex launch pins each of its
+    /// hooks' trust hashes in its own `config.toml` instead (PA1213 security F1).
     pub fn runs_hooks(&self) -> bool {
         self.hooks || self.relay
     }
@@ -1704,12 +1714,13 @@ fn codex_config(
     servers: &[LaunchServer],
     off_tools: &[(String, Vec<String>)],
     hooks: &[CodexHook],
+    source: &str,
 ) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
     document["project_doc_max_bytes"] = toml_edit::value(0);
     if !hooks.is_empty() {
-        document["hooks"] = toml_edit::Item::Table(codex_hook_table(hooks));
+        document["hooks"] = toml_edit::Item::Table(codex_hook_table(hooks, source));
     }
     if !servers.is_empty() {
         let mut table = toml_edit::Table::new();
@@ -1754,47 +1765,110 @@ fn codex_config(
     Ok(document.to_string())
 }
 
-/// One hook a Codex launch writes into its `config.toml`: the event, the tool matcher, the
-/// shell command and the timeout in seconds (PA-12).
+/// One hook a Codex launch writes into its `config.toml`: the event, its trust-key label,
+/// the tool matcher, the shell command and the timeout in seconds, both as Codex reads them
+/// back, so the pinned trust hash matches (PA-12, PA1213 security F1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexHook {
-    event: String,
+    event: &'static str,
+    label: &'static str,
     matcher: Option<String>,
     command: String,
-    timeout: Option<u32>,
+    timeout: u32,
 }
 
-/// Codex's hook events (Codex 0.163 source, app-server protocol v2 `HookEventName`). An
-/// owner hook keeps its Claude Code event name on Codex only when Codex has that event.
-pub const CODEX_HOOK_EVENTS: [&str; 12] = [
-    "PreToolUse",
-    "PermissionRequest",
-    "PostToolUse",
-    "PreCompact",
-    "PostCompact",
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "SubagentStart",
-    "SubagentStop",
-    "Stop",
-    "Interrupt",
+/// Codex's hook events, each with the label Codex keys its hook trust state by (Codex
+/// 0.167.1 `hook_event_key_label`). An owner hook keeps its Claude Code event name on Codex
+/// only when Codex has that event.
+const CODEX_HOOK_EVENTS: [(&str, &str); 12] = [
+    ("PreToolUse", "pre_tool_use"),
+    ("PermissionRequest", "permission_request"),
+    ("PostToolUse", "post_tool_use"),
+    ("PreCompact", "pre_compact"),
+    ("PostCompact", "post_compact"),
+    ("SessionStart", "session_start"),
+    ("SessionEnd", "session_end"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("SubagentStart", "subagent_start"),
+    ("SubagentStop", "subagent_stop"),
+    ("Stop", "stop"),
+    ("Interrupt", "interrupt"),
 ];
+/// Codex's default hook timeout, and the bounds it holds session-end and interrupt hooks
+/// to (Codex 0.167.1 `normalize_command_hook`).
+const CODEX_HOOK_TIMEOUT_DEFAULT: u32 = 600;
+const CODEX_END_TIMEOUT_DEFAULT: u32 = 1;
+const CODEX_END_TIMEOUT_MAX: u32 = 3;
+
+/// One Codex hook as Codex normalizes it: a matcher only on events that read one, the
+/// timeout defaulted and bounded as Codex does. Takes the Claude Code event name, matcher,
+/// command and timeout. Returns the hook, or None for an event Codex does not have.
+fn codex_hook(
+    event: &str,
+    matcher: Option<&str>,
+    command: String,
+    timeout: Option<u32>,
+) -> Option<CodexHook> {
+    let &(event, label) = CODEX_HOOK_EVENTS.iter().find(|(name, _)| *name == event)?;
+    let matcher = match event {
+        "UserPromptSubmit" | "Stop" | "Interrupt" => None,
+        _ => matcher.map(str::to_owned),
+    };
+    let timeout = match event {
+        "SessionEnd" | "Interrupt" => timeout
+            .unwrap_or(CODEX_END_TIMEOUT_DEFAULT)
+            .clamp(1, CODEX_END_TIMEOUT_MAX),
+        _ => timeout.unwrap_or(CODEX_HOOK_TIMEOUT_DEFAULT).max(1),
+    };
+    Some(CodexHook {
+        event,
+        label,
+        matcher,
+        command,
+        timeout,
+    })
+}
+
+/// The hash Codex trusts one hook by (Codex 0.167.1 `hook_hash`, `version_for_toml`): SHA-256
+/// of the compact JSON, keys sorted, of its event label, matcher and one normalized command
+/// handler. Proven live on Codex 0.167.1 with a stand-in home. Takes the hook. Returns
+/// `sha256:<hex>`.
+fn codex_hook_hash(hook: &CodexHook) -> String {
+    let mut handler = serde_json::Map::new();
+    handler.insert("async".to_owned(), false.into());
+    handler.insert("command".to_owned(), hook.command.as_str().into());
+    handler.insert("timeout".to_owned(), hook.timeout.into());
+    handler.insert("type".to_owned(), "command".into());
+    let mut identity = serde_json::Map::new();
+    identity.insert("event_name".to_owned(), hook.label.into());
+    identity.insert(
+        "hooks".to_owned(),
+        serde_json::Value::Array(vec![serde_json::Value::Object(handler)]),
+    );
+    if let Some(matcher) = &hook.matcher {
+        identity.insert("matcher".to_owned(), matcher.as_str().into());
+    }
+    let mut text = Vec::new();
+    serde_json::to_writer(&mut text, &serde_json::Value::Object(identity))
+        .expect("a JSON value always writes to memory");
+    format!("sha256:{:x}", Sha256::digest(&text))
+}
 
 /// The `[hooks]` table of a Codex `config.toml`: per event, one `[[hooks.<event>]]` group
-/// with its matcher and one command handler, in launch order. Takes the hooks. Returns the
-/// table.
-fn codex_hook_table(hooks: &[CodexHook]) -> toml_edit::Table {
+/// with its matcher and one command handler, in launch order, and `[hooks.state]` pinning
+/// each one's trust hash under the key Codex reads, so Codex runs exactly these hooks with
+/// no trust bypass and still holds any hook an agent adds for review (PA1213 security F1).
+/// Takes the hooks and the canonical `config.toml` path. Returns the table.
+fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
     table.set_implicit(true);
+    let mut state = toml_edit::Table::new();
+    state.set_implicit(true);
     for hook in hooks {
-        assert!(CODEX_HOOK_EVENTS.contains(&hook.event.as_str()));
         let mut handler = toml_edit::Table::new();
         handler["type"] = toml_edit::value("command");
         handler["command"] = toml_edit::value(hook.command.as_str());
-        if let Some(timeout) = hook.timeout {
-            handler["timeout"] = toml_edit::value(i64::from(timeout));
-        }
+        handler["timeout"] = toml_edit::value(i64::from(hook.timeout));
         let mut handlers = toml_edit::ArrayOfTables::new();
         handlers.push(handler);
         let mut group = toml_edit::Table::new();
@@ -1802,15 +1876,23 @@ fn codex_hook_table(hooks: &[CodexHook]) -> toml_edit::Table {
             group["matcher"] = toml_edit::value(matcher.as_str());
         }
         group.insert("hooks", toml_edit::Item::ArrayOfTables(handlers));
-        match table
-            .entry(&hook.event)
-            .or_insert(toml_edit::Item::ArrayOfTables(
-                toml_edit::ArrayOfTables::new(),
-            )) {
-            toml_edit::Item::ArrayOfTables(groups) => groups.push(group),
-            _ => unreachable!("each event holds a list of groups"),
-        }
+        let toml_edit::Item::ArrayOfTables(groups) =
+            table
+                .entry(hook.event)
+                .or_insert(toml_edit::Item::ArrayOfTables(
+                    toml_edit::ArrayOfTables::new(),
+                ))
+        else {
+            unreachable!("each event holds a list of groups");
+        };
+        let key = format!("{source}:{}:{}:0", hook.label, groups.len());
+        groups.push(group);
+        let mut pinned = toml_edit::Table::new();
+        pinned["trusted_hash"] = toml_edit::value(codex_hook_hash(hook));
+        state.insert(&key, toml_edit::Item::Table(pinned));
     }
+    assert_eq!(state.len(), hooks.len());
+    table.insert("state", toml_edit::Item::Table(state));
     table
 }
 
@@ -1822,7 +1904,11 @@ fn codex_hook_table(hooks: &[CodexHook]) -> toml_edit::Table {
 fn codex_hooks(state: &Path, hooks: &[EffectiveHook]) -> Result<Vec<CodexHook>, LaunchError> {
     let kept: Vec<&EffectiveHook> = hooks
         .iter()
-        .filter(|hook| CODEX_HOOK_EVENTS.contains(&hook.event.as_str()))
+        .filter(|hook| {
+            CODEX_HOOK_EVENTS
+                .iter()
+                .any(|(name, _)| *name == hook.event)
+        })
         .collect();
     let copies = state.join(HOOK_PLUGINS);
     if kept.is_empty() || !quotable(&copies) {
@@ -1835,12 +1921,12 @@ fn codex_hooks(state: &Path, hooks: &[EffectiveHook]) -> Result<Vec<CodexHook>, 
     for hook in kept {
         let id = copy_hook(hook, &copies, &mut tally, &mut copied)?;
         let root = copies.join(id);
-        out.push(CodexHook {
-            event: hook.event.clone(),
-            matcher: hook.matcher.clone(),
-            command: hook_command(&root.to_string_lossy(), &hook.command),
-            timeout: hook.timeout,
-        });
+        out.extend(codex_hook(
+            &hook.event,
+            hook.matcher.as_deref(),
+            hook_command(&root.to_string_lossy(), &hook.command),
+            hook.timeout,
+        ));
     }
     assert!(!out.is_empty() && out.len() <= hooks.len());
     Ok(out)
