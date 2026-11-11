@@ -114,6 +114,10 @@ jobs:
           }
           lost=$(unresolved)
           if [ -n "$lost" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::the runner DNS does not resolve ${lost}and CI changes no DNS setting on a self-hosted runner; fix the runner's DNS"
+              exit 1
+            fi
             link=$(ip route show default | awk '{print $5; exit}')
             [ -n "$link" ] || { echo "::error::the runner DNS does not resolve ${lost}and the runner has no default route"; exit 1; }
             echo "::warning::the runner DNS does not resolve ${lost% }; asking 1.1.1.1 and 8.8.8.8 on $link instead"
@@ -123,6 +127,10 @@ jobs:
             [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
           fi
           if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
+              exit 1
+            fi
             echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
             printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
             sudo apt-get "${apt_options[@]}" update --error-on=any
@@ -348,27 +356,23 @@ jobs:
         if: runner.environment != 'github-hosted'
         run: |
           set -euo pipefail
+          case "$RUNNER_TOOL_CACHE" in /?*) ;; *) echo "::error::RUNNER_TOOL_CACHE is not an absolute path; nothing set up"; exit 1 ;; esac
           state="$RUNNER_TOOL_CACHE/crazyagent-ci"
           home="$RUNNER_TEMP/home"
           target="$state/target-line-tables"
+          rm -rf "$state"
           mkdir -p "$state"
-          size_kib="$(du -sk "$state" | cut -f1)"
-          if (( size_kib > 20 * 1024 * 1024 )); then
-            echo "pruning $state: ${size_kib} KiB"
-            rm -rf "$state"
-          fi
-          mkdir -p "$state"
-          find "$state" -mindepth 1 -maxdepth 1 -name 'target*' ! -name target-line-tables -exec rm -rf {} +
           free_kib="$(df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print $4 }')"
           echo "runner tool cache volume: $(( free_kib / 1024 / 1024 )) GiB free before the build"
-          if (( free_kib < 15 * 1024 * 1024 )); then
-            echo "::error::badal has $(( free_kib / 1024 / 1024 )) GiB free on the runner tool cache volume and this job needs 15 GiB; free disk on badal, then run the job again"
+          if (( free_kib < 10 * 1024 * 1024 )); then
+            echo "::error::badal has $(( free_kib / 1024 / 1024 )) GiB free on the runner tool cache volume and this job needs 10 GiB; free disk on badal, then run the job again"
             exit 1
           fi
           rm -rf "$home"
-          mkdir -p "$home" "$target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
+          mkdir -p "$home" "$RUNNER_TEMP/tmp" "$target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
           {
             echo "HOME=$home"
+            echo "TMPDIR=$RUNNER_TEMP/tmp"
             echo "CARGO_HOME=$state/cargo-home"
             echo "CARGO_TARGET_DIR=$target"
             echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
@@ -471,7 +475,7 @@ jobs:
             dir="$(dirname "$dir")"
           done
           for config in "$CARGO_HOME/config.toml" "$CARGO_HOME/config"; do
-            [ ! -e "$config" ] || { echo "::error::Cargo reads $config from the Cargo home CI keeps across runs; remove it, CI never builds with Cargo settings left in its cache"; exit 1; }
+            [ ! -e "$config" ] || { echo "::error::Cargo reads $config from the Cargo home CI made for this job; CI never builds with Cargo settings a step left on the runner"; exit 1; }
           done
           prefix="$RUNNER_TOOL_CACHE/crazyagent-ci/rust/$RUST_TOOLCHAIN"
           work="$RUNNER_TEMP/rust"
@@ -705,31 +709,33 @@ jobs:
         env:
           BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}
         run: make test-bun BUN="$BUN" BUN_TESTS_EXCLUDE="$BUN_TESTS_EXCLUDE"
-      - name: Show the free disk and trim the CI cache on the owner's runner
+      - name: Delete every CI file this job made on the owner's runner
         if: always() && runner.environment != 'github-hosted'
         run: |
-          set -euo pipefail
-          case "$RUNNER_TOOL_CACHE" in /?*) ;; *) echo "::error::RUNNER_TOOL_CACHE is not an absolute path; nothing trimmed"; exit 1 ;; esac
-          state="$RUNNER_TOOL_CACHE/crazyagent-ci"
-          target="$state/target-line-tables"
+          set -uo pipefail
+          for folder in "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"; do
+            case "$folder" in /?*) ;; *) echo "::error::the runner folder $folder is not an absolute path; nothing deleted"; exit 1 ;; esac
+          done
+          case "$GITHUB_WORKSPACE" in "$(dirname "$RUNNER_TEMP")"/?*) ;; *) echo "::error::the checkout $GITHUB_WORKSPACE is not inside the runner's work folder; nothing deleted"; exit 1 ;; esac
           free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
           echo "runner tool cache volume: $(free_gib) GiB free after the tests"
+          target="$RUNNER_TOOL_CACHE/crazyagent-ci/target-line-tables"
           if [ -d "$target" ]; then
             du -sk "$target" | awk '{ printf "Rust target: %.1f GiB\n", $1 / 1048576 }'
           fi
-          if [ -d "$state" ] && [ ! -L "$state" ]; then
-            size_kib="$(du -sk "$state" | cut -f1)"
-            if (( size_kib > 10 * 1024 * 1024 )); then
-              echo "trimming the Rust targets in $state: ${size_kib} KiB"
-              find "$state" -mindepth 1 -maxdepth 1 -name 'target*' -exec rm -rf {} +
-            fi
-            size_kib="$(du -sk "$state" | cut -f1)"
-            if (( size_kib > 10 * 1024 * 1024 )); then
-              echo "pruning $state: ${size_kib} KiB"
-              rm -rf "$state"
-            fi
-          fi
-          echo "runner tool cache volume: $(free_gib) GiB free after the trim"
+          tools=(crazyagent-ci claude-code codex uv vscodium-reh-web)
+          temp=(home tmp node-arm64 bun-arm64 rust claude-code codex vscodium-reh-web uv uv-cache uv-python uv-python-bin graphify context-mode)
+          made=()
+          for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
+          for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done
+          while IFS= read -r -d '' entry; do made+=("$entry"); done < <(find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -print0)
+          left=()
+          for path in "${made[@]}"; do
+            rm -rf "$path" 2>/dev/null || { chmod -R u+w "$path" 2>/dev/null; rm -rf "$path"; }
+            if [ -e "$path" ] || [ -L "$path" ]; then left+=("$path"); fi
+          done
+          echo "runner tool cache volume: $(free_gib) GiB free after the cleanup"
+          if [ "${#left[@]}" -gt 0 ]; then echo "::error::still on the runner: ${left[*]}"; exit 1; fi
 
   windows:
     name: Windows lint and tests (off until v2.2.1)

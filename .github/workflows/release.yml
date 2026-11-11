@@ -82,17 +82,17 @@ jobs:
   build:
     needs: [prepare, ci]
     environment: release
-    timeout-minutes: 150
+    timeout-minutes: 300
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: [self-hosted, macOS, badal]
+          - runner: macos-15
             target: aarch64-apple-darwin
             os: macos
-          - runner: [self-hosted, macOS, badal]
+          - runner: macos-15
             target: x86_64-apple-darwin
             os: macos
           - runner: ubuntu-22.04
@@ -130,7 +130,7 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - id: bun
-        if: runner.environment == 'github-hosted'
+        if: runner.environment == 'github-hosted' && matrix.os != 'macos'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -157,11 +157,11 @@ jobs:
           test "$("$work/bin/node" -p process.arch)" = arm64
           echo "$work/bin" >> "$GITHUB_PATH"
       - id: bun-arm64
-        name: Install pinned arm64 bun on the owner's runner
-        if: runner.environment != 'github-hosted'
+        name: Install pinned arm64 bun for macOS
+        if: matrix.os == 'macos'
         run: |
           set -euo pipefail
-          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the release runner on badal must be native macOS arm64"; exit 1; }
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the macOS release runner must be native macOS arm64"; exit 1; }
           prefix="$RUNNER_TOOL_CACHE/crazyagent-release/bun/$BUN_VERSION/arm64"
           work="$RUNNER_TEMP/bun-arm64"
           rm -rf "$work"
@@ -186,8 +186,15 @@ jobs:
         if: matrix.target == 'x86_64-apple-darwin'
         run: |
           set -euo pipefail
-          arch -x86_64 /usr/bin/true || { echo "::error::Rosetta 2 is required to build the x86_64 rcli host; install it with: softwareupdate --install-rosetta --agree-to-license"; exit 1; }
-          prefix="$RUNNER_TOOL_CACHE/bun/$BUN_VERSION/x64"
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::Rosetta 2 is required to build the x86_64 rcli host; install it with: softwareupdate --install-rosetta --agree-to-license"
+              exit 1
+            fi
+            sudo softwareupdate --install-rosetta --agree-to-license
+            arch -x86_64 /usr/bin/true
+          fi
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-release/bun/$BUN_VERSION/x64"
           work="$RUNNER_TEMP/bun-x64"
           rm -rf "$work"
           mkdir -p "$prefix" "$work/bin"
@@ -275,6 +282,10 @@ jobs:
           }
           lost=$(unresolved)
           if [ -n "$lost" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::the runner DNS does not resolve ${lost}and CI changes no DNS setting on a self-hosted runner; fix the runner's DNS"
+              exit 1
+            fi
             link=$(ip route show default | awk '{print $5; exit}')
             [ -n "$link" ] || { echo "::error::the runner DNS does not resolve ${lost}and the runner has no default route"; exit 1; }
             echo "::warning::the runner DNS does not resolve ${lost% }; asking 1.1.1.1 and 8.8.8.8 on $link instead"
@@ -284,6 +295,10 @@ jobs:
             [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
           fi
           if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
+              exit 1
+            fi
             echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
             printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
             sudo apt-get "${apt_options[@]}" update --error-on=any
@@ -304,9 +319,12 @@ jobs:
           set -euo pipefail
           rm -rf "$RUNNER_TEMP/crazyagent-release"
           mkdir -p "$RUNNER_TEMP/crazyagent-release/target" "$RUNNER_TEMP/crazyagent-release/cargo-home"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crazyagent-release/target" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=$RUNNER_TEMP/crazyagent-release/cargo-home" >> "$GITHUB_ENV"
-          echo "BUN_INSTALL_CACHE_DIR=$RUNNER_TEMP/crazyagent-release/bun-cache" >> "$GITHUB_ENV"
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crazyagent-release/target"
+            echo "CARGO_HOME=$RUNNER_TEMP/crazyagent-release/cargo-home"
+            echo "BUN_INSTALL_CACHE_DIR=$RUNNER_TEMP/crazyagent-release/bun-cache"
+            echo "npm_config_cache=$RUNNER_TEMP/crazyagent-release/npm-cache"
+          } >> "$GITHUB_ENV"
       - name: Set release version
         run: node scripts/release/version.mjs set "$VERSION"
       - name: Install desktop dependencies
@@ -497,6 +515,29 @@ jobs:
           path: signing/
           if-no-files-found: error
           retention-days: 7
+      - name: Delete every release file this job made on the owner's runner
+        if: always() && runner.environment != 'github-hosted'
+        run: |
+          set -uo pipefail
+          for folder in "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"; do
+            case "$folder" in /?*) ;; *) echo "::error::the runner folder $folder is not an absolute path; nothing deleted"; exit 1 ;; esac
+          done
+          case "$GITHUB_WORKSPACE" in "$(dirname "$RUNNER_TEMP")"/?*) ;; *) echo "::error::the checkout $GITHUB_WORKSPACE is not inside the runner's work folder; nothing deleted"; exit 1 ;; esac
+          free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
+          echo "runner tool cache volume: $(free_gib) GiB free after the build"
+          tools=(crazyagent-release)
+          temp=(crazyagent-release node-arm64 bun-arm64 bun-x64 rust rcli apple macos-tmp)
+          made=()
+          for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
+          for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done
+          while IFS= read -r -d '' entry; do made+=("$entry"); done < <(find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -print0)
+          left=()
+          for path in "${made[@]}"; do
+            rm -rf "$path" 2>/dev/null || { chmod -R u+w "$path" 2>/dev/null; rm -rf "$path"; }
+            if [ -e "$path" ] || [ -L "$path" ]; then left+=("$path"); fi
+          done
+          echo "runner tool cache volume: $(free_gib) GiB free after the cleanup"
+          if [ "${#left[@]}" -gt 0 ]; then echo "::error::still on the runner: ${left[*]}"; exit 1; fi
 
   publish:
     needs: [prepare, build]
