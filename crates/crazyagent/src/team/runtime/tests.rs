@@ -16100,7 +16100,10 @@ fn a_wake_task_s_intent_names_the_text_that_was_typed() {
     let pending = ledger::pending(&fixture.connection, ledger::ActionKind::Dispatch).unwrap();
     assert_eq!(pending.len(), 1);
     let payload: serde_json::Value = serde_json::from_str(&pending[0].payload).unwrap();
-    assert_eq!(payload["marker"], WAKE_DELIVERED);
+    assert_eq!(
+        payload["marker"],
+        WAKE_DELIVERED[..WAKE_DELIVERED.len().min(delivery::MARKER_BYTES_MAX)]
+    );
     assert!(typed.contains(WAKE_DELIVERED), "{typed}");
     team.workers.clear();
 }

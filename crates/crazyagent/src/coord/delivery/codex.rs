@@ -266,6 +266,9 @@ mod wire {
             Ok(())
         }
 
+        /// Writes all of `bytes` before the call's deadline. A timeout the socket refuses
+        /// is never zero here, so the refusal means the bridge closed its end. Input: the
+        /// bytes. Output: Ok once written, else the plain code.
         fn write(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
             let left = self
                 .deadline
@@ -274,12 +277,16 @@ mod wire {
                 .ok_or("codex_bridge_slow")?;
             self.stream
                 .set_write_timeout(Some(left))
-                .map_err(|_| "codex_bridge_unavailable")?;
+                .map_err(|_| "codex_bridge_closed")?;
             self.stream
                 .write_all(bytes)
                 .map_err(|_| "codex_bridge_closed")
         }
 
+        /// Reads until the buffer holds `need` bytes, before the call's deadline and within
+        /// the read bound. A timeout the socket refuses is never zero here, so the refusal
+        /// means the bridge closed its end. Input: the bytes needed. Output: Ok once
+        /// buffered, else the plain code.
         fn fill(&mut self, need: usize) -> Result<(), &'static str> {
             let mut chunk = [0u8; CHUNK_BYTES];
             while self.buffer.len() < need {
@@ -290,7 +297,7 @@ mod wire {
                     .ok_or("codex_bridge_slow")?;
                 self.stream
                     .set_read_timeout(Some(left))
-                    .map_err(|_| "codex_bridge_unavailable")?;
+                    .map_err(|_| "codex_bridge_closed")?;
                 let count = match self.stream.read(&mut chunk) {
                     Ok(0) => return Err("codex_bridge_closed"),
                     Ok(count) => count,

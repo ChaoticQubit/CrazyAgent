@@ -198,7 +198,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const acceptHeld = () => page.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Accept")?.disabled ?? null`);
         assert.equal(await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); return box.scrollHeight > box.clientHeight; })()`), true, "the moved diff needs the box's own scroll");
         assert.equal(await acceptHeld(), true, "Accept holds until the moved diff's end was on screen");
-        await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); box.scrollTop = box.scrollHeight; })()`);
+        await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); box.scrollTop = box.scrollHeight; box.querySelector(".ch-end").scrollIntoView({ block: "nearest" }); })()`);
         for (const deadline = Date.now() + STEP_MS; await acceptHeld() !== false; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "Accept comes back once the moved diff's end was on screen");
         await me.capture("changes-moved-diff-read");
 

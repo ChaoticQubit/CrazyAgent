@@ -1005,13 +1005,17 @@ fn a_lead_worker_takes_in_its_lead_s_gitlink_and_its_own_is_still_refused() {
     );
 }
 
-/// Removes the owner repository's `.git/info`, as a clone or `init --template=` leaves a
-/// project, and writes a grafts file into a case variant of it that gives `child` the only
-/// parent `parent`, as a project-root agent could (land-19 r2 M1). The owner's own git then
-/// answers ancestry from it. Inputs: the case, the grafted commit and its claimed parent.
+/// Leaves the owner repository with no `.git/info`, as a clone or `init --template=` leaves
+/// a project and as the case's repository starts, and writes a grafts file into a case
+/// variant of it that gives `child` the only parent `parent`, as a project-root agent could
+/// (land-19 r2 M1). The owner's own git then answers ancestry from it. Inputs: the case,
+/// the grafted commit and its claimed parent.
 fn forge_grafts(case: &Case, child: &str, parent: &str) {
     let git = case.repo.join(".git");
-    std::fs::remove_dir_all(git.join("info")).unwrap();
+    match std::fs::remove_dir_all(git.join("info")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        removed => removed.unwrap(),
+    }
     write(
         &git.join("INFO").join("grafts"),
         &format!("{child} {parent}\n"),
@@ -3737,6 +3741,7 @@ fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt
 #[test]
 fn a_set_accepted_in_a_place_a_later_build_named_still_lists_and_keeps_that_place() {
     let case = Case::new();
+    closing_tables(&case);
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
@@ -11617,6 +11622,29 @@ fn an_ordinary_land_intent_is_stored_in_the_shape_an_older_engine_reads() {
     assert_eq!(
         serde_json::from_str::<store::Intent>(&marked).unwrap(),
         land(true)
+    );
+}
+
+/// G24 r1 L1: a reset's stored copy of a set that was never regenerated keeps the shape an
+/// older engine reads after a rollback, and a regenerated set's copy still carries its fields.
+#[test]
+fn a_reset_copy_of_a_set_never_regenerated_is_stored_in_the_shape_an_older_engine_reads() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut record = store::load(&case.db, &id).unwrap();
+    assert_eq!(record.regenerated_head, None);
+    assert!(record.regenerated_files.is_empty());
+    let stored = serde_json::to_value(store::Earlier::of(&record)).unwrap();
+    assert!(stored.get("regenerated_head").is_none(), "{stored}");
+    assert!(stored.get("regenerated_files").is_none(), "{stored}");
+    record.regenerated_head = Some(record.head.clone());
+    record.regenerated_files = vec!["README".into()];
+    let regenerated = store::Earlier::of(&record);
+    let text = serde_json::to_string(&regenerated).unwrap();
+    assert_eq!(
+        serde_json::from_str::<store::Earlier>(&text).unwrap(),
+        regenerated
     );
 }
 

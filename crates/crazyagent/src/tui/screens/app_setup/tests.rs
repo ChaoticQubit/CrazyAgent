@@ -1065,9 +1065,18 @@ fn settings_show_team_agents_kept_running_and_ended_a_day_after_quitting_by_defa
         &rows,
         "An agent still running when the time is up ends with its terminal.",
     );
-    find(
-        &rows,
-        "agents left behind when CrazyAgent did not quit cleanly.",
+    let note = rows
+        .iter()
+        .skip_while(|row| !row.contains("An agent still running when the time is up"))
+        .take(3)
+        .map(|row| row.trim_matches(|c: char| !(c.is_alphanumeric() || c.is_ascii_punctuation())))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        note.contains(
+            "The limit also covers agents left behind when CrazyAgent did not quit cleanly."
+        ),
+        "{note}"
     );
     assert!(rows.last().unwrap().contains("q Quitting"));
     shell.key(Key::Char('q'));

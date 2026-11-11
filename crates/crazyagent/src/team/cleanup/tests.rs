@@ -1618,14 +1618,17 @@ fn clearing_a_pinned_cache_file_never_changes_an_owner_file_a_swapped_folder_poi
 /// When git drops an agent's worktree record but leaves a file the engine cannot delete,
 /// the agent stays offered for removal with its record waiting, and a later removal
 /// finishes once the file can go, instead of refusing it as an invalid worktree for good
-/// (RVD-C-N1).
+/// (RVD-C-N1). The file is pinned at mode 000, which Clean up cannot open to unpin
+/// (T8-R2-F1); a pinned file it can open goes at once (T8-R2-N4).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_leftover_the_engine_cannot_delete_keeps_the_agent_offered_and_a_later_removal_finishes_it() {
+    use std::os::unix::fs::PermissionsExt;
     let case = Case::new();
     case.agent(1, "sub", "stopped");
     let stuck = case.worktree(1).join("target/stuck.bin");
     write(&stuck, b"locked\n");
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
     let unlocked = Unlocked(stuck.clone());
     assert!(chflags("uchg", &stuck));
     assert_eq!(case.listed(), [1]);
