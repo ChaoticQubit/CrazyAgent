@@ -690,3 +690,135 @@ fn a_reply_with_a_missing_close_a_repeated_tab_or_a_cut_end_gives_only_whole_tab
         [(Tab::Features, "- Search\n".to_owned())]
     );
 }
+
+#[test]
+fn the_readme_is_the_repo_file_read_whole_and_never_through_a_link() {
+    let (db, project, folder) = case();
+    std::fs::write(
+        folder.path().join("README.md"),
+        "# Alpha\n\nReads papers.\n",
+    )
+    .unwrap();
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    let readme = overview.readme.unwrap();
+    assert_eq!(readme.path, "README.md");
+    assert_eq!(readme.text, "# Alpha\n\nReads papers.\n");
+    assert!(!readme.cut);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_readme_that_is_a_link_is_not_shown() {
+    let (db, project, folder) = case();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(outside.path(), "secret\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), folder.path().join("README.md")).unwrap();
+    assert!(
+        read(&db, &project, folder.path(), 1)
+            .unwrap()
+            .readme
+            .is_none()
+    );
+    std::fs::write(folder.path().join("README.txt"), "Plain.\n").unwrap();
+    let readme = read(&db, &project, folder.path(), 1)
+        .unwrap()
+        .readme
+        .unwrap();
+    assert_eq!(readme.path, "README.txt");
+    assert_eq!(readme.text, "Plain.\n");
+}
+
+#[test]
+fn a_readme_over_the_bound_is_cut_at_a_line_and_says_so() {
+    let (db, project, folder) = case();
+    std::fs::write(
+        folder.path().join("README.md"),
+        "line\n".repeat(README_BYTES_MAX as usize / 5 + 10),
+    )
+    .unwrap();
+    let readme = read(&db, &project, folder.path(), 1)
+        .unwrap()
+        .readme
+        .unwrap();
+    assert!(readme.cut);
+    assert!(readme.text.len() as u64 <= README_BYTES_MAX);
+    assert!(readme.text.len() as u64 > README_BYTES_MAX - 5);
+    assert!(readme.text.ends_with("line\n"));
+    std::fs::write(folder.path().join("README.md"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    assert!(
+        read(&db, &project, folder.path(), 1)
+            .unwrap()
+            .readme
+            .is_none()
+    );
+}
+
+fn link_competitor_research(
+    db: &mut Connection,
+    project: &ProjectId,
+    folder: &std::path::Path,
+    path: &str,
+) {
+    use crate::project_setup::ResearchKind;
+    use crate::project_setup::links::{self, DocLink, LinkKind};
+    let file = folder.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "Beta is faster at search.\n").unwrap();
+    links::initialize(db).unwrap();
+    let tx = db.transaction().unwrap();
+    let link = DocLink {
+        path: path.to_owned(),
+        kind: LinkKind::Research(ResearchKind::CompetitorResearch),
+    };
+    links::set(&tx, project, &[link]).unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn competitors_is_missing_without_research_and_linked_with_a_linked_file() {
+    let (mut db, project, folder) = case();
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Missing
+    );
+    link_competitor_research(
+        &mut db,
+        &project,
+        folder.path(),
+        "docs/research-competitors.md",
+    );
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Linked {
+            paths: vec!["docs/research-competitors.md".into()]
+        }
+    );
+    std::fs::remove_file(folder.path().join("docs/research-competitors.md")).unwrap();
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Missing
+    );
+}
+
+#[test]
+fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
+    let (mut db, project, folder) = case();
+    link_competitor_research(&mut db, &project, folder.path(), "docs/competitors.md");
+    db.execute_batch(
+        "CREATE TABLE research_jobs(id INTEGER PRIMARY KEY, project TEXT, kind TEXT,
+           status TEXT, report_path TEXT);
+         INSERT INTO research_jobs(project,kind,status,report_path) VALUES
+           ('alpha','competitor_research','done','research/old.md'),
+           ('alpha','competitor_research','done','research/new.md'),
+           ('alpha','competitor_research','running',NULL),
+           ('alpha','market_research','done','research/market.md'),
+           ('beta','competitor_research','done','research/beta.md');",
+    )
+    .unwrap();
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Report {
+            path: "research/new.md".into()
+        }
+    );
+}

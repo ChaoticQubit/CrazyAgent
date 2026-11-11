@@ -25,6 +25,7 @@ pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
+pub use transport::overview::OVERVIEW_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
     Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionMode, InstructionRecord,
