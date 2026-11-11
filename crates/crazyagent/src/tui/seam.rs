@@ -66,6 +66,50 @@ pub struct AccountRow {
     pub status: String,
 }
 
+/// The words an account goes by wherever a screen shows it outside its own row in Accounts:
+/// the name the owner gave it, with the account id after it when another account has the
+/// same name, so two accounts never read the same. Inputs: the account id and the owner's
+/// account rows. Output: the words, or none for an id with no row.
+pub fn account_label(id: &str, accounts: &[AccountRow]) -> Option<String> {
+    let own = accounts.iter().find(|account| account.id.as_str() == id)?;
+    let uses = accounts
+        .iter()
+        .filter(|account| account.name == own.name)
+        .count();
+    assert!(uses >= 1, "the account's own row has its name");
+    Some(account_words(own, uses > 1))
+}
+
+/// The words of every account at once ([`account_label`]), in one pass over the rows, for a
+/// screen that names many accounts. Input: the owner's account rows. Output: the words by
+/// account id.
+pub fn account_labels(accounts: &[AccountRow]) -> std::collections::HashMap<String, String> {
+    let mut uses: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for account in accounts {
+        *uses.entry(account.name.as_str()).or_default() += 1;
+    }
+    let labels: std::collections::HashMap<String, String> = accounts
+        .iter()
+        .map(|account| {
+            let shared = uses[account.name.as_str()] > 1;
+            (
+                account.id.as_str().to_owned(),
+                account_words(account, shared),
+            )
+        })
+        .collect();
+    assert!(labels.len() <= accounts.len());
+    labels
+}
+
+fn account_words(account: &AccountRow, shared: bool) -> String {
+    if shared {
+        format!("{} ({})", account.name, account.id.as_str())
+    } else {
+        account.name.clone()
+    }
+}
+
 /// The problem code a request gets while the engine has no support for it yet.
 /// Screens show "Not ready yet" for it instead of a failure.
 pub const NOT_READY: &str = "engine_support_not_ready";
@@ -131,6 +175,7 @@ pub enum Request {
     Changes(Box<super::client::changes::ChangesQuery>),
     Process(Box<super::client::process::ProcessQuery>),
     Recovery(Box<super::client::recovery::RecoveryQuery>),
+    Roadmap(Box<super::client::roadmap::RoadmapQuery>),
     Questions(Box<super::client::questions::QuestionsQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
     Reveal(Box<super::client::ide::RevealQuery>),
@@ -179,6 +224,7 @@ impl std::fmt::Debug for Request {
             Self::Changes(_) => "Changes",
             Self::Process(_) => "Process",
             Self::Recovery(_) => "Recovery",
+            Self::Roadmap(_) => "Roadmap",
             Self::Questions(_) => "Questions",
             Self::Cleanup(_) => "Cleanup",
             Self::Reveal(_) => "Reveal",

@@ -1,5 +1,6 @@
-import { nextGeneration } from "../../api";
+import { listAccounts, nextGeneration } from "../../api";
 import type { Result } from "../../api";
+import { useLoad } from "../../state";
 import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { formatRoute } from "../../ui";
 import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
@@ -11,7 +12,7 @@ import { useTeamGraph } from "../team";
 import { Console, type ConsoleLine } from "./console";
 import { agentMentions } from "./console-model";
 import { useProjectFiles } from "./project-files";
-import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, activityLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Button, Drawer, Menu, type Tone } from "../../ui";
@@ -85,11 +86,13 @@ export function queuedLines(queued: string | null, openFailed: boolean): Console
 /** The console lines of the master conversation: each turn's opening (the owner's message as
  * this window sent it or as read back from the engine, the engine's line for a turn it asked
  * for, or a placeholder for a message whose text is not read yet), the reply or the turn's
- * status line, its task and account lines, then the messages this window sent that no turn
- * shows yet. Inputs: the turns, the texts this window sent by turn id, when each was sent,
- * the current time and the owner lines read back by input cursor. Output: the lines in
- * order, each with an id that stays the same while it is shown. */
-export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {}): ConsoleLine[] {
+ * status line (a running turn's with its activity behind Show activity), its task and account
+ * lines, then the messages this window sent that no turn shows yet. Inputs: the turns, the
+ * texts this window sent by turn id, when each was sent, the current time, the owner lines
+ * read back by input cursor and the owner's account names for the account lines. Output: the
+ * lines in order, each with an id that stays the same while it is shown. */
+export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {},
+  accounts: { id: string; name: string }[] = []): ConsoleLine[] {
   const lines: ConsoleLine[] = [];
   for (const turn of turns) {
     const engine = engineLine(turn);
@@ -100,12 +103,16 @@ export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, 
     if (turn.reply) lines.push({ id: `${turn.id}-reply`, kind: "reply", text: turn.reply.text });
     else {
       const failed = turnSettled(turn) && turn.phase !== "succeeded";
-      lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine", text: turn.phase === "running" ? thinkingLine(sentAt?.[turn.id], now) : turnLine(turn) });
+      const running = turn.phase === "running";
+      const activity = running ? activityLines(turn.activity, now) : [];
+      lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine",
+        text: running ? thinkingLine(sentAt?.[turn.id] ?? turn.attempt?.selected_at_ms, now, turn.activity) : turnLine(turn),
+        ...(activity.length > 0 ? { activity } : {}) });
     }
     taskLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-task-${index}`, kind: "delegate", text }));
     const changes = changesLine(turn);
     if (changes !== null) lines.push({ id: `${turn.id}-changes`, kind: "tool", text: changes });
-    accountLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
+    accountLines(turn, accounts).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
   }
   for (const [id, text] of Object.entries(sent)) {
     if (turns.some((turn) => turn.id === id)) continue;
@@ -136,6 +143,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const current = useRef(data.id);
   current.current = data.id;
   const [graph] = useTeamGraph(data.id);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
   const [tag, setTag] = useState<string | null>(null);
   const files = useProjectFiles(data.id, readOnly ? null : tag);
   const setup = valueOf(data.setup);
@@ -273,7 +281,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
-  const told = [...consoleLines(turns, sent, sentAtByProject.get(data.id), now, held), ...queuedLines(queued, openFailed && !ticket)];
+  const told = [...consoleLines(turns, sent, sentAtByProject.get(data.id), now, held, accounts.kind === "ok" ? accounts.value : []), ...queuedLines(queued, openFailed && !ticket)];
   const switched = readOnly ? switchDivider(data.team.result) : null;
   const lines: ConsoleLine[] = [...(told.length > 0 ? told : [{ id: "empty", kind: "engine" as const, text: readOnly
     ? "No earlier conversation. Messages sent to the master before it ran live stay here to read."

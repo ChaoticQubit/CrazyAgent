@@ -60,7 +60,7 @@ const UNCONFIRMED_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(1
 const FULL_ROWS = Array.from({ length: 15 }, (_, index) => ranked(index, next({ kind: "tied_order" })));
 const HOLD_ROWS = [{ ...ranked(2, next({ kind: "ranked", rank: 1 })), held_for: [{ project: "project-a", name: "Meals for two", until_ms: Date.now() + 90 * 60000 }] }, ranked(0, next({ kind: "least_used" })), ranked(1, { kind: "never_use" })];
 const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], unconfirmed: [order(UNCONFIRMED_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], full: [order(FULL_ROWS)], "project-held": [order(HOLD_ROWS), SPARE_ORDER], bare: [] };
-const SCHEDULE = { strategy: "use_it_or_lose_it", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
+const SCHEDULE = { strategy: "use_it_or_lose_it", live_master: "keep", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
 const reading = (used_percent) => (used_percent === null ? null : { used_percent, resets_at_ms: null });
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
 const others = (count) => Array.from({ length: count }, (_, index) => limit(100 + index, 40));
@@ -71,6 +71,7 @@ const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limi
 function applied(current, change) {
   const version = current.version + 1;
   if (change.kind === "app_strategy") return { ...current, strategy: change.strategy, version };
+  if (change.kind === "live_master") return { ...current, live_master: change.choice, version };
   if (change.kind === "pool_strategy") {
     const pools = current.pools.filter((item) => item.id !== change.pool);
     return { ...current, pools: change.strategy === null ? pools : [...pools, { id: change.pool, strategy: change.strategy }], version };

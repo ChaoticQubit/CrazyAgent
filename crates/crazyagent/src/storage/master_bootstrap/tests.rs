@@ -572,6 +572,90 @@ fn a_master_lease_whose_worktree_gains_a_config_worktree_is_no_longer_ready() {
     );
 }
 
+/// OB-7b: a Ready master lease whose check fails once on a read is checked once more and
+/// stays Ready. The step closes the repository's refs folder before its first listing, a
+/// permission failure, and opens it again before the next one.
+#[test]
+fn a_ready_master_lease_whose_check_fails_once_on_a_read_stays_ready() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let closed = case.repository.join(".git/refs");
+    let listings = std::rc::Rc::new(std::cell::Cell::new(0));
+    let step = {
+        let (closed, listings) = (closed.clone(), listings.clone());
+        worktrees::BeforeRead::set(move |path, listing| {
+            if path != closed || !listing {
+                return;
+            }
+            listings.set(listings.get() + 1);
+            let mode = if listings.get() == 1 { 0o000 } else { 0o755 };
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        })
+    };
+    let state = case.lease_state();
+    drop(step);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(listings.get(), 2, "the check ran once more, and only once");
+    assert_eq!(state, LeaseState::Ready);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+}
+
+/// OB-7b: a read that keeps failing is tried once more and no further, and the lease reads
+/// Uncertain; it is Ready again once the folder can be read.
+#[test]
+fn a_ready_master_lease_whose_check_fails_twice_on_a_read_is_uncertain_until_it_reads() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let closed = case.repository.join(".git/refs");
+    let listings = std::rc::Rc::new(std::cell::Cell::new(0));
+    let step = {
+        let (closed, listings) = (closed.clone(), listings.clone());
+        worktrees::BeforeRead::set(move |path, listing| {
+            if path == closed && listing {
+                listings.set(listings.get() + 1);
+            }
+        })
+    };
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let state = case.lease_state();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(listings.get(), 2, "two tries, no third");
+    assert_eq!(state, LeaseState::Uncertain);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+    drop(step);
+}
+
+/// OB-7b: a check that meets a refused entry, here a link put in a file's place inside
+/// .git, is not tried again and the lease reads Uncertain at once.
+#[test]
+fn a_ready_master_lease_whose_check_meets_a_refused_entry_is_uncertain_with_no_second_try() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let planted = case.repository.join(".git/ob7-note");
+    std::fs::write(&planted, b"kept\n").unwrap();
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+    let outside = case.root.path().join("ob7-outside");
+    std::fs::write(&outside, b"outside\n").unwrap();
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let step = {
+        let (planted, reads) = (planted.clone(), reads.clone());
+        worktrees::BeforeRead::set(move |path, listing| {
+            if path != planted || listing {
+                return;
+            }
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                std::fs::remove_file(path).unwrap();
+                std::os::unix::fs::symlink(&outside, path).unwrap();
+            }
+        })
+    };
+    let state = case.lease_state();
+    drop(step);
+    assert_eq!(reads.get(), 1, "a refusal was tried again");
+    assert_eq!(state, LeaseState::Uncertain);
+}
+
 #[test]
 fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
     let mut case = Case::new();

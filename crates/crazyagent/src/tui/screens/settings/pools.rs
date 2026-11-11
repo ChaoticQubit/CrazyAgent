@@ -1087,6 +1087,66 @@ mod tests {
     }
 
     #[test]
+    fn account_choice_shows_the_live_master_account_choice_and_m_sets_each_option() {
+        use crate::scheduling::{LiveMasterAccount, ScheduleChange};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.key(&Key::Char('o'), &mut ctx);
+        assert!(matches!(
+            ctx.next_request(),
+            Some(Request::Settings(job)) if matches!(*job, SettingsJob::Schedule)
+        ));
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let shown = body(&screen.modal(&ctx).expect("the editor shows").0);
+        let line = |shown: &str| {
+            shown
+                .lines()
+                .find(|line| line.contains("Live master account"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{shown}"))
+        };
+        let help = |shown: &str| {
+            let lines: Vec<&str> = shown
+                .lines()
+                .skip_while(|line| !line.contains("Live master account"))
+                .skip(1)
+                .take_while(|line| !line.trim().is_empty())
+                .collect();
+            let fits = lines.iter().all(|line| line.chars().count() <= 76 - 4);
+            assert!(fits, "the box cuts a help line: {shown}");
+            let words: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+            words.join(" ")
+        };
+        assert!(
+            line(&shown).ends_with("Keep start account"),
+            "nothing stored reads the default: {shown}"
+        );
+        assert_eq!(help(&shown), LiveMasterAccount::Keep.detail());
+        for choice in [LiveMasterAccount::MoveWhenIdle, LiveMasterAccount::Keep] {
+            screen.key(&Key::Char('m'), &mut ctx);
+            assert_eq!(change(&mut ctx), ScheduleChange::LiveMaster { choice });
+            let shown = body(&screen.modal(&ctx).unwrap().0);
+            assert!(line(&shown).ends_with(choice.label()), "{shown}");
+            assert_eq!(help(&shown), choice.detail(), "{shown}");
+        }
+        assert_eq!(ctx.queued(), 0);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Char('m'), &mut ctx);
+        assert_eq!(
+            change(&mut ctx),
+            ScheduleChange::LiveMaster {
+                choice: LiveMasterAccount::MoveWhenIdle
+            },
+            "the key works from a member's row too"
+        );
+    }
+
+    #[test]
     fn account_choice_steps_stay_in_range() {
         use super::super::account_choice::{cycle, next_pin, plan_line, rank_step, reserve_step};
         use crate::scheduling::{AccountPlan, Pin, Strategy};
@@ -1190,6 +1250,55 @@ mod tests {
         }
         assert_eq!(asked.len(), 2, "{asked:?}");
         assert!(asked[1].contains("Ranking"), "{asked:?}");
+    }
+
+    /// Account choice names each account as Accounts does, in the member rows and in Next
+    /// accounts, and shows an id only for an account whose name is not known (OB-4).
+    #[test]
+    fn account_choice_names_accounts_and_falls_back_to_the_id() {
+        use crate::scheduling::PoolRanking;
+        let mut ctx = ctx();
+        ctx.store.accounts = Load::Ready(vec![crate::tui::seam::AccountRow {
+            id: CredentialRef::new("member-1").unwrap(),
+            name: "Claude-ChaoticQubit".into(),
+            provider: "ChatGPT".into(),
+            status: "Signed in".into(),
+        }]);
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        while ctx.next_request().is_some() {}
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let ranking: Vec<PoolRanking> = serde_json::from_value(serde_json::json!([{
+            "pool": "pool-main",
+            "strategy": "use_it_or_lose_it",
+            "accounts": [
+                {
+                    "connection": "member-1",
+                    "standing": {"kind": "next", "weekly_resets_ms": null,
+                        "weekly_left_percent": 40, "use_last": false,
+                        "why": {"kind": "no_reading"}}
+                },
+                {"connection": "member-9", "standing": {"kind": "never_use"}}
+            ],
+            "own_order_projects": 0
+        }]))
+        .expect("a ranking reads");
+        screen.arrive(&settings(SettingsEvent::Ranking(Ok(ranking))), &mut ctx);
+        let shown = body(&screen.modal(&ctx).expect("the editor shows").0);
+        assert!(shown.contains("  Claude-ChaoticQubit"), "{shown}");
+        assert!(shown.contains(" 1. Claude-ChaoticQubit"), "{shown}");
+        assert!(
+            !shown.contains("member-1"),
+            "a named account never shows its id: {shown}"
+        );
+        assert!(
+            shown.contains("    member-9"),
+            "an account with no name known falls back to its id: {shown}"
+        );
     }
 
     /// An account one project holds after its agent reported a limit keeps its place in the

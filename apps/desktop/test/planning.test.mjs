@@ -133,7 +133,7 @@ test("Retry and Plan roadmap now call the engine", () => {
   assert.match(read("src/api-projects.ts"), /export function planRoadmap\(id: string, generation: number\): Promise<Result<IntentReceipt>> \{\s*return call<IntentReceipt>\("desktop_plan_roadmap", \{ id, generation \}\);/);
   assert.match(read("src/engine-client.ts"), /export function planRoadmap\(id: string, generation: number\): Promise<IntentReceipt> \{\s*return invoke<IntentReceipt>\("desktop_plan_roadmap", \{ id, generation \}\);/);
   assert.match(read("src/screens/project/overview.tsx"), /<PlanningLine data=\{data\} \/>/);
-  assert.match(read("src/screens/project/settings.tsx"), /<GeneralSection data=\{data\} setup=\{setup!\} \/><PlanningLine data=\{data\} \/>/);
+  assert.match(read("src/screens/project/settings.tsx"), /<GeneralSection data=\{data\} setup=\{setup!\} \/><PlanningLine data=\{data\} settings \/>/);
   assert.match(read("src-tauri/src/lib.rs"), /lock\(&state\)\.await\?\.plan_roadmap\(&id, generation\)\.await/);
 });
 

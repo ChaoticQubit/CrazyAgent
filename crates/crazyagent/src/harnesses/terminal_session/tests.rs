@@ -96,6 +96,13 @@ mod own_turns {
     /// Starts a stand-in pane under the always-allow sandbox profile, or at Full access when
     /// `unconfined`. Takes the agent name and the access. Returns the pane.
     fn start_at(name: &str, unconfined: bool) -> Pane {
+        start_with(name, unconfined, STAND_IN)
+    }
+
+    /// Starts a pane that runs `script` as Claude Code, under the always-allow sandbox
+    /// profile, or at Full access when `unconfined`. Takes the agent name, the access and
+    /// the script. Returns the pane.
+    fn start_with(name: &str, unconfined: bool, script: &str) -> Pane {
         let root = tempfile::Builder::new()
             .prefix("ca-own-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -114,7 +121,7 @@ mod own_turns {
             private(path);
         }
         let executable = bin.join("claude");
-        std::fs::write(&executable, STAND_IN).unwrap();
+        std::fs::write(&executable, script).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let profile = base.join("agent.sb");
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
@@ -303,6 +310,165 @@ mod own_turns {
         let mut pane = start("own-turns-3");
         pane.session.follow_own_turns();
         pane.session.follow_every_turn();
+    }
+
+    const RULE: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}";
+    const READS: &str = "exec /bin/cat > \"$HOME/typed\"";
+    const DRAWS: &str = "while :; do printf '.'; /bin/sleep 0.2; done";
+
+    /// A stand-in for Claude Code that draws a screen once and then runs a command. Takes
+    /// the screen as a `printf` format and the command. Returns the script.
+    fn showing(screen: &str, then: &str) -> String {
+        format!("#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?2004h{screen}'\n{then}\n")
+    }
+
+    /// Claude Code's idle input prompt as a `printf` format: the prompt row between two
+    /// rules and its footer. Takes nothing. Returns the format.
+    fn idle_screen() -> String {
+        format!("{RULE}\\r\\n> \\r\\n{RULE}\\r\\n  ? for shortcuts\\r\\n")
+    }
+
+    /// Waits until the session says its open turn is stale. Takes the pane. Panics when it
+    /// does not within 20 seconds.
+    fn stale(pane: &mut Pane) {
+        let until = Instant::now() + Duration::from_secs(20);
+        while !pane.session.turn_stale() {
+            assert!(
+                Instant::now() < until,
+                "the open turn never counted as stale"
+            );
+            assert_eq!(
+                pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+                None
+            );
+        }
+    }
+
+    /// OB-1: in a session that follows every turn, an open turn whose record gets no byte
+    /// for the launch's `stale_turn`, on a pane whose app waits, is said stale once and is
+    /// open no more. The model at work in it starts it again as a turn, which can go stale
+    /// again and ends like any other; a turn that ended is never stale.
+    #[test]
+    fn an_open_turn_with_a_silent_record_on_a_waiting_pane_is_said_stale_once() {
+        let mut pane = start_with("stale-turn-1", false, &showing(&idle_screen(), READS));
+        pane.session.follow_every_turn();
+        pane.session.limits.stale_turn = Duration::from_secs(4);
+        assert!(!pane.session.turn_stale(), "no turn is open");
+        pane.write(&[&user("go")]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted)
+        );
+        assert!(!pane.session.turn_stale(), "the record just grew");
+        stale(&mut pane);
+        assert!(!pane.session.turn_stale(), "a stale turn is said once");
+        std::thread::sleep(Duration::from_secs(5));
+        assert_eq!(
+            pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+            None
+        );
+        assert!(!pane.session.turn_stale(), "a dropped turn is open no more");
+
+        pane.write(&[TOOL]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted),
+            "the model at work in the dropped turn starts it again"
+        );
+        assert!(
+            !pane.session.turn_stale(),
+            "a record that grew starts the wait again"
+        );
+        stale(&mut pane);
+
+        pane.write(&[&reply("done")]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted)
+        );
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(text("done"))
+        );
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(DONE)
+        );
+        std::thread::sleep(Duration::from_secs(5));
+        assert_eq!(
+            pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+            None
+        );
+        assert!(!pane.session.turn_stale(), "a turn that ended is not stale");
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
+    /// Checks that an open turn with a silent record never counts as stale on a pane that
+    /// runs `script`, for more than twice the `stale_turn` it is given. Takes the agent name
+    /// and the script.
+    fn never_stale(name: &str, script: &str) {
+        let mut pane = start_with(name, false, script);
+        pane.session.follow_every_turn();
+        pane.session.limits.stale_turn = Duration::from_secs(4);
+        pane.write(&[&user("go")]);
+        assert_eq!(
+            pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted)
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until {
+            assert!(!pane.session.turn_stale(), "the open turn was dropped");
+            assert_eq!(
+                pane.session.next_fact(Duration::from_millis(100)).unwrap(),
+                None
+            );
+        }
+    }
+
+    /// OB-1 r1 (OB1-F2): a turn whose record is silent for longer than `stale_turn` is never
+    /// stale while its pane still draws, as an app at work on a silent tool does, though the
+    /// idle prompt is on its screen.
+    #[test]
+    fn an_open_turn_is_never_stale_while_its_pane_still_draws() {
+        never_stale("stale-turn-2", &showing(&idle_screen(), DRAWS));
+    }
+
+    /// OB-1 r1 (OB1-F2): a turn is never stale while a marked numbered choice is on its
+    /// still screen, though the idle prompt is on it too.
+    #[test]
+    fn an_open_turn_is_never_stale_while_a_question_is_on_its_screen() {
+        let asked = format!(
+            " Do you want to proceed?\\r\\n \u{276f} 1. Yes\\r\\n   2. No\\r\\n\\r\\n{}",
+            idle_screen()
+        );
+        never_stale("stale-turn-3", &showing(&asked, READS));
+    }
+
+    /// OB1R2-F1: a turn with a silent record goes stale on a still screen whatever it shows
+    /// besides a question: a dialog the engine cannot read, or no prompt at all. Its status
+    /// must clear; holding engine input for such a screen is its caller's part.
+    #[test]
+    fn an_open_turn_goes_stale_on_a_still_screen_that_shows_no_idle_prompt() {
+        let dialog =
+            format!("{RULE}\\r\\n Tell the agent what to do differently:\\r\\n{RULE}\\r\\n");
+        for (name, script) in [
+            ("stale-turn-4", showing(&dialog, READS)),
+            ("stale-turn-5", STAND_IN.to_owned()),
+        ] {
+            let mut pane = start_with(name, false, &script);
+            pane.session.follow_every_turn();
+            pane.session.limits.stale_turn = Duration::from_secs(4);
+            pane.write(&[&user("go")]);
+            assert_eq!(
+                pane.session.next_fact(Duration::from_secs(5)).unwrap(),
+                Some(TranscriptEvent::TurnStarted)
+            );
+            stale(&mut pane);
+            assert!(
+                !pane.session.took_none(),
+                "{name}: the engine started this pane"
+            );
+        }
     }
 
     const BACKGROUND_USE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 40","run_in_background":true}}],"stop_reason":"tool_use"}}"#;

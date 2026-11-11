@@ -657,14 +657,17 @@ fn restart(
 
 /// The files the setup mapping found that the owner kept, as the project's links: each
 /// roadmap file as a roadmap and each research file under its kind, a roadmap planning file
-/// as a roadmap too. A path the links store refuses, such as one in the engine folder, is
-/// left out, and at most [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX) links are
-/// kept. Takes the transaction, the project and the paths the owner kept. Returns the
-/// links, none for a project that was not onboarded or whose mapping found nothing.
+/// as a roadmap too. A found file is linked only under a group the owner kept it in, so a
+/// file found as the roadmap and as research is not linked as the roadmap once the owner
+/// turned the roadmap off. A kept file the mapping did not find in that group, and a path
+/// the links store refuses, such as one in the engine folder, is left out, and at most
+/// [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX) links are kept. Takes the
+/// transaction, the project and the files the owner kept. Returns the links, none for a
+/// project that was not onboarded or whose mapping found nothing.
 pub(crate) fn found_links(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
-    kept: &[String],
+    kept: &[crate::project_setup::KeptFile],
 ) -> Result<Vec<crate::project_setup::links::DocLink>, EngineError> {
     use crate::project_setup::ResearchKind;
     use crate::project_setup::links::{self, DocLink, LinkKind};
@@ -679,28 +682,37 @@ pub(crate) fn found_links(
         .flatten();
     let mut facts = MappingFacts::default();
     draft::restore_found(&mut facts, column.as_deref()).map_err(error)?;
-    let roadmap = facts.roadmap.iter().map(|path| (path, LinkKind::Roadmap));
+    let roadmap = facts
+        .roadmap
+        .iter()
+        .map(|path| (path, None, LinkKind::Roadmap));
     let research = facts.research.iter().flat_map(|found| {
         let kind = match found.kind {
             ResearchKind::RoadmapPlanning => LinkKind::Roadmap,
             kind => LinkKind::Research(kind),
         };
-        found.files.iter().map(move |path| (path, kind))
+        found
+            .files
+            .iter()
+            .map(move |path| (path, Some(found.kind), kind))
     });
     let mut linked: Vec<DocLink> = Vec::new();
-    for (path, kind) in roadmap.chain(research) {
+    for (path, group, kind) in roadmap.chain(research) {
         let link = DocLink {
             path: path.clone(),
             kind,
         };
         if linked.len() < links::LINKS_MAX
-            && kept.contains(path)
+            && kept
+                .iter()
+                .any(|file| file.research == group && file.path == *path)
             && links::below_folder(path)
             && !linked.contains(&link)
         {
             linked.push(link);
         }
     }
+    assert!(linked.len() <= links::LINKS_MAX);
     Ok(linked)
 }
 

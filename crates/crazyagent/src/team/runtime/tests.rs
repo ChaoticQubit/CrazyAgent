@@ -3750,6 +3750,500 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
     host.close(&[]).unwrap();
 }
 
+/// Applies owner scheduling changes one by one, each on the schedule's current version, as
+/// the owner's Pools screen does. Takes the fixture and the changes.
+#[cfg(target_os = "macos")]
+fn schedule(fixture: &Fixture, changes: &[crate::scheduling::ScheduleChange]) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    for change in changes {
+        let tx = connection.transaction().unwrap();
+        let version = crate::scheduling::load(&tx).unwrap().version;
+        assert_eq!(
+            crate::scheduling::apply(&tx, &fixture.access, change, version).unwrap(),
+            crate::protocol::Outcome::Applied,
+            "{change:?}"
+        );
+        tx.commit().unwrap();
+    }
+}
+
+/// The owner change that pins one pool account Use last, or clears its plan. Takes the
+/// connection and whether to pin it. Returns the change.
+#[cfg(target_os = "macos")]
+fn use_last(connection: &str, pinned: bool) -> crate::scheduling::ScheduleChange {
+    crate::scheduling::ScheduleChange::Account {
+        connection: reference(connection),
+        plan: crate::scheduling::AccountPlan {
+            pin: pinned.then_some(crate::scheduling::Pin::UseLast),
+            ..crate::scheduling::AccountPlan::default()
+        },
+    }
+}
+
+/// The owner change that stores Live master account: Move when idle (DEC-139).
+#[cfg(target_os = "macos")]
+fn move_when_idle_on() -> crate::scheduling::ScheduleChange {
+    crate::scheduling::ScheduleChange::LiveMaster {
+        choice: crate::scheduling::LiveMasterAccount::MoveWhenIdle,
+    }
+}
+
+/// The pool account a team agent's row names. Takes the fixture and the agent. Returns the
+/// connection id.
+#[cfg(target_os = "macos")]
+fn agent_account(fixture: &Fixture, id: i64) -> String {
+    fixture
+        .connection
+        .query_row(
+            "SELECT connection FROM team_agents WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Starts a live Codex master in a project whose pool holds two endpoint accounts, `local-a`
+/// then `local-b`, after the given owner scheduling changes. Takes those changes. Returns the
+/// fixture, the host, the runtime and the master's agent id once its pane runs.
+#[cfg(target_os = "macos")]
+fn two_account_master(
+    before: &[crate::scheduling::ScheduleChange],
+) -> (Fixture, Arc<dyn Host>, TeamRuntime, i64) {
+    two_account_master_running(before, LIVE_CODEX, None)
+}
+
+/// Starts a live Codex master as `two_account_master` does, with the given Codex stand-in
+/// and, when a session is named, in that master session with its conversation kept. Takes
+/// the owner scheduling changes, the script and the session. Returns the fixture, the host,
+/// the runtime and the master's agent id once its pane runs.
+#[cfg(target_os = "macos")]
+fn two_account_master_running(
+    before: &[crate::scheduling::ScheduleChange],
+    script: &str,
+    session: Option<&str>,
+) -> (Fixture, Arc<dyn Host>, TeamRuntime, i64) {
+    let mut fixture = Fixture::new(1);
+    let mut second = fixture.access.connections[0].clone();
+    second.id = reference("local-b");
+    fixture.access.connections.push(second);
+    fixture.access.pools[0].members.push(reference("local-b"));
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, script);
+    schedule(&fixture, before);
+    if let Some(session) = session {
+        switch_session(&fixture.connection, session);
+    }
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+            && session.is_none_or(|session| kept_conversation(&f.connection, session).is_some())
+    });
+    let master = masters(&fixture.connection)[0];
+    (fixture, host, team, master)
+}
+
+/// The other of the fixture's two pool accounts. Takes one of them. Returns the other.
+#[cfg(target_os = "macos")]
+fn other_account(account: &str) -> &'static str {
+    if account == ENDPOINT {
+        "local-b"
+    } else {
+        ENDPOINT
+    }
+}
+
+/// Records a weekly usage reading for one pool account as a usage poll does, with an empty
+/// 5-hour window. Takes the fixture, the connection and the weekly use in percent.
+#[cfg(target_os = "macos")]
+fn weekly_use(fixture: &Fixture, connection: &str, percent: f64) {
+    crate::usage::initialize(&fixture.connection).unwrap();
+    let window = |used_percent, resets_at_ms| crate::usage::LimitWindow {
+        used_percent,
+        resets_at_ms,
+    };
+    crate::usage::record_observation(
+        &fixture.connection,
+        &reference(connection),
+        &crate::usage::Observation {
+            plan: None,
+            five_hour: Some(window(0.0, None)),
+            weekly: Some(window(percent, Some(now_ms() + 86_400_000))),
+            provider: Some(crate::usage::poll::Provider::Claude),
+        },
+        crate::usage::LimitSource::Poll,
+        now_ms(),
+    )
+    .unwrap();
+}
+
+/// Ticks the runtime past two of the idle live master's account checks, so a move the
+/// owner's choice allows has happened and one it does not allow has not. Takes the runtime.
+#[cfg(target_os = "macos")]
+fn ticks_past_move_checks(team: &mut TeamRuntime) {
+    let deadline = Instant::now() + super::MOVE_CHECK_EVERY * 2 + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Live master account, Keep start account, the default (DEC-139): an idle live master
+/// stays on the account it started on when the owner's order puts another pool account
+/// first, with no note. Its next start takes the account that is first now, which shows the
+/// order did change under it.
+#[cfg(target_os = "macos")]
+#[test]
+fn keep_start_account_leaves_an_idle_live_master_on_its_account_when_the_order_changes() {
+    let (fixture, host, mut team, master) = two_account_master(&[]);
+    let project = fixture.setup.project_id.clone();
+    assert_eq!(
+        crate::scheduling::live_master(&fixture.connection).unwrap(),
+        crate::scheduling::LiveMasterAccount::Keep,
+        "nothing stored reads Keep start account"
+    );
+    let first = agent_account(&fixture, master);
+    let other = if first == ENDPOINT {
+        "local-b"
+    } else {
+        ENDPOINT
+    };
+    schedule(&fixture, &[use_last(&first, true)]);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        first,
+        "the idle master keeps its start account"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(master));
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 0);
+
+    stop_live(&fixture, &mut team);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the master's next start takes the account that is first now",
+        |f| agent_account(f, master) == other && live_agent(&f.connection) == Some(master),
+    );
+    assert_eq!(
+        noted(&fixture, super::LIVE_MASTER_MOVED),
+        0,
+        "a start the owner asked for is not a move"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Live master account, Move when idle (DEC-139): the held account wins a tie, so a master
+/// on the second pool account stays there while nothing sets the accounts apart; once the
+/// owner's Use last pin puts the other account clearly first, the idle master stops and the same
+/// master row starts again on that account with one note, and it moves once.
+#[cfg(target_os = "macos")]
+#[test]
+fn move_when_idle_moves_an_idle_live_master_to_the_top_account_once_and_never_on_a_tie() {
+    let (fixture, host, mut team, master) =
+        two_account_master(&[move_when_idle_on(), use_last(ENDPOINT, true)]);
+    let project = fixture.setup.project_id.clone();
+    assert_eq!(
+        agent_account(&fixture, master),
+        "local-b",
+        "Use last on the first pool account starts the master on the second"
+    );
+
+    schedule(&fixture, &[use_last(ENDPOINT, false)]);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        "local-b",
+        "the held account wins a tie, though the other one comes first in the pool"
+    );
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 0);
+
+    schedule(&fixture, &[use_last("local-b", true)]);
+    fixture.until(
+        &mut team,
+        "the idle master moves to the account that is first now",
+        |f| {
+            agent_account(f, master) == ENDPOINT
+                && live_agent(&f.connection) == Some(master)
+                && noted(f, super::LIVE_MASTER_MOVED) == 1
+        },
+    );
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "the same master row"
+    );
+    assert!(
+        super::super::master::live(&fixture.connection, &project).unwrap(),
+        "the live master stayed on"
+    );
+    ticks_past_move_checks(&mut team);
+    assert_eq!(agent_account(&fixture, master), ENDPOINT);
+    assert_eq!(
+        noted(&fixture, super::LIVE_MASTER_MOVED),
+        1,
+        "the move happens once"
+    );
+    assert!(
+        !fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("The live master was turned off")),
+        "a move does not turn the live master off"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Live master account, Move when idle (DEC-139, LMA r1 L2), never drops an unsent owner
+/// line: a line the owner left in the master's terminal three minutes ago, long past the
+/// time engine input waits for one, still holds the move, so the stop never empties it;
+/// once the owner clears it, the master moves.
+#[cfg(target_os = "macos")]
+#[test]
+fn move_when_idle_waits_while_the_owner_holds_an_unsent_line_however_old() {
+    let (fixture, host, mut team, master) = two_account_master(&[move_when_idle_on()]);
+    let project = fixture.setup.project_id.clone();
+    let first = agent_account(&fixture, master);
+    let other = other_account(&first);
+    let typed = now_ms() - 180_000;
+    super::super::master::owner_typed(&fixture.connection, master, b"half a line", typed).unwrap();
+    assert!(
+        super::super::master::quiet(&fixture.connection, None, &project, now_ms()),
+        "engine input no longer waits for a line this old"
+    );
+    schedule(&fixture, &[use_last(&first, true)]);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        first,
+        "the master is not stopped under the owner's unsent line"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(master));
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 0);
+
+    super::super::master::owner_typed(&fixture.connection, master, b"\x15", now_ms()).unwrap();
+    fixture.until(
+        &mut team,
+        "the owner clears the line and the master moves",
+        |f| {
+            agent_account(f, master) == other
+                && live_agent(&f.connection) == Some(master)
+                && noted(f, super::LIVE_MASTER_MOVED) == 1
+        },
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Live master account, Move when idle (LMA r1 F3 a): a move the order asks for while the
+/// live master is in a turn waits for that turn. The master keeps its account and its pane
+/// through the rest of the turn, and moves once the turn has ended.
+#[cfg(target_os = "macos")]
+#[test]
+fn move_when_idle_waits_until_the_live_masters_turn_ends() {
+    let (fixture, host, mut team, master) =
+        two_account_master_running(&[move_when_idle_on()], &holding_codex(), Some("s-one"));
+    let first = agent_account(&fixture, master);
+    let other = other_account(&first);
+    host.input(&AgentId::team(master).unwrap(), b"a long turn\r")
+        .unwrap();
+    fixture.until(&mut team, "the long turn opens", |f| {
+        live_turns(&f.connection).1
+    });
+
+    schedule(&fixture, &[use_last(&first, true)]);
+    ticks_past_move_checks(&mut team);
+    assert!(live_turns(&fixture.connection).1, "the turn is still open");
+    assert_eq!(
+        agent_account(&fixture, master),
+        first,
+        "the master is not stopped in its turn"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(master));
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 0);
+
+    std::fs::write(stand_in_file(&fixture, master, "go"), "").unwrap();
+    fixture.until(&mut team, "the turn ends and it moves", |f| {
+        agent_account(f, master) == other
+            && live_agent(&f.connection) == Some(master)
+            && noted(f, super::LIVE_MASTER_MOVED) == 1
+    });
+    assert_eq!(masters(&fixture.connection), [master]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Live master account, Move when idle (LMA r1 F3 b): while work of the project is in
+/// flight, here an owner message the master has not answered, the idle master keeps its
+/// account; once the message is answered, it moves.
+#[cfg(target_os = "macos")]
+#[test]
+fn move_when_idle_waits_while_work_of_the_project_is_in_flight() {
+    let (fixture, host, mut team, master) = two_account_master(&[move_when_idle_on()]);
+    let first = agent_account(&fixture, master);
+    let other = other_account(&first);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner','Plan it','sent',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    schedule(&fixture, &[use_last(&first, true)]);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        first,
+        "the master is not stopped under a message it has not answered"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(master));
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 0);
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_messages SET state='answered' WHERE id=?1",
+            [message],
+        )
+        .unwrap();
+    fixture.until(&mut team, "the answer lands and it moves", |f| {
+        agent_account(f, master) == other
+            && live_agent(&f.connection) == Some(master)
+            && noted(f, super::LIVE_MASTER_MOVED) == 1
+    });
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Live master account, Move when idle under Balanced (LMA r1 F1): accounts whose weekly
+/// use passes each other by less than the margin move nothing; an account ahead by the
+/// margin takes the master, once; and for `MOVE_DWELL` after a move nothing moves the
+/// master again, however far ahead the other account is.
+#[cfg(target_os = "macos")]
+#[test]
+fn move_when_idle_under_balanced_needs_the_margin_and_moves_once_per_dwell() {
+    let balanced = crate::scheduling::ScheduleChange::AppStrategy {
+        strategy: crate::scheduling::Strategy::Balanced,
+    };
+    let (fixture, host, mut team, master) = two_account_master(&[move_when_idle_on(), balanced]);
+    let project = fixture.setup.project_id.clone();
+    let first = agent_account(&fixture, master);
+    let other = other_account(&first);
+    weekly_use(&fixture, &first, 30.2);
+    weekly_use(&fixture, other, 30.1);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        first,
+        "a tenth of a point less weekly use moves nothing"
+    );
+    weekly_use(&fixture, other, 25.3);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        first,
+        "4.9 points less weekly use moves nothing"
+    );
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 0);
+
+    weekly_use(&fixture, other, 25.2);
+    fixture.until(
+        &mut team,
+        "5 points less weekly use moves the idle master",
+        |f| {
+            agent_account(f, master) == other
+                && live_agent(&f.connection) == Some(master)
+                && noted(f, super::LIVE_MASTER_MOVED) == 1
+        },
+    );
+    let next = team.moves_next[&project];
+    assert!(
+        next > Instant::now() + super::MOVE_DWELL - Duration::from_secs(60),
+        "the next check waits for the dwell"
+    );
+
+    weekly_use(&fixture, &first, 1.0);
+    ticks_past_move_checks(&mut team);
+    assert_eq!(
+        agent_account(&fixture, master),
+        other,
+        "inside the dwell the master stays, though the first account is far ahead"
+    );
+    assert_eq!(noted(&fixture, super::LIVE_MASTER_MOVED), 1);
+
+    team.moves_next.remove(&project);
+    fixture.until(&mut team, "after the dwell it moves back", |f| {
+        agent_account(f, master) == first
+            && live_agent(&f.connection) == Some(master)
+            && noted(f, super::LIVE_MASTER_MOVED) == 2
+    });
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Live master account, Move when idle (LMA r1 L3, F3 c): a move between two endpoint
+/// accounts carries the conversation as a summary. The master starts a new harness
+/// conversation with no resume, its instructions hold the earlier turns, and the note that
+/// says so comes before the move note.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_move_between_endpoint_accounts_starts_a_conversation_seeded_with_the_earlier_turns() {
+    let (fixture, host, mut team, master) =
+        two_account_master_running(&[move_when_idle_on()], RESUMING_CODEX, Some("s-one"));
+    let first = agent_account(&fixture, master);
+    let other = other_account(&first);
+    let (before, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let started = launches(&fixture, master).len();
+
+    schedule(&fixture, &[use_last(&first, true)]);
+    fixture.until(
+        &mut team,
+        "the master moves and starts a new conversation",
+        |f| {
+            agent_account(f, master) == other
+                && live_agent(&f.connection) == Some(master)
+                && noted(f, super::LIVE_MASTER_MOVED) == 1
+                && kept_conversation(&f.connection, "s-one").is_some_and(|(id, _)| id != before)
+        },
+    );
+    let launched = launches(&fixture, master);
+    assert_eq!(launched.len(), started + 1, "{launched:?}");
+    assert!(
+        !launched[started].contains("resume"),
+        "an endpoint account never resumes a conversation kept on another: {launched:?}"
+    );
+    let seeded = codex_instructions(&fixture, master);
+    assert!(
+        seeded.contains("Your earlier harness conversation in this session"),
+        "{seeded}"
+    );
+    assert!(seeded.contains("You: Done."), "{seeded}");
+    let notes: Vec<String> = fixture
+        .status()
+        .messages
+        .into_iter()
+        .filter(|message| message.state == MessageState::Note)
+        .map(|message| message.text)
+        .collect();
+    let at = |text: &str| notes.iter().position(|note| note == text);
+    assert!(
+        at(crate::master_sessions::FRESH_NOTE) < at(super::LIVE_MASTER_MOVED),
+        "the summary note comes before the move note: {notes:?}"
+    );
+    assert!(at(crate::master_sessions::FRESH_NOTE).is_some(), "{notes:?}");
+    assert_eq!(live_turns(&fixture.connection), (1, false));
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// An owner message waiting as the live switch goes off is sent only once the stopping
 /// live master has ended, so the project never runs a per-message master beside it.
 #[cfg(target_os = "macos")]
@@ -14775,6 +15269,7 @@ fn between_turns(
         fresh: None,
         own_turn: None,
         own_rules: None,
+        counted_none: false,
         turn_started: None,
         fed: None,
         session: None,
@@ -15600,6 +16095,292 @@ fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it()
         assert_eq!(fixture.agent_status(agent).0, expected, "row {at}");
         assert_eq!(shown, Some(problem), "row {at}");
     }
+}
+
+/// A live master's open turn its pane reports as none is closed as no turn (OB-1): the
+/// master is idle again, engine input is no longer held by an open turn, and no turn is
+/// numbered or kept for usage. The report changes nothing when no turn is open, and a turn
+/// that starts later opens as usual.
+#[test]
+fn a_live_master_turn_reported_as_none_closes_without_counting() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Master, true, true);
+    worker.live = true;
+    team.workers.insert(agent, worker);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    super::super::master::pane_ready(&fixture.connection, &project, agent).unwrap();
+    let shown = |fixture: &Fixture| -> (String, bool, i64, i64) {
+        let status = fixture
+            .connection
+            .query_row(
+                "SELECT status FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (open, turns) = fixture
+            .connection
+            .query_row(
+                "SELECT turn_open,turns FROM team_live_masters WHERE project=?1",
+                [PROJECT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let kept = fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM team_master_turns", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        (status, open, turns, kept)
+    };
+    let started = || Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+
+    team.apply(agent, started()).unwrap();
+    assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
+    assert!(super::super::master::turn_running(&fixture.connection, &project).unwrap());
+
+    let held = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_master_input_holds WHERE agent=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(held(&fixture), 0);
+    team.apply(agent, Report::NoTurn).unwrap();
+    assert_eq!(shown(&fixture), ("idle".to_owned(), false, 0, 0));
+    assert!(!super::super::master::turn_running(&fixture.connection, &project).unwrap());
+    assert_eq!(team.workers[&agent].turn_started, None);
+    assert_eq!(held(&fixture), 1, "engine input is held after the drop");
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [agent],
+        )
+        .unwrap();
+    team.apply(agent, Report::NoTurn).unwrap();
+    assert_eq!(
+        shown(&fixture),
+        ("starting".to_owned(), false, 0, 0),
+        "with no turn open the report changes no status"
+    );
+    assert_eq!(held(&fixture), 1);
+
+    team.apply(agent, started()).unwrap();
+    assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
+    assert_eq!(held(&fixture), 0, "a turn that starts ends the hold");
+    team.workers.clear();
+}
+
+/// OB-1 r1 (OB1-F3): a live master's turn dropped as none was counted once for the Sessions
+/// list at its start, so the next start, the same turn starting again or a new one, takes
+/// that count and adds none. A start with no drop before it counts as before.
+#[test]
+fn a_dropped_live_master_turn_counts_once_in_the_sessions_list() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Master, true, true);
+    worker.live = true;
+    worker.session = Some("s-dropped".into());
+    team.workers.insert(agent, worker);
+    crate::master_sessions::initialize(&fixture.connection).unwrap();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    super::super::master::pane_ready(&fixture.connection, &project, agent).unwrap();
+    let counted = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(turns),0) FROM session_owner_turns WHERE session='s-dropped'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let started = || Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+
+    team.apply(agent, started()).unwrap();
+    assert_eq!(counted(&fixture), 1);
+    team.apply(agent, Report::NoTurn).unwrap();
+    assert_eq!(counted(&fixture), 1);
+    team.apply(agent, started()).unwrap();
+    assert_eq!(
+        counted(&fixture),
+        1,
+        "the next start takes the dropped turn's count"
+    );
+    team.apply(agent, started()).unwrap();
+    assert_eq!(
+        counted(&fixture),
+        2,
+        "a start with no drop before it counts"
+    );
+    team.workers.clear();
+}
+
+#[cfg(target_os = "macos")]
+const LIVE_CODEX_STARTED: &str = r#"  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+"#;
+
+#[cfg(target_os = "macos")]
+const LIVE_CODEX_READY: &str = r"Codex stand-in ready\n'";
+#[cfg(target_os = "macos")]
+const LIVE_CODEX_COMPOSER: &str = "Codex stand-in ready\\n\u{203a} Ask Codex to do anything\\n'";
+
+/// A live Codex stand-in whose turn on a line with "never ends" opens and writes no end,
+/// and whose line with "late end" writes a reply and an end with no start before them. With
+/// `composer` it shows a composer row as its idle prompt; without, a screen the engine
+/// cannot read as one. Takes that choice. Returns the script.
+#[cfg(target_os = "macos")]
+fn unclosed_codex(composer: bool) -> String {
+    let started = format!(
+        "  case \"$line\" in *\"late end\"*) ;; *)\n{LIVE_CODEX_STARTED}  ;; esac\n  case \"$line\" in *\"never ends\"*) continue ;; esac\n"
+    );
+    assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_STARTED).count(), 1);
+    assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_READY).count(), 1);
+    let ready = if composer {
+        LIVE_CODEX_COMPOSER
+    } else {
+        LIVE_CODEX_READY
+    };
+    LIVE_CODEX
+        .replace(LIVE_CODEX_STARTED, &started)
+        .replace(LIVE_CODEX_READY, ready)
+}
+
+/// Runs a live master on `unclosed_codex` until a turn the owner's line opened, which
+/// nothing closes, was dropped after a 4 second `stale_turn`: the master is idle, the
+/// project counts no agent as working, and no turn is counted or kept. Takes the fixture,
+/// its host and whether the app shows its idle prompt. Returns the runtime and the master.
+#[cfg(target_os = "macos")]
+fn dropped_live_turn(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    composer: bool,
+) -> (TeamRuntime, i64) {
+    let limits = TeamLimits {
+        stale_turn: Duration::from_secs(4),
+        master_idle_stop: Duration::from_secs(3600),
+        ..TeamLimits::default()
+    };
+    let mut team = limited_runtime(fixture, host, &unclosed_codex(composer), limits);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master runs idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
+    });
+    let master = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(master).unwrap(), b"never ends\r")
+        .unwrap();
+    fixture.until(&mut team, "the turn opens", |f| {
+        live_turns(&f.connection) == (0, true) && f.agent_status(master).0 == AgentStatus::Working
+    });
+    fixture.until(&mut team, "the turn nothing closes is dropped", |f| {
+        live_turns(&f.connection) == (0, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status='working'"
+        ),
+        0,
+        "the project counts no agent as working"
+    );
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_master_turns WHERE project=?1"
+        ),
+        0,
+        "a dropped turn is kept for no usage"
+    );
+    (team, master)
+}
+
+/// Types engine input into the fixture's live master as the engine does. Takes the
+/// fixture, its host and the text. Returns Ok once typed, or why it was not.
+#[cfg(target_os = "macos")]
+fn engine_input(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    text: &str,
+) -> Result<(), super::super::master::InputRefused> {
+    let input = Connection::open(fixture.base.join("engine.db")).unwrap();
+    super::super::master::master_input(&input, host.as_ref(), None, &fixture.setup.project_id, text)
+}
+
+/// OB-1 in a real pane, on an app that shows its idle prompt: a live master's turn that
+/// opens and that nothing closes goes back to idle after the runtime's `stale_turn`, and
+/// engine input reaches the master at once, since its screen shows the prompt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_dropped_live_master_turn_on_an_idle_prompt_releases_engine_input() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, master) = dropped_live_turn(&fixture, &host, true);
+    assert_eq!(
+        engine_input(&fixture, &host, "[owner] status please"),
+        Ok(())
+    );
+    fixture.until(&mut team, "the engine's input turn is counted", |f| {
+        live_turns(&f.connection) == (1, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    team.shutdown().unwrap();
+}
+
+/// OB1R2-F1 in a real pane, on an app whose screen the engine cannot read as an idle
+/// prompt: the turn nothing closes is dropped all the same, so the master is idle and the
+/// project counts no agent as working, yet engine input stays held and nothing is typed.
+/// The owner's line ends the hold: the dropped turn starts again with the model's text, its
+/// late end counts as one turn, and engine input reaches the master after it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_dropped_live_master_turn_on_an_unknown_screen_is_idle_and_holds_engine_input() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, master) = dropped_live_turn(&fixture, &host, false);
+    assert_eq!(
+        engine_input(&fixture, &host, "[owner] status please"),
+        Err(super::super::master::InputRefused::Busy),
+        "engine input is held on a screen that is no idle prompt"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        live_turns(&fixture.connection),
+        (0, false),
+        "nothing was typed"
+    );
+    assert_eq!(fixture.agent_status(master).0, AgentStatus::Idle);
+
+    host.input(&AgentId::team(master).unwrap(), b"late end\r")
+        .unwrap();
+    fixture.until(&mut team, "the late end counts as a turn", |f| {
+        live_turns(&f.connection) == (1, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    assert_eq!(
+        engine_input(&fixture, &host, "[owner] status please"),
+        Ok(())
+    );
+    fixture.until(&mut team, "the engine's input turn is counted", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    team.shutdown().unwrap();
 }
 
 /// A turn that starts after a good one and never ends leaves no good end to stand on, so a
@@ -21919,8 +22700,9 @@ fn an_endpoint_agent_under_no_network_gets_a_proxy_only_for_its_named_https_endp
 
 /// A kept pane an earlier engine left running gets its model proxy back on the port its
 /// record and profile name, with its account's hosts, and closes with the engine; a pane
-/// whose saved port another process took ends with the reason, since its profile reaches
-/// no other port (S4b).
+/// whose saved port another process took, or whose saved port is not one of the model proxy
+/// ports, ends with the reason and no listener on that port, since its profile reaches no
+/// other port (S4b, LPF1-L2).
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
@@ -21944,11 +22726,10 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         .unwrap()
     };
     let free = || {
-        crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        let model = ModelHost::new("models.crazyagent.test", 443).unwrap();
+        let port = ModelProxy::bind(7, vec![model], None, &[]).unwrap().port();
+        assert!(crate::sandbox::model_proxy::PROXY_PORTS.contains(&port));
+        port
     };
 
     let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
@@ -21984,8 +22765,8 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     host.kill(&AgentId::team(kept).unwrap()).unwrap();
 
     let taken = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
-    let holder = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
-    let held = holder.local_addr().unwrap().port();
+    let held = free();
+    let holder = crate::spawn_gate::bind_tcp_std(("127.0.0.1", held)).unwrap();
     let record = PaneRecord {
         proxy: Some(held),
         ..fixture.pane(&host, taken)
@@ -22002,6 +22783,30 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         "The terminal of team agent {taken} was closed: its model proxy port {held} is taken."
     )));
     assert!(again.shutdown().unwrap().is_empty());
+    drop(holder);
+
+    let old = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let outside = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    assert!(!crate::sandbox::model_proxy::PROXY_PORTS.contains(&outside));
+    let record = PaneRecord {
+        proxy: Some(outside),
+        ..fixture.pane(&host, old)
+    };
+    fixture.keep(old, &record);
+    let mut last = open().with_terminal(host.clone()).unwrap();
+    assert!(!host.alive().unwrap().contains(&AgentId::team(old).unwrap()));
+    assert!(fixture.note(&format!(
+        "The terminal of team agent {old} was closed: its model proxy port {outside} is outside the ports CrazyAgent uses now."
+    )));
+    assert!(
+        crate::spawn_gate::connect_tcp_std(("127.0.0.1", outside)).is_err(),
+        "a model proxy listens on {outside}"
+    );
+    assert!(last.shutdown().unwrap().is_empty());
     host.close(&[]).unwrap();
 }
 

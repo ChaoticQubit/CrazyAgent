@@ -518,6 +518,19 @@ export function accountCatalog(): Promise<Result<ProviderEntry[]>> {
   return call<ProviderEntry[]>("desktop_account_catalog");
 }
 
+/** The words each account goes by wherever a view shows it outside its own row in Accounts:
+ * the name the owner gave it, with the account id after it when another account has the
+ * same name, so two accounts never read the same. Input: the accounts. Output: the words by
+ * account id. */
+export function accountLabels(accounts: readonly { id: string; name: string }[]): Map<string, string> {
+  const uses = new Map<string, number>();
+  for (const account of accounts) uses.set(account.name, (uses.get(account.name) ?? 0) + 1);
+  const labels = new Map<string, string>();
+  for (const account of accounts) labels.set(account.id, uses.get(account.name) === 1 ? account.name : `${account.name} (${account.id})`);
+  if (labels.size > accounts.length) throw new Error(`more account labels than accounts: ${labels.size} for ${accounts.length}`);
+  return labels;
+}
+
 /** Reads every account, following the engine's pages. Output: all accounts in engine order. */
 export async function listAccounts(): Promise<Result<AccountView[]>> {
   const accounts: AccountView[] = [];
@@ -663,6 +676,8 @@ export function poolSummaries(): Promise<Result<PoolSummary[]>> {
 
 export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
 export type AccountPin = "never_use" | "use_last";
+/** What a live master does once its pool's account order puts another account first (DEC-139). */
+export type LiveMasterAccount = "keep" | "move_when_idle";
 
 export interface AccountPlan {
   rank: number | null;
@@ -672,6 +687,7 @@ export interface AccountPlan {
 
 export interface AccountSchedule {
   strategy: AccountStrategy;
+  live_master: LiveMasterAccount;
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
@@ -680,6 +696,7 @@ export interface AccountSchedule {
 
 export type ScheduleChange =
   | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "live_master"; choice: LiveMasterAccount }
   | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
   | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
   | { kind: "account"; connection: string; plan: AccountPlan };

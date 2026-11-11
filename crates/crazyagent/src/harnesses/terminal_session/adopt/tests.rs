@@ -121,7 +121,7 @@ fn an_idle_pane_is_adopted_as_it_is() {
     assert_eq!(session.record(), Some(&record));
     assert_eq!(session.process_group(), record.pid);
     assert!(
-        session.ready && !session.turn,
+        session.ready && !session.turn && !session.took_none(),
         "the adopted agent waits for its next prompt"
     );
     assert_eq!(lines(&file), 2, "nothing was typed into an idle agent");
@@ -174,11 +174,77 @@ fn a_turn_still_running_is_stopped_before_the_pane_is_adopted() {
 }
 
 #[cfg(target_os = "macos")]
+const DRAWING_HARNESS: &str = "while :; do printf 'working\\n'; sleep 0.2; done";
+#[cfg(target_os = "macos")]
+const IDLE_PROMPT: &str = "printf '\u{203a} Ask the agent to do anything\\n'; ";
+#[cfg(target_os = "macos")]
+const LOCAL_OUTPUT: &str =
+    r#"{"type":"user","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}"#;
+
+#[cfg(target_os = "macos")]
+const COMMAND: &str = r#"{"type":"user","message":{"content":"<command-message>review</command-message>\n<command-name>/review</command-name>"}}"#;
+
+/// Checks that a pane taken over idle over an open turn follows a typed command the model
+/// answers as a turn, from the model's first line to its end (OB-1 r1): the dropped turn is
+/// open no more in the record's reader. Takes the session, which then follows every turn,
+/// and its record, to which the command and the answer are written.
+#[cfg(target_os = "macos")]
+fn follows_a_typed_command(session: &mut TerminalSession, file: &Path) {
+    use std::io::Write;
+    session.follow_every_turn();
+    let mut record = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    writeln!(record, "{COMMAND}\n{TURN_DONE}").unwrap();
+    let mut facts = Vec::new();
+    while let Some(fact) = session.next_fact(Duration::from_secs(5)).unwrap() {
+        facts.push(fact);
+        if facts.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(
+        facts,
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::Text {
+                text: "Done\n".to_owned()
+            },
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// A turn that does not stop on a pane whose app still draws ends the pane: the app works
+/// on something the engine can no longer match to its work.
+#[cfg(target_os = "macos")]
 #[test]
-fn a_turn_that_does_not_stop_leaves_no_pane_behind() {
+fn a_turn_that_does_not_stop_on_a_pane_that_still_draws_leaves_no_pane_behind() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let agent = AgentId::team(3).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN]);
+    let record = fixture.spawn(&host, &agent, DRAWING_HARNESS, &file);
+
+    let refused = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .err()
+    .map(|problem| problem.0);
+    assert_eq!(refused.as_deref(), Some("launch_adopt_unsettled"));
+    assert!(host.alive().unwrap().is_empty());
+}
+
+/// OB-1 r1 (OB1-F1): a sub-agent's turn that does not stop on a still pane that shows no
+/// idle prompt ends the pane as before: what the screen shows cannot be told from a dialog,
+/// so the pane is not taken over idle, where a task could be typed into it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_turn_that_does_not_stop_on_a_still_pane_with_no_idle_prompt_leaves_no_pane_behind() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(14).unwrap();
     let file = fixture.transcript(&[TURN_OPEN]);
     let record = fixture.spawn(&host, &agent, "exec cat", &file);
 
@@ -192,6 +258,129 @@ fn a_turn_that_does_not_stop_leaves_no_pane_behind() {
     .map(|problem| problem.0);
     assert_eq!(refused.as_deref(), Some("launch_adopt_unsettled"));
     assert!(host.alive().unwrap().is_empty());
+}
+
+/// OB1R2-F1: a live master's turn that does not stop on a still pane is taken over idle
+/// whatever its screen shows, here no idle prompt: the pane keeps running, and the session
+/// says a turn was dropped so its caller holds engine input.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_turn_that_does_not_stop_on_a_still_pane_is_adopted_idle_whatever_it_shows() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(15).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+
+    let mut session = TerminalSession::adopt_live(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .unwrap();
+    assert!(session.ready && !session.turn && session.took_none());
+    follows_a_typed_command(&mut session, &file);
+    session.leave();
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "the live master's pane was not ended over a turn that could not be settled"
+    );
+}
+
+/// OB-1: a turn that does not stop on a pane whose app waits does not end the pane. The
+/// pane is taken over idle and keeps running.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_turn_that_does_not_stop_on_a_waiting_pane_is_adopted_idle() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(11).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN]);
+    let record = fixture.spawn(&host, &agent, &format!("{IDLE_PROMPT}exec cat"), &file);
+
+    let mut session = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .unwrap();
+    assert!(session.ready && !session.turn && session.took_none());
+    assert_eq!(lines(&file), 1);
+    follows_a_typed_command(&mut session, &file);
+    session.leave();
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "the pane was not ended over a turn that could not be settled"
+    );
+}
+
+/// OB-1: an open turn whose record is older than the launch's `stale_turn`, on a pane whose
+/// app waits, is no turn. The pane is taken over idle at once and nothing is typed into it:
+/// the stand-in would record an Escape.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stale_open_turn_on_a_waiting_pane_is_adopted_idle_with_nothing_typed() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(12).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE, TURN_OPEN]);
+    let harness = format!("{IDLE_PROMPT}{ESCAPE_HARNESS}");
+    let record = fixture.spawn(&host, &agent, &harness, &file);
+    std::thread::sleep(Duration::from_secs(5));
+
+    let began = Instant::now();
+    let mut session = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits {
+            stale_turn: Duration::from_secs(4),
+            ..LaunchLimits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        began.elapsed() < SETTLE_WAIT,
+        "no wait for a turn to settle"
+    );
+    assert!(session.ready && !session.turn);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(lines(&file), 3, "nothing was typed into the pane");
+    follows_a_typed_command(&mut session, &file);
+    session.leave();
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
+}
+
+/// OB-1: a line Claude Code writes as a user line that is no prompt opens no turn for
+/// adoption either, so nothing is typed into the pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_user_line_that_is_no_prompt_is_no_open_turn_at_adoption() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(13).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE, LOCAL_OUTPUT]);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let began = Instant::now();
+    let session = TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .unwrap();
+    assert!(began.elapsed() < SETTLE_WAIT);
+    assert!(session.ready && !session.turn);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(lines(&file), 3, "nothing was typed into the pane");
+    session.leave();
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
 }
 
 #[cfg(target_os = "macos")]

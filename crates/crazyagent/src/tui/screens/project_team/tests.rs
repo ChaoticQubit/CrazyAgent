@@ -771,10 +771,60 @@ fn titles_and_plain_reasons() {
     );
     assert_eq!(short_path("/a/b/worktrees/agent-3/"), "worktrees/agent-3");
     assert_eq!(
+        account_name(Some("acct-002"), &accounts()),
+        "Claude Max - work",
+        "a listed account goes by the name Accounts shows (OB-4)"
+    );
+    assert_eq!(
         account_name(Some("acct-404"), &accounts()),
-        "A pool account"
+        "acct-404",
+        "an account with no name known falls back to its id"
     );
     assert_eq!(account_name(None, &accounts()), "-");
+}
+
+#[test]
+fn two_accounts_with_one_name_show_their_ids() {
+    use crate::tui::seam::{account_label, account_labels};
+    let row = |id: &str, name: &str| AccountRow {
+        id: CredentialRef::new(id).unwrap(),
+        name: name.into(),
+        provider: String::new(),
+        status: String::new(),
+    };
+    let rows = [
+        row("claude-account-1a", "Claude"),
+        row("claude-account-2b", "Claude"),
+        row("chatgpt-account-3c", "Work ChatGPT"),
+    ];
+    assert_eq!(
+        account_name(Some("claude-account-1a"), &rows),
+        "Claude (claude-account-1a)"
+    );
+    assert_eq!(
+        account_name(Some("claude-account-2b"), &rows),
+        "Claude (claude-account-2b)"
+    );
+    assert_eq!(
+        account_name(Some("chatgpt-account-3c"), &rows),
+        "Work ChatGPT",
+        "a name used once stays plain"
+    );
+    assert_eq!(
+        account_name(Some("claude-account-2b"), &rows[1..]),
+        "Claude"
+    );
+    assert_eq!(account_label("gone", &rows), None);
+    let labels = account_labels(&rows);
+    assert_eq!(labels.len(), 3);
+    for account in &rows {
+        assert_eq!(
+            labels.get(account.id.as_str()),
+            account_label(account.id.as_str(), &rows).as_ref(),
+            "the one-pass words are the single account's words"
+        );
+    }
+    assert!(account_labels(&[]).is_empty());
 }
 
 #[tokio::test]
