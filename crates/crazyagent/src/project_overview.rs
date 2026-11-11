@@ -1,6 +1,8 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::onboarding::draft::{self, Folder, overview_seal};
+use crate::project_setup::ResearchKind;
+use crate::project_setup::links::{self, LinkKind};
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{QUIET_MS, Refresh};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -9,15 +11,22 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+mod pack;
 #[cfg(test)]
 mod tests;
 
+pub use pack::{
+    EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, parse_reply, prompt,
+};
+
 /// The folder inside a project's `.crazyagent` that holds the tab files.
 pub const TABS_FOLDER: &str = "overview";
-/// The most bytes of one tab's text, as a file and as a proposal.
-pub const TAB_BYTES_MAX: usize = 64 * 1024;
-/// The most bytes of the project's README the Overview shows.
-pub const README_BYTES_MAX: u64 = 1024 * 1024;
+/// The most bytes of one tab's text, as a file and as a proposal: two of them travel in
+/// one owner frame.
+pub const TAB_BYTES_MAX: usize = 24 * 1024;
+/// The most bytes of the project's README the Overview shows; a longer one is cut at a
+/// line, since the text travels in one owner frame.
+pub const README_BYTES_MAX: u64 = 24 * 1024;
 /// The most bytes of the words saying why the last writing run failed.
 pub const FAILURE_BYTES_MAX: usize = 200;
 /// The tab file is not at the version the owner saw.
@@ -50,11 +59,21 @@ pub const BLOCKED_NOT_A_FILE: &str = "not_a_file";
 pub const BLOCKED_NOT_A_FOLDER: &str = "not_a_folder";
 
 const LAYOUT: &str = ".crazyagent";
+const README_NAMES: [&str; 7] = [
+    "README.md",
+    "Readme.md",
+    "readme.md",
+    "README.markdown",
+    "README",
+    "README.txt",
+    "README.rst",
+];
+const REPORT_PATH_BYTES_MAX: usize = 1024;
 const TEMP_RANDOM_BYTES: usize = 8;
 
 const _: () = assert!(TAB_BYTES_MAX <= 64 * 1024);
 const _: () = assert!(TAB_BYTES_MAX as u64 <= README_BYTES_MAX);
-const _: () = assert!(FAILURE_BYTES_MAX == 200 && TAB_BYTES_MAX == 65536);
+const _: () = assert!(FAILURE_BYTES_MAX == 200 && TAB_BYTES_MAX == 24576);
 const _: () = assert!(TEMP_RANDOM_BYTES >= 8);
 
 const SCHEMA: &str = "
@@ -72,7 +91,7 @@ CREATE TABLE IF NOT EXISTS project_overview_tabs(
   project TEXT NOT NULL,
   tab TEXT NOT NULL CHECK(tab IN ('quick_info','features','competitors','install_and_use')),
   seal TEXT,
-  proposal TEXT CHECK(proposal IS NULL OR length(CAST(proposal AS BLOB)) <= 65536),
+  proposal TEXT CHECK(proposal IS NULL OR length(CAST(proposal AS BLOB)) <= 24576),
   PRIMARY KEY(project, tab)
 );
 ";
@@ -807,10 +826,126 @@ pub fn set_apply(db: &Connection, project: &ProjectId, apply: Apply) -> Result<(
     Ok(())
 }
 
+/// The length of the longest prefix of `text` within `max` bytes that ends after a
+/// newline, or at a character boundary when no line ends inside the bound. Inputs: the
+/// text and the bound. Output: the length in bytes, the whole text when it fits.
+pub(crate) fn cut_at_line(text: &str, max: usize) -> usize {
+    if text.len() <= max {
+        return text.len();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = text[..end].rfind('\n').map_or(end, |at| at + 1);
+    assert!(cut <= max);
+    cut
+}
+
+/// The repository's README as the Overview shows it: the first usual README name at the
+/// folder root that is a regular file, opened through no link, read to at most
+/// [`README_BYTES_MAX`] and cut at its last whole line when it is longer. Input: the
+/// project folder. Output: the README, none without one or for one that is not text.
+pub fn readme(folder: &Path) -> Option<Readme> {
+    let root = draft::open_folder(folder)?;
+    let (name, file) = README_NAMES.iter().find_map(|name| {
+        let file = draft::open_in(&root, name)?;
+        file.metadata()
+            .is_ok_and(|metadata| metadata.is_file())
+            .then_some((*name, file))
+    })?;
+    let mut bytes = Vec::new();
+    file.take(README_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let cut = bytes.len() as u64 > README_BYTES_MAX;
+    bytes.truncate(README_BYTES_MAX as usize);
+    let mut text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let valid = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            if !cut || bytes.len() - valid > 3 {
+                return None;
+            }
+            bytes.truncate(valid);
+            String::from_utf8(bytes).ok()?
+        }
+    };
+    if cut {
+        let end = text.rfind('\n').map_or(text.len(), |at| at + 1);
+        text.truncate(end);
+    }
+    assert!(text.len() as u64 <= README_BYTES_MAX);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(Readme {
+        path: name.to_owned(),
+        text,
+        cut,
+    })
+}
+
+/// Whether the engine database holds a table. Inputs: the connection and the table name.
+/// Output: the answer, or `overview_unavailable`.
+fn present(db: &Connection, table: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(unavailable)
+}
+
+/// What the Competitors tab can build on: the report of the project's newest finished
+/// competitor research job, else the competitor research files the owner linked that
+/// read as text through no link, else nothing. Inputs: the connection, the project and
+/// its folder. Output: the state, or `overview_unavailable`.
+pub fn competitors(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Path,
+) -> Result<Competitors, EngineError> {
+    if present(db, "research_jobs")? {
+        let report: Option<String> = db
+            .query_row(
+                "SELECT report_path FROM research_jobs
+                 WHERE project=?1 AND kind=?2 AND status='done' AND report_path IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+                params![project.as_str(), ResearchKind::CompetitorResearch.name()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?;
+        if let Some(path) = report.filter(|path| path.len() <= REPORT_PATH_BYTES_MAX) {
+            return Ok(Competitors::Report { path });
+        }
+    }
+    if !present(db, "project_doc_links")? {
+        return Ok(Competitors::Missing);
+    }
+    let paths: Vec<String> = links::list(db, project)
+        .map_err(unavailable)?
+        .into_iter()
+        .filter(|link| link.kind == LinkKind::Research(ResearchKind::CompetitorResearch))
+        .map(|link| link.path)
+        .filter(|path| links::read_linked(folder, path).is_some())
+        .collect();
+    assert!(paths.len() <= links::LINKS_MAX);
+    Ok(if paths.is_empty() {
+        Competitors::Missing
+    } else {
+        Competitors::Linked { paths }
+    })
+}
+
 /// Reads the project's Overview. The first read of a project makes its row stale and due
 /// at once, which asks for the first writing run; a project with no `.crazyagent` folder
 /// gets no row and `needs_home` instead, so no run is asked for it. The README and the
-/// competitor state are not filled here. Inputs: the connection, the project, its folder
+/// competitor state are read as well. Inputs: the connection, the project, its folder
 /// and the time. Output: the Overview with the four tabs in order, or
 /// `overview_unavailable`.
 pub fn read(
@@ -864,9 +999,9 @@ pub fn read(
             .is_none_or(|failure| failure.len() <= FAILURE_BYTES_MAX)
     );
     Ok(Overview {
-        readme: None,
+        readme: readme(folder),
         tabs,
-        competitors: Competitors::Missing,
+        competitors: competitors(db, project, folder)?,
         running: state.running_ms.is_some(),
         stale: state.stale,
         checked_ms: state.checked_ms,

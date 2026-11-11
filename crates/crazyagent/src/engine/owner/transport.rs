@@ -52,6 +52,7 @@ pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
+pub(crate) mod overview;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
@@ -2198,6 +2199,7 @@ enum Protocol {
     Agents,
     Changes,
     Cleanup,
+    Overview,
     Usage,
     IdeExtensions,
     Recovery,
@@ -2231,6 +2233,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
+        ("overview", Protocol::Overview),
         ("usage", Protocol::Usage),
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
@@ -2303,6 +2306,7 @@ async fn serve_admitted(
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
             Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
+            Protocol::Overview => return Ok(Some(Deferred::Overview(a))),
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
@@ -2496,6 +2500,10 @@ async fn serve_admitted(
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
         }
+        Deferred::Overview(a) => {
+            let served = overview::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
+        }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
@@ -2575,6 +2583,7 @@ enum Deferred {
     IdeTab(Admission),
     Questions(Admission),
     Cleanup(Admission),
+    Overview(Admission),
     SkillImport(Admission),
     Usage(Admission),
     Icloud(Admission),
@@ -2615,6 +2624,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
+        Protocol::Overview => overview::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
