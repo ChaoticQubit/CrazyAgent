@@ -332,7 +332,7 @@ impl<'a> Places<'a> {
     fn under(&mut self, place: usize, line: &'a str) -> usize {
         let next = self.known.len() + 1;
         let found = *self.known.entry((place, line.trim_end())).or_insert(next);
-        assert!(found >= 1 && found <= self.known.len());
+        assert!((1..=self.known.len()).contains(&found));
         found
     }
 }
