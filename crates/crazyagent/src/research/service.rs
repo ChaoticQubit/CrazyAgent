@@ -345,7 +345,7 @@ struct StatusStarts<'a, F> {
     runner: &'a Arc<ResearchRunner>,
     resolve: &'a F,
     db: &'a rusqlite::Connection,
-    checks: &'a mut Vec<JoinHandle<()>>,
+    checks: &'a mut Vec<JoinHandle<Option<crate::roadmap_status::run::RunLeft>>>,
 }
 
 #[cfg(unix)]
