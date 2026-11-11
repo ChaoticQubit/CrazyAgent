@@ -223,6 +223,16 @@ async fn blocking(
         .map_err(|_| failure(UNAVAILABLE))?
 }
 
+/// Pins the sign-in and master host of a harness the engine's own job just installed or
+/// updated, when the engine started without it. Only the engine's PATH is searched and a
+/// refusal is logged by its code alone. Inputs: the owner runtime and the harness id.
+fn pin(owner: &OwnerRuntimeHandle, id: &str) {
+    let path = std::env::var_os("PATH");
+    if let Err(error) = owner.register_installed_harness(id, path.as_deref()) {
+        eprintln!("{id} got no sign-in host after its install ({})", error.0);
+    }
+}
+
 /// Checks the grant, then answers one update action. Update and Install probe the machine
 /// first and start one background job; when it ends the catalog is probed again, which is
 /// what makes the list and every later launch see the new install without a restart.
@@ -246,6 +256,10 @@ async fn answer(
     let updates = engine.harness_updates.clone();
     let probe = engine.harness_probe.clone();
     let runtime = tokio::runtime::Handle::current();
+    let owner = OwnerRuntimeHandle {
+        engine: engine.clone(),
+        authority: authority.clone(),
+    };
     match action {
         Action::List | Action::Check => Err(failure("harness_catalog_request_invalid")),
         Action::Settings => {
@@ -282,7 +296,9 @@ async fn answer(
         Action::Update { id } => {
             let entry = entry(engine, search.clone(), &id, true).await?;
             blocking(move || {
+                let id = entry.id.clone();
                 let after = move || {
+                    pin(&owner, &id);
                     runtime.spawn(async move {
                         let _ = probe.entries(search, true).await;
                     });
@@ -299,6 +315,7 @@ async fn answer(
             blocking(move || {
                 let id = entry.id.clone();
                 let after = move || {
+                    pin(&owner, &id);
                     let entries = runtime.block_on(probe.entries(search, true)).ok()?;
                     let found = entries.into_iter().find(|entry| entry.id == id)?;
                     found.executable
