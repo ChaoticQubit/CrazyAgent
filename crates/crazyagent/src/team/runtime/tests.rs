@@ -17774,9 +17774,9 @@ fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
     team.shutdown().unwrap();
 }
 
-/// PA-7: a native Codex lead's task prompt says its Codex sub-agents share its worktree and
+/// PA-7: a native Codex lead with tools is told its Codex sub-agents share its worktree and
 /// task branch, so it gives each its own files and reports for them; it names no teammates
-/// folder or teammate branch, which only a Claude Code agent team has.
+/// folder or teammate branch, which only an agent team has. Tools off runs none (r1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_codex_lead_s_task_prompt_says_its_sub_agents_share_its_worktree() {
@@ -17788,6 +17788,17 @@ fn a_native_codex_lead_s_task_prompt_says_its_sub_agents_share_its_worktree() {
         crate::coord::settings::SubagentMode::Native,
     );
     let mut team = fixture.runtime();
+    assert_eq!(
+        team.branch_line(&fixture.setup.project_id, lead),
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        ),
+        "a Codex lead with tools off runs no sub-agents"
+    );
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET tools=1 WHERE id=?1", [lead])
+        .unwrap();
     let line = team.branch_line(&fixture.setup.project_id, lead);
     assert!(!line.contains(crate::agent_git::TEAMMATES_FOLDER), "{line}");
     assert!(!line.contains(&format!("{branch}--")), "{line}");
@@ -21046,9 +21057,9 @@ fn a_native_plan_without_its_tmux_is_a_caller_bug() {
 }
 
 /// PA-7: a Codex lead the master starts in the Native mode runs Codex's own sub-agents,
-/// capped at the owner's Max teammates per harness (the largest choice under No limit),
-/// without the Claude Code agent team machinery; a nested or app-spawned Codex agent and
-/// an RCLI one get none, and the plan gives its launch context the cap.
+/// capped at Max teammates (the largest choice under No limit), with no agent team and only
+/// with the terminal host, where they show (r1); a nested or app-spawned Codex agent and an
+/// RCLI one get none, and the plan gives its launch context the cap.
 #[test]
 fn a_native_codex_lead_runs_capped_codex_sub_agents_without_an_agent_team() {
     use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
@@ -21067,7 +21078,8 @@ fn a_native_codex_lead_runs_capped_codex_sub_agents_without_an_agent_team() {
         id
     };
     let spawned = sub("codex", None);
-    let team = fixture.runtime();
+    let headless = fixture.runtime();
+    let team = fixture.runtime().with_terminal(fixture.host()).unwrap();
     assert_eq!(
         team.native_threads(&project, spawned, AgentRole::Sub, "codex"),
         Ok(None)
@@ -21085,6 +21097,17 @@ fn a_native_codex_lead_runs_capped_codex_sub_agents_without_an_agent_team() {
         team.native_lead(&project, lead, AgentRole::Sub, "codex"),
         Ok(false),
         "a Codex lead runs no Claude Code agent team, terminal host or not"
+    );
+    assert_eq!(
+        headless.native_lead(&project, lead, AgentRole::Sub, "codex"),
+        Ok(false)
+    );
+    let refused = headless
+        .native_threads(&project, lead, AgentRole::Sub, "codex")
+        .unwrap_err();
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_mode_unavailable")),
+        "only the lead's terminal shows its Codex sub-agents: {refused}"
     );
     assert_eq!(
         team.native_threads(&project, lead, AgentRole::Sub, "codex"),
@@ -21135,6 +21158,8 @@ fn a_native_codex_lead_runs_capped_codex_sub_agents_without_an_agent_team() {
     drop(installed);
     let mut team = team;
     team.shutdown().unwrap();
+    let mut headless = headless;
+    headless.shutdown().unwrap();
 }
 
 #[test]

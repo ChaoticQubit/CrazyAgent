@@ -46,7 +46,9 @@ test("Native is listed for every harness kind and chosen only where it has nativ
     assert.equal(options[1].disabledReason, undefined, `${harness}: CrazyAgent workers are always open`);
     assert.ok(coord.modeHelper(harness, native).endsWith("."), harness);
   }
-  assert.match(coord.modeHelper("codex", true), /Codex sub-agents run inside the lead's own session and worktree, up to Max teammates/);
+  assert.match(coord.modeHelper("codex", true), /Codex sub-agents run inside the lead's own session and worktree, on its model\./);
+  assert.ok(coord.modeHelper("codex", true).includes(coord.CODEX_NATIVE_SCOPE), "the Codex helper says what the app cannot show");
+  assert.ok(!coord.modeHelper("claude-code", true).includes(coord.CODEX_NATIVE_SCOPE));
   assert.equal(coord.modeHelper("rcli", false), coord.NATIVE_UNAVAILABLE.rcli);
   assert.deepEqual(coord.DELIVERY_OPTIONS.map((option) => option.value), ["auto", "native_only", "typing_only"]);
 });
@@ -56,6 +58,13 @@ test("the desktop says why RCLI has no native sub-agents in the engine's own wor
   const engine = /pub const RCLI_NATIVE_UNAVAILABLE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
   assert.ok(engine, "the engine states RCLI's reason");
   assert.equal(coord.NATIVE_UNAVAILABLE.rcli, engine);
+});
+
+test("the desktop says what the app cannot show of Codex sub-agents in the engine's own words", () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
+  const engine = /pub const CODEX_NATIVE_SCOPE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
+  assert.ok(engine, "the engine states what Codex sub-agents leave out");
+  assert.equal(coord.CODEX_NATIVE_SCOPE, engine);
 });
 
 test("counted tools are read with the engine's rule: once each, at most 32, wildcards allowed", () => {

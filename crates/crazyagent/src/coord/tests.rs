@@ -3223,8 +3223,8 @@ fn a_claim_holding_a_line_separator_is_refused_by_name() {
 }
 
 /// DEC-141 parity for the Native sub-agent mode (PA-7): every harness kind has an answer,
-/// the setting stores Native exactly for a kind that runs native sub-agents, and a kind
-/// that cannot gives its own reason.
+/// the setting stores Native exactly for a kind that runs native sub-agents, a kind that
+/// cannot gives its own reason, and threads say what the app cannot show of them (r1).
 #[cfg(unix)]
 #[test]
 fn every_harness_kind_answers_the_native_sub_agent_mode() {
@@ -3234,6 +3234,19 @@ fn every_harness_kind_answers_the_native_sub_agent_mode() {
     for harness in HarnessKind::ALL {
         let answer = settings::native_sub_agents(harness);
         let stored = settings::set_mode(&connection, &project, harness, SubagentMode::Native);
+        let scope = settings::native_scope(harness);
+        match answer {
+            NativeSubAgents::Threads => {
+                let scope = scope.expect("threads say what the app cannot show of them");
+                assert!(scope.starts_with(harness_name(harness)), "{scope}");
+                for shown in ["graph", "counts", "Stop", "team tool calls", "No limit"] {
+                    assert!(scope.contains(shown), "{shown}: {scope}");
+                }
+            }
+            NativeSubAgents::Teams | NativeSubAgents::Unavailable(_) => {
+                assert_eq!(scope, None, "{harness:?}");
+            }
+        }
         match answer {
             NativeSubAgents::Teams | NativeSubAgents::Threads => {
                 stored.unwrap();

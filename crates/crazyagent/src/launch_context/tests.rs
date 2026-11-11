@@ -2338,9 +2338,9 @@ fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
 }
 
 /// PA-7: a Codex lead in the Native mode gets Codex 0.164's multi-agent v2 on in its
-/// `config.toml`, its sub-agents capped at the owner's Max teammates and started with the
-/// lead's own instructions plus the sub-agent section; tools off, App-spawned or Claude Code
-/// get none of it.
+/// `config.toml`, its sub-agents capped at Max teammates, started with the lead's own
+/// instructions plus the sub-agent section and on the lead's model and effort (r1, no model
+/// on spawn, no default to reset the effort); tools off, App-spawned or Claude Code get none.
 #[test]
 fn a_native_codex_lead_turns_codex_sub_agents_on_with_their_own_instructions_and_cap() {
     let directory = tempfile::tempdir().unwrap();
@@ -2356,7 +2356,17 @@ fn a_native_codex_lead_turns_codex_sub_agents_on_with_their_own_instructions_and
         toml::from_str(&fs::read_to_string(lead.join("config.toml")).unwrap()).unwrap();
     let v2 = &config["features"]["multi_agent_v2"];
     assert_eq!(v2["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        v2["expose_spawn_agent_model_overrides"].as_bool(),
+        Some(false)
+    );
     assert_eq!(config["agents"]["max_threads"].as_integer(), Some(4));
+    for unset in [
+        "default_subagent_model",
+        "default_subagent_reasoning_effort",
+    ] {
+        assert!(config["agents"].get(unset).is_none(), "{unset}");
+    }
     let own = config["developer_instructions"].as_str().unwrap();
     let sub = v2["subagent_developer_instructions"].as_str().unwrap();
     assert!(sub.starts_with(own), "{sub}");
@@ -2390,6 +2400,10 @@ fn a_native_codex_lead_turns_codex_sub_agents_on_with_their_own_instructions_and
         let config = fs::read_to_string(home.join("config.toml")).unwrap_or_default();
         assert!(!config.contains("multi_agent_v2"), "{name}: {config}");
         assert!(!config.contains("max_threads"), "{name}: {config}");
+        assert!(
+            !config.contains("expose_spawn_agent_model_overrides"),
+            "{name}: {config}"
+        );
         drop(installed);
     }
 }

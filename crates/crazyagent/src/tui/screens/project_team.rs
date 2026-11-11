@@ -8,7 +8,7 @@ use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
     HarnessKind, NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole,
-    SubagentMode, TaskStart, native_sub_agents,
+    SubagentMode, TaskStart, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -2408,7 +2408,15 @@ impl TeamView {
                         harness: kind,
                         mode,
                     },
-                    format!("{name} sub-agents are now {}.", mode_words(kind, mode)),
+                    match (mode, native_scope(kind)) {
+                        (SubagentMode::Native, Some(scope)) => {
+                            format!(
+                                "{name} sub-agents are now {}. {scope}",
+                                mode_words(kind, mode)
+                            )
+                        }
+                        _ => format!("{name} sub-agents are now {}.", mode_words(kind, mode)),
+                    },
                 )
             }
             CoordRow::Delivery(kind) => {
@@ -2699,10 +2707,14 @@ impl TeamView {
                     found(kind)
                         .map_or("", |row| mode_words(kind, row.mode))
                         .to_owned(),
-                    if found(kind).is_some_and(|row| !row.native) {
-                        "  no native sub-agents"
-                    } else {
-                        ""
+                    match found(kind) {
+                        Some(row) if !row.native => "  no native sub-agents",
+                        Some(row)
+                            if row.mode == SubagentMode::Native && native_scope(kind).is_some() =>
+                        {
+                            "  shown in the lead's terminal only"
+                        }
+                        _ => "",
                     },
                 ),
                 CoordRow::Delivery(kind) => (

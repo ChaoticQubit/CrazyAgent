@@ -95,11 +95,15 @@ export const NATIVE_UNAVAILABLE: Record<CoordHarness, string | null> = {
   rcli: "RCLI runs without tools, so it has no native sub-agents yet; its sub-agents are CrazyAgent workers.",
 };
 
+/** What the app cannot show of Codex's own sub-agents, in the engine's words (PA-7 r1): they show
+ * only in the lead's terminal, the graph, counts and Stop act on the lead, and No limit is 15. */
+export const CODEX_NATIVE_SCOPE = "Codex sub-agents show only in the lead's terminal, where Codex lists each one: the app's graph, counts and Stop act on the lead, their team tool calls count as the lead's, and Codex holds them to Max teammates at once, 15 under No limit because Codex needs a number.";
+
 const NATIVE_LABELS: Record<CoordHarness, string> = { "claude-code": "Native agent teams", codex: "Native Codex sub-agents", rcli: "Native sub-agents" };
 
 const NATIVE_HELPERS: Record<CoordHarness, string> = {
   "claude-code": "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
-  codex: "Native Codex sub-agents run inside the lead's own session and worktree, up to Max teammates at once. CrazyAgent workers get their own terminal, worktree and branch.",
+  codex: `Native Codex sub-agents run inside the lead's own session and worktree, on its model. ${CODEX_NATIVE_SCOPE} CrazyAgent workers get their own terminal, worktree and branch.`,
   rcli: "Native sub-agents run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch.",
 };
 

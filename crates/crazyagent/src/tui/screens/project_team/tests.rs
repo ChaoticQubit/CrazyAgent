@@ -3196,6 +3196,13 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         harness_row(&view, HarnessKind::Codex).0,
         SubagentMode::Native
     );
+    assert!(
+        frame(&view, 116, 30)
+            .iter()
+            .any(|row| row.contains("Codex sub-agents")
+                && row.contains("shown in the lead's terminal only")),
+        "the Codex row says where its native sub-agents show"
+    );
 
     view.key(press(KeyCode::Down));
     let reply = view.key(press(KeyCode::Left));

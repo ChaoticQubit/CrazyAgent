@@ -1726,9 +1726,9 @@ fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -
     denied
 }
 
-/// Writes a Codex agent's `config.toml`: its developer instructions, no project docs, its
-/// MCP servers with the tools the owner switched off, and for a native lead (PA-7) Codex
-/// 0.164's multi-agent v2 on with `agents.max_threads` and the sub-agents' own instructions.
+/// Writes a Codex agent's `config.toml`: instructions, no project docs, MCP servers less the
+/// tools switched off, and for a native lead (PA-7) multi-agent v2 on with `max_threads`,
+/// the sub-agents' instructions and no model or effort on spawn, so each runs the lead's.
 /// Inputs: the instructions, servers, switched-off tools and the native lead's cap and
 /// sub-agent instructions. Output: the text, or `launch_context_server_name_taken`.
 fn codex_config(
@@ -1745,6 +1745,7 @@ fn codex_config(
         let mut v2 = toml_edit::Table::new();
         v2["enabled"] = toml_edit::value(true);
         v2["subagent_developer_instructions"] = toml_edit::value(sub.as_str());
+        v2["expose_spawn_agent_model_overrides"] = toml_edit::value(false);
         let mut features = toml_edit::Table::new();
         features.set_implicit(true);
         features.insert("multi_agent_v2", toml_edit::Item::Table(v2));

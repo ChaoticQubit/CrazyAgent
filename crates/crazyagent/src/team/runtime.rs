@@ -6609,10 +6609,11 @@ impl TeamRuntime {
         }
     }
 
-    /// How many Codex sub-agent threads a native-mode Codex lead may run at once (PA-7): the
-    /// project's Max teammates, or the largest choice under No limit; None for any agent whose
-    /// native sub-agents are not threads of its own harness. Takes the project, the agent, its
-    /// role and its launch harness. Returns the cap, or the plain reason it cannot be read.
+    /// How many Codex sub-agent threads a native-mode Codex lead may run at once (PA-7): Max
+    /// teammates, or the largest choice under No limit; None for any agent whose native
+    /// sub-agents are not threads. Its terminal is the one place they show, so it needs the
+    /// terminal host, as a team does (r1). Takes the project, agent, role and launch harness.
+    /// Returns the cap, or the plain reason.
     fn native_threads(
         &self,
         project: &ProjectId,
@@ -6623,6 +6624,12 @@ impl TeamRuntime {
         use crate::coord::settings::NativeSubAgents;
         if self.native_kind(project, id, role, launch)? != Some(NativeSubAgents::Threads) {
             return Ok(None);
+        }
+        if self.terminal.is_none() {
+            return Err(with_code(
+                "this lead runs Codex sub-agents natively, which needs the engine's terminal host, the only place they show",
+                Some("native_mode_unavailable"),
+            ));
         }
         let cap = super::teammate_cap(&self.connection, project)
             .map_err(|e| with_code("the project's Max teammates could not be read", Some(&e.0)))?;
@@ -7344,21 +7351,22 @@ impl TeamRuntime {
         self.note_lead(project, lead, body)
     }
 
-    /// Tells whether a stored agent runs on a harness kind whose native sub-agents are threads
-    /// of its own process (PA-7), read from its row. Takes the agent. Returns the answer,
-    /// false when unread.
+    /// Tells whether a stored agent with tools runs on a harness kind whose native sub-agents
+    /// are threads of its own process (PA-7), read from its row; tools off runs none (r1).
+    /// Takes the agent. Returns the answer, false when unread.
     fn native_threads_lead(&self, agent: i64) -> bool {
         use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
         self.connection
             .query_row(
-                "SELECT harness FROM team_agents WHERE id=?1",
+                "SELECT harness,tools FROM team_agents WHERE id=?1",
                 [agent],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()
             .ok()
             .flatten()
-            .and_then(|harness| HarnessKind::from_harness(&harness))
+            .filter(|(_, tools)| *tools)
+            .and_then(|(harness, _)| HarnessKind::from_harness(&harness))
             .map(native_sub_agents)
             == Some(NativeSubAgents::Threads)
     }
