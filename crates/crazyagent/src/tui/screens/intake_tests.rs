@@ -8,7 +8,8 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, ResearchKind, SetupAction, SetupQuery};
-use crate::projects_home::{AddMode, AddOverride};
+use crate::projects_home::icloud::Progress;
+use crate::projects_home::{AddMode, AddOverride, Measured};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
@@ -21,6 +22,8 @@ use crate::tui::seam::{Arrival, PoolChange, Request, ShellRequest};
 use crate::tui::shell::Shell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const SETTINGS: &str = r#"version = 1
@@ -884,7 +887,10 @@ fn a_soft_refusal_from_the_engine_turns_into_the_question_for_that_issue() {
         IntakeQuery::FolderSize {
             path: typed.clone(),
         },
-        Ok(IntakeView::FolderSize(10)),
+        Ok(IntakeView::FolderSize(Measured {
+            bytes: 10,
+            placeholders: 0,
+        })),
     ));
     shell.key(Key::Enter);
     shell.key(Key::Enter);
@@ -2178,4 +2184,255 @@ fn a_refused_onboarding_commit_says_why_and_keeps_the_offer() {
         crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
         tip
     );
+}
+
+/// Opens the Existing folder page on ~/Desktop/shop, a git folder, picks `mode`, and answers the
+/// size read with `placeholders` files only in iCloud. Takes the user folder, the way and the
+/// count. Returns the shell, after the Enter that goes on from the size, and the typed folder.
+fn measured_icloud_folder(user: &Path, mode: AddMode, placeholders: u64) -> (Shell, String) {
+    let user = user.canonicalize().unwrap();
+    let source = user.join("Desktop").join("shop");
+    std::fs::create_dir_all(source.join(".git")).unwrap();
+    let mut ctx = screen_ctx(&user);
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let typed = source.to_str().unwrap().to_owned();
+    keys(&mut shell, &format!("{typed}/"));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    if mode == AddMode::Copy {
+        shell.key(Key::Right);
+    }
+    shell.key(Key::Enter);
+    shell.arrive(intake(
+        IntakeQuery::FolderSize {
+            path: typed.clone(),
+        },
+        Ok(IntakeView::FolderSize(Measured {
+            bytes: 10,
+            placeholders,
+        })),
+    ));
+    shell.key(Key::Enter);
+    (shell, typed)
+}
+
+/// Takes every intake job the screen queued. Takes the shell. Returns the jobs in order.
+fn intake_jobs(shell: &mut Shell) -> Vec<IntakeJob> {
+    let mut jobs = Vec::new();
+    while let Some(request) = shell.ctx.next_screen_request() {
+        if let Request::Intake(job) = request {
+            jobs.push(*job);
+        }
+    }
+    jobs
+}
+
+/// Takes the one iCloud download the screen queued. Takes the shell. Returns its folder and
+/// the flag that stops it.
+fn download_job(shell: &mut Shell) -> (String, Arc<AtomicBool>) {
+    let downloads: Vec<(String, Arc<AtomicBool>)> = intake_jobs(shell)
+        .into_iter()
+        .filter_map(|job| match job {
+            IntakeJob::IcloudDownload { path, cancel } => Some((path, cancel)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(downloads.len(), 1, "one download is queued");
+    downloads.into_iter().next().unwrap()
+}
+
+/// The ways of the adds the screen queued. Takes the shell and the folder. Returns them.
+fn added_ways(shell: &mut Shell, folder: &str) -> Vec<AddMode> {
+    intake_jobs(shell)
+        .into_iter()
+        .filter_map(|job| match job.query() {
+            IntakeQuery::AddExisting { source, mode, .. } if source == folder => Some(mode),
+            _ => None,
+        })
+        .collect()
+}
+
+fn icloud_arrival(folder: &str, result: Result<IntakeView, String>) -> Arrival {
+    intake(
+        IntakeQuery::IcloudDownload {
+            path: folder.to_owned(),
+        },
+        result,
+    )
+}
+
+#[test]
+fn an_icloud_folder_asks_first_and_download_and_move_moves_once_every_file_is_here() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Move, 3);
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Download shop from iCloud first?"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "3 files are only in iCloud; CrazyAgent"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "can take a while)."), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Moving takes the folder out of iCloud Desktop on your"
+        ),
+        "{rows:#?}"
+    );
+    for choice in ["Download and move", "Download and copy", "Cancel"] {
+        assert!(shows(&rows, choice), "{choice} missing: {rows:#?}");
+    }
+    assert!(added_ways(&mut shell, &typed).is_empty());
+    shell.key(Key::Enter);
+    let (path, cancel) = download_job(&mut shell);
+    assert_eq!(path, typed);
+    assert!(!cancel.load(Ordering::Relaxed));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Downloading from iCloud"), "{rows:#?}");
+    shell.arrive(icloud_arrival(
+        &typed,
+        Ok(IntakeView::IcloudProgress(Progress { total: 3, done: 1 })),
+    ));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Downloading from iCloud: 1 of 3 files"),
+        "{rows:#?}"
+    );
+    shell.key(Key::Enter);
+    assert!(
+        intake_jobs(&mut shell).is_empty(),
+        "keys wait while it downloads"
+    );
+    shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(3))));
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "from iCloud first?"), "{rows:#?}");
+    assert!(shows(&rows, "Press Enter again to move it"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Move]);
+}
+
+#[test]
+fn download_and_copy_turns_a_move_into_a_copy_after_the_download() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Move, 1);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "1 file is only in iCloud"), "{rows:#?}");
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let (path, _) = download_job(&mut shell);
+    assert_eq!(path, typed);
+    shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(1))));
+    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Copying the folder"), "{rows:#?}");
+}
+
+#[test]
+fn cancel_closes_the_icloud_question_and_downloads_or_adds_nothing() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 4);
+    shell.key(Key::Right);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Enter Cancel"), "{rows:#?}");
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "from iCloud first?"), "{rows:#?}");
+    assert!(
+        intake_jobs(&mut shell)
+            .iter()
+            .all(|job| !matches!(job, IntakeJob::IcloudDownload { .. })),
+        "Cancel starts no download"
+    );
+    assert!(added_ways(&mut shell, &typed).is_empty());
+}
+
+#[test]
+fn esc_stops_a_running_download_and_the_folder_is_not_added() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Move, 5);
+    shell.key(Key::Enter);
+    let (_, cancel) = download_job(&mut shell);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Esc Stop the download"), "{rows:#?}");
+    shell.key(Key::Esc);
+    assert!(cancel.load(Ordering::Relaxed), "Esc sets the stop flag");
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Stopping the download"), "{rows:#?}");
+    shell.arrive(icloud_arrival(
+        &typed,
+        Err("home_icloud_not_downloaded".into()),
+    ));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "The download stopped. Nothing was moved or copied."),
+        "{rows:#?}"
+    );
+    assert!(added_ways(&mut shell, &typed).is_empty());
+}
+
+#[test]
+fn esc_just_before_a_download_ends_still_adds_nothing() {
+    let user = tempfile::tempdir().unwrap();
+    for mode in [AddMode::Copy, AddMode::Move] {
+        let (mut shell, typed) = measured_icloud_folder(user.path(), mode, 2);
+        shell.key(Key::Enter);
+        let (_, cancel) = download_job(&mut shell);
+        shell.key(Key::Esc);
+        assert!(cancel.load(Ordering::Relaxed), "Esc sets the stop flag");
+        shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(2))));
+        let rows = render(&mut shell, 80, 40);
+        assert!(
+            shows(&rows, "The download stopped. Nothing was moved or copied."),
+            "{rows:#?}"
+        );
+        assert!(!shows(&rows, "Copying the folder"), "{rows:#?}");
+        assert!(!shows(&rows, "Press Enter again to move it"), "{rows:#?}");
+        assert!(added_ways(&mut shell, &typed).is_empty(), "{mode:?}");
+    }
+}
+
+#[test]
+fn a_download_the_engine_ends_shows_its_sentence_and_adds_nothing() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 2);
+    shell.key(Key::Enter);
+    let _ = download_job(&mut shell);
+    shell.arrive(icloud_arrival(
+        &typed,
+        Err("home_icloud_not_downloaded".into()),
+    ));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Some files are still only in iCloud"),
+        "{rows:#?}"
+    );
+    assert!(added_ways(&mut shell, &typed).is_empty());
+}
+
+#[test]
+fn an_add_the_engine_refuses_for_icloud_files_asks_to_download_them() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) = measured_icloud_folder(user.path(), AddMode::Copy, 0);
+    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
+    shell.arrive(intake(
+        IntakeQuery::AddExisting {
+            source: typed.clone(),
+            mode: AddMode::Copy,
+            overrides: Vec::new(),
+            generation: 1,
+        },
+        Err("home_icloud_not_downloaded".into()),
+    ));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Some files are only in iCloud"), "{rows:#?}");
+    assert!(shows(&rows, "Enter Download and copy"), "{rows:#?}");
+    shell.key(Key::Enter);
+    let (path, _) = download_job(&mut shell);
+    assert_eq!(path, typed);
+    shell.arrive(icloud_arrival(&typed, Ok(IntakeView::IcloudDownloaded(9))));
+    assert_eq!(added_ways(&mut shell, &typed), [AddMode::Copy]);
 }

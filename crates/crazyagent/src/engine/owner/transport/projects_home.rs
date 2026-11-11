@@ -16,7 +16,7 @@ enum Step {
     Reply(Box<OwnerResponse>),
     Record(HomeEffect),
     Staged(Result<Staged, String>),
-    Size(u64),
+    Size(crate::projects_home::Measured),
     Deleted(Result<(PathBuf, Vec<crate::projects_home::RecordedFile>), String>),
 }
 
@@ -393,7 +393,7 @@ async fn measure(path: &str, deadline: Instant) -> Result<Step, EngineError> {
         .await
         .map_err(|_| failure("folder_size_interrupted"))?
     {
-        Ok(bytes) => Ok(Step::Size(bytes)),
+        Ok(measured) => Ok(Step::Size(measured)),
         Err(e) => Ok(Step::Reply(Box::new(OwnerResponse::Rejected { code: e.0 }))),
     }
 }
@@ -478,11 +478,14 @@ async fn finish(
                 })
                 .await?,
         },
-        Step::Size(bytes) => {
+        Step::Size(measured) => {
             let mut state = engine
                 .owner_job(|reply| Job::OwnerRead(a.clone(), OwnerRead::ProjectsHome, reply))
                 .await?;
-            state.data = OwnerData::FolderSize { bytes };
+            state.data = OwnerData::FolderSize {
+                bytes: measured.bytes,
+                placeholders: measured.placeholders,
+            };
             OwnerResponse::Read { state }
         }
     };

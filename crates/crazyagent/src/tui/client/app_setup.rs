@@ -175,6 +175,7 @@ impl NativeOwner {
                 let size = controller
                     .folder_size(path.clone())
                     .await
+                    .map(|measured| measured.bytes)
                     .map_err(|error| problem(&error, lost));
                 AppSetupEvent::FolderSize(path, size)
             }
