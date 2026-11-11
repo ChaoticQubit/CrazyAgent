@@ -477,7 +477,10 @@ fn the_owner_environment_passes_only_the_basics_and_turns_every_prompt_off() {
             .map(|value| value.to_string_lossy().into_owned())
     };
     assert_eq!(value("HOME").as_deref(), Some("/Users/owner"));
-    assert_eq!(value("PATH").as_deref(), Some("/usr/bin:/bin"));
+    assert_eq!(
+        value("PATH"),
+        Some(system_path(None).to_string_lossy().into_owned())
+    );
     assert_eq!(
         value("SSH_AUTH_SOCK").as_deref(),
         Some("/private/tmp/agent.sock")
@@ -526,11 +529,11 @@ fn the_owner_path_keeps_only_real_folders_the_ide_and_agents_cannot_write() {
     .unwrap();
     assert_eq!(
         owner_path(&path, &[project.folder.as_path(), engine.as_path()]),
-        OsString::from("/usr/bin:/usr/bin:/bin")
+        system_path(None)
     );
     assert_eq!(
         owner_path(&path, &[Path::new("/usr")]),
-        OsString::from("/bin"),
+        system_path(Some(Path::new("/usr"))),
         "a denied folder is left out by its real path, through a link too"
     );
     let env = owner_env(
@@ -541,9 +544,24 @@ fn the_owner_path_keeps_only_real_folders_the_ide_and_agents_cannot_write() {
         env.iter()
             .find(|(name, _)| name == "PATH")
             .map(|(_, value)| value.clone()),
-        Some(OsString::from("/usr/bin:/usr/bin:/bin"))
+        Some(system_path(None))
     );
     assert_eq!(owner_path(OsStr::new(".:bin"), &[]), OsString::new());
+}
+
+/// The owner PATH `/usr/bin` and `/bin` leave on this host: each by its real path, once,
+/// outside `denied`. On macOS that is `/usr/bin:/bin`; where `/bin` links to `/usr/bin`, as
+/// on merged-usr Linux, it is `/usr/bin` alone. Input: the denied folder, if any. Output:
+/// the PATH value.
+fn system_path(denied: Option<&Path>) -> OsString {
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for folder in ["/usr/bin", "/bin"] {
+        let real = std::fs::canonicalize(folder).unwrap();
+        if !denied.is_some_and(|denied| real.starts_with(denied)) && !kept.contains(&real) {
+            kept.push(real);
+        }
+    }
+    std::env::join_paths(kept).unwrap()
 }
 
 #[test]
