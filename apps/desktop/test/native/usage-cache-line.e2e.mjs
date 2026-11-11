@@ -262,6 +262,7 @@ test("Metrics shows the Tokens headline with its three parts and the cache re-re
   await onEngine(t, "ca-cache-line-", async ({ project, runtime, me, page, site }) => {
     assert.equal(await handOff(me, page, project, runtime), "done", "the Codex sub-agent finished the task");
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/metrics` });
+    await me.click("Off", '[aria-label="Prices"] [role="radio"]');
     let shown = null;
     let counted = null;
     let want = null;
