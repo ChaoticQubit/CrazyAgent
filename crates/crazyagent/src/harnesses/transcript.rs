@@ -78,6 +78,7 @@ pub struct TranscriptReader {
     aside: bool,
     dropped: bool,
     consumed: u64,
+    codex_calls: CodexExecCalls,
 }
 
 impl TranscriptReader {
@@ -128,6 +129,7 @@ impl TranscriptReader {
             aside: false,
             dropped: false,
             consumed: 0,
+            codex_calls: CodexExecCalls::default(),
         }
     }
 
@@ -271,7 +273,10 @@ impl TranscriptReader {
                 continue;
             };
             let facts = match self.source {
-                Transcript::CodexRollouts { .. } => codex_facts(&value),
+                Transcript::CodexRollouts { .. } => {
+                    let exec = self.codex_calls.sees(&value);
+                    codex_facts(&value, exec)
+                }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
                 Transcript::Unavailable => Vec::new(),
             };
@@ -547,7 +552,11 @@ fn line_text(text: &str) -> TranscriptEvent {
     TranscriptEvent::Text { text }
 }
 
-fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
+/// The facts of one Codex rollout line. Takes the line and whether it is the output of an
+/// exec tool call ([`CodexExecCalls::sees`]), the only output whose header can name a
+/// command left running. Returns the facts, none for a line that says nothing the session
+/// follows.
+fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
     let payload = &value["payload"];
     match (value["type"].as_str(), payload["type"].as_str()) {
         (Some("event_msg"), Some("task_started")) => vec![TranscriptEvent::TurnStarted],
@@ -589,13 +598,13 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
                 .unwrap_or("tool")
                 .to_owned(),
         }],
-        (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
+        (Some("response_item"), Some("function_call_output")) if exec => {
             output_texts(&payload["output"])
-                .into_iter()
-                .flat_map(str::lines)
-                .filter_map(|line| line.strip_prefix(CODEX_RUNNING))
-                .filter_map(codex_session_id)
+                .first()
+                .copied()
+                .and_then(codex_running)
                 .map(|id| TranscriptEvent::BackgroundStarted { id })
+                .into_iter()
                 .collect()
         }
         (Some("event_msg"), Some("item_completed"))
@@ -613,9 +622,89 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
     }
 }
 
-/// The line Codex 0.164 ends a tool output with while the command it started still runs,
-/// followed by the session id of that command (core tools/context.rs).
+/// The header line Codex 0.164 writes into an exec tool output while the command it started
+/// still runs, followed by the session id of that command (core tools/context.rs
+/// `response_header`).
 const CODEX_RUNNING: &str = "Process running with session ID ";
+
+/// The line that ends the header of a Codex exec tool output; every line after it is the
+/// command's own output, which the command, the repository or fetched text controls.
+const CODEX_OUTPUT: &str = "Output:";
+
+/// The most lines a Codex 0.164 exec output header has: chunk id, wall time, exit code,
+/// running session, original token count and `Output:`.
+const CODEX_HEADER_LINES_MAX: usize = 6;
+
+/// The Codex 0.164 tools whose output header names a command left running (unified exec).
+const CODEX_EXEC_TOOLS: [&str; 2] = ["exec_command", "write_stdin"];
+
+/// The most exec tool calls a reader waits for the output of at once; past it the oldest
+/// is forgotten, and its output then starts no background command.
+const CODEX_EXEC_CALLS_MAX: usize = 64;
+
+/// The longest Codex tool call id a reader keeps.
+const CODEX_CALL_ID_BYTES_MAX: usize = 128;
+
+/// The exec tool calls of a Codex rollout whose output is still to come, oldest first: only
+/// the header Codex writes on an exec output can name a command left running, so the
+/// output of any other tool, or text in an output's body, never starts one (PA9-F1).
+#[derive(Debug, Default)]
+struct CodexExecCalls {
+    waiting: std::collections::VecDeque<String>,
+}
+
+impl CodexExecCalls {
+    /// Takes one rollout line: remembers an exec_command or write_stdin call by its call
+    /// id, and tells whether the line is the output of a remembered call, which it then
+    /// forgets. Takes the line. Returns true only for such an output.
+    fn sees(&mut self, value: &Value) -> bool {
+        let payload = &value["payload"];
+        let call = payload["call_id"]
+            .as_str()
+            .filter(|call| !call.is_empty() && call.len() <= CODEX_CALL_ID_BYTES_MAX);
+        let Some(call) = call.filter(|_| value["type"] == "response_item") else {
+            return false;
+        };
+        let exec = match payload["type"].as_str() {
+            Some("function_call") => {
+                let tool = payload["name"].as_str().unwrap_or_default();
+                if CODEX_EXEC_TOOLS.contains(&tool) {
+                    self.waiting.push_back(call.to_owned());
+                    if self.waiting.len() > CODEX_EXEC_CALLS_MAX {
+                        self.waiting.pop_front();
+                    }
+                }
+                false
+            }
+            Some("function_call_output") => {
+                match self.waiting.iter().position(|waiting| waiting == call) {
+                    Some(at) => self.waiting.remove(at).is_some(),
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        assert!(self.waiting.len() <= CODEX_EXEC_CALLS_MAX);
+        exec
+    }
+}
+
+/// The session id the header of a Codex exec output names as still running. The header is
+/// the lines before the first `Output:` line, at most `CODEX_HEADER_LINES_MAX`; the lines
+/// after it are never read. Takes the output's first text. Returns the id, none for text
+/// with no header or no running line in it.
+fn codex_running(text: &str) -> Option<String> {
+    let mut running = None;
+    for line in text.lines().take(CODEX_HEADER_LINES_MAX) {
+        if line == CODEX_OUTPUT {
+            return running;
+        }
+        if let Some(id) = line.strip_prefix(CODEX_RUNNING) {
+            running = codex_session_id(id);
+        }
+    }
+    None
+}
 
 /// The most digits a Codex session id is read with.
 const CODEX_SESSION_DIGITS_MAX: usize = 20;
