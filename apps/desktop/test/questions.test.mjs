@@ -14,6 +14,7 @@ const question = (extra = {}) => ({
   recommended: "SQLite", context: "It runs on one laptop.", status: "pending", version: 3, answer: null, created_ms: NOW - 120_000, settled_ms: null,
   ...extra,
 });
+const COMMENT_AFTER_THE_GROUP = /<\/fieldset><label class="qs-option qs-comment"><input type="checkbox"[^>]*\/><span>Add a comment<\/span><\/label>/;
 const card = (item, extra = {}) => renderToStaticMarkup(createElement(view.QuestionCard, {
   question: item, now: NOW, busy: false, onAnswer: () => {}, onDismiss: () => {}, ...extra,
 }));
@@ -67,16 +68,29 @@ test("a multi question shows checkboxes and Add a comment last", () => {
   assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
   assert.doesNotMatch(html, /type="radio"/);
   assert.match(html, /<legend[^>]*>Pick any<\/legend>/);
-  assert.match(html, /Add a comment<\/span><\/label>\s*<\/fieldset>/);
+  assert.match(html, COMMENT_AFTER_THE_GROUP);
   assert.equal(html.match(/>Recommended</g)?.length, 1);
 });
 
 test("a single question shows radios and Add a comment last", () => {
   const html = card(question({ kind: "single" }));
-  assert.equal((html.match(/type="radio"/g) ?? []).length, 3);
-  assert.doesNotMatch(html, /type="checkbox"/);
-  assert.match(html, /Add a comment<\/span><\/label>\s*<\/fieldset>/);
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
+  assert.match(html, COMMENT_AFTER_THE_GROUP);
   assert.equal(client.COMMENT_LABEL, "Add a comment");
+});
+
+test("Add a comment is a checkbox outside the option group that says whether its box is open, and opening moves the keyboard into the box", () => {
+  for (const kind of ["single", "multi"]) {
+    const html = card(question({ kind }));
+    const group = html.slice(html.indexOf("<fieldset"), html.indexOf("</fieldset>"));
+    assert.doesNotMatch(group, /Add a comment/, kind);
+    assert.match(html, /<input type="checkbox" aria-expanded="false"\/><span>Add a comment<\/span>/, kind);
+    assert.doesNotMatch(html, /<textarea/, kind);
+  }
+  const source = readFileSync(new URL("../src/screens/project/questions.tsx", import.meta.url), "utf8");
+  assert.match(source, /useEffect\(\(\) => \{\s*if \(commenting\) document\.getElementById\(field\)\?\.focus\(\);\s*\}, \[commenting, field\]\);/);
+  assert.match(source, /aria-controls=\{commenting \? field : undefined\}/);
 });
 
 test("a text question shows only the text box", () => {

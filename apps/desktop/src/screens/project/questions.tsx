@@ -57,8 +57,8 @@ export function picksAfter(kind: QuestionKind, picks: readonly number[], index: 
 
 /** One question: who asked and when, the question, its context and, while it waits, its
  * choices: radios for a single question, checkboxes for a multi one, the recommended option
- * marked and Add a comment last, which opens a comment box; a text question shows only its
- * answer box. A question asked in an agent's terminal is answered there, so it offers only
+ * marked, then an Add a comment checkbox outside that group, which opens the comment box and
+ * moves the keyboard into it; a text question shows only its answer box. A question asked in an agent's terminal is answered there, so it offers only
  * Dismiss. A settled question shows its status and answer. Inputs: the question, now, whether
  * an action runs and the handlers. Output: the card. */
 export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
@@ -83,6 +83,9 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
   const badge = statusBadge(question.status);
   const suggested = typing ? question.recommended : null;
   const input = question.kind === "multi" ? "checkbox" : "radio";
+  useEffect(() => {
+    if (commenting) document.getElementById(field)?.focus();
+  }, [commenting, field]);
   return <section className="pj-stack-s qs-card" aria-label={`Question from ${askerLabel(question.asker)}`}>
     <div className="pj-row between">
       <strong>{askerLabel(question.asker)}</strong>
@@ -109,11 +112,11 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
           <span>{displayText(option)}</span>
           {isRecommended(question, index) && <span className="qs-recommended pj-small">Recommended</span>}
         </label>)}
-        <label className="qs-option qs-comment">
-          <input type={input} name={`${name}-comment`} checked={commenting} disabled={busy} onChange={() => {}}
-            onClick={() => setCommenting(!commenting)} />
-          <span>{COMMENT_LABEL}</span></label>
       </fieldset>}
+      {!typing && <label className="qs-option qs-comment">
+        <input type="checkbox" aria-expanded={commenting} aria-controls={commenting ? field : undefined} checked={commenting} disabled={busy}
+          onChange={(event) => setCommenting(event.target.checked)} />
+        <span>{COMMENT_LABEL}</span></label>}
       {suggested && <div className="pj-row">
         <span className="pj-small pj-secondary">{`Suggested: ${displayText(suggested)}`}</span>
         <Button size="small" disabled={busy} onClick={() => setText(suggested)}>Use suggested answer</Button>
