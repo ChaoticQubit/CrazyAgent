@@ -216,3 +216,111 @@ fn a_hidden_folder_resists_hard_link_clone_and_firmlink() {
         "FIRMLINK READ LEAKED through {firmlink}: {aliased:?}"
     );
 }
+
+#[test]
+fn a_kept_out_file_is_seen_but_its_text_is_never_read() {
+    let case = case();
+    let kept = case.project.join("web").join("tokens.json");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "{\"owner\": \"KEPT_OUT_CANARY\"}\n").unwrap();
+    let sandbox = sandbox_with_hidden(&case, &[]).keep_out(&kept).unwrap();
+    let output = run(
+        &sandbox,
+        &case.profile,
+        &format!("test -f '{0}' && echo seen; cat '{0}'", kept.display()),
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"seen\n");
+}
+
+#[test]
+fn a_hidden_folder_is_not_even_seen() {
+    let case = case();
+    let sandbox = sandbox_with_hidden(&case, std::slice::from_ref(&case.secret));
+    let notes = case.secret.join("notes.txt");
+    let output = run(
+        &sandbox,
+        &case.profile,
+        &format!("test -e '{}' && echo seen", notes.display()),
+    );
+    assert_eq!(output.stdout, b"");
+}
+
+#[test]
+fn a_kept_out_files_attribute_values_are_never_read() {
+    let case = case();
+    let kept = case.project.join("web").join("tokens.json");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "{}\n").unwrap();
+    let mut write = std::process::Command::new("/usr/bin/xattr");
+    write
+        .args(["-w", "com.example.where", "XATTR_CANARY"])
+        .arg(&kept)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let wrote = crazyagent::spawn_gate::output(&mut write).unwrap();
+    assert!(wrote.status.success(), "{wrote:?}");
+    let sandbox = sandbox_with_hidden(&case, &[]).keep_out(&kept).unwrap();
+    let output = run(
+        &sandbox,
+        &case.profile,
+        &format!("ls -l@ '{}'", kept.display()),
+    );
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(listed.contains("com.example.where\t-1"), "{output:?}");
+    assert!(!listed.contains("com.example.where\t12"), "{output:?}");
+}
+
+#[test]
+fn a_kept_out_folder_is_seen_but_never_listed_and_its_files_are_never_read() {
+    let case = case();
+    let folder = case.project.join("vendor");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("lib.ts"), "VENDOR_CANARY\n").unwrap();
+    let sandbox = sandbox_with_hidden(&case, &[]).keep_out(&folder).unwrap();
+    let output = run(
+        &sandbox,
+        &case.profile,
+        &format!(
+            "ls '{0}'; cat '{0}/lib.ts'; test -d '{0}' && echo seen",
+            folder.display()
+        ),
+    );
+    assert_eq!(output.stdout, b"seen\n", "{output:?}");
+}
+
+#[test]
+fn a_kept_out_file_resists_hard_link_and_clone() {
+    let case = case();
+    let kept = case.project.join("web").join("tokens.json");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "{\"owner\": \"KEPT_OUT_CANARY\"}\n").unwrap();
+    let sandbox = sandbox_with_hidden(&case, &[]).keep_out(&kept).unwrap();
+    let linked = case.project.join("linked.txt");
+    let link = run(
+        &sandbox,
+        &case.profile,
+        &format!(
+            "ln '{}' '{}' && cat '{}'",
+            kept.display(),
+            linked.display(),
+            linked.display()
+        ),
+    );
+    assert!(!link.status.success(), "hard link leaked: {link:?}");
+    assert_eq!(link.stdout, b"");
+    let cloned = case.project.join("cloned.txt");
+    let clone = run(
+        &sandbox,
+        &case.profile,
+        &format!(
+            "cp -c '{}' '{}' && cat '{}'",
+            kept.display(),
+            cloned.display(),
+            cloned.display()
+        ),
+    );
+    assert!(!clone.status.success(), "clonefile leaked: {clone:?}");
+    assert_eq!(clone.stdout, b"");
+}

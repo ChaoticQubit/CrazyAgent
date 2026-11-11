@@ -1,4 +1,4 @@
-use super::names::{paths_in, secret_like};
+use super::names::{paths_in, secret_like, source_file};
 use super::{
     Document, ENTRY_NAME_BYTES_MAX, Evidence, Folder, SKIPPED_ENTRIES, clip, file_text,
     open_folder, open_in,
@@ -409,7 +409,8 @@ pub(crate) fn outside_git(repo: &Path) -> bool {
 /// follow: whatever the project's git ignores, tracked or not, an ignored folder once with
 /// a closing `/`, each submodule and nested repository whole with a closing `/`, as their
 /// own ignores are not the project's, and the outermost file or folder of each other path
-/// whose name is secret-like. Asks git three times, bounded as [`ignored`]; a folder outside
+/// whose name is secret-like, but for a programming source file, which a word in its name
+/// alone does not keep out. Asks git three times, bounded as [`ignored`]; a folder outside
 /// git is walked instead. Takes the folder. Returns the paths, or `None` when git could not
 /// answer, the walk could not finish or a name is not UTF-8, so no graph is built.
 pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
@@ -438,8 +439,8 @@ pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
         let mut end = 0;
         for name in path.split('/') {
             end += name.len();
-            if secret_like(name) {
-                let folder = end < path.len();
+            let folder = end < path.len();
+            if secret_like(name) && (folder || !source_file(name)) {
                 kept.insert(format!("{}{}", &path[..end], if folder { "/" } else { "" }));
                 break;
             }
@@ -450,8 +451,9 @@ pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
 }
 
 /// The paths below `repo`, a folder outside git, the code graph must never read (MAP-2): the
-/// outermost file or folder of each path whose name is secret-like and each folder holding
-/// a `.git` entry, whole, each folder with a closing `/`. The walk follows no link and skips
+/// outermost file or folder of each path whose name is secret-like, but for a programming
+/// source file, and each folder holding a `.git` entry, whole, each folder with a closing
+/// `/`. The walk follows no link and skips
 /// the root's engine and graph folders. Takes the folder. Returns the paths, or `None` past
 /// 100,000 entries or 64 folders deep, or when a folder cannot be read or a name is not UTF-8.
 fn walked(repo: &Path) -> Option<Vec<String>> {
@@ -475,7 +477,7 @@ fn walked(repo: &Path) -> Option<Vec<String>> {
                 format!("{at}/{name}")
             };
             if !entry.file_type().ok()?.is_dir() {
-                if secret_like(&name) {
+                if secret_like(&name) && !source_file(&name) {
                     kept.insert(path);
                 }
                 continue;
