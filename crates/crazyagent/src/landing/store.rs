@@ -149,6 +149,10 @@ pub(super) struct Earlier {
     restorable_until_ms: Option<u64>,
     #[serde(default)]
     restored: bool,
+    #[serde(default)]
+    regenerated_head: Option<String>,
+    #[serde(default)]
+    regenerated_files: Vec<String>,
 }
 
 impl Earlier {
@@ -166,6 +170,8 @@ impl Earlier {
             updated_ms: record.updated_ms,
             restorable_until_ms: record.restorable_until_ms,
             restored: record.restored,
+            regenerated_head: record.regenerated_head.clone(),
+            regenerated_files: record.regenerated_files.clone(),
         }
     }
 
@@ -188,6 +194,8 @@ impl Earlier {
         record.updated_ms = self.updated_ms;
         record.restorable_until_ms = self.restorable_until_ms;
         record.restored = self.restored;
+        record.regenerated_head = self.regenerated_head;
+        record.regenerated_files = self.regenerated_files;
     }
 }
 
