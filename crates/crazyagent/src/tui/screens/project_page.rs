@@ -706,7 +706,10 @@ impl ProjectPage {
                 text: waiting.text.clone(),
                 error: false,
             });
-            transcript.status = MasterStatus::Thinking { since_ms: None };
+            transcript.status = MasterStatus::Thinking {
+                since_ms: None,
+                activity: Vec::new(),
+            };
         }
         Some(transcript)
     }

@@ -3106,6 +3106,132 @@ fn type_text(screen: &mut ProjectScreen, text: &str) {
 }
 
 #[test]
+fn a_running_master_turn_shows_what_it_last_did_and_ctrl_o_opens_the_whole_list() {
+    use crate::master_session::MasterActivityLine;
+    let mut screen = console_screen();
+    let now: i64 = 3_600_000;
+    let texts = [
+        "Searching the code",
+        "Reading README.md",
+        "Running a command",
+        "Editing src/app/layout.tsx",
+        "Updating its plan",
+        "Writing a reply",
+        "Reading src/app/page.tsx",
+    ];
+    let lines: Vec<MasterActivityLine> = texts
+        .iter()
+        .zip(0u64..)
+        .map(|(text, step)| MasterActivityLine {
+            at_ms: 3_600_000 - 4_000 - (6 - step) * 10_000,
+            text: (*text).into(),
+        })
+        .collect();
+    let thinking = |activity: &[MasterActivityLine]| MasterStatus::Thinking {
+        since_ms: Some(now - 6 * 60_000),
+        activity: activity.to_vec(),
+    };
+    let look = Look::plain();
+    let control_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let draw = |screen: &mut ProjectScreen| {
+        let drawn = project_screen(screen, 90, 40, &look);
+        let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+        (rows, drawn.help)
+    };
+    let under = |rows: &[String], count: usize| -> Vec<String> {
+        let at = rows
+            .iter()
+            .rposition(|row| row.contains("Thinking..."))
+            .unwrap_or_else(|| panic!("{}", rows.join("\n")));
+        rows[at + 1..at + 1 + count]
+            .iter()
+            .map(|row| row.trim().to_owned())
+            .collect()
+    };
+    screen.now_ms = now;
+
+    screen.transcript.as_mut().expect("console").status = thinking(&lines[2..]);
+    let (rows, help) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert!(
+        shown.contains("Thinking...  6 min \u{b7} Reading src/app/page.tsx, 4 s ago"),
+        "{shown}"
+    );
+    assert!(!screen.more_activity());
+    assert!(!help.iter().any(|(key, _)| *key == "Ctrl-O"), "{help:?}");
+    screen.key(control_o);
+    assert!(!screen.activity_open, "five lines have no longer list");
+
+    screen.transcript.as_mut().expect("console").status = thinking(&lines);
+    let (rows, help) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert_eq!(
+        under(&rows, 5),
+        [
+            "44 s ago  Running a command",
+            "34 s ago  Editing src/app/layout.tsx",
+            "24 s ago  Updating its plan",
+            "14 s ago  Writing a reply",
+            "4 s ago  Reading src/app/page.tsx",
+        ],
+        "{shown}"
+    );
+    assert!(!shown.contains("Searching the code"), "{shown}");
+    assert!(!shown.contains("Reading README.md"), "{shown}");
+    assert!(help.contains(&("Ctrl-O", "All activity")), "{help:?}");
+
+    assert_eq!(screen.key(control_o), ProjectReply::Handled);
+    assert!(screen.activity_open);
+    assert_eq!(screen.input.value(), "", "the key types nothing");
+    let (rows, help) = draw(&mut screen);
+    let listed = under(&rows, 7);
+    assert_eq!(listed[0], "1 min ago  Searching the code");
+    assert_eq!(listed[1], "54 s ago  Reading README.md");
+    assert_eq!(listed[6], "4 s ago  Reading src/app/page.tsx");
+    assert!(help.contains(&("Ctrl-O", "Less activity")), "{help:?}");
+
+    screen.now_ms = now + 9 * 60_000;
+    let (rows, _) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert!(
+        shown.contains("Thinking...  15 min \u{b7} no new activity for 9 min"),
+        "{shown}"
+    );
+
+    screen.transcript.as_mut().expect("console").status = MasterStatus::Replied;
+    let (rows, help) = draw(&mut screen);
+    let shown = rows.join("\n");
+    assert!(!shown.contains("Thinking"), "{shown}");
+    assert!(!shown.contains("src/app/page.tsx"), "{shown}");
+    assert!(!help.iter().any(|(key, _)| *key == "Ctrl-O"), "{help:?}");
+    assert!(!screen.more_activity());
+}
+
+#[test]
+fn an_activity_line_wider_than_the_screen_is_cut_to_its_width() {
+    use crate::master_session::MasterActivityLine;
+    let mut screen = console_screen();
+    let long = format!("Reading {}", "deep/".repeat(36));
+    screen.now_ms = 60_000;
+    screen.transcript.as_mut().expect("console").status = MasterStatus::Thinking {
+        since_ms: Some(0),
+        activity: vec![MasterActivityLine {
+            at_ms: 56_000,
+            text: long,
+        }],
+    };
+    let drawn = project_screen(&mut screen, 60, 30, &Look::plain());
+    let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let shown = rows.join("\n");
+    let wide: Vec<&String> = rows.iter().filter(|row| row.contains("deep/")).collect();
+    assert_eq!(wide.len(), 2, "{shown}");
+    for row in wide {
+        assert!(row.chars().count() <= 60, "{shown}");
+        assert!(row.trim_end().ends_with('\u{2026}'), "{shown}");
+    }
+}
+
+#[test]
 fn the_master_console_draws_the_transcript_and_prompt_like_a_terminal() {
     let mut screen = console_screen();
     let look = Look::plain();

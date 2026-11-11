@@ -61,6 +61,21 @@
   color: var(--cs-error);
 }
 
+.cs-activity {
+  color: var(--cs-dim);
+}
+
+.cs-activity summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.cs-activity ol {
+  margin: 0;
+  padding: 0 0 0 2ch;
+  list-style: none;
+}
+
 .cs .markdown {
   gap: 8px;
   max-width: none;

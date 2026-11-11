@@ -2259,7 +2259,7 @@ export interface MasterTurn {
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
-  attempt?: { connection: { account_ref: string } } | null;
+  attempt?: { connection: { account_ref: string }; selected_at_ms?: number } | null;
   accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;
@@ -2267,6 +2267,15 @@ export interface MasterTurn {
   changes?: string | null;
   engine_request?: MasterEngineRequest | null;
   input_cursor?: string;
+  activity?: MasterActivityLine[];
+}
+
+/** One line of what a running master turn is doing, as the engine words it: a fixed phrase
+ * with at most one project-relative path, and the engine's clock in milliseconds when it
+ * last saw it. The engine sends the lines oldest first, only while the turn is outstanding. */
+export interface MasterActivityLine {
+  at_ms: number;
+  text: string;
 }
 
 /** What the engine asked the master in a turn Ask agent to update started: the change set,
