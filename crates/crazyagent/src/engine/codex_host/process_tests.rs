@@ -636,6 +636,56 @@ async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_frames_with
     let _ = host.close().await;
 }
 
+/// Starts a Codex master host on a stand-in app-server under the master's own sandbox, as
+/// the engine does. Inputs: a name for the turn's lease and ids, the stand-in's script and
+/// the host's budget, whose wall time is its clock. Output: the fixture, which owns the
+/// folders, and the running host.
+#[cfg(unix)]
+async fn stand_in_master(
+    name: &str,
+    body: &str,
+    limits: ResourceBudget,
+) -> (
+    crate::engine::master_host_fixture::MasterFixture,
+    super::CodexHost,
+) {
+    use crate::adapters::{NativeAction, NativeHarness};
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::protocol::{CredentialRef, RequestId, SessionId};
+
+    let mut fixture = MasterFixture::new("codex");
+    let profile = fixture.lease(&format!("codex-{name}"), 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("codex", body);
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let mut command = Command::new(&harness);
+    command
+        .args(["-c", "cli_auth_credentials_store=\"file\""])
+        .env("CODEX_HOME", &home)
+        .current_dir(std::fs::canonicalize(&fixture.project).unwrap());
+    let action = NativeAction::Launch {
+        session_id: SessionId::new(format!("{name}-session")).unwrap(),
+        harness: NativeHarness::Codex,
+        profile_ref: CredentialRef::new("group-master-profile").unwrap(),
+        worktree_lease: RequestId::new(format!("{name}-lease")).unwrap(),
+    };
+    let host = super::CodexHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        action,
+        CredentialRef::new("group-master-account").unwrap(),
+        Some(Duration::from_millis(limits.wall_time_ms)),
+        limits,
+        "stand-in instructions",
+    )
+    .await
+    .unwrap();
+    assert!(host.diagnostic().fault.is_none());
+    (fixture, host)
+}
+
 /// A stand-in Codex app-server that answers initialize, the master thread and the turn in
 /// Codex 0.164's shapes, then writes a long turn: 10,000 reply deltas and a turn end whose
 /// one line lists 10,000 items.
@@ -672,44 +722,14 @@ exec /bin/sleep 30
 #[tokio::test]
 async fn a_long_codex_master_turn_of_ten_thousand_items_ends_with_its_reply() {
     use crate::adapters::events::{EventKind, TurnOutcome};
-    use crate::adapters::{NativeAction, NativeHarness};
-    use crate::engine::master_host_fixture::MasterFixture;
-    use crate::protocol::{CredentialRef, RequestId, SessionId};
+    use crate::protocol::RequestId;
 
-    let mut fixture = MasterFixture::new("codex");
-    let profile = fixture.lease("codex-long-turn", 1).unwrap();
-    let home = profile.profile_path().unwrap();
-    let harness = fixture.stand_in("codex", LONG_TURN_APP_SERVER);
-    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
-    let mut command = Command::new(&harness);
-    command
-        .args(["-c", "cli_auth_credentials_store=\"file\""])
-        .env("CODEX_HOME", &home)
-        .current_dir(std::fs::canonicalize(&fixture.project).unwrap());
-    let action = NativeAction::Launch {
-        session_id: SessionId::new("long-turn-session").unwrap(),
-        harness: NativeHarness::Codex,
-        profile_ref: CredentialRef::new("group-master-profile").unwrap(),
-        worktree_lease: RequestId::new("long-turn-lease").unwrap(),
-    };
     let limits = ResourceBudget {
         output_bytes: 4 * 1_048_576,
         wall_time_ms: 30_000,
         ..budget()
     };
-    let mut host = super::CodexHost::spawn(
-        command,
-        sandbox,
-        profile,
-        home,
-        action,
-        CredentialRef::new("group-master-account").unwrap(),
-        Some(Duration::from_millis(limits.wall_time_ms)),
-        limits,
-        "stand-in instructions",
-    )
-    .await
-    .unwrap();
+    let (_fixture, mut host) = stand_in_master("long-turn", LONG_TURN_APP_SERVER, limits).await;
     host.start_turn(RequestId::new("long-turn").unwrap(), "hello")
         .await
         .unwrap();
@@ -730,6 +750,72 @@ async fn a_long_codex_master_turn_of_ten_thousand_items_ends_with_its_reply() {
     .await
     .unwrap();
     assert_eq!(deltas, 10_000, "every delta reached the reader");
+    assert_eq!(ended, TurnOutcome::Success);
+    assert!(host.diagnostic().fault.is_none());
+    let _ = host.close().await;
+}
+
+/// A stand-in Codex app-server whose turn starts twenty native sub-agent threads at once,
+/// answers the interrupt the engine sends for each by its id, then ends the master's turn
+/// with a reply.
+#[cfg(unix)]
+const SUB_AGENTS_APP_SERVER: &str = r#"#!/bin/sh
+read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+read -r line
+read -r line
+cwd=$(pwd)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"on-request\",\"approvalsReviewer\":\"user\",\"sandbox\":{\"type\":\"readOnly\",\"networkAccess\":false}}}"
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+i=0
+while [ "$i" -lt 20 ]; do
+  i=$((i+1))
+  printf '%s\n' "{\"method\":\"turn/started\",\"params\":{\"threadId\":\"child-$i\",\"turn\":{\"id\":\"child-turn-$i\",\"rootTurnId\":\"stand-in-turn\",\"items\":[],\"status\":\"inProgress\"}}}"
+done
+i=0
+while [ "$i" -lt 20 ]; do
+  i=$((i+1))
+  read -r line
+  rest=${line#*\"id\":}
+  printf '%s\n' "{\"id\":${rest%%,*},\"result\":{}}"
+done
+printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"stand-in-thread","turnId":"stand-in-turn","itemId":"item-1","delta":"done"}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"stand-in-thread","turn":{"id":"stand-in-turn","items":[],"status":"completed"}}}'
+exec /bin/sleep 30
+"#;
+
+/// A Codex master turn that starts twenty native sub-agents ends with its reply (OB-5 r2):
+/// the 17th thread used to end the turn as over capacity, and so did the 17th interrupt
+/// waiting for its answer. The engine interrupts every one and the master's reply arrives.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_master_turn_that_starts_twenty_native_sub_agents_ends_with_its_reply() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::protocol::RequestId;
+
+    let limits = ResourceBudget {
+        output_bytes: 65_536,
+        wall_time_ms: 20_000,
+        ..budget()
+    };
+    let (_fixture, mut host) = stand_in_master("sub-agents", SUB_AGENTS_APP_SERVER, limits).await;
+    host.start_turn(RequestId::new("sub-agents-turn").unwrap(), "hello")
+        .await
+        .unwrap();
+    let mut reply = String::new();
+    let ended = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match host.next_event().await.unwrap().kind {
+                EventKind::AssistantDelta { text, .. } => reply.push_str(&text),
+                EventKind::TurnFinished { outcome, .. } => break outcome,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply, "done");
     assert_eq!(ended, TurnOutcome::Success);
     assert!(host.diagnostic().fault.is_none());
     let _ = host.close().await;

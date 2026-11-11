@@ -474,3 +474,114 @@ fn an_instructions_file_adds_one_flag_and_only_a_private_single_link_file_outsid
     case.launch.instructions = Some(file);
     assert_eq!(case.launch.command().unwrap().get_args().count(), 10);
 }
+
+/// One frame of a prompted turn as its host reads it, for the capture rows. Inputs: the
+/// frame's sequence and its body. Output: the event.
+fn turn_event(sequence: u64, event: super::EventBody) -> super::Event {
+    super::Event(super::RawEvent {
+        protocol_version: super::HOST_PROTOCOL_VERSION,
+        session_id: SessionId::new("capture-session").unwrap(),
+        instance_id: RequestId::new("capture-instance").unwrap(),
+        sequence,
+        event,
+    })
+}
+
+/// No count of messages and no total of frames ends an rcli master turn (OB-5 r2): a turn
+/// of 10,000 messages, where the 129th used to end it as a reply cut off, each beside a
+/// tool output frame of the largest size, where 1 MiB of frames in all used to end it,
+/// ends with its whole reply.
+#[test]
+fn a_turn_of_ten_thousand_messages_and_large_frames_ends_with_its_reply() {
+    use super::master::RcliMasterStatus;
+    use super::{EventBody, TurnStatus};
+
+    let turn_id = RequestId::new("turn-long").unwrap();
+    let mut turn = TurnCapture::new(turn_id.clone());
+    let largest = crate::protocol::FRAME_BYTES_MAX + 4;
+    let mut sequence = 0;
+    let mut frame = |event: EventBody| {
+        sequence += 1;
+        turn_event(sequence, event)
+    };
+    for index in 1..=10_000 {
+        let message_id = RequestId::new(format!("msg-{index}")).unwrap();
+        let started = EventBody::MessageStarted {
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        };
+        let delta = EventBody::MessageDelta {
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+            text: format!("step {index}"),
+        };
+        let output = EventBody::Output {
+            turn_id: turn_id.clone(),
+            text: "tool output".into(),
+        };
+        let finished = EventBody::MessageFinished {
+            turn_id: turn_id.clone(),
+            message_id,
+        };
+        for event in [started, delta, output, finished] {
+            let taken = turn.accept(&frame(event), largest);
+            assert!(taken.is_ok_and(|done| done.is_none()), "message {index}");
+        }
+    }
+    let completed = EventBody::Completed {
+        turn_id: turn_id.clone(),
+        status: TurnStatus::Succeeded,
+    };
+    let done = turn.accept(&frame(completed), largest).unwrap().unwrap();
+    assert_eq!(done.turn_id, turn_id);
+    assert!(matches!(done.status, RcliMasterStatus::Succeeded));
+    let reply = done.reply.unwrap();
+    assert_eq!(reply.split("\n\n").count(), 10_000);
+    assert!(
+        reply.starts_with("step 1\n\nstep 2\n\n"),
+        "{}",
+        &reply[..32]
+    );
+    assert!(reply.ends_with("\n\nstep 9999\n\nstep 10000"));
+}
+
+/// The capture is bounded by the bytes it keeps: text past 8 MiB ends the turn with the
+/// output limit code, which the owner reads as output too large to keep, never with the
+/// order code, which reads as a reply cut off. A message id used twice still gets the
+/// order code.
+#[test]
+fn kept_reply_bytes_past_the_bound_end_the_turn_with_the_output_code() {
+    use super::EventBody;
+
+    let turn_id = RequestId::new("turn-large").unwrap();
+    let message_id = RequestId::new("msg-1").unwrap();
+    let mut turn = TurnCapture::new(turn_id.clone());
+    let started = || EventBody::MessageStarted {
+        turn_id: turn_id.clone(),
+        message_id: message_id.clone(),
+    };
+    assert!(turn.accept(&turn_event(1, started()), 128).is_ok());
+    let twice = turn.accept(&turn_event(2, started()), 128).err().unwrap();
+    assert_eq!(twice.0, "rcli_master_message_order");
+    let text = "x".repeat(60_000);
+    let mut kept = 0;
+    let failure = loop {
+        let delta = EventBody::MessageDelta {
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+            text: text.clone(),
+        };
+        match turn.accept(&turn_event(3 + kept, delta), 60_200) {
+            Ok(done) => assert!(done.is_none()),
+            Err(failure) => break failure,
+        }
+        kept += 1;
+        assert!(kept <= 200, "no byte bound ended the turn");
+    };
+    assert_eq!(failure.0, "rcli_master_output_limit");
+    assert_eq!(
+        kept,
+        139,
+        "8 MiB less the message's entry, in 60,000 byte deltas"
+    );
+}

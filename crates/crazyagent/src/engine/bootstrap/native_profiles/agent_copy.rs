@@ -13,6 +13,11 @@ pub(super) const CODEX_RECORD: &str = "auth.json";
 pub(super) const CLAUDE_RECORD: &str = ".credentials.json";
 const RECORD_BYTES_MAX: u64 = 65_536;
 const USABLE_MIN: Duration = Duration::from_secs(60);
+
+/// How far ahead a turn with no time bound has its copy checked when it starts: the day a
+/// team agent's copy is checked for. After that its keeper renews the copy, however long
+/// the turn runs.
+const OPEN_TURN_AHEAD: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(target_os = "macos")]
 const SECURITY: &str = "/usr/bin/security";
 #[cfg(target_os = "macos")]
@@ -168,6 +173,20 @@ impl NativeProfileUse {
         turn: Duration,
         executable: &Path,
     ) -> Result<AgentCredential, EngineError> {
+        self.hand_to_turn(agent_home, Some(turn), executable)
+    }
+
+    /// Does what `hand_to_agent` does for a turn that may have no time bound. A bounded turn
+    /// gets a keeper only when its copy lapses within it. A turn with no bound always gets
+    /// one, whatever time the token has left (OB-5 r2): the keeper acts only near the
+    /// expiry. Inputs: the agent's private home, the turn's time bound or none, and the
+    /// harness executable. Output: as `hand_to_agent`.
+    pub(crate) fn hand_to_turn(
+        &self,
+        agent_home: &Path,
+        turn: Option<Duration>,
+        executable: &Path,
+    ) -> Result<AgentCredential, EngineError> {
         self.revalidate_retained()?;
         if self.configured.is_some() {
             return Err(unavailable());
@@ -183,7 +202,9 @@ impl NativeProfileUse {
         let path = self.profile_path()?;
         let mut record = account_record(harness, &self.home.file, &path)?;
         let now = since_epoch()?;
-        let turn_end = now.checked_add(turn).ok_or_else(expiring)?;
+        let ahead = turn.unwrap_or(OPEN_TURN_AHEAD);
+        assert!(!ahead.is_zero());
+        let turn_end = now.checked_add(ahead).ok_or_else(expiring)?;
         let renewal = if record.expires <= turn_end.max(now + USABLE_MIN) {
             let renewal = self.renewal(harness, executable)?;
             record = off_worker(|| renewal.renew(record.expires))?;
@@ -201,9 +222,11 @@ impl NativeProfileUse {
             name,
             keeper: None,
         };
-        if let Some(renewal) = renewal
-            && record.expires <= turn_end
-        {
+        if turn.is_none() || (renewal.is_some() && record.expires <= turn_end) {
+            let renewal = match renewal {
+                Some(renewal) => renewal,
+                None => self.renewal(harness, executable)?,
+            };
             let agent = credential.home.try_clone().map_err(|_| unavailable())?;
             credential.keeper = Some(Keeper::start(renewal, agent, name, record.expires)?);
         }

@@ -4,6 +4,14 @@ import { FRAME_TEXT_MAX } from "./host.codec.ts";
 
 export const MESSAGE_JSON_MAX = 458_752;
 
+/** The bytes of message state one turn keeps: one entry for each SDK message identity. No
+ * count of messages ends a turn (OB-5 r2): past the bound the oldest messages that are
+ * finished or discarded are forgotten. */
+export const MESSAGE_STATE_BYTES_MAX = 1_048_576;
+
+/** What the state of one SDK message costs beside its id. */
+const MESSAGE_STATE_ENTRY_BYTES = 64;
+
 export type MessageFrame =
   | { kind: "message_started" | "message_reset" | "message_discarded" | "message_finished"; turn_id: string; message_id: string }
   | { kind: "message_delta"; turn_id: string; message_id: string; text: string };
@@ -80,8 +88,8 @@ function stateInvariant(value: MessageState | undefined): asserts value is Messa
   assert(value !== null && value !== undefined &&
     ["streaming", "finished", "discarded", "overflowed"].includes(value.phase) &&
     (value.hostId === null ? value.phase === "discarded" || value.phase === "overflowed" :
-      typeof value.hostId === "string" && /^msg-[1-9][0-9]{0,2}$/.test(value.hostId) &&
-      Number(value.hostId.slice(4)) <= 128), "host_message_identity_invariant");
+      typeof value.hostId === "string" && /^msg-[1-9][0-9]{0,15}$/.test(value.hostId) &&
+      Number.isSafeInteger(Number(value.hostId.slice(4)))), "host_message_identity_invariant");
 }
 
 export class SdkMessageProjection {
@@ -89,6 +97,7 @@ export class SdkMessageProjection {
   private readonly sdkTurnId: string;
   private readonly messages = new Map<string, MessageState>();
   private nextMessage = 1;
+  private stateBytes = 0;
   private closed = false;
   private overflow = false;
 
@@ -114,7 +123,7 @@ export class SdkMessageProjection {
     if (discard) {
       if (previous?.phase === "discarded") reject();
       if (!previous) {
-        this.admit();
+        this.admit(nativeId);
         this.messages.set(nativeId, { hostId: null, phase: "discarded" });
         return [];
       }
@@ -125,7 +134,7 @@ export class SdkMessageProjection {
     const chunks = textChunks(input.text, MESSAGE_JSON_MAX, MESSAGE_JSON_MAX);
     if (previous && previous.phase !== "streaming") reject();
     if (chunks === null) {
-      if (!previous) this.admit();
+      if (!previous) this.admit(nativeId);
       this.overflow = true;
       this.messages.set(nativeId, { hostId: previous?.hostId ?? null, phase: "overflowed" });
       return previous ? [{ kind: "message_discarded", turn_id: this.turnId, message_id: previous.hostId }] : [];
@@ -134,11 +143,10 @@ export class SdkMessageProjection {
     const output: MessageFrame[] = [];
     let current = previous;
     if (!current) {
-      this.admit();
+      this.admit(nativeId);
       const sequence = this.nextMessage;
       this.nextMessage += 1;
-      assert(Number.isSafeInteger(sequence) && sequence >= 1 && sequence <= 128,
-        "host_message_counter_invariant");
+      assert(Number.isSafeInteger(sequence) && sequence >= 1, "host_message_counter_invariant");
       const hostId = `msg-${sequence}`;
       current = { hostId, phase: "streaming" };
       this.messages.set(nativeId, current);
@@ -164,9 +172,23 @@ export class SdkMessageProjection {
   close(): void {
     this.closed = true;
     this.messages.clear();
+    this.stateBytes = 0;
   }
 
-  private admit(): void {
-    if (this.messages.size >= 128) reject();
+  /** Makes room for the state of one more SDK message, whatever the count before it. Past
+   * MESSAGE_STATE_BYTES_MAX the oldest finished or discarded messages are forgotten; the
+   * event is refused only when messages still streaming fill the bound alone. Input: the
+   * SDK message id. Output: none. */
+  private admit(nativeId: string): void {
+    const cost = nativeId.length + MESSAGE_STATE_ENTRY_BYTES;
+    for (const [id, state] of this.messages) {
+      if (this.stateBytes + cost <= MESSAGE_STATE_BYTES_MAX) break;
+      if (state.phase !== "finished" && state.phase !== "discarded") continue;
+      this.messages.delete(id);
+      this.stateBytes -= id.length + MESSAGE_STATE_ENTRY_BYTES;
+    }
+    if (this.stateBytes + cost > MESSAGE_STATE_BYTES_MAX) reject();
+    this.stateBytes += cost;
+    assert(this.stateBytes > 0 && this.stateBytes <= MESSAGE_STATE_BYTES_MAX, "host_message_state_invariant");
   }
 }

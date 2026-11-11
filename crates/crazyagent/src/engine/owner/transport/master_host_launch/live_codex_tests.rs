@@ -151,7 +151,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         &profile,
         &codex,
         &connection,
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         Some(&engine),
         &[],
     )
@@ -377,7 +377,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         &profile,
         &codex,
         &connection,
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         Some(&engine),
         &[],
     )

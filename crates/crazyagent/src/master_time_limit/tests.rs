@@ -42,14 +42,12 @@ fn each_option_is_saved_and_read_back_with_its_clock_and_its_cause() {
             Some(minutes) => {
                 let clock = Duration::from_secs(u64::from(minutes) * 60);
                 assert_eq!(limit.run_time(), Some(clock));
-                assert_eq!(limit.sign_in_ahead(), clock);
                 let cause = limit.cause().unwrap();
                 assert_eq!(cause, format!("master_time_limit_{minutes}"));
                 assert_eq!(minutes_of_cause(&cause), Some(minutes));
             }
             None => {
                 assert_eq!(limit.run_time(), None);
-                assert_eq!(limit.sign_in_ahead(), SIGN_IN_AHEAD);
                 assert_eq!(limit.cause(), None);
             }
         }

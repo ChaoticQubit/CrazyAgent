@@ -919,3 +919,49 @@ fn unsupported_request_while_idle_is_deniable_and_blocks_new_dispatch() {
     );
     assert_eq!(request(&protocol.start_turn("next").unwrap())["id"], 4);
 }
+
+/// A master may start any number of native sub-agents in one turn (OB-5 r2): 1,000 threads
+/// one after another, where the 17th used to end the turn as over capacity, then 100 at
+/// once, where the 17th waiting interrupt did. Each is interrupted, none reaches the turn,
+/// and the turn still ends completed.
+#[test]
+fn a_turn_that_starts_a_thousand_native_sub_agents_still_ends_completed() {
+    let mut protocol = active();
+    let mut next = 4;
+    for index in 0..1_000 {
+        let (thread, turn) = (format!("child-{index}"), format!("child-turn-{index}"));
+        let started = child_turn(&thread, &turn, "turn-unit", "inProgress");
+        assert_eq!(
+            protocol.receive(&started).unwrap(),
+            vec![Event::NativeSubAgentStarted {
+                thread_id: thread.clone(),
+                turn_id: turn.clone()
+            }]
+        );
+        let interrupt = request(&protocol.interrupt_child(&thread, &turn).unwrap());
+        assert_eq!(interrupt["id"], next);
+        assert!(reply(&mut protocol, next, json!({})).is_empty());
+        let ended = child_turn(&thread, &turn, "turn-unit", "interrupted");
+        assert!(protocol.receive(&ended).unwrap().is_empty());
+        next += 1;
+    }
+    for index in 0..100 {
+        let (thread, turn) = (format!("batch-{index}"), format!("batch-turn-{index}"));
+        let started = child_turn(&thread, &turn, "turn-unit", "inProgress");
+        assert_eq!(protocol.receive(&started).unwrap().len(), 1);
+        protocol.interrupt_child(&thread, &turn).unwrap();
+    }
+    for index in 0..100 {
+        assert!(reply(&mut protocol, next + index, json!({})).is_empty());
+    }
+    assert_eq!(protocol.state(), State::Active);
+    let ended = notification("turn/completed", "turn-unit", "completed");
+    assert_eq!(
+        protocol.receive(&ended).unwrap(),
+        vec![Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }]
+    );
+    assert_eq!(protocol.state(), State::Idle);
+}

@@ -1468,6 +1468,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "native_profile_renewal_failed" => MasterReason::TransientFailure,
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit"
+        | "codex_host_protocol_capacity"
         | "claude_host_stdout_limit"
         | "claude_host_stderr_limit"
         | "claude_host_output_limit"
@@ -1954,6 +1955,7 @@ mod tests {
             ("gateway_cooldown", MasterReason::CooldownActive),
             ("master_runtime_scope_revoked", MasterReason::ScopeRevoked),
             ("codex_host_output_limit", MasterReason::OutputLimit),
+            ("codex_host_protocol_capacity", MasterReason::OutputLimit),
             ("claude_host_stdout_limit", MasterReason::OutputLimit),
             ("claude_host_stderr_limit", MasterReason::OutputLimit),
             ("claude_host_output_limit", MasterReason::OutputLimit),

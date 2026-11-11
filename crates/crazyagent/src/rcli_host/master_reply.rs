@@ -3,12 +3,19 @@ use super::master_launch::error;
 use super::{Event, EventBody, TurnStatus};
 use crate::protocol::{ProtocolError, RequestId};
 use crate::usage::capture::Tokens;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
-const REPLY_BYTES_MAX: usize = 1_048_576;
+/// The bytes one turn's capture keeps: the text of its messages and one entry for each
+/// message. No count of messages and no total of frames ends a turn (OB-5 r2); a turn that
+/// would keep more ends with the output limit code. It is the size of the engine's capture
+/// file for one turn.
+const KEPT_BYTES_MAX: usize = 8 * 1024 * 1024;
+
+/// What the entry of one message costs beside its id and its text.
+const MESSAGE_ENTRY_BYTES: usize = 64;
 
 struct Message {
-    id: RequestId,
     text: String,
     finished: bool,
     discarded: bool,
@@ -21,8 +28,9 @@ pub(super) struct TurnCapture {
     pub(super) deadline: Option<Instant>,
     pub(super) cancelling: bool,
     messages: Vec<Message>,
-    retained_bytes: usize,
-    observed_bytes: usize,
+    index: BTreeMap<RequestId, usize>,
+    text_bytes: usize,
+    entry_bytes: usize,
     usage: Tokens,
     usage_through: u64,
 }
@@ -34,50 +42,38 @@ impl TurnCapture {
             deadline: None,
             cancelling: false,
             messages: Vec::new(),
-            retained_bytes: 0,
-            observed_bytes: 0,
+            index: BTreeMap::new(),
+            text_bytes: 0,
+            entry_bytes: 0,
             usage: Tokens::default(),
             usage_through: 0,
         };
         assert!(capture.messages.is_empty());
-        assert_eq!(capture.retained_bytes, 0);
+        assert_eq!(capture.kept(), 0);
         assert!(capture.deadline.is_none());
         capture
     }
 
+    /// Takes one frame of the turn into the capture. Frames pass through uncounted: only
+    /// what the capture keeps is bounded, by `KEPT_BYTES_MAX`. Inputs: the event and the
+    /// bytes of its frame. Output: the completion once the turn ended, none before, or a
+    /// plain code.
     pub(super) fn accept(
         &mut self,
         event: &Event,
         frame_bytes: usize,
     ) -> Result<Option<RcliMasterCompletion>, ProtocolError> {
-        assert!(self.messages.len() <= 128);
-        assert!(self.retained_bytes <= REPLY_BYTES_MAX);
+        assert_eq!(self.index.len(), self.messages.len());
+        assert!(self.kept() <= KEPT_BYTES_MAX);
         assert!(frame_bytes > 4);
         assert!(frame_bytes <= crate::protocol::FRAME_BYTES_MAX + 4);
-        self.observed_bytes += frame_bytes;
-        if self.observed_bytes > REPLY_BYTES_MAX {
-            return Err(error("rcli_master_output_limit"));
-        }
         match &event.0.event {
             EventBody::MessageStarted {
                 turn_id,
                 message_id,
             } => {
                 self.scope(turn_id)?;
-                if self.messages.len() == 128
-                    || self
-                        .messages
-                        .iter()
-                        .any(|message| message.id == *message_id)
-                {
-                    return Err(error("rcli_master_message_order"));
-                }
-                self.messages.push(Message {
-                    id: message_id.clone(),
-                    text: String::new(),
-                    finished: false,
-                    discarded: false,
-                });
+                self.start(message_id)?;
             }
             EventBody::MessageDelta {
                 turn_id,
@@ -132,8 +128,38 @@ impl TurnCapture {
             }
             _ => {}
         }
-        assert!(self.retained_bytes <= REPLY_BYTES_MAX);
+        assert!(self.kept() <= KEPT_BYTES_MAX);
         Ok(None)
+    }
+
+    /// The bytes the capture keeps now: the text of its messages and their entries.
+    /// Input: the capture. Output: the bytes.
+    fn kept(&self) -> usize {
+        self.text_bytes + self.entry_bytes
+    }
+
+    /// Opens a message of the turn, however many came before it. Input: the message id.
+    /// Output: Ok, the order code for an id the turn already used, or the output limit code
+    /// when its entry no longer fits the kept bytes.
+    fn start(&mut self, message_id: &RequestId) -> Result<(), ProtocolError> {
+        if self.index.contains_key(message_id) {
+            return Err(error("rcli_master_message_order"));
+        }
+        let entry = message_id.as_str().len() + MESSAGE_ENTRY_BYTES;
+        if self.kept() + entry > KEPT_BYTES_MAX {
+            return Err(error("rcli_master_output_limit"));
+        }
+        let previous = self.index.insert(message_id.clone(), self.messages.len());
+        assert!(previous.is_none());
+        self.messages.push(Message {
+            text: String::new(),
+            finished: false,
+            discarded: false,
+        });
+        self.entry_bytes += entry;
+        assert_eq!(self.index.len(), self.messages.len());
+        assert!(self.kept() <= KEPT_BYTES_MAX);
+        Ok(())
     }
 
     /// Hands over the tokens the turn's usage frames reported since the last call, each
@@ -156,10 +182,12 @@ impl TurnCapture {
         message_id: &RequestId,
     ) -> Result<&mut Message, ProtocolError> {
         self.scope(turn_id)?;
-        self.messages
-            .iter_mut()
-            .find(|message| message.id == *message_id)
-            .ok_or_else(|| error("rcli_master_message_order"))
+        let at = *self
+            .index
+            .get(message_id)
+            .ok_or_else(|| error("rcli_master_message_order"))?;
+        assert!(at < self.messages.len());
+        Ok(&mut self.messages[at])
     }
 
     fn delta(
@@ -169,24 +197,19 @@ impl TurnCapture {
         text: &str,
     ) -> Result<(), ProtocolError> {
         let next = self
-            .retained_bytes
+            .kept()
             .checked_add(text.len())
-            .filter(|bytes| *bytes <= REPLY_BYTES_MAX)
+            .filter(|bytes| *bytes <= KEPT_BYTES_MAX)
             .ok_or_else(|| error("rcli_master_output_limit"))?;
         let message = self.message(turn_id, message_id)?;
         if message.finished || message.discarded {
             return Err(error("rcli_master_message_order"));
         }
         message.text.push_str(text);
-        self.retained_bytes = next;
-        assert!(self.retained_bytes <= REPLY_BYTES_MAX);
-        assert_eq!(
-            self.retained_bytes,
-            self.messages
-                .iter()
-                .map(|message| message.text.len())
-                .sum::<usize>()
-        );
+        let grown = message.text.len();
+        self.text_bytes += text.len();
+        assert_eq!(self.kept(), next);
+        assert!(grown <= self.text_bytes);
         Ok(())
     }
 
@@ -200,18 +223,11 @@ impl TurnCapture {
         if message.discarded || !discard && message.finished {
             return Err(error("rcli_master_message_order"));
         }
-        let removed = message.text.len();
-        message.text.clear();
+        let removed = std::mem::take(&mut message.text).len();
         message.discarded = discard;
-        self.retained_bytes -= removed;
-        assert!(self.retained_bytes <= REPLY_BYTES_MAX);
-        assert_eq!(
-            self.retained_bytes,
-            self.messages
-                .iter()
-                .map(|message| message.text.len())
-                .sum::<usize>()
-        );
+        assert!(removed <= self.text_bytes);
+        self.text_bytes -= removed;
+        assert!(self.kept() <= KEPT_BYTES_MAX);
         Ok(())
     }
 
@@ -225,9 +241,6 @@ impl TurnCapture {
                 continue;
             }
             let separator = if reply.is_empty() { "" } else { "\n\n" };
-            if reply.len() + separator.len() + message.text.len() > REPLY_BYTES_MAX {
-                return Err(error("rcli_master_output_limit"));
-            }
             reply.push_str(separator);
             reply.push_str(&message.text);
         }
@@ -235,7 +248,7 @@ impl TurnCapture {
             return Err(error("rcli_master_empty_reply"));
         }
         assert!(!reply.is_empty());
-        assert!(reply.len() <= REPLY_BYTES_MAX);
+        assert!(reply.len() <= self.text_bytes + 2 * self.messages.len());
         Ok(reply)
     }
 }

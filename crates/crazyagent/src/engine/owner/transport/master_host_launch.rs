@@ -140,7 +140,7 @@ impl OwnerRuntimeHandle {
         } else {
             None
         };
-        let wall_time = prepared.time.sign_in_ahead();
+        let wall_time = prepared.time.run_time();
         let delegate = engine.as_deref().map(delegate_engine).transpose()?;
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;
@@ -301,9 +301,9 @@ pub(super) struct MasterTurnLaunch {
 /// a new private mailbox in the turn's temporary folder, less the tools switched off. The keychain
 /// stays denied and the managed home is never given to the master. Inputs: where the turn runs, the
 /// account lease, the registered executable, the attempt's connection, the instruction text, the
-/// turn's wall time, the engine executable for tools on, the team tools switched off and the
-/// owner's master step limit, which only a tools-on command carries (OB-5b). Output:
-/// the launch parts with the copy, or the refusal of the part that failed,
+/// turn's time limit (none for no limit), the engine executable for tools on, the team tools
+/// switched off and the owner's master step limit, which only a tools-on command carries
+/// (OB-5b). Output: the launch parts with the copy, or the refusal of the part that failed,
 /// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
 /// minute after a renewal.
 #[allow(clippy::too_many_arguments)]
@@ -313,14 +313,14 @@ pub(super) fn claude_master_turn(
     executable: &Path,
     connection: &ModelConnection,
     instructions: &str,
-    wall_time: Duration,
+    wall_time: Option<Duration>,
     engine: Option<&Path>,
     tools_off: &[String],
     steps: StepLimit,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
-    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
+    let credential = profile.hand_to_turn(&home, wall_time, executable)?;
     let (command, sandbox, tool_record) = match engine {
         None => (
             crate::engine::claude_host::launch_command(
@@ -393,20 +393,20 @@ pub(super) fn claude_master_turn(
 /// macOS refuses a Seatbelt profile inside the master's, which keeps writes to the leased worktree
 /// and the turn's own folders, and only the engine's team server, as for Claude Code. Inputs: where
 /// the turn runs, the account lease, the registered executable, the attempt's connection, the
-/// turn's wall time, the engine executable for tools on and the team tools switched off. Output:
-/// the launch parts with the copy, or the refusal of the part that failed.
+/// turn's time limit (none for no limit), the engine executable for tools on and the team tools
+/// switched off. Output: the launch parts with the copy, or the refusal of the part that failed.
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
     executable: &Path,
     connection: &ModelConnection,
-    wall_time: Duration,
+    wall_time: Option<Duration>,
     engine: Option<&Path>,
     tools_off: &[String],
 ) -> Result<MasterTurnLaunch, EngineError> {
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
-    let credential = profile.hand_to_agent(&home, wall_time, executable)?;
+    let credential = profile.hand_to_turn(&home, wall_time, executable)?;
     let Some(engine) = engine else {
         return Ok(MasterTurnLaunch {
             command: master_command(executable, &home, place.worktree, model, None)?,

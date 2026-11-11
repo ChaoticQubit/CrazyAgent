@@ -10,7 +10,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const STDOUT_BYTES_MAX: usize = 16_777_216;
-const STDERR_BYTES_MAX: usize = 16_384;
 const WRITE_TIME: Duration = Duration::from_secs(1);
 const CLEANUP_TIME: Duration = Duration::from_secs(6);
 const INTERVAL: Duration = Duration::from_millis(5);
@@ -23,7 +22,6 @@ pub(super) struct HostProcess {
     stderr: Option<ChildStderr>,
     pending: Vec<u8>,
     stdout_bytes: usize,
-    stderr_bytes: usize,
     status: Option<ExitStatus>,
     group_absent: bool,
     clean: bool,
@@ -44,7 +42,6 @@ impl HostProcess {
             stderr: Some(stderr),
             pending: Vec::new(),
             stdout_bytes: 0,
-            stderr_bytes: 0,
             status: None,
             group_absent: false,
             clean: false,
@@ -146,8 +143,13 @@ impl HostProcess {
         Ok(length + 4)
     }
 
+    /// Drains what the host wrote to its error pipe so the host never waits on it. The
+    /// bytes are read and dropped, at most 16 KiB a call: nothing of them is kept, so no
+    /// total of them ends a turn (OB-5 r2). Input: the process. Output: Ok, or a plain code
+    /// for a pipe that failed.
     fn read_stderr(&mut self) -> Result<(), ProtocolError> {
         let mut scratch = [0; 1024];
+        let mut drained = 0;
         for _ in 0..16 {
             let Some(output) = self.stderr.as_mut() else {
                 return Ok(());
@@ -158,17 +160,15 @@ impl HostProcess {
                     return Ok(());
                 }
                 Ok(count) => {
-                    self.stderr_bytes += count;
-                    if self.stderr_bytes > STDERR_BYTES_MAX {
-                        return Err(error("rcli_master_stderr_limit"));
-                    }
+                    assert!(count <= scratch.len());
+                    drained += count;
                 }
                 Err(failure) if failure.kind() == io::ErrorKind::Interrupted => {}
                 Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(_) => return Err(error("rcli_master_stderr_failed")),
             }
         }
-        assert!(self.stderr_bytes <= STDERR_BYTES_MAX);
+        assert!(drained <= 16 * scratch.len());
         assert!(self.child.id() > 1);
         Ok(())
     }

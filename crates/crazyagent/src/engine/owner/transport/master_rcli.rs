@@ -81,9 +81,7 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         return MasterRuntimeObservation::Disconnected;
     }
     let reason = match error.0.as_str() {
-        "rcli_master_output_limit" | "rcli_master_stderr_limit" | "codex_host_output_limit" => {
-            MasterReason::OutputLimit
-        }
+        "rcli_master_output_limit" | "codex_host_output_limit" => MasterReason::OutputLimit,
         "rcli_master_empty_reply" => MasterReason::NoReply,
         "rcli_master_capture_incomplete"
         | "rcli_master_message_order"

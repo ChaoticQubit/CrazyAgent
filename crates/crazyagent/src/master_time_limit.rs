@@ -16,11 +16,6 @@ pub const RUN_TIME_MAX: Duration = Duration::from_secs(60 * 60);
 /// the start only, never the turn: a turn the owner cannot stop yet must not wait for ever.
 pub const START_TIME_MAX: Duration = Duration::from_secs(10 * 60);
 
-/// How far ahead a turn with no time limit has its sign-in copy checked when it starts:
-/// the day a team agent's copy is checked for. A copy that lapses sooner is renewed while
-/// the turn runs, however long that is.
-pub const SIGN_IN_AHEAD: Duration = Duration::from_secs(24 * 60 * 60);
-
 #[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS master_time_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -69,15 +64,6 @@ impl TimeLimit {
         assert!(time.is_none_or(|time| !time.is_zero() && time <= RUN_TIME_MAX));
         assert_eq!(time.is_none(), self == Self::NoLimit);
         time
-    }
-
-    /// How far ahead a turn's sign-in copy is checked when it starts: the limit, or
-    /// [`SIGN_IN_AHEAD`] for no limit. Input: the choice. Output: the time.
-    pub fn sign_in_ahead(self) -> Duration {
-        let ahead = self.run_time().unwrap_or(SIGN_IN_AHEAD);
-        assert!(!ahead.is_zero());
-        assert!(ahead <= SIGN_IN_AHEAD);
-        ahead
     }
 
     /// The cause a turn stopped by this limit ends with. Input: the choice. Output: the

@@ -117,7 +117,6 @@ fn rcli_cleanup_uncertainty_never_becomes_a_confirmed_terminal_failure() {
 fn rcli_failures_keep_capture_budget_and_approval_reasons() {
     for (code, expected) in [
         ("rcli_master_output_limit", MasterReason::OutputLimit),
-        ("rcli_master_stderr_limit", MasterReason::OutputLimit),
         (
             "rcli_master_capture_incomplete",
             MasterReason::CaptureIncomplete,
