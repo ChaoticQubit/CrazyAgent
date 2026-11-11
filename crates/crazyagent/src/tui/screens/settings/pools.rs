@@ -1252,6 +1252,55 @@ mod tests {
         assert!(asked[1].contains("Ranking"), "{asked:?}");
     }
 
+    /// Account choice names each account as Accounts does, in the member rows and in Next
+    /// accounts, and shows an id only for an account whose name is not known (OB-4).
+    #[test]
+    fn account_choice_names_accounts_and_falls_back_to_the_id() {
+        use crate::scheduling::PoolRanking;
+        let mut ctx = ctx();
+        ctx.store.accounts = Load::Ready(vec![crate::tui::seam::AccountRow {
+            id: CredentialRef::new("member-1").unwrap(),
+            name: "Claude-ChaoticQubit".into(),
+            provider: "ChatGPT".into(),
+            status: "Signed in".into(),
+        }]);
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        while ctx.next_request().is_some() {}
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let ranking: Vec<PoolRanking> = serde_json::from_value(serde_json::json!([{
+            "pool": "pool-main",
+            "strategy": "use_it_or_lose_it",
+            "accounts": [
+                {
+                    "connection": "member-1",
+                    "standing": {"kind": "next", "weekly_resets_ms": null,
+                        "weekly_left_percent": 40, "use_last": false,
+                        "why": {"kind": "no_reading"}}
+                },
+                {"connection": "member-9", "standing": {"kind": "never_use"}}
+            ],
+            "own_order_projects": 0
+        }]))
+        .expect("a ranking reads");
+        screen.arrive(&settings(SettingsEvent::Ranking(Ok(ranking))), &mut ctx);
+        let shown = body(&screen.modal(&ctx).expect("the editor shows").0);
+        assert!(shown.contains("  Claude-ChaoticQubit"), "{shown}");
+        assert!(shown.contains(" 1. Claude-ChaoticQubit"), "{shown}");
+        assert!(
+            !shown.contains("member-1"),
+            "a named account never shows its id: {shown}"
+        );
+        assert!(
+            shown.contains("    member-9"),
+            "an account with no name known falls back to its id: {shown}"
+        );
+    }
+
     /// An account one project holds after its agent reported a limit keeps its place in the
     /// order and says, on its own line under it, which project holds it and until when
     /// (SECAUDIT-RATELIMIT-FORGE).

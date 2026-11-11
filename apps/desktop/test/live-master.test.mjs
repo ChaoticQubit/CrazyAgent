@@ -10,6 +10,7 @@ import { pasteTerminal } from "./native/trial-kit.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
 const live = await import("../src/screens/project/live-master.tsx");
+const loads = await import("../src/state.ts");
 
 const key = (type, extra = {}) => ({ type, key: "Enter", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, ...extra });
 
@@ -648,6 +649,11 @@ test("the running harness comes from the team status agent behind the master car
   assert.match(shown, /data-testid="master-switch-waits"[^>]*>Codex from the next start</, shown);
   const same = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
   assert.doesNotMatch(same, /master-switch-waits/);
+  assert.match(shown, /<span class="pj-console-detail">claude-account-f2fa<\/span>/, "with no name read yet the head falls back to the account's id (OB-4)");
+  loads.cacheLoad(loads.loadKey("accounts", []), { kind: "ok", value: [{ id: "claude-account-f2fa", name: "Claude-ScholarScope" }] });
+  const named = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
+  assert.match(named, /<span class="pj-console-detail">Claude-ScholarScope<\/span>/, "the head names the master's account as Accounts does");
+  assert.doesNotMatch(named, /claude-account-f2fa/);
 });
 
 test("Live terminal is unavailable with its plain reason for a master with no live terminal, and available with its words for one that has it (OWNER-Q4-2-L3)", async () => {

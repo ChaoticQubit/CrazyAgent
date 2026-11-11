@@ -1,8 +1,10 @@
+use super::client::settings::{SettingsEvent, SettingsJob};
 use super::client::{
     ConversationContext, ConversationEvent, ConversationJob, ConversationQuery,
     ConversationSubmission, CreationEvent, CreationJob, CreationSubmission, Evidence,
     MutationDelivery, OwnerEvent, OwnerProgress, SetupQuery, SetupView,
 };
+use super::screens::settings_accounts::account_row;
 use super::{dispatch, master_session, model_access};
 use crate::config::EffectiveConfig;
 use crate::conversation::{
@@ -216,6 +218,7 @@ pub struct App {
     submitted_generation: Option<u64>,
     pending_creation: Option<(RequestId, u64)>,
     pub(super) owner_ready: bool,
+    accounts_wanted: bool,
     pub(super) owner_problem: Option<String>,
     pub(super) owner_notice: String,
     pub(super) evidence: Option<Evidence>,
@@ -277,6 +280,7 @@ impl App {
             submitted_generation: None,
             pending_creation: None,
             owner_ready: false,
+            accounts_wanted: false,
             owner_problem: None,
             owner_notice: "Connecting to the trusted engine endpoint".into(),
             evidence: None,
@@ -837,6 +841,16 @@ impl App {
         Ok(Some((project, self.owner_generation, first)))
     }
 
+    /// The one full account read the classic view asks for after each owner connection is
+    /// ready, so master turn lines name accounts as Accounts does. Input: none. Output: the
+    /// job, once per ready connection, else none.
+    pub(super) fn take_accounts_job(&mut self) -> Option<SettingsJob> {
+        let due = self.owner_ready && self.accounts_wanted;
+        self.accounts_wanted &= !due;
+        assert!(!(due && self.accounts_wanted));
+        due.then_some(SettingsJob::AllAccounts)
+    }
+
     pub(super) fn apply_owner(&mut self, event: OwnerEvent) -> Result<(), String> {
         match event {
             OwnerEvent::Master(event) => {
@@ -868,8 +882,13 @@ impl App {
                 }
             }
             OwnerEvent::Creation(event) => self.apply_creation(*event)?,
+            OwnerEvent::Settings(event) => {
+                if let SettingsEvent::AllAccounts(Ok(accounts)) = *event {
+                    self.master
+                        .name_accounts(accounts.iter().map(account_row).collect());
+                }
+            }
             OwnerEvent::Shell(_)
-            | OwnerEvent::Settings(_)
             | OwnerEvent::TeamGraph { .. }
             | OwnerEvent::ProjectFiles { .. }
             | OwnerEvent::Intake(_)
@@ -919,6 +938,7 @@ impl App {
                 }
                 self.invalidate_evidence()?;
                 self.owner_ready = ready;
+                self.accounts_wanted = ready;
                 self.sync_master()?;
                 self.master.access();
                 self.owner_problem = (!ready).then_some(problem);
@@ -2201,6 +2221,42 @@ mod tests {
         ));
         assert!(!created_as(&spec("Other", &[]), &folder));
         assert!(!created_as(&spec("Notes", &["/other"]), &folder));
+    }
+
+    /// The classic view asks for the account rows once per ready owner connection, and a
+    /// full account read reaches the master view without a failure (OB4-F2).
+    #[test]
+    fn accounts_are_read_once_per_ready_owner_connection() {
+        let mut app = App::new();
+        assert!(
+            app.take_accounts_job().is_none(),
+            "nothing before a connection"
+        );
+        app.accounts_wanted = true;
+        assert!(
+            app.take_accounts_job().is_none(),
+            "nothing while the owner connection is not ready"
+        );
+        assert!(app.accounts_wanted, "the read is still owed");
+        app.owner_ready = true;
+        assert!(matches!(
+            app.take_accounts_job(),
+            Some(SettingsJob::AllAccounts)
+        ));
+        assert!(app.take_accounts_job().is_none(), "once per connection");
+        app.apply_owner(OwnerEvent::Settings(Box::new(SettingsEvent::AllAccounts(
+            Ok(Vec::new()),
+        ))))
+        .unwrap();
+        app.apply_owner(OwnerEvent::Settings(Box::new(SettingsEvent::AllAccounts(
+            Err("owner_read_failed".into()),
+        ))))
+        .unwrap();
+        app.accounts_wanted = true;
+        assert!(
+            app.take_accounts_job().is_some(),
+            "again after a new connection"
+        );
     }
 
     #[test]

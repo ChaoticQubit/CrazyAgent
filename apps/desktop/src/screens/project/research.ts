@@ -2,7 +2,7 @@ import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import { namedFailure } from "../../api";
+import { accountLabels, namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterActivityLine, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
@@ -184,11 +184,12 @@ export function resultSummary(text: string): string {
   return line.length > SUMMARY_MAX ? `${line.slice(0, SUMMARY_MAX - 1)}...` : line;
 }
 
-/** Names a team agent's account as the owner sees it in Accounts, never by its id. Inputs: the
- * owner's account names and the account id. Output: the name, "An account in the pool" for an id
- * not listed, or "No account yet". */
+/** Names an account as the owner sees it in Accounts. Inputs: the owner's account names and
+ * the account id. Output: the name, with the id after it when another account has the same
+ * name ([accountLabels]), the id itself for an account with no name known (not read yet or
+ * removed), or "No account yet". */
 export function accountName(accounts: { id: string; name: string }[], id: string | null): string {
-  return id === null ? "No account yet" : accounts.find((item) => item.id === id)?.name ?? "An account in the pool";
+  return id === null ? "No account yet" : accountLabels(accounts).get(id) ?? id;
 }
 
 /** Builds the Team panel: each agent with its role, plain name, harness, account, current task
@@ -656,14 +657,16 @@ export function delegating(turns: MasterTurn[]): boolean {
 }
 
 /** The account a master turn runs on or, for a turn no account could run, each account
- * of the pool with why, and other harnesses that are ready. Input: the turn. Output: the
- * lines, empty when the turn has not reached an account yet. */
-export function accountLines(turn: MasterTurn): string[] {
-  const account = turn.attempt?.connection.account_ref;
-  if (account) return [`On account ${account}`];
+ * of the pool with why, and other harnesses that are ready. Each account goes by the name
+ * the owner gave it in Accounts, and by its id only when no name is known; the sign-in
+ * reference the engine keeps beside it is never shown. Inputs: the turn and the owner's
+ * account names. Output: the lines, empty when the turn has not reached an account yet. */
+export function accountLines(turn: MasterTurn, accounts: { id: string; name: string }[] = []): string[] {
+  const attempt = turn.attempt?.connection;
+  if (attempt) return [`On account ${accountName(accounts, attempt.id)}`];
   return (turn.accounts ?? []).map((item) => item.reason === null
-    ? `${item.account_ref} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
-    : `${item.account_ref}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
+    ? `${accountName(accounts, item.connection)} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
+    : `${accountName(accounts, item.connection)}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
 }
 
 export const ACTIVITY_QUIET_MS = 60_000;

@@ -307,11 +307,7 @@ impl Names {
             }
         }
         if let Some(accounts) = ctx.store.accounts.ready() {
-            for account in accounts {
-                names
-                    .accounts
-                    .insert(account.id.as_str().into(), account.name.clone());
-            }
+            names.accounts = crate::tui::seam::account_labels(accounts);
         }
         names
     }

@@ -136,8 +136,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
 });
 
 test("a master turn names its account, and a turn no account could run names each one and why", () => {
-  const running = { id: "t2", ordinal: 2, phase: "running", reason: null, reply: null, attempt: { connection: { account_ref: "work-claude" } } };
-  assert.deepEqual(research.accountLines(running), ["On account work-claude"]);
+  const running = { id: "t2", ordinal: 2, phase: "running", reason: null, reply: null, attempt: { connection: { id: "claude-a", account_ref: "work-claude" } } };
+  assert.deepEqual(research.accountLines(running), ["On account claude-a"], "with no name known the account goes by its id, never by its sign-in reference");
   assert.deepEqual(research.accountLines({ id: "t1", ordinal: 1, phase: "queued", reason: null, reply: null }), []);
   const blocked = {
     id: "t3", ordinal: 3, phase: "blocked", reason: "readiness_unknown", reply: null, attempt: null,
@@ -150,12 +150,55 @@ test("a master turn names its account, and a turn no account could run names eac
   };
   assert.equal(research.turnLine(blocked), "No account in this master's pool can run it now. (readiness_unknown)");
   assert.deepEqual(research.accountLines(blocked), [
-    "work-claude: not signed in",
-    "home-claude: rate limited, paused for a few minutes",
-    "spare-claude: sign-in could not be renewed just now, available again in a minute",
-    "work-codex is ready on codex: change the master to codex to use it.",
+    "claude-a: not signed in",
+    "claude-b: rate limited, paused for a few minutes",
+    "claude-d: sign-in could not be renewed just now, available again in a minute",
+    "codex-c is ready on codex: change the master to codex to use it.",
   ]);
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [blocked]), "Not signed in");
+  const names = [{ id: "claude-a", name: "Work Claude" }, { id: "codex-c", name: "Work Codex" }];
+  assert.deepEqual(research.accountLines({ ...running, attempt: { connection: { id: "claude-a", account_ref: "work-claude" } } }, names), ["On account Work Claude"],
+    "the account a turn runs on goes by its name (OB-4)");
+  assert.deepEqual(research.accountLines({ ...running, attempt: { connection: { id: "claude-z", account_ref: "gone-claude" } } }, names), ["On account claude-z"],
+    "an account with no name falls back to its id");
+  const told = research.accountLines(blocked, names);
+  assert.deepEqual(told, [
+    "Work Claude: not signed in",
+    "claude-b: rate limited, paused for a few minutes",
+    "claude-d: sign-in could not be renewed just now, available again in a minute",
+    "Work Codex is ready on codex: change the master to codex to use it.",
+  ]);
+  assert.ok(![...told, ...research.accountLines(blocked)].some((line) => /work-claude|home-claude|spare-claude|work-codex/u.test(line)), "no line shows a sign-in reference");
+});
+
+test("two accounts with the same name show their ids, an account with its own name does not (OB4-F1)", async () => {
+  const { accountLabels } = await import("../src/api.ts");
+  const accounts = [
+    { id: "claude-account-1a", name: "Claude" },
+    { id: "claude-account-2b", name: "Claude" },
+    { id: "chatgpt-account-3c", name: "Work ChatGPT" },
+  ];
+  assert.deepEqual([...accountLabels(accounts)], [
+    ["claude-account-1a", "Claude (claude-account-1a)"],
+    ["claude-account-2b", "Claude (claude-account-2b)"],
+    ["chatgpt-account-3c", "Work ChatGPT"],
+  ]);
+  assert.equal(accountLabels([]).size, 0);
+  assert.equal(research.accountName(accounts, "claude-account-2b"), "Claude (claude-account-2b)");
+  assert.equal(research.accountName(accounts, "chatgpt-account-3c"), "Work ChatGPT");
+  assert.equal(research.accountName(accounts, "gone"), "gone");
+  assert.equal(research.accountName(accounts.slice(1), "claude-account-2b"), "Claude", "a name used once stays plain");
+  const blocked = {
+    id: "t3", ordinal: 3, phase: "blocked", reason: "rate_limited", reply: null, attempt: null,
+    accounts: [
+      { account_ref: "claude-login-1a", connection: "claude-account-1a", harness: "claude", reason: "rate_limited" },
+      { account_ref: "claude-login-2b", connection: "claude-account-2b", harness: "claude", reason: "readiness_unknown" },
+    ],
+  };
+  assert.deepEqual(research.accountLines(blocked, accounts), [
+    "Claude (claude-account-1a): rate limited, paused for a few minutes",
+    "Claude (claude-account-2b): not signed in",
+  ], "a blocked turn tells two accounts of one name apart");
 });
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
@@ -696,7 +739,7 @@ test("the Team panel names each agent, its account and current task, and lists t
       depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [], messageNote: null },
     { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null,
       depth: 0, lead: null, stop: { agent: 2 }, stoppedByYou: false, teammates: [], messageNote: null },
-    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "", rename: null,
+    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "acct-gone", word: "Ready", task: "Last task: Task 12", folder: "", rename: null,
       depth: 0, lead: null, stop: { agent: 3 }, stoppedByYou: false, teammates: [], messageNote: null },
   ], "the master has no Stop; each live sub-agent has its own");
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [

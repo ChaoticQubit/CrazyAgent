@@ -25,7 +25,7 @@ use crate::team::{
     TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
-use crate::tui::seam::AccountRow;
+use crate::tui::seam::{AccountRow, account_label};
 use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Style;
@@ -4084,19 +4084,14 @@ fn agents_word(count: usize) -> String {
     }
 }
 
-/// Names an agent's account as the owner sees it in Accounts, never by its id.
-/// Takes the account id, if the agent has one, and the owner's account rows.
-/// Returns the account name, "A pool account" for an id not listed, or "-" for none.
+/// Names an account as the owner sees it in Accounts.
+/// Takes the account id, if there is one, and the owner's account rows.
+/// Returns the account's words ([`account_label`]: the name, with the id after a name two
+/// accounts share), the id itself while no name is known, or "-" for none.
 pub(in crate::tui) fn account_name(id: Option<&str>, accounts: &[AccountRow]) -> String {
     match id {
         None => "-".into(),
-        Some(id) => accounts
-            .iter()
-            .find(|account| account.id.as_str() == id)
-            .map_or_else(
-                || "A pool account".to_owned(),
-                |account| account.name.clone(),
-            ),
+        Some(id) => account_label(id, accounts).unwrap_or_else(|| id.to_owned()),
     }
 }
 
