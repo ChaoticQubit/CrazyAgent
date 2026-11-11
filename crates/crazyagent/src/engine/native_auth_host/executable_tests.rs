@@ -260,6 +260,38 @@ fn native_auth_registered_entry_refuses_a_rewrite_of_its_pinned_file_in_place() 
 }
 
 #[test]
+fn native_auth_registered_entry_keeps_a_pinned_file_whose_metadata_alone_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(registered.verified_path().is_err());
+    let current = registered.current().unwrap();
+    assert_eq!(
+        current.verified_path().unwrap(),
+        std::fs::canonicalize(&real).unwrap()
+    );
+    assert_eq!(current.digest, registered.digest);
+    assert!(Arc::ptr_eq(&current, &current.current().unwrap()));
+}
+
+#[test]
+fn native_auth_registered_entry_refuses_a_pinned_file_whose_metadata_turned_unsafe() {
+    let root = tempfile::tempdir().unwrap();
+    let real = executable(root.path(), "claude-2.1.322");
+    let link = root.path().join("claude");
+    symlink(&real, &link).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o720)).unwrap();
+    assert_eq!(
+        registered.current().map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_unsafe"
+    );
+}
+
+#[test]
 fn native_auth_registered_entry_moves_to_a_new_install_while_the_old_one_is_kept() {
     let root = tempfile::tempdir().unwrap();
     let old = executable(root.path(), "claude-2.1.309");
