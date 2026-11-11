@@ -199,8 +199,8 @@ struct Grant {
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `network` is the project network its
-/// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
-/// is the project's Claude Code terminal display, read when the agent is prepared (N-D9);
+/// profile was made for, which a narrower saved choice stops it for (CS-2); `terminal_display`
+/// is the project's terminal display, read when the agent is prepared (N-D9, DEC-141);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
 /// (T3-15, DEC-116).
 struct Plan {
@@ -226,7 +226,7 @@ struct Plan {
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
     proxy: Option<Arc<ModelProxy>>,
-    claude_display: crate::coord::settings::ClaudeDisplay,
+    terminal_display: crate::coord::settings::TerminalDisplay,
     task_start: Option<String>,
 }
 
@@ -246,14 +246,14 @@ impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
     /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
     /// model proxy also points the launch's variables at it (S4b). Every plan gives its
-    /// Claude Code terminal the project's display (N-D9). Takes the context. Returns it.
+    /// terminal the project's display (N-D9, DEC-141). Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
-        let context = context.with_claude_display(self.claude_display);
+        let context = context.with_terminal_display(self.terminal_display);
         let context = match &self.proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -7874,14 +7874,14 @@ impl TeamRuntime {
                 .map_err(sandboxed)?;
         }
         sandbox.install(&profile).map_err(sandboxed)?;
-        let claude_display = crate::coord::settings::read(&self.connection, &stored.project_id)
+        let terminal_display = crate::coord::settings::read(&self.connection, &stored.project_id)
             .map_err(|e| {
                 with_code(
                     "the project's coordination settings could not be read",
                     Some(&e.0),
                 )
             })?
-            .claude_display;
+            .terminal_display;
         let plan = Plan {
             harness: launch.into(),
             executable: program,
@@ -7915,7 +7915,7 @@ impl TeamRuntime {
             #[cfg(unix)]
             scratch_pin,
             proxy,
-            claude_display,
+            terminal_display,
             task_start,
         };
         let mode = match &account.reach {

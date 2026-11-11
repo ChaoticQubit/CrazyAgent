@@ -870,34 +870,36 @@ export interface RoleSkills {
   worker: string[] | null;
 }
 
-/** How every Claude Code terminal of a project draws: Classic on the normal screen, so the
- * app's view scrolls with the wheel and a plain drag selects, or Fullscreen, Claude Code's own
- * view, which takes the mouse. */
-export type ClaudeDisplay = "classic" | "fullscreen";
+/** How every agent terminal of a project draws, whatever harness runs in it (DEC-141): Classic
+ * on the normal screen, so the app's view scrolls with the wheel and a plain drag selects, or
+ * Fullscreen, the harness's own view, which takes the mouse. */
+export type TerminalDisplay = "classic" | "fullscreen";
 
 /** Whether the first turn of each task of a team agent carries the Task-start reminder: the
  * context-mode tools to load and the approved skills to check for the task. */
 export type TaskStart = "on" | "off";
 
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
- * tool names the adoption counts include, the skills each team role gets, the Claude Code
- * terminal display and the Task-start reminder. */
+ * tool names the adoption counts include, the skills each team role gets, the terminal
+ * display of every harness and the Task-start reminder. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
   nudges: Nudges;
   counted_tools: string[];
   role_skills: RoleSkills;
-  claude_display: ClaudeDisplay;
+  terminal_display: TerminalDisplay;
   task_start: TaskStart;
 }
 
-/** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
+/** One harness kind's sub-agent mode and delivery, whether it has native teammates at all, and
+ * the terminal displays its terminals can draw; an engine from before DEC-141 sends none. */
 export interface HarnessCoordination {
   harness: CoordHarness;
   mode: SubagentMode;
   delivery: Delivery;
   native: boolean;
+  displays?: TerminalDisplay[];
 }
 
 /** A project's coordination settings with each harness kind's mode and delivery. */

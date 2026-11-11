@@ -549,7 +549,7 @@ impl ManagedAgent {
         executable: &Path,
         host: Arc<dyn Host>,
         role: AgentRole,
-        display: crate::coord::settings::ClaudeDisplay,
+        display: crate::coord::settings::TerminalDisplay,
     ) -> Self {
         Self::open(
             harness,
@@ -583,7 +583,7 @@ impl ManagedAgent {
         placement: Placement,
         role: AgentRole,
         network: Option<AgentNetwork>,
-        display: Option<crate::coord::settings::ClaudeDisplay>,
+        display: Option<crate::coord::settings::TerminalDisplay>,
     ) -> Self {
         let native = matches!(placement, Placement::NativeLead);
         let root = tempfile::Builder::new()
@@ -665,12 +665,12 @@ impl ManagedAgent {
             )
             .unwrap();
         }
-        if let Some(claude_display) = display {
+        if let Some(terminal_display) = display {
             crate::coord::settings::write(
                 &connection,
                 &setup.project_id,
                 &crate::coord::settings::CoordSettings {
-                    claude_display,
+                    terminal_display,
                     ..crate::coord::settings::CoordSettings::default()
                 },
             )

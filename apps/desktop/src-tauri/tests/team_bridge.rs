@@ -579,8 +579,8 @@ fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls
 
 async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     use crazyagent::coord::settings::{
-        ClaudeDisplay, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo,
-        RoleSkills, SubagentMode, TaskStart,
+        CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
+        SubagentMode, TaskStart, TerminalDisplay,
     };
     use crazyagent::coord::tool_switches::Switch;
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
@@ -660,7 +660,7 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
             lead: Some(Vec::new()),
             worker: Some(vec!["release-notes".into()]),
         },
-        claude_display: ClaudeDisplay::Fullscreen,
+        terminal_display: TerminalDisplay::Fullscreen,
         task_start: TaskStart::Off,
     };
     for receipt in [

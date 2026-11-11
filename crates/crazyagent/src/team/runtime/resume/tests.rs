@@ -1242,7 +1242,7 @@ mod live {
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
             proxy: plan.proxy.clone(),
-            claude_display: plan.claude_display,
+            terminal_display: plan.terminal_display,
             task_start: plan.task_start.clone(),
         }
     }

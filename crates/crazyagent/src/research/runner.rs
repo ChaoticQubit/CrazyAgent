@@ -876,9 +876,9 @@ impl ResearchRunner {
         let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
         let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
         let display = jobs
-            .claude_display(&project)
+            .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
-        let context = context.with_claude_display(display);
+        let context = context.with_terminal_display(display);
         let context = match &proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -3433,7 +3433,7 @@ mod tests {
     /// without settings stays Classic.
     #[test]
     fn a_research_job_reads_the_claude_code_display_of_its_project() {
-        use crate::coord::settings::{ClaudeDisplay, CoordSettings, write};
+        use crate::coord::settings::{CoordSettings, TerminalDisplay, write};
         use std::os::unix::fs::PermissionsExt;
         let folder = tempfile::tempdir().unwrap();
         let database = folder.path().join("engine.db");
@@ -3449,24 +3449,27 @@ mod tests {
             .unwrap();
         let jobs = ResearchJobs::open(&database).unwrap();
         assert_eq!(
-            jobs.claude_display(&project).unwrap(),
-            ClaudeDisplay::Classic
+            jobs.terminal_display(&project).unwrap(),
+            TerminalDisplay::Classic
         );
         write(
             &connection,
             &project,
             &CoordSettings {
-                claude_display: ClaudeDisplay::Fullscreen,
+                terminal_display: TerminalDisplay::Fullscreen,
                 ..CoordSettings::default()
             },
         )
         .unwrap();
         assert_eq!(
-            jobs.claude_display(&project).unwrap(),
-            ClaudeDisplay::Fullscreen
+            jobs.terminal_display(&project).unwrap(),
+            TerminalDisplay::Fullscreen
         );
         let other = ProjectId::new("research-elsewhere").unwrap();
-        assert_eq!(jobs.claude_display(&other).unwrap(), ClaudeDisplay::Classic);
+        assert_eq!(
+            jobs.terminal_display(&other).unwrap(),
+            TerminalDisplay::Classic
+        );
     }
 
     /// A research job with tools under None reaches its model only through a model proxy

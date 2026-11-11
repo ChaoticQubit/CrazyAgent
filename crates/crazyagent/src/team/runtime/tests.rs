@@ -13456,7 +13456,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         hookless: false,
         scratch_pin: None,
         proxy: None,
-        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
     };
     let account = || AccountBinding::Subscription {
@@ -20694,7 +20694,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
-        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
     }
 }
@@ -21075,7 +21075,7 @@ fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
 /// starts it, and builds its pane command from the plan and the kept context the runtime
 /// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
 #[cfg(target_os = "macos")]
-fn team_claude_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(String, String)> {
+fn team_terminal_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(String, String)> {
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let (_, plan, mode) = runtime
         .prepare(
@@ -21125,7 +21125,7 @@ fn a_team_claude_code_terminal_starts_classic_by_default() {
     let fixture = Fixture::new(1);
     let mut runtime = exiting_claude_runtime(&fixture);
     assert_eq!(
-        team_claude_display(&fixture, &runtime),
+        team_terminal_display(&fixture, &runtime),
         [(
             "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
             "1".to_owned()
@@ -21140,32 +21140,32 @@ fn a_team_claude_code_terminal_starts_classic_by_default() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
-    use crate::coord::settings::{ClaudeDisplay, CoordSettings, write};
+    use crate::coord::settings::{CoordSettings, TerminalDisplay, write};
     let fixture = Fixture::new(1);
     let project = ProjectId::new(PROJECT).unwrap();
     let mut runtime = exiting_claude_runtime(&fixture);
-    let choose = |claude_display: ClaudeDisplay| {
+    let choose = |terminal_display: TerminalDisplay| {
         write(
             &fixture.connection,
             &project,
             &CoordSettings {
-                claude_display,
+                terminal_display,
                 ..CoordSettings::default()
             },
         )
         .unwrap();
     };
-    choose(ClaudeDisplay::Fullscreen);
+    choose(TerminalDisplay::Fullscreen);
     assert_eq!(
-        team_claude_display(&fixture, &runtime),
+        team_terminal_display(&fixture, &runtime),
         [
             ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
             ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
         ]
     );
-    choose(ClaudeDisplay::Classic);
+    choose(TerminalDisplay::Classic);
     assert_eq!(
-        team_claude_display(&fixture, &runtime),
+        team_terminal_display(&fixture, &runtime),
         [(
             "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
             "1".to_owned()
@@ -22298,7 +22298,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         scratch_pin: None,
         toolchains: Vec::new(),
         proxy: None,
-        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
     };
     let account = || AccountBinding::Subscription {

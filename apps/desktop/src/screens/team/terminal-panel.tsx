@@ -8,7 +8,7 @@ import { readTerminalInput } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
-import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
@@ -91,6 +91,14 @@ export function inputNote(node: GraphNode, input: InputChoice): string {
   if (input === "box") return `The terminal shows ${node.label}; type in the message box below.`;
   if (input === "terminal") return `${typingNote(node, false)} Enter sends, Shift+Enter adds a line.`;
   return typingNote(node, true);
+}
+
+/** A live terminal's whole status line: where typing goes and, while the app in the terminal
+ * reads the mouse, how to select text, for every harness alike (DEC-141). Inputs: the node,
+ * the owner's Terminal input, whether the app reads the mouse and whether this is a Mac.
+ * Output: the sentences. */
+export function liveNote(node: GraphNode, input: InputChoice, mouse: boolean, mac: boolean = isMac()): string {
+  return mouse ? `${inputNote(node, input)} ${selectNote(mac)}` : inputNote(node, input);
 }
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
@@ -235,6 +243,40 @@ export function followScroll(terminal: Terminal, set: (behind: boolean) => void)
   return terminal.onScroll(report);
 }
 
+/** Tells whether the app in a terminal reads the mouse, so the view says how to select text
+ * only then: once at the start and after every write xterm parsed, as an app turns mouse
+ * reporting on and off with what it writes. Inputs: the terminal and the setter for that
+ * flag. Output: the subscription. */
+export function followMouse(terminal: Terminal, set: (mouse: boolean) => void): IDisposable {
+  const report = () => set(terminal.modes.mouseTrackingMode !== "none");
+  report();
+  return terminal.onWriteParsed(report);
+}
+
+/** Keeps the text the owner selected while the app in a terminal reads the mouse (OB-8,
+ * DEC-141): xterm drops a selection whenever it sends the app a mouse report, and an app that
+ * asks for every pointer move gets one as soon as the pointer moves, so a forced drag's
+ * selection was gone before the copy key or the menu's Copy. While text is selected in such a
+ * terminal, a pointer move with no button held and a right-click stay with the view and never
+ * reach xterm, so no report is sent for them; a left click still goes to the app and lets the
+ * selection go. Inputs: the terminal and the element around its screen. Output: the
+ * subscription. */
+export function keepSelection(terminal: Terminal, screen: HTMLElement): IDisposable {
+  const hold = (event: MouseEvent) => {
+    if (terminal.modes.mouseTrackingMode === "none" || !terminal.hasSelection()) return;
+    const kept = event.type === "mousemove" ? event.buttons === 0 : event.button === 2;
+    if (kept) event.stopPropagation();
+  };
+  screen.addEventListener("mousemove", hold, true);
+  screen.addEventListener("mousedown", hold, true);
+  return {
+    dispose: () => {
+      screen.removeEventListener("mousemove", hold, true);
+      screen.removeEventListener("mousedown", hold, true);
+    },
+  };
+}
+
 /** Where the owner right-clicked a terminal, in page coordinates, and what was selected then. */
 export type MenuAt = { x: number; y: number; selection: string };
 
@@ -327,7 +369,9 @@ function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, 
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel, with a way back to
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
- * status line. Closing it detaches the view; the agent keeps running.
+ * status line, which also says how to select text while the app in the terminal reads the
+ * mouse; that selection stays until the owner copies it or clicks. Closing it detaches the
+ * view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
  * closed, the stop action when the agent can be stopped, `embedded` when a console around
  * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
@@ -364,6 +408,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   const term = useRef<Terminal | null>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
   const [behind, setBehind] = useState(false);
+  const [mouse, setMouse] = useState(false);
   const [menu, setMenu] = useState<MenuAt | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -447,6 +492,8 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
         return true;
       };
       const scrolled = followScroll(terminal, setBehind);
+      const moused = followMouse(terminal, setMouse);
+      const selected = keepSelection(terminal, element);
       latest.current = () => {
         terminal.scrollToBottom();
         terminal.focus();
@@ -483,6 +530,8 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
         typing.dispose();
         resized.dispose();
         scrolled.dispose();
+        moused.dispose();
+        selected.dispose();
         window.clearTimeout(timer);
         window.cancelAnimationFrame(frame);
         unsettle();
@@ -523,7 +572,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
     }} />
     {menu && term.current && <TerminalMenu terminal={term.current} at={menu} onDone={closeMenu} />}
     {view.kind === "live" && <div className="tg-terminal-note">
-      <span role="status">{copied ?? inputNote(node, input)}</span>
+      <span role="status">{copied ?? liveNote(node, input, mouse)}</span>
       {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
       <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(term.current ? terminalOutput(term.current) : "", "Copied the output.")}>Copy output</Button>
     </div>}

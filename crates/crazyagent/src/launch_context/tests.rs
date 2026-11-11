@@ -211,7 +211,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let installed = context.install("codex", &home, false).unwrap();
@@ -260,7 +260,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
 
@@ -321,7 +321,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let held = context().install("codex", &home, false).unwrap();
@@ -375,7 +375,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let held = context().install("codex", &home, false).unwrap();
@@ -422,7 +422,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let context = fresh()
@@ -548,7 +548,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     }
     .with_index(&plugins, &RoleSkills::default());
@@ -588,7 +588,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let first = context.install("codex", &home, true).unwrap();
@@ -661,7 +661,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             native_team: None,
             relay: None,
             model_proxy: None,
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
         let first = context.install("codex", &home, true).unwrap();
@@ -721,7 +721,7 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let first = context.install("codex", &home, true).unwrap();
@@ -866,7 +866,7 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             native_team: None,
             relay: None,
             model_proxy: None,
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
         let system = home.join("skills").join(CODEX_SYSTEM_SKILLS);
@@ -952,7 +952,7 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     agents.shell(&format!(
@@ -1024,7 +1024,7 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
 
@@ -1076,7 +1076,7 @@ fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() 
             native_team: None,
             relay: None,
             model_proxy: None,
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
 
@@ -1117,7 +1117,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
 
@@ -1280,7 +1280,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let start = "# Project context from CrazyAgent\n";
@@ -1474,7 +1474,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let home = |name: &str| {
@@ -1570,7 +1570,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             native_team: None,
             relay: None,
             model_proxy: None,
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
         let claude = home(&format!("claude-{layout:?}"));
@@ -1653,7 +1653,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
@@ -1776,7 +1776,7 @@ impl LeftPane {
             native_team: None,
             relay: None,
             model_proxy: None,
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
         let request = crate::harnesses::launch::LaunchRequest {
@@ -1970,7 +1970,7 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let restart = " After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n";
@@ -2018,7 +2018,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
@@ -2109,7 +2109,7 @@ fn context_with(
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     }
 }
@@ -2818,7 +2818,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
     let home = |name: &str| {
@@ -2978,7 +2978,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         native_team: None,
         relay: None,
         model_proxy: None,
-        claude_display: ClaudeDisplay::Classic,
+        terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     }
 }

@@ -260,6 +260,20 @@ export function pasteText(text: string): string {
   return kept;
 }
 
+/** The key that makes a drag select text while the app in a terminal reads the mouse: xterm
+ * then sends a plain drag to the app, and only a drag with this key held selects. Input:
+ * whether this is a Mac. Output: Option on a Mac, Shift elsewhere. */
+export function dragKey(mac: boolean): "Option" | "Shift" {
+  return mac ? "Option" : "Shift";
+}
+
+/** What a live terminal says while the app in it reads the mouse, as an agent in its
+ * Fullscreen display does, so the owner can still select and copy. Input: whether this is a
+ * Mac. Output: the sentence. */
+export function selectNote(mac: boolean): string {
+  return `Hold ${dragKey(mac)} and drag to select text; the app in this terminal reads the mouse.`;
+}
+
 /** What one terminal channel message means for the view. */
 export type TerminalEvent =
   | { kind: "output"; bytes: Uint8Array }
