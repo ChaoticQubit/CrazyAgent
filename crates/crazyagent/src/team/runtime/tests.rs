@@ -15584,6 +15584,67 @@ fn a_live_master_turn_reported_as_none_closes_without_counting() {
     team.workers.clear();
 }
 
+#[cfg(target_os = "macos")]
+const LIVE_CODEX_STARTED: &str = r#"  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+"#;
+
+/// A live Codex stand-in whose turn on a line with "never ends" opens and writes no end,
+/// and whose line with "late end" writes a reply and an end with no start before them.
+/// Takes nothing. Returns the script.
+#[cfg(target_os = "macos")]
+fn unclosed_codex() -> String {
+    let started = format!(
+        "  case \"$line\" in *\"late end\"*) ;; *)\n{LIVE_CODEX_STARTED}  ;; esac\n  case \"$line\" in *\"never ends\"*) continue ;; esac\n"
+    );
+    assert_eq!(LIVE_CODEX.matches(LIVE_CODEX_STARTED).count(), 1);
+    LIVE_CODEX.replace(LIVE_CODEX_STARTED, &started)
+}
+
+/// OB-1 in a real pane: a live master's turn that opens and that nothing closes, on an app
+/// that waits, goes back to idle after the runtime's `stale_turn` with no turn counted or
+/// kept. An end the app writes for it later still counts as one turn.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_turn_nothing_closes_goes_idle_and_a_late_end_still_counts() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let limits = TeamLimits {
+        stale_turn: Duration::from_secs(4),
+        master_idle_stop: Duration::from_secs(3600),
+        ..TeamLimits::default()
+    };
+    let mut team = limited_runtime(&fixture, &host, &unclosed_codex(), limits);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master runs idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
+    });
+    let master = masters(&fixture.connection)[0];
+    let agent = AgentId::team(master).unwrap();
+
+    host.input(&agent, b"never ends\r").unwrap();
+    fixture.until(&mut team, "the turn opens", |f| {
+        live_turns(&f.connection) == (0, true) && f.agent_status(master).0 == AgentStatus::Working
+    });
+    fixture.until(&mut team, "the turn nothing closes is dropped", |f| {
+        live_turns(&f.connection) == (0, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_master_turns WHERE project=?1"
+        ),
+        0,
+        "a dropped turn is kept for no usage"
+    );
+
+    host.input(&agent, b"late end\r").unwrap();
+    fixture.until(&mut team, "the late end counts as a turn", |f| {
+        live_turns(&f.connection) == (1, false) && f.agent_status(master).0 == AgentStatus::Idle
+    });
+    team.shutdown().unwrap();
+}
+
 /// A turn that starts after a good one and never ends leaves no good end to stand on, so a
 /// command outliving it still fails the agent (team-8 r1 M1).
 #[test]
