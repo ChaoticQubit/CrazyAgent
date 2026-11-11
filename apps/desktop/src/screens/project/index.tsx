@@ -281,6 +281,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active !== review && <WaitingChanges projectId={projectId} place={review} />}
       <ImportMoveBanner projectId={projectId} version={importMoves} />
       <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
+      {questionsShown !== "tab" && <QuestionPopup data={data} shown={popupOn(questionsShown, active)} />}
     </div>
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
@@ -294,7 +295,6 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
       {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} onHideProblem={setIdeHideProblem} />}
     </div>
-    {popupOn(questionsShown, active) && <QuestionPopup key={projectId} data={data} />}
     {replaces && <IdeConfirm data={data} />}
     {replaces && <IdeExtensionConfirm data={data} />}
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}
