@@ -10,10 +10,11 @@ const view = await import("../src/screens/project/questions.tsx");
 
 const NOW = Date.UTC(2026, 9, 27, 15, 0);
 const question = (extra = {}) => ({
-  id: 12, project_id: "p-1", asker: "agent:team-3", question: "Which database should the app use?", options: ["Postgres", "SQLite"],
+  id: 12, project_id: "p-1", asker: "agent:team-3", question: "Which database should the app use?", kind: "single", options: ["Postgres", "SQLite"],
   recommended: "SQLite", context: "It runs on one laptop.", status: "pending", version: 3, answer: null, created_ms: NOW - 120_000, settled_ms: null,
   ...extra,
 });
+const COMMENT_AFTER_THE_GROUP = /<\/fieldset><label class="qs-option qs-comment"><input type="checkbox"[^>]*\/><span>Add a comment<\/span><\/label>/;
 const card = (item, extra = {}) => renderToStaticMarkup(createElement(view.QuestionCard, {
   question: item, now: NOW, busy: false, onAnswer: () => {}, onDismiss: () => {}, ...extra,
 }));
@@ -41,8 +42,9 @@ test("a pending card names who asked, marks the recommended option and waits for
   assert.equal(markup.match(/>Recommended</g)?.length, 1);
   assert.match(markup, /<span>SQLite<\/span><span class="qs-recommended pj-small">Recommended<\/span>/);
   assert.doesNotMatch(markup, /<span>Postgres<\/span><span class="qs-recommended/);
-  assert.match(markup, /<label for="[^"]+">Or write your own answer<\/label>/);
-  assert.match(markup, /<button[^>]*disabled=""[^>]*>Answer<\/button>/, "Answer waits for an option or text");
+  assert.match(markup, /<legend[^>]*>Pick one<\/legend>/);
+  assert.doesNotMatch(markup, /<textarea/, "the comment box opens only once Add a comment is picked");
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Answer<\/button>/, "Answer waits for a pick or a comment");
   assert.match(markup, /<button[^>]*>Dismiss<\/button>/);
   assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>Dismiss<\/button>/);
   assert.equal(client.isRecommended(question(), 1), true);
@@ -53,12 +55,57 @@ test("a pending card names who asked, marks the recommended option and waits for
 });
 
 test("a question with no options offers its suggested answer and a field of its own", () => {
-  const markup = card(question({ options: [], recommended: "Keep it private" }));
+  const markup = card(question({ kind: "text", options: [], recommended: "Keep it private" }));
   assert.match(markup, />Suggested: Keep it private</);
   assert.match(markup, />Use suggested answer</);
   assert.match(markup, /<label for="[^"]+">Your answer<\/label>/);
   assert.doesNotMatch(markup, /type="radio"/);
-  assert.doesNotMatch(card(question({ options: [], recommended: null })), /Suggested/);
+  assert.doesNotMatch(card(question({ kind: "text", options: [], recommended: null })), /Suggested/);
+});
+
+test("a multi question shows checkboxes and Add a comment last", () => {
+  const html = card(question({ kind: "multi", options: ["Web", "Desktop"], recommended: "Web" }));
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /type="radio"/);
+  assert.match(html, /<legend[^>]*>Pick any<\/legend>/);
+  assert.match(html, COMMENT_AFTER_THE_GROUP);
+  assert.equal(html.match(/>Recommended</g)?.length, 1);
+});
+
+test("a single question shows radios and Add a comment last", () => {
+  const html = card(question({ kind: "single" }));
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
+  assert.match(html, COMMENT_AFTER_THE_GROUP);
+  assert.equal(client.COMMENT_LABEL, "Add a comment");
+});
+
+test("Add a comment is a checkbox outside the option group that says whether its box is open, and opening moves the keyboard into the box", () => {
+  for (const kind of ["single", "multi"]) {
+    const html = card(question({ kind }));
+    const group = html.slice(html.indexOf("<fieldset"), html.indexOf("</fieldset>"));
+    assert.doesNotMatch(group, /Add a comment/, kind);
+    assert.match(html, /<input type="checkbox" aria-expanded="false"\/><span>Add a comment<\/span>/, kind);
+    assert.doesNotMatch(html, /<textarea/, kind);
+  }
+  const source = readFileSync(new URL("../src/screens/project/questions.tsx", import.meta.url), "utf8");
+  assert.match(source, /useEffect\(\(\) => \{\s*if \(commenting\) document\.getElementById\(field\)\?\.focus\(\);\s*\}, \[commenting, field\]\);/);
+  assert.match(source, /aria-controls=\{commenting \? field : undefined\}/);
+});
+
+test("a text question shows only the text box", () => {
+  const html = card(question({ kind: "text", options: [], recommended: "Call it Atlas" }));
+  assert.doesNotMatch(html, /type="radio"|type="checkbox"|Add a comment/);
+  assert.match(html, /<textarea/);
+});
+
+test("picking replaces the pick of a single question, adds to a multi one, and a second click clears it", () => {
+  assert.deepEqual(view.picksAfter("single", [], 1), [1]);
+  assert.deepEqual(view.picksAfter("single", [1], 0), [0]);
+  assert.deepEqual(view.picksAfter("single", [1], 1), []);
+  assert.deepEqual(view.picksAfter("multi", [2], 0), [0, 2]);
+  assert.deepEqual(view.picksAfter("multi", [0, 2], 2), [0]);
+  assert.deepEqual(view.picksAfter("text", [], 0), []);
 });
 
 test("a question asked in an agent's terminal is answered there, so its card offers only Dismiss", () => {
@@ -73,12 +120,26 @@ test("a question asked in an agent's terminal is answered there, so its card off
   assert.doesNotMatch(card(question({ asker: "terminal:2", status: "answered_in_terminal", settled_ms: NOW })), />Dismiss</);
 });
 
-test("the answer sent is one option or trimmed text of at most 4096 bytes", () => {
-  assert.deepEqual(view.choiceOf(1, ""), { option: 1 });
-  assert.deepEqual(view.choiceOf(0, "ignored while an option is picked"), { option: 0 });
-  assert.deepEqual(view.choiceOf(null, "  Use SQLite  "), { text: "Use SQLite" });
-  assert.equal(view.choiceOf(null, ""), null);
-  assert.equal(view.choiceOf(null, " \n\t "), null);
+test("the choice sent holds the picks in order and a trimmed comment, or nothing to send", () => {
+  assert.deepEqual(view.choiceOf("multi", [2, 0], "  later "), { picks: [0, 2], comment: "later" });
+  assert.deepEqual(view.choiceOf("single", [], "Neither"), { picks: [], comment: "Neither" });
+  assert.deepEqual(view.choiceOf("single", [1], null), { picks: [1], comment: null });
+  assert.deepEqual(view.choiceOf("single", [1], " \n\t "), { picks: [1], comment: null });
+  assert.deepEqual(view.choiceOf("single", [0], "Ship the web first."), { picks: [0], comment: "Ship the web first." });
+  assert.deepEqual(view.choiceOf("text", [], "  Use SQLite  "), { picks: [], comment: "Use SQLite" });
+  assert.equal(view.choiceOf("single", [], "   "), null);
+  assert.equal(view.choiceOf("single", [], null), null);
+  assert.equal(view.choiceOf("single", [0, 1], null), null);
+  assert.equal(view.choiceOf("text", [0], "Atlas"), null);
+  assert.equal(view.choiceOf("multi", [client.OPTIONS_MAX], null), null);
+  assert.equal(view.choiceOf("multi", [-1], null), null);
+  assert.equal(view.choiceOf("multi", [0.5], null), null);
+  assert.deepEqual(view.choiceOf("multi", [0], "a".repeat(client.COMMENT_BYTES_MAX)), { picks: [0], comment: "a".repeat(client.COMMENT_BYTES_MAX) });
+  assert.equal(view.choiceOf("multi", [0], "a".repeat(client.COMMENT_BYTES_MAX + 1)), null, "a comment with picks is at most 2048 bytes");
+  assert.equal(view.choiceOf("multi", [0], "é".repeat(client.COMMENT_BYTES_MAX / 2 + 1)), null, "the bound is bytes, not characters");
+  assert.deepEqual(view.choiceOf("single", [], "a".repeat(client.ANSWER_BYTES_MAX)), { picks: [], comment: "a".repeat(client.ANSWER_BYTES_MAX) });
+  assert.equal(view.choiceOf("single", [], "a".repeat(client.ANSWER_BYTES_MAX + 1)), null);
+  assert.equal(client.COMMENT_BYTES_MAX, 2048);
   assert.equal(client.typedAnswer("a".repeat(client.ANSWER_BYTES_MAX)), "a".repeat(client.ANSWER_BYTES_MAX));
   assert.equal(client.typedAnswer("a".repeat(client.ANSWER_BYTES_MAX + 1)), null);
   assert.equal(client.typedAnswer("é".repeat(client.ANSWER_BYTES_MAX / 2)), "é".repeat(client.ANSWER_BYTES_MAX / 2));
@@ -196,7 +257,7 @@ test("the Questions tab sits after Changes and the commands go through the bridg
   const { TABS } = await import("../src/screens/project/index.tsx");
   assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings"]);
   const source = readFileSync(new URL("../src/api-questions.ts", import.meta.url), "utf8");
-  assert.match(source, /call<void>\("desktop_answer_question", \{ id, version, option, text \}\)/);
+  assert.match(source, /call<void>\("desktop_answer_question", \{ id, version, picks: choice\.picks, comment: choice\.comment \}\)/);
   assert.match(source, /call<void>\("desktop_dismiss_question", \{ id, version \}\)/);
   assert.match(source, /call<QuestionPage>\("desktop_questions", \{ projectId, after \}\)/);
 });
