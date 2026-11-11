@@ -106,26 +106,51 @@ fn accept_writes_the_proposal_only_at_the_version_the_owner_saw() {
     let (db, project, folder) = case();
     offer(&db, &project, folder.path(), Tab::Features, "- A\n").unwrap();
     offer(&db, &project, folder.path(), Tab::Features, "- B\n").unwrap();
-    let seen = features(&db, &project, folder.path()).version;
+    let seen = features(&db, &project, folder.path());
+    assert_eq!(seen.proposal_version, overview_seal("- B\n"));
     std::fs::write(folder.path().join(FEATURES), "- A edited elsewhere\n").unwrap();
+    let reviewed = seen.proposal_version.as_str();
     assert_eq!(
-        accept(&db, &project, folder.path(), Tab::Features, &seen)
-            .unwrap_err()
-            .0,
+        accept(
+            &db,
+            &project,
+            folder.path(),
+            Tab::Features,
+            &seen.version,
+            reviewed
+        )
+        .unwrap_err()
+        .0,
         TAB_CHANGED
     );
     let now = features(&db, &project, folder.path());
     assert_eq!(now.text.as_deref(), Some("- A edited elsewhere\n"));
     assert_eq!(now.proposal.as_deref(), Some("- B\n"));
-    accept(&db, &project, folder.path(), Tab::Features, &now.version).unwrap();
+    accept(
+        &db,
+        &project,
+        folder.path(),
+        Tab::Features,
+        &now.version,
+        reviewed,
+    )
+    .unwrap();
     let done = features(&db, &project, folder.path());
     assert_eq!(done.text.as_deref(), Some("- B\n"));
     assert!(done.proposal.is_none());
+    assert!(done.proposal_version.is_empty());
     assert!(!done.edited);
     assert_eq!(
-        accept(&db, &project, folder.path(), Tab::Features, &done.version)
-            .unwrap_err()
-            .0,
+        accept(
+            &db,
+            &project,
+            folder.path(),
+            Tab::Features,
+            &done.version,
+            reviewed
+        )
+        .unwrap_err()
+        .0,
         NO_PROPOSAL
     );
 }
@@ -355,6 +380,7 @@ fn an_overview_goes_over_the_wire_in_the_shape_the_desktop_reads() {
     assert_eq!(wire["tabs"][3]["edited"], false);
     assert_eq!(wire["tabs"][0]["tab"], "quick_info");
     assert_eq!(wire["tabs"][0]["version"], "");
+    assert_eq!(wire["tabs"][0]["proposal_version"], "");
     assert_eq!(
         serde_json::to_value(Competitors::Linked {
             paths: vec!["docs/research-competitors.md".to_owned()]
@@ -914,7 +940,60 @@ fn the_owner_can_replace_a_blank_tab_file_and_a_refresh_cannot() {
     set_apply(&db, &project, Apply::AlwaysAsk).unwrap();
     offer(&db, &project, folder.path(), Tab::Features, "- C\n").unwrap();
     std::fs::write(folder.path().join(FEATURES), "\n").unwrap();
-    accept(&db, &project, folder.path(), Tab::Features, "").unwrap();
+    let reviewed = features(&db, &project, folder.path()).proposal_version;
+    accept(&db, &project, folder.path(), Tab::Features, "", &reviewed).unwrap();
     let accepted = features(&db, &project, folder.path());
     assert_eq!(accepted.text.as_deref(), Some("- C\n"));
+}
+
+#[test]
+fn accept_writes_only_the_proposal_the_owner_reviewed() {
+    let (db, project, folder) = case();
+    offer(&db, &project, folder.path(), Tab::Features, "- A\n").unwrap();
+    offer(&db, &project, folder.path(), Tab::Features, "- B\n").unwrap();
+    let reviewed = features(&db, &project, folder.path());
+    assert_eq!(reviewed.proposal.as_deref(), Some("- B\n"));
+    offer(&db, &project, folder.path(), Tab::Features, "- C\n").unwrap();
+    assert_eq!(
+        accept(
+            &db,
+            &project,
+            folder.path(),
+            Tab::Features,
+            &reviewed.version,
+            &reviewed.proposal_version,
+        )
+        .unwrap_err()
+        .0,
+        PROPOSAL_CHANGED
+    );
+    let now = features(&db, &project, folder.path());
+    assert_eq!(now.text.as_deref(), Some("- A\n"));
+    assert_eq!(now.proposal.as_deref(), Some("- C\n"));
+    assert_ne!(now.proposal_version, reviewed.proposal_version);
+    assert_eq!(
+        accept(
+            &db,
+            &project,
+            folder.path(),
+            Tab::Features,
+            &now.version,
+            ""
+        )
+        .unwrap_err()
+        .0,
+        PROPOSAL_CHANGED
+    );
+    accept(
+        &db,
+        &project,
+        folder.path(),
+        Tab::Features,
+        &now.version,
+        &now.proposal_version,
+    )
+    .unwrap();
+    let done = features(&db, &project, folder.path());
+    assert_eq!(done.text.as_deref(), Some("- C\n"));
+    assert!(done.proposal.is_none() && done.proposal_version.is_empty());
 }

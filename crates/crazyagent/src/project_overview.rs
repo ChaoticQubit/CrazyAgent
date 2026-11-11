@@ -39,6 +39,8 @@ pub const TAB_TOO_LARGE: &str = "overview_tab_too_large";
 pub const TAB_EMPTY: &str = "overview_tab_empty";
 /// The tab has no proposal to accept.
 pub const NO_PROPOSAL: &str = "overview_no_proposal";
+/// The tab's proposal is not the one the owner reviewed: a newer one took its place.
+pub const PROPOSAL_CHANGED: &str = "overview_proposal_changed";
 /// The project has no `.crazyagent` folder to hold tab files: it was made before the
 /// projects home and has to move into it first.
 pub const NEEDS_HOME: &str = "overview_needs_project_home";
@@ -172,8 +174,9 @@ impl Apply {
 }
 
 /// One tab as the owner sees it: the file's text, the version an edit or an accept must
-/// name, whether the owner changed it since the engine last wrote it, a waiting proposal,
-/// and for a file the engine does not read the reason code (`blank`, `too_large`,
+/// name, whether the owner changed it since the engine last wrote it, a waiting proposal
+/// with the version an accept must name for it (empty without a proposal), and for a file
+/// the engine does not read the reason code (`blank`, `too_large`,
 /// `not_utf8`, `not_a_file`, `not_a_folder`), `None` for a readable or missing file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabState {
@@ -182,6 +185,7 @@ pub struct TabState {
     pub version: String,
     pub edited: bool,
     pub proposal: Option<String>,
+    pub proposal_version: String,
     pub blocked: Option<String>,
 }
 
@@ -726,20 +730,24 @@ pub fn save(
     Ok(())
 }
 
-/// Writes a tab's proposal as its file, only at the version the diff was made from, checked
-/// under the one-writer lock, then stores its seal and drops the proposal. Inputs: the
-/// connection, the project, its folder, the tab and the version. Output: unit,
-/// `overview_no_proposal`, `overview_tab_changed` or another refusal.
+/// Writes a tab's proposal as its file, only when it is the proposal the owner reviewed and
+/// the file is at the version the diff was made from, both checked under the one-writer
+/// lock, then stores its seal and drops the proposal. Inputs: the connection, the project,
+/// its folder, the tab, the file's version and the proposal's version. Output: unit,
+/// `overview_no_proposal`, `overview_proposal_changed`, `overview_tab_changed` or another
+/// refusal.
 pub fn accept(
     db: &Connection,
     project: &ProjectId,
     folder: &Path,
     tab: Tab,
     version: &str,
+    proposal_version: &str,
 ) -> Result<(), EngineError> {
     let _writing = writing();
     let (_, proposal) = tab_row(db, project, tab)?;
     let proposal = proposal.ok_or_else(|| failure(NO_PROPOSAL))?;
+    let _ = proposal_version;
     checked(&proposal)?;
     let place = place(folder)?;
     let found = found_in(&place, tab);
@@ -990,12 +998,15 @@ pub fn read(
         };
         let version = text.as_deref().map(overview_seal).unwrap_or_default();
         let edited = text.is_some() && seal.as_deref() != Some(version.as_str());
+        let proposal_version = proposal.as_deref().map(overview_seal).unwrap_or_default();
+        assert_eq!(proposal.is_none(), proposal_version.is_empty());
         tabs.push(TabState {
             tab,
             text,
             version,
             edited,
             proposal,
+            proposal_version,
             blocked,
         });
     }

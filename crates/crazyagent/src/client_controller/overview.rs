@@ -38,16 +38,18 @@ impl OwnerController {
             .await
     }
 
-    /// Writes a tab's proposal as its file at the version its diff was made from. Inputs:
-    /// the project, the tab and the version. Output: unit, or the refusal.
+    /// Writes a tab's proposal as its file, when it is still the proposal the owner
+    /// reviewed and the file is at the version its diff was made from. Inputs: the project,
+    /// the tab, the file's version and the proposal's version. Output: unit, or the refusal.
     pub async fn overview_accept(
         &self,
         project: ProjectId,
         tab: Tab,
         version: String,
+        proposal_version: String,
     ) -> Result<(), EngineError> {
         self.overview_client()?
-            .overview_accept(project, tab, version)
+            .overview_accept(project, tab, version, proposal_version)
             .await
     }
 
