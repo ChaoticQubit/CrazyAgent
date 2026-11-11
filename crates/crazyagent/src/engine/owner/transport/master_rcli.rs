@@ -205,8 +205,6 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        let given = crate::agent_home::text(&prepared.agent_project)
-            .map_err(|problem| EngineError(problem.0))?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
         let _folder =
@@ -222,14 +220,11 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             &prepared.hidden_paths,
         )?;
-        if !given.text.is_empty() {
-            launch.instructions = Some(super::master_host_launch::write_master_instructions(
-                &self.authority.root,
-                &runtime_ref,
-                &given.text,
-            )?);
-        }
-        assert_eq!(launch.instructions.is_some(), !given.text.is_empty());
+        launch.instructions = super::master_host_launch::rcli_turn_instructions(
+            &self.authority.root,
+            &runtime_ref,
+            &prepared.agent_project,
+        )?;
         let capture = Capture::new(file, resources.output_bytes)?;
         let launching = self
             .inspect_master_turn(

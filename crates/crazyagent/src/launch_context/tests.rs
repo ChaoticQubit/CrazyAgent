@@ -3919,11 +3919,11 @@ fn answer_as_responses(stream: std::net::TcpStream, bodies: &std::sync::Mutex<Ve
     let _ = stream.write_all(data.as_bytes());
 }
 
-/// DEC-141 PA-18 (PARITY-AUDIT): a real Codex resumed with `resume <id>` after the owner
-/// changed the instructions follows the new text. The engine's launch writes the owner's text
-/// into the home's AGENTS.md before each start, and Codex reads it again on resume and tells
-/// the model it replaces the earlier one, as `--system-prompt-snapshot off` does for Claude
-/// Code. The model is a stand-in server, so no account is used.
+/// DEC-141 PA-18: a real Codex resumed with `codex exec resume <id>` after the owner changed
+/// the instructions is given the new AGENTS.md text the engine's launch wrote and told it
+/// replaces the old. Only this exec form is driven; the TUI `resume <id>` the engine runs in a
+/// pane, plain or behind the app-server bridge, needs a terminal and is not (PALOW-L1). The
+/// model is a stand-in server, so no account is used.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "live qualification: needs codex in /opt/homebrew/bin"]

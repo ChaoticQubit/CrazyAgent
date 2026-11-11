@@ -1198,6 +1198,23 @@ pub(super) fn write_master_instructions(
     Ok(runtime.path.join(MASTER_INSTRUCTIONS))
 }
 
+/// Gives one RCLI master turn the owner's instructions as they are now: the app and project
+/// text is read again for every turn and written into that turn's own folder, so a change made
+/// between turns reaches the next one, as RCLI keeps no session to resume (DEC-141 PA-18).
+/// Inputs: the owner root, the turn's runtime reference and the agent project. Output: the
+/// file, None for an empty text, or the read or write failure.
+pub(super) fn rcli_turn_instructions(
+    root: &Root,
+    runtime_ref: &RequestId,
+    project: &crate::agent_home::AgentProject,
+) -> Result<Option<PathBuf>, EngineError> {
+    let given = crate::agent_home::text(project).map_err(|problem| EngineError(problem.0))?;
+    if given.text.is_empty() {
+        return Ok(None);
+    }
+    write_master_instructions(root, runtime_ref, &given.text).map(Some)
+}
+
 /// Refuses the master instruction file where the owner-only turn directory cannot be made.
 /// Takes the owner root, turn reference and text, all unused.
 /// Returns `master_capture_unavailable`.
@@ -1535,6 +1552,41 @@ mod tests {
             "the Process page warns at exactly the room the largest context and the largest instruction files leave"
         );
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
+    }
+
+    /// DEC-141 PA-18 (PALOW-L1): an RCLI master turn after the owner changed the instructions
+    /// is given the new text and not the old, since every turn reads the text again; a turn
+    /// with no text gets no file.
+    #[test]
+    fn an_rcli_master_turn_after_an_instruction_change_is_given_the_new_text() {
+        let temporary = private_root();
+        let root = Root::open(temporary.path()).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let project = crate::agent_home::AgentProject {
+            data: data.path().canonicalize().unwrap(),
+            id: crate::protocol::ProjectId::new("rcli").unwrap(),
+            folder: None,
+            mode: crate::instruction_files::Mode::Both,
+            repeated: crate::agent_home::Repeated::LeaveOut,
+        };
+        let turn = |root: &Root| {
+            let (runtime_ref, _, _) = allocate_master_capture(root).unwrap();
+            rcli_turn_instructions(root, &runtime_ref, &project)
+                .unwrap()
+                .map(|path| std::fs::read_to_string(path).unwrap())
+        };
+
+        assert_eq!(turn(&root), None, "no text gives no file");
+        crate::agent_home::save_app(&project.data, "OWNER-ALPHA-41\n").unwrap();
+        let first = turn(&root).unwrap();
+        crate::agent_home::save_app(&project.data, "OWNER-BETA-42\n").unwrap();
+        let second = turn(&root).unwrap();
+
+        assert!(first.contains("OWNER-ALPHA-41"), "{first}");
+        assert!(
+            second.contains("OWNER-BETA-42") && !second.contains("OWNER-ALPHA-41"),
+            "the next turn keeps the old text: {second}"
+        );
     }
 
     #[test]
