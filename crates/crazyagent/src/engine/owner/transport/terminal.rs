@@ -480,14 +480,17 @@ const PROMPT_SENT: &[u8] = b"\r";
 /// signal: the typed keys, or for a prompt a line sent with Enter, since a prompt is the
 /// owner's own text too and can answer a box on that screen. Takes the request. Returns
 /// the keys, or none for a request that types nothing or only the view's wheel keys, which
-/// are the owner reading, not typing (OB-10).
+/// are the owner reading, not typing (OB-10). A wheel request holding any other byte counts
+/// as typed keys (OB10-L1).
 #[cfg(unix)]
 fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
     match request {
-        TerminalRequest::Input { bytes } => Some(bytes.as_slice()),
+        TerminalRequest::Scroll { bytes } if crate::team::master::wheel_only(bytes) => None,
+        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+            Some(bytes.as_slice())
+        }
         TerminalRequest::Prompt { .. } => Some(PROMPT_SENT),
-        TerminalRequest::Scroll { .. }
-        | TerminalRequest::Attach { .. }
+        TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
         | TerminalRequest::AttachSized { .. }
         | TerminalRequest::Resize { .. }

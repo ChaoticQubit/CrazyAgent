@@ -1099,6 +1099,27 @@ fn pressed(bytes: &[u8]) -> bool {
     false
 }
 
+/// Says whether bytes a view sent as wheel keys are only those: up and down arrow keys in
+/// CSI or SS3 form and the reports `report_len` reads. A wheel request holding any other
+/// byte counts as the owner's keys (OB10-L1). Takes the bytes. Returns the answer.
+#[cfg(unix)]
+pub(crate) fn wheel_only(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        let rest = &bytes[index..];
+        let step = match rest {
+            [0x1b, b'[' | b'O', b'A' | b'B', ..] => Some(3),
+            _ => report_len(rest),
+        };
+        let Some(step) = step else {
+            return false;
+        };
+        assert!(step >= 3 && index + step <= bytes.len());
+        index += step;
+    }
+    true
+}
+
 /// The length of the view report that bytes start with: a focus report, an X10 mouse report
 /// of three raw bytes, or an SGR mouse report of digits and `;` ending in `M` or `m`. Takes
 /// the bytes. Returns the length, none when they start with anything else.

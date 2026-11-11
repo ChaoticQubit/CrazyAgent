@@ -198,6 +198,12 @@ fn wheel_keys_and_a_views_own_reports_never_count_as_owner_keys() {
         (15, input(b"\x1b[M`!!")),
         (16, input(b"\x1b[A")),
         (17, input(b"\x1b[Ix")),
+        (
+            18,
+            TerminalRequest::Scroll {
+                bytes: b"\x1b[Ayes\r".to_vec(),
+            },
+        ),
     ];
     let at = crate::team::now_ms();
     for (agent, request) in &requests {
@@ -223,4 +229,9 @@ fn wheel_keys_and_a_views_own_reports_never_count_as_owner_keys() {
         "an arrow key the owner presses still holds engine input"
     );
     assert_eq!(keyed(17), Some(at), "a key typed beside a report counts");
+    assert_eq!(
+        keyed(18),
+        Some(at),
+        "a wheel request carrying other keys counts as the owner typing (OB10-L1)"
+    );
 }
