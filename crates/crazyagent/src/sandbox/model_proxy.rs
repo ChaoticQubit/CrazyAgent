@@ -19,9 +19,22 @@ pub const HOSTS_MAX: usize = 8;
 /// The loopback ports a model proxy takes when no saved port is given (S4B-2W1). The block is
 /// fixed, so every Open-network sandbox, whenever it started, denies binding all of it: no
 /// sandboxed agent can take a proxy's port, not even while the engine that held it is down.
-/// It lies below macOS's ephemeral ports, which start at 49152.
+/// It lies below the ports the system hands out by itself ([`PICKED_PORTS_START`]).
+#[cfg(not(target_os = "linux"))]
 pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 41_300..=41_427;
-const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < 49_152);
+/// The same block on Linux, which hands out ports from 32768 up by itself: a bind to port 0
+/// or a listen with no bind gets such a port with no Landlock check, so the block lies
+/// below them (LPF1-M1), and below the 30000 to 32767 that Kubernetes node ports use.
+#[cfg(target_os = "linux")]
+pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 29_300..=29_427;
+/// Where the ports the system hands out by itself start unless an administrator moved
+/// them: 49152 on macOS and Windows, 32768 on Linux.
+#[cfg(not(target_os = "linux"))]
+pub const PICKED_PORTS_START: u16 = 49_152;
+/// Where the ports Linux hands out by itself start unless an administrator moved them.
+#[cfg(target_os = "linux")]
+pub const PICKED_PORTS_START: u16 = 32_768;
+const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < PICKED_PORTS_START);
 const _: () = {
     let mut index = 0;
     while index < super::OWNER_PORTS.len() {

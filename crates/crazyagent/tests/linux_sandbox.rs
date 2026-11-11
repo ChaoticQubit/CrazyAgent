@@ -899,9 +899,32 @@ for name, family, protocol in (('mptcp', socket.AF_INET, 262), ('mptcp6', socket
 /// to listen on, port 0 asking Linux for a free one. Output: one line per port, then one
 /// per socket kind that holds a TCP port without being plain TCP.
 fn listens(sandbox: &dyn Sandbox, case: &Case, ports: &[u16]) -> String {
+    port_probe(sandbox, case, LISTEN, ports)
+}
+
+const PICKS: &str = "import socket, sys
+kept = set(int(port) for port in sys.argv[1:])
+def held(bind):
+    count = 0
+    for _ in range(3000):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if bind:
+            listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        if listener.getsockname()[1] in kept:
+            count += 1
+        listener.close()
+    return count
+print('bind0=' + str(held(True)))
+print('listen=' + str(held(False)))
+";
+
+/// Runs a Python port probe inside a sandbox. Inputs: the sandbox, the case, the script
+/// and the TCP ports it is given. Output: what the script printed.
+fn port_probe(sandbox: &dyn Sandbox, case: &Case, script: &str, ports: &[u16]) -> String {
     let mut harness = Command::new("/usr/bin/python3");
     harness
-        .args(["-I", "-c", LISTEN])
+        .args(["-I", "-c", script])
         .args(ports.iter().map(u16::to_string))
         .current_dir(case.project.join("worktrees"));
     let output = crazyagent::spawn_gate::output(
@@ -945,8 +968,8 @@ fn an_open_network_agent_listens_on_no_owner_model_or_proxy_port() {
         landlock.backend()
     );
     assert_eq!(
-        listens(&landlock, &case, &[1455, 11434, 41_300, 41_427, kept, 0]),
-        "1455=refused\n11434=refused\n41300=refused\n41427=refused\n18080=refused\n0=bound\n\
+        listens(&landlock, &case, &[1455, 11434, 29_300, 29_427, kept, 0]),
+        "1455=refused\n11434=refused\n29300=refused\n29427=refused\n18080=refused\n0=bound\n\
          mptcp=refused\nmptcp6=refused\nsmc=refused\n"
     );
     let bwrap = BWRAP_PATHS
@@ -966,6 +989,68 @@ fn an_open_network_agent_listens_on_no_owner_model_or_proxy_port() {
         ),
         other => panic!("bubblewrap must refuse an open network: {other:?}"),
     }
+}
+
+/// LPF1-M1: Landlock checks only the port a bind names, so a port Linux picks itself, for
+/// a bind to port 0 or a listen with no bind, must never be one the owner's side keeps.
+/// The kept ports lie below the range Linux picks from, so thousands of picks hold none.
+#[test]
+fn a_port_linux_picks_for_an_open_network_agent_is_never_a_kept_port() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let kept: u16 = 18_080;
+    let open = policy(&case, SandboxNetwork::Open)
+        .keep_ports(&[kept])
+        .unwrap();
+    let landlock = LinuxSandbox::detect(open, Path::new(HELPER)).unwrap();
+    let mut ports: Vec<u16> = vec![1455, 11434, kept];
+    ports.extend(29_300..=29_427);
+    assert_eq!(
+        port_probe(&landlock, &case, PICKS, &ports),
+        "bind0=0\nlisten=0\n"
+    );
+}
+
+/// LPF1-M1: a kept port inside the range Linux picks from could be handed to the agent
+/// with no check, so the launch is refused with a plain sentence, by the engine and by a
+/// helper started without it.
+#[test]
+fn an_open_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
+    let case = case();
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let low: u16 = range
+        .split_ascii_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let open = policy(&case, SandboxNetwork::Open)
+        .keep_ports(&[low])
+        .unwrap();
+    match LinuxSandbox::detect(open, Path::new(HELPER)) {
+        Err(SandboxError::Unavailable(reason)) => {
+            assert!(reason.contains(&format!("port {low} ")), "{reason}");
+            assert!(reason.contains("by itself"), "{reason}");
+        }
+        other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
+    }
+    let direct = crazyagent::spawn_gate::output(
+        Command::new(HELPER)
+            .args(["--keep-free", &low.to_string(), "--", "/bin/true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(direct.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&direct.stderr).contains(&format!("port {low} ")),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
 }
 
 struct Checkouts {

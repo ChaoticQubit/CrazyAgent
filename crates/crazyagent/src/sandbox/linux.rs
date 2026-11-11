@@ -1,4 +1,4 @@
-use super::model_proxy::PROXY_PORTS;
+use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
 use super::{
     KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
     LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS,
@@ -16,6 +16,8 @@ use seccompiler::{
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
+use std::ops::RangeInclusive;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -43,6 +45,18 @@ const KEEP_FREE_MAX: usize =
     OWNER_PORTS.len() + KEPT_PORTS_MAX + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize + 1;
 /// The socket family of SMC, whose listener holds a TCP port and takes plain TCP clients.
 const AF_SMC: u64 = 43;
+const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
+const PICKED_PORTS_BYTES_MAX: u64 = 64;
+const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
+     by itself (net.ipv4.ip_local_port_range), so it cannot keep the owner's ports free of an \
+     open-network agent";
+const _: () = {
+    let mut index = 0;
+    while index < OWNER_PORTS.len() {
+        assert!(OWNER_PORTS[index] < PICKED_PORTS_START);
+        index += 1;
+    }
+};
 const FS_ABI: ABI = ABI::V3;
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: i64 = 0x4000_0000;
@@ -252,10 +266,54 @@ fn port(value: Option<OsString>) -> Result<u16, String> {
         .ok_or_else(|| "port must be 1 to 65535".to_string())
 }
 
+/// The ports Linux hands out by itself, as `net.ipv4.ip_local_port_range` gives them; IPv6
+/// follows the same setting. Input: the file's text. Output: the lowest and the highest
+/// port, or none for text that is not two port numbers in rising order.
+fn picked_ports(text: &str) -> Option<RangeInclusive<u16>> {
+    let mut numbers = text.split_ascii_whitespace().map(str::parse::<u16>);
+    let low = numbers.next()?.ok()?;
+    let high = numbers.next()?.ok()?;
+    (numbers.next().is_none() && low <= high).then_some(low..=high)
+}
+
+/// Reads [`picked_ports`] for the network this process is in. No input. Output: the range,
+/// or none when the setting cannot be read.
+fn read_picked_ports() -> Option<RangeInclusive<u16>> {
+    let mut text = String::new();
+    fs::File::open(PICKED_PORTS_FILE)
+        .ok()?
+        .take(PICKED_PORTS_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    picked_ports(&text)
+}
+
+/// Refuses an open network whose kept ports Linux could hand to the agent by itself.
+/// Landlock checks only the port a bind names: a bind to port 0, or a listen on a socket
+/// that was never bound, gets a port Linux picks from its range with no check, and no rule
+/// can refuse a listen. So every kept port must lie outside that range, or no open-network
+/// agent starts. Inputs: the kept ports and the range, none when it cannot be read.
+/// Output: Ok, or the plain reason naming the first kept port inside the range.
+fn kept_outside_picked(kept: &[u16], picked: Option<&RangeInclusive<u16>>) -> Result<(), String> {
+    let Some(picked) = picked else {
+        return Err(PICKED_PORTS_UNREADABLE.into());
+    };
+    let Some(port) = kept.iter().find(|port| picked.contains(*port)) else {
+        return Ok(());
+    };
+    let (low, high) = (picked.start(), picked.end());
+    Err(format!(
+        "port {port} is kept free for the owner's apps, a local model or a model proxy, and this \
+         Linux hands out ports {low} to {high} by itself, so an agent with an open network \
+         could end up listening on it; move the local model to a port below {low}, or have an \
+         administrator move net.ipv4.ip_local_port_range away from port {port}"
+    ))
+}
+
 /// The TCP ports an open-network agent may bind. Landlock has no rule that refuses a port,
 /// so the helper allows every other one, port 0 among them, which asks Linux for a free
-/// port. Input: the kept ports, none of them 0. Output: every port that is not kept, in
-/// rising order.
+/// port: [`kept_outside_picked`] holds that such a port is never a kept one. Input: the
+/// kept ports, none of them 0. Output: every port that is not kept, in rising order.
 fn bindable(keep_free: &[u16]) -> Vec<u16> {
     assert!(!keep_free.contains(&0));
     let mut kept = vec![false; usize::from(u16::MAX) + 1];
@@ -481,6 +539,13 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
+    let keeps = !policy.limit_network && !policy.keep_free.is_empty();
+    if keeps
+        && let Err(reason) = kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref())
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     match enforce(&policy, launch.is_some()) {
         Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
@@ -658,12 +723,17 @@ impl LinuxSandbox {
     }
 }
 
-/// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
-/// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
-/// plain `Unavailable` reason.
+/// Refuses a policy neither Linux backend starts: one confined to its own worktree, a
+/// limited network under [`LinuxSockets::Refuse`], or an open network with a kept port
+/// that Linux could hand to the agent by itself ([`kept_outside_picked`]). Input: the
+/// policy. Output: Ok, or the plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.checkout.is_some() || sandbox.clone.is_some() {
         return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
+    }
+    if matches!(sandbox.network(), SandboxNetwork::Open) {
+        kept_outside_picked(&kept_free(sandbox), read_picked_ports().as_ref())
+            .map_err(SandboxError::Unavailable)?;
     }
     if matches!(sandbox.network(), SandboxNetwork::Only(_))
         && sandbox.linux_sockets() == LinuxSockets::Refuse
@@ -1030,6 +1100,72 @@ mod tests {
                 program: PathBuf::from("/bin/true"),
                 args: Vec::new(),
             })
+        );
+    }
+
+    #[test]
+    fn the_ports_linux_hands_out_are_read_as_two_rising_numbers_or_not_at_all() {
+        assert_eq!(picked_ports("32768\t60999\n"), Some(32768..=60999));
+        assert_eq!(picked_ports("1024 65535"), Some(1024..=65535));
+        assert_eq!(picked_ports("40000 40000"), Some(40000..=40000));
+        for text in [
+            "",
+            "32768",
+            "60999 32768",
+            "1 2 3",
+            "low high",
+            "32768 70000",
+            "-1 5",
+        ] {
+            assert_eq!(picked_ports(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_open_network_is_refused_when_linux_could_hand_out_a_kept_port() {
+        let (_temp, sandbox) = project(SandboxNetwork::Open);
+        let usual = PICKED_PORTS_START..=60_999;
+        let kept = kept_free(&sandbox.clone().keep_ports(&[8080, 18_080]).unwrap());
+        assert_eq!(
+            kept_outside_picked(&kept, Some(&usual)),
+            Ok(()),
+            "the owner ports and the whole proxy block lie below the ports Linux hands out"
+        );
+        let inside = kept_free(&sandbox.clone().keep_ports(&[40_000]).unwrap());
+        let reason = kept_outside_picked(&inside, Some(&usual)).unwrap_err();
+        assert!(reason.starts_with("port 40000 is kept free"), "{reason}");
+        assert!(reason.contains("ports 32768 to 60999"), "{reason}");
+        let moved = kept_outside_picked(&kept, Some(&(1024..=65_535))).unwrap_err();
+        assert!(moved.starts_with("port 1455 is kept free"), "{moved}");
+        assert_eq!(
+            kept_outside_picked(&kept, None),
+            Err(PICKED_PORTS_UNREADABLE.to_owned()),
+            "a range that cannot be read starts no open-network agent"
+        );
+        assert!(kept_outside_picked(&[], None).is_err());
+    }
+
+    #[test]
+    fn a_kept_port_inside_this_machines_picked_ports_refuses_the_open_network() {
+        let picked = read_picked_ports().expect("Linux test machines show their port range");
+        let inside = (*picked.start()).max(1);
+        let helper = std::env::current_exe().unwrap();
+        let landlock = || LinuxBackend::Landlock {
+            helper: helper.clone(),
+        };
+        let (_kept, sandbox) = project(SandboxNetwork::Open);
+        let sandbox = sandbox.keep_ports(&[inside]).unwrap();
+        match LinuxSandbox::new(sandbox, landlock()) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains(&format!("port {inside} ")), "{reason}");
+            }
+            other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
+        }
+        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let closed = sandbox.keep_ports(&[inside]).unwrap();
+        assert!(
+            LinuxSandbox::new(closed, landlock()).is_ok(),
+            "a network that binds nothing is not held to the range"
         );
     }
 
