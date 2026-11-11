@@ -698,25 +698,28 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                 })
                 .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
-                .and_then(|()| match harnesses.codex.as_deref().filter(|_| writable) {
-                    None => Ok(None),
-                    Some(executable) => {
-                        let agents = service
-                            .owner_runtime()
-                            .map(|handle| handle.agents())
-                            .transpose()
-                            .map_err(|error| error.0)?;
-                        crazyagent::research::service::start_for_engine(
-                            runtime_dir,
-                            &global,
-                            &project,
-                            executable,
-                            harnesses.claude.as_deref(),
-                            agent_terminal(&service),
-                            agents,
-                        )
-                        .map(Some)
+                .and_then(|()| {
+                    if !writable {
+                        return Ok(None);
                     }
+                    let agents = service
+                        .owner_runtime()
+                        .map(|handle| handle.agents())
+                        .transpose()
+                        .map_err(|error| error.0)?;
+                    crazyagent::research::service::start_for_engine(
+                        runtime_dir,
+                        &global,
+                        &project,
+                        harnesses.codex.as_deref(),
+                        harnesses.claude.as_deref(),
+                        agent_terminal(&service),
+                        agents,
+                        service
+                            .owner_runtime()
+                            .map(|handle| handle.harness_lookup()),
+                    )
+                    .map(Some)
                 })
                 .and_then(|research| {
                     if !writable {
@@ -728,6 +731,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         &project,
                         harnesses.codex.as_deref(),
                         harnesses.claude.as_deref(),
+                        service
+                            .owner_runtime()
+                            .map(|handle| handle.harness_lookup()),
                     ) {
                         Ok(onboarding) => Ok((research, Some(onboarding))),
                         Err(error) => {
@@ -744,7 +750,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     if let Some(executable) = harnesses.claude.as_deref() {
                         executables.insert("claude-code", executable.to_path_buf());
                     }
-                    if !writable || executables.is_empty() {
+                    if !writable {
                         return Ok((research, onboarding, None));
                     }
                     let agents = match service
@@ -767,6 +773,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         agents,
                         agent_terminal(&service),
                         service.owner_runtime().map(|handle| handle.reproving()),
+                        service
+                            .owner_runtime()
+                            .map(|handle| handle.harness_lookup()),
                     ) {
                         Ok(team) => Ok((research, onboarding, Some(team))),
                         Err(error) => {
@@ -807,6 +816,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     &global,
                     &project,
                     executables,
+                    service
+                        .owner_runtime()
+                        .map(|handle| handle.harness_lookup()),
                 ) {
                     Ok(usage) => Some(usage),
                     Err(problem) => {

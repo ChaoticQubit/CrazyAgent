@@ -2472,6 +2472,129 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_prepared_agent_renews_its_credential_through_the_harness_entry_after_an_update() {
+    let fixture = Fixture::new(1);
+    let entry = fixture.base.join("bin").join("codex");
+    let versions = fixture.base.join("versions");
+    for version in ["1", "2"] {
+        let file = versions.join(version).join("codex");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::create_dir(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(versions.join("1").join("codex"), &entry).unwrap();
+    let old = std::fs::canonicalize(&entry).unwrap();
+    let new = std::fs::canonicalize(versions.join("2").join("codex")).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", entry.clone())]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        1,
+        AgentRole::Sub,
+        "codex",
+        true,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+    );
+    let (_, plan, _) = match prepared {
+        Ok(prepared) => prepared,
+        Err(problem) => panic!("the agent was not prepared: {problem}"),
+    };
+    assert_eq!(plan.executable, old);
+    assert_eq!(plan.entry, entry);
+    std::fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(&new, &entry).unwrap();
+    std::fs::remove_dir_all(versions.join("1")).unwrap();
+    assert!(crate::paths::launch_executable(&plan.executable, None).is_err());
+    assert_eq!(
+        crate::paths::launch_executable(&plan.entry, None).unwrap(),
+        new
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_harness_installed_after_engine_start_is_prepared_only_through_the_engines_lookup() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::new(),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let prepare = |runtime: &TeamRuntime| {
+        runtime.prepare(
+            &fixture.setup,
+            1,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        )
+    };
+    let runtime = open();
+    let Err(missing) = prepare(&runtime) else {
+        panic!("a runtime without the lookup found a harness it was not given");
+    };
+    assert_eq!(missing, "harness is not installed");
+    drop(runtime);
+    let pinned = codex.clone();
+    let runtime = open().with_harness_lookup(Arc::new(move |harness: &str| {
+        (harness == "codex").then(|| pinned.clone())
+    }));
+    let (_, plan, _) = match prepare(&runtime) {
+        Ok(prepared) => prepared,
+        Err(problem) => panic!("the agent was not prepared: {problem}"),
+    };
+    assert_eq!(plan.entry, codex);
+    assert_eq!(plan.executable, std::fs::canonicalize(&codex).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     let fixture = Fixture::new(1);
     let bin = fixture.base.join("bin");
@@ -12720,6 +12843,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
     let plan = |layout: Layout| Plan {
         harness: "codex".into(),
         executable: PathBuf::from("/bin/sh"),
+        entry: PathBuf::from("/bin/sh"),
         working_dir: PathBuf::from("/tmp"),
         model: None,
         tools: true,
@@ -19667,6 +19791,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
     Plan {
         harness: harness.into(),
         executable: PathBuf::from("/bin/sh"),
+        entry: PathBuf::from("/bin/sh"),
         working_dir: PathBuf::from("/tmp"),
         model: None,
         tools: true,
@@ -21271,6 +21396,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
     let plan = Plan {
         harness: "claude-code".into(),
         executable: PathBuf::from("/usr/bin/true"),
+        entry: PathBuf::from("/usr/bin/true"),
         working_dir: PathBuf::from("/private/tmp"),
         model: None,
         tools: true,

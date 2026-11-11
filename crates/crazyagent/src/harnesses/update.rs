@@ -1,14 +1,28 @@
+mod run;
+mod state;
 #[cfg(all(test, unix))]
 mod tests;
 
+pub use run::{
+    AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
+    UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
+};
+pub use state::{
+    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_NOT_FOUND,
+    INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS, UPDATE_FAILED, UPDATE_OFF,
+    Updates, initialize, set_settings, settings,
+};
+
 use crate::harnesses;
+#[cfg(all(test, unix))]
+use run::read_pointer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 pub const VERSION_BYTES_MAX: usize = 64;
-pub const ARGS_MAX: usize = 4;
+pub const ARGS_MAX: usize = 5;
 pub const BREW_PREFIXES: [&str; 3] = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
 pub const POINTER_BYTES_MAX: u64 = 256 * 1024;
 pub const OUTPUT_BYTES_MAX: usize = 64 * 1024;
@@ -27,6 +41,12 @@ const VERSION_PARTS_MAX: usize = 6;
 const PATH_PARTS_MAX: usize = 64;
 const NPM_FLAGS_MAX: usize = 1;
 const BUNDLED: &str = "rcli";
+/// The macOS group of administrators, whose members can already act as root.
+#[cfg(unix)]
+const ADMIN_GROUP: u32 = 80;
+/// Makes `brew outdated` list a cask that updates itself, which it leaves out otherwise
+/// while a named `brew upgrade` of the same cask does upgrade it.
+const GREEDY: &str = "--greedy-auto-updates";
 const MODULES: &str = "node_modules";
 
 const _: () = assert!(3 + NPM_FLAGS_MAX <= ARGS_MAX);
@@ -154,13 +174,16 @@ pub struct Roots {
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of
-/// the compiled table, and the folders that go first on the child's search path.
+/// the compiled table, and the folders that go first on the child's search path. `prefix`
+/// is set for npm alone: the prefix the harness was found in, which the runner pins as
+/// npm's global prefix so a prefix in the owner's npmrc never moves the install.
 /// Nothing in it ever comes from a file, the environment or the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fixed {
     pub program: PathBuf,
     pub args: Vec<&'static str>,
     pub search: Vec<PathBuf>,
+    pub prefix: Option<PathBuf>,
 }
 
 /// How a vendor's release pointer names the newest version: the whole body, or one string
@@ -693,6 +716,7 @@ fn brew_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
         program: bin.join("brew"),
         args,
         search: vec![bin],
+        prefix: None,
     }
 }
 
@@ -702,6 +726,7 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
         program: bin.join("npm"),
         args,
         search: vec![bin],
+        prefix: Some(prefix.to_path_buf()),
     }
 }
 
@@ -719,11 +744,14 @@ fn checked(fixed: Fixed) -> Result<Fixed, &'static str> {
     assert!(fixed.program.is_absolute());
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
+    assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
     Ok(fixed)
 }
 
-/// Builds the one update command of an installed harness: its own updater through its
-/// launcher, or the Homebrew or npm that installed it, by absolute path.
+/// Builds the one update command of an installed harness: its own updater, or the Homebrew
+/// or npm that installed it, by absolute path. A self-update runs the PATH entry, the
+/// launcher the vendor's updater repoints, never the versioned real file, and only while
+/// that entry still resolves to the real path the method was decided from.
 /// Inputs: the harness id, its PATH entry, the entry's real path and the roots.
 /// Output: the command, or the refusal code.
 pub fn update_command(
@@ -735,10 +763,14 @@ pub fn update_command(
     match found(id, real, roots)? {
         Found::Own(own) => {
             let folder = entry.parent().ok_or(TOOL_MISSING)?;
+            if std::fs::canonicalize(entry).ok().as_deref() != Some(real) {
+                return Err(UNKNOWN_INSTALL);
+            }
             checked(Fixed {
                 program: entry.to_path_buf(),
                 args: own.args.to_vec(),
                 search: vec![folder.to_path_buf()],
+                prefix: None,
             })
         }
         Found::Brew { prefix, brew } => checked(brew_fixed(
@@ -766,11 +798,13 @@ pub fn update_command(
 pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixed>, &'static str> {
     match found(id, real, roots)? {
         Found::Own(_) => Ok(None),
-        Found::Brew { prefix, brew } => checked(brew_fixed(
-            prefix,
-            vec!["outdated", flag(brew.kind), "--json=v2", brew.name],
-        ))
-        .map(Some),
+        Found::Brew { prefix, brew } => {
+            let args = match brew.kind {
+                BrewKind::Cask => vec!["outdated", flag(brew.kind), GREEDY, "--json=v2", brew.name],
+                BrewKind::Formula => vec!["outdated", flag(brew.kind), "--json=v2", brew.name],
+            };
+            checked(brew_fixed(prefix, args)).map(Some)
+        }
         Found::Npm { prefix, npm, .. } => {
             checked(npm_fixed(&prefix, vec!["view", npm.package, "version"])).map(Some)
         }
@@ -814,8 +848,10 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
 
 /// Checks that a program is safe to start as this user: it resolves to a regular runnable
 /// file owned by root or this user that neither the group nor everyone can write, and no one
-/// else can swap it through a world-writable folder. A group-writable folder is accepted
-/// (Homebrew on Intel Macs). Input: the absolute program path. Output: Ok or the refusal code.
+/// else can swap it through a folder everyone can write. A folder its group can write is
+/// accepted on macOS only for the administrators (Homebrew's folders), who can already act
+/// as root, since every local user shares the staff group; elsewhere only for this user's
+/// own group. Input: the absolute program path. Output: Ok or the refusal code.
 #[cfg(unix)]
 fn trusted(program: &Path) -> Result<(), &'static str> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -824,13 +860,22 @@ fn trusted(program: &Path) -> Result<(), &'static str> {
     }
     let target = std::fs::canonicalize(program).map_err(|_| TOOL_MISSING)?;
     let metadata = std::fs::metadata(&target).map_err(|_| TOOL_MISSING)?;
+    let user = rustix::process::geteuid().as_raw();
+    let group = rustix::process::getegid().as_raw();
+    let trusted_group = if cfg!(target_os = "macos") {
+        ADMIN_GROUP
+    } else {
+        group
+    };
     let open_folder = |path: &Path| {
         path.parent()
             .and_then(|folder| std::fs::metadata(folder).ok())
-            .is_none_or(|folder| folder.permissions().mode() & 0o002 != 0)
+            .is_none_or(|folder| {
+                let mode = folder.permissions().mode();
+                mode & 0o002 != 0 || (mode & 0o020 != 0 && folder.gid() != trusted_group)
+            })
     };
     let mode = metadata.permissions().mode();
-    let user = rustix::process::geteuid().as_raw();
     let safe = metadata.is_file()
         && mode & 0o111 != 0
         && mode & 0o022 == 0

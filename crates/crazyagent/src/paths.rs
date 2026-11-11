@@ -323,6 +323,31 @@ pub fn resolve_harnesses(
     }
 }
 
+/// How the team runtime, usage upkeep, research and onboarding find a harness the engine did
+/// not have when it started: the engine answers with the entry of a harness it has pinned
+/// since, so nothing is launched that did not pass the checks of a registration. Only engine
+/// start hands one out; a runtime built without it never looks past what it was given.
+/// Input: the launch harness id. Output: the entry, or none.
+pub type HarnessLookup = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
+/// Finds the PATH entry of a harness the engine did not have when it started, for the engine
+/// to check and pin after its own install or update job. It covers every catalog harness
+/// CrazyAgent starts itself, by the executable names of its catalog row; a harness without
+/// a launch adapter is never started, so nothing about it waits for a restart. Inputs: the
+/// catalog id and the engine's own PATH value. Output: the entry with its links kept; none
+/// for an alias or unknown id, for a harness without a launch adapter, for no PATH value
+/// and for a harness that is still not installed.
+pub fn harness_entry(harness: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    let spec = crate::harnesses::spec(harness)
+        .filter(|spec| spec.id == harness && spec.launch.is_none())?;
+    let entry = spec
+        .binaries
+        .iter()
+        .find_map(|name| path_entry(name, path))?;
+    assert!(entry.is_absolute());
+    Some(entry)
+}
+
 /// Resolves a harness entry kept at engine start to the real file a launch runs and its
 /// sandbox grants, as the entry stands now. Inputs: the absolute entry and the PATH value.
 /// Output: the entry's real file; when an entry in a PATH folder is gone, the first PATH
@@ -551,6 +576,41 @@ mod tests {
         std::fs::remove_file(&entry).unwrap();
         std::os::unix::fs::symlink(&new, &entry).unwrap();
         assert_eq!(launch_executable(&entry, Some(&path)).unwrap(), new);
+    }
+
+    #[test]
+    fn a_harness_installed_after_engine_start_is_found_on_the_engines_path_by_its_launch_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let bin = root.join("bin");
+        let real = root.join("cask/2.1.322/claude");
+        program(&real, 0o755);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&real, bin.join("claude")).unwrap();
+        program(&bin.join("aider"), 0o755);
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        assert_eq!(
+            harness_entry("claude-code", Some(&path)),
+            Some(bin.join("claude"))
+        );
+        assert_eq!(harness_entry("codex", Some(&path)), None);
+        assert_eq!(harness_entry("aider", Some(&path)), None);
+        assert_eq!(harness_entry("claude", Some(&path)), None);
+        assert_eq!(harness_entry("claude-code", None), None);
+        let started = crate::harnesses::specs()
+            .iter()
+            .filter(|spec| spec.launch.is_none());
+        let mut covered = 0;
+        for spec in started {
+            let entry = bin.join(spec.binaries[0]);
+            if !entry.exists() {
+                program(&entry, 0o755);
+            }
+            assert_eq!(harness_entry(spec.id, Some(&path)), Some(entry));
+            assert!(crate::team::launch_harness(spec.id).is_some());
+            covered += 1;
+        }
+        assert!(covered >= 2);
     }
 
     #[test]

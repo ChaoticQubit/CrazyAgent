@@ -220,6 +220,12 @@ impl RegisteredNativeAuthHost {
         Ok(Arc::new(fresh))
     }
 
+    /// The PATH entry this host was captured through, which a launch resolves again each
+    /// time. Input: none. Output: the entry, or none for a host captured by its real path.
+    pub(crate) fn entry(&self) -> Option<&Path> {
+        self.entry.as_deref()
+    }
+
     /// Returns the captured path while the retained file and the file at that path still
     /// have the identity hashed at capture. On macOS every content write moves ctime by the
     /// fine clock, so equal identity means the hashed bytes without re-reading a harness of

@@ -2286,6 +2286,9 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::HarnessCatalog if harness_catalog::slow(body) => {
+                return Ok(Some(Deferred::HarnessUpdates(a)));
+            }
             Protocol::HarnessCatalog => {
                 return harness_catalog::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2497,6 +2500,10 @@ async fn serve_admitted(
             let served = usage::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
         }
+        Deferred::HarnessUpdates(a) => {
+            let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
+        }
         Deferred::Icloud(a) => {
             let served = icloud::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
@@ -2551,8 +2558,10 @@ struct Tasks {
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, Usage requests, which read and write the usage store, and iCloud
-/// downloads, which wait for macOS to bring a folder's files to this Mac. Each
+/// copy skill folders, Usage requests, which read and write the usage store, harness
+/// version, update and install requests, which wait for a harness, Homebrew, npm or a
+/// vendor's release pointer, and iCloud downloads, which wait for macOS to bring a
+/// folder's files to this Mac. Each
 /// carries the admission, and the projects home its validated request; the others read
 /// the request frame.
 enum Deferred {
@@ -2569,6 +2578,7 @@ enum Deferred {
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
+    HarnessUpdates(Admission),
     Icloud(Admission),
 }
 
