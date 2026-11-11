@@ -1046,6 +1046,46 @@ fn a_port_linux_picks_for_an_open_network_agent_is_never_a_kept_port() {
     );
 }
 
+const AUTOBIND: &str = "import socket
+for name, bind in (('bind0', True), ('listen', False)):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if bind:
+            listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        print(name + '=listened')
+    except PermissionError:
+        print(name + '=refused')
+    listener.close()
+";
+
+/// REL220-F2: a limited network binds no TCP port, and a listen on a socket that was never
+/// bound, which takes a port Linux picks with no bind check, is refused too, under both
+/// limited-network sockets settings. So no limited-network agent or server check holds a
+/// kept local model or proxy port, wherever the range Linux picks from lies.
+#[test]
+fn a_limited_network_agent_listens_on_no_port_linux_picks() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    for sockets in [LinuxSockets::TcpOnly, LinuxSockets::TcpPorts] {
+        let limited = policy(&case, SandboxNetwork::Only(Vec::new())).limit_sockets(sockets);
+        let landlock = LinuxSandbox::detect(limited, Path::new(HELPER)).unwrap();
+        assert!(
+            matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+            "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
+            landlock.backend()
+        );
+        assert_eq!(
+            port_probe(&landlock, &case, AUTOBIND, &[]),
+            "bind0=refused\nlisten=refused\n",
+            "{sockets:?}"
+        );
+    }
+}
+
 /// LPF1-M1: a kept port inside the range Linux picks from could be handed to the agent
 /// with no check, so the launch is refused with a plain sentence, by the engine and by a
 /// helper started without it.
