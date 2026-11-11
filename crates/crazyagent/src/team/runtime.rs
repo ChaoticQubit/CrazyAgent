@@ -443,7 +443,8 @@ enum Report {
         text: String,
     },
     /// The turn a live master's pane was in is none: it stayed open with no new byte in the
-    /// session record on a pane whose app waits (OB-1).
+    /// session record on a pane whose app waits (OB-1). Its start was counted once for the
+    /// Sessions list, so the next turn that starts takes that count and adds none.
     NoTurn,
     Own {
         end: Option<TurnEnd>,
@@ -545,6 +546,7 @@ struct Worker {
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
+    counted_none: bool,
     session: Option<String>,
     seed: Option<String>,
     bound: Option<TurnBound>,
@@ -6264,6 +6266,7 @@ impl TeamRuntime {
                 own_turn: None,
                 own_rules: None,
                 turn_started: None,
+                counted_none: false,
                 session: None,
                 seed: None,
                 bound: None,
@@ -8263,10 +8266,11 @@ impl TeamRuntime {
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
+                let counted = std::mem::take(&mut worker.counted_none);
                 let live_session = worker
                     .session
                     .clone()
-                    .filter(|_| worker.live)
+                    .filter(|_| worker.live && !counted)
                     .map(|session| (worker.project.clone(), session));
                 super::master::turn_started(&self.connection, id)?;
                 if let Some((project, session)) = live_session {
@@ -8281,6 +8285,7 @@ impl TeamRuntime {
             } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let started = worker.turn_started.take();
+                worker.counted_none = false;
                 worker.idle_since = Instant::now();
                 worker.worked = true;
                 worker.ended_well = end == TurnEnd::Success;
@@ -8335,6 +8340,7 @@ impl TeamRuntime {
                 if worker.turn_started.take().is_none() {
                     return Ok(false);
                 }
+                worker.counted_none = worker.live && worker.session.is_some();
                 worker.idle_since = Instant::now();
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(false);

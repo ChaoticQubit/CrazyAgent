@@ -14685,6 +14685,7 @@ fn between_turns(
         fresh: None,
         own_turn: None,
         own_rules: None,
+        counted_none: false,
         turn_started: None,
         session: None,
         seed: None,
@@ -15581,6 +15582,56 @@ fn a_live_master_turn_reported_as_none_closes_without_counting() {
 
     team.apply(agent, started()).unwrap();
     assert_eq!(shown(&fixture), ("working".to_owned(), true, 0, 0));
+    team.workers.clear();
+}
+
+/// OB-1 r1 (OB1-F3): a live master's turn dropped as none was counted once for the Sessions
+/// list at its start, so the next start, the same turn starting again or a new one, takes
+/// that count and adds none. A start with no drop before it counts as before.
+#[test]
+fn a_dropped_live_master_turn_counts_once_in_the_sessions_list() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Master, true, true);
+    worker.live = true;
+    worker.session = Some("s-dropped".into());
+    team.workers.insert(agent, worker);
+    crate::master_sessions::initialize(&fixture.connection).unwrap();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    super::super::master::pane_ready(&fixture.connection, &project, agent).unwrap();
+    let counted = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(turns),0) FROM session_owner_turns WHERE session='s-dropped'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let started = || Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+
+    team.apply(agent, started()).unwrap();
+    assert_eq!(counted(&fixture), 1);
+    team.apply(agent, Report::NoTurn).unwrap();
+    assert_eq!(counted(&fixture), 1);
+    team.apply(agent, started()).unwrap();
+    assert_eq!(
+        counted(&fixture),
+        1,
+        "the next start takes the dropped turn's count"
+    );
+    team.apply(agent, started()).unwrap();
+    assert_eq!(
+        counted(&fixture),
+        2,
+        "a start with no drop before it counts"
+    );
     team.workers.clear();
 }
 
