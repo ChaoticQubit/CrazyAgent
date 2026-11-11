@@ -281,6 +281,18 @@ test("Account limits and its reset controls stay when only the metrics read fail
   assert.doesNotMatch(text(render({ usage: failed })), /Account limits/, "no usage read, no limits to show");
 });
 
+test("a read refused by a busy engine says so, and the line stops saying Updating once a read failed", () => {
+  const busy = { kind: "error", code: "owner_busy", message: "" };
+  for (const patch of [{ metrics: busy }, { usage: busy }]) {
+    const words = text(render({ ...patch, updatedMs: null }));
+    assert.match(words, /CrazyAgent is busy with other requests\. Try again in a moment\./, JSON.stringify(patch));
+    assert.match(words, /2 projects · Not updated · provider-reported usage per turn/, JSON.stringify(patch));
+    assert.doesNotMatch(words, /Updating|owner_busy/, JSON.stringify(patch));
+  }
+  assert.match(text(render({ metrics: busy })), /2 projects · Updated 10 s ago · provider-reported/, "a failed reload keeps the last read's time");
+  assert.match(text(render({ metrics: { kind: "loading" }, updatedMs: null })), /2 projects · Updating · provider-reported/);
+});
+
 test("Account limits stays while the metrics read loads or is not ready (r1 L1)", () => {
   const notReady = { kind: "error", code: "usage_unavailable", message: "" };
   for (const metrics of [{ kind: "loading" }, { kind: "not_ready" }, notReady]) {
