@@ -25,8 +25,10 @@ const MEMBERS_MAX: usize = 64;
 const GRAPHIFY: &str = "graphify";
 const GRAPHED: &str = ".graphed";
 const NUDGED: &str = ".nudged";
-/// The most files of one Codex patch the edit guard checks, each one engine question.
-const PATCH_PATHS_MAX: usize = 32;
+/// The most files of one Codex patch the edit guard checks, all in one engine question; a
+/// patch naming more is refused under Block and Wait (PA1213-F2).
+const PATCH_PATHS_MAX: usize = relay::ASK_PATHS_MAX;
+const PATCH_TOOL: &str = "apply_patch";
 const PATCH_BEGIN: &str = "*** Begin Patch";
 const PATCH_HEADS: [&str; 4] = [
     "*** Add File: ",
@@ -53,6 +55,14 @@ const _: () = assert!(
 );
 /// Why an edit of a session the engine placed in no pane is held (DEC-111 Q18).
 const UNNAMED_EDIT: &str = "CrazyAgent: the engine could not tell which agent this session is, so this edit is held. Try again in a moment.";
+/// Why a patch whose files the guard cannot place is refused under Block and Wait: a shell
+/// call's working folder or a `cd` can move it off the files it names (PA1213-F1).
+const UNPLACED_PATCH: &str = "CrazyAgent: overlapping edits are checked in this project, and a patch run through the shell can land in another folder than the one it names. Use the apply_patch tool for this edit.";
+/// Why a patch naming more files than one engine question covers is refused (PA1213-F2).
+const PATCH_TOO_LARGE: &str = "CrazyAgent: overlapping edits are checked in this project, and this patch names more than 32 files. Split it into smaller patches.";
+/// Why a patch is held when the engine did not answer for all its files in one wait.
+const PATCH_UNCHECKED: &str = "CrazyAgent: the engine did not check every file of this patch in time, so it is held. Try again in a moment, or split it.";
+const _: () = assert!(PATCH_PATHS_MAX == 32);
 
 /// The hook events the relay runs on, each named by its `coord-hook` argument: Claude
 /// Code's after every tool call, at a stop, before AskUserQuestion, on a permission prompt
@@ -707,64 +717,81 @@ fn first_edit(folder: &Mailbox, socket: Option<&Path>, who: &Identity) -> Option
     Some(super::adoption::FIRST_EDIT_REMINDER)
 }
 
-/// Decides one file edit before it runs. A session the engine placed in no pane may not
-/// edit (DEC-111 Q18). A native teammate may edit only inside
-/// `<lead worktree>/.worktrees/<its name>/` (Q17); under Overlaps Block or Wait, an edit to
-/// a repository file another active agent claimed is refused after asking the engine (Q15,
-/// OS-8).
-/// The guard is cooperative: the session owns its home and mailbox. Takes the folder, the
-/// mailbox whose caller socket a native teammate asks over, the identity and the hook
-/// input. Returns the reason to deny, or None to let it run.
+/// Decides one edit before it runs (cooperative): an unplaced session may not edit (Q18), a
+/// native teammate edits only in its own worktree (Q17), and under Overlaps Block or Wait a
+/// claimed file, a Codex patch the guard cannot place or one past `PATCH_PATHS_MAX` files is
+/// refused (Q15, OS-8, PA1213-F1, F2). Takes the folder, the caller-socket mailbox, the
+/// identity and the hook input. Returns the reason to deny, or None to let it run.
 fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value) -> Option<String> {
     if who.unnamed {
         return Some(UNNAMED_EDIT.to_owned());
     }
-    edited_paths(input)
-        .iter()
-        .find_map(|path| guard_path(folder, socket, who, path))
+    let refused = match edited(input) {
+        Edit::Files(files) => return guard_files(folder, socket, who, &files),
+        Edit::Unplaced => UNPLACED_PATCH,
+        Edit::TooMany => PATCH_TOO_LARGE,
+    };
+    let checked = who.teammate.is_some()
+        || (who.activity.is_some()
+            && relay::read_roster(folder, who.part)
+                .is_some_and(|roster| matches!(roster.overlaps, Overlaps::Block | Overlaps::Wait)));
+    checked.then(|| refused.to_owned())
 }
 
-/// The absolute files one edit call writes: Claude Code's `file_path` or `notebook_path`,
-/// or each file a Codex patch adds, updates, deletes or moves to, read from the patch
-/// tool's or a shell call's `command` and placed under the call's `cwd` (PA-12). Takes
-/// the hook input. Returns at most `PATCH_PATHS_MAX` paths, none for any other call.
-fn edited_paths(input: &Value) -> Vec<PathBuf> {
+/// What one edit call writes, as the guard reads its hook input: `Files` holds the absolute
+/// files, at most `PATCH_PATHS_MAX` and none for a call that edits nothing; `Unplaced` is a
+/// patch whose folder the hook cannot see, carried by a shell call (which its own working
+/// folder or a `cd` can move) or sent with no absolute `cwd`; `TooMany` is a patch naming
+/// more than `PATCH_PATHS_MAX` files.
+#[derive(Debug, PartialEq, Eq)]
+enum Edit {
+    Files(Vec<PathBuf>),
+    Unplaced,
+    TooMany,
+}
+
+/// Reads what one edit call writes: Claude Code's absolute `file_path` or `notebook_path`,
+/// or each file a Codex `apply_patch` call adds, updates, deletes or moves to, placed under
+/// the call's `cwd` (PA-12). A shell call carrying a patch is `Unplaced` (PA1213-F1). Takes
+/// the hook input. Returns the edit.
+fn edited(input: &Value) -> Edit {
     let tool_input = &input["tool_input"];
     if let Some(path) = tool_input["file_path"]
         .as_str()
         .or_else(|| tool_input["notebook_path"].as_str())
     {
-        return Some(PathBuf::from(path))
-            .filter(|path| path.is_absolute())
-            .into_iter()
-            .collect();
+        return Edit::Files(
+            Some(PathBuf::from(path))
+                .filter(|path| path.is_absolute())
+                .into_iter()
+                .collect(),
+        );
     }
-    let (Some(command), Some(cwd)) = (
-        tool_input["command"].as_str(),
-        input["cwd"]
-            .as_str()
-            .map(Path::new)
-            .filter(|cwd| cwd.is_absolute()),
-    ) else {
-        return Vec::new();
+    let Some(names) = tool_input["command"].as_str().and_then(patch_paths) else {
+        return Edit::Files(Vec::new());
     };
-    let paths: Vec<PathBuf> = patch_paths(command)
-        .into_iter()
-        .map(|path| cwd.join(path))
-        .collect();
-    assert!(paths.len() <= PATCH_PATHS_MAX);
-    paths
+    let cwd = input["cwd"]
+        .as_str()
+        .map(Path::new)
+        .filter(|cwd| cwd.is_absolute());
+    match (input["tool_name"].as_str(), cwd) {
+        (Some(PATCH_TOOL), Some(_)) if names.len() > PATCH_PATHS_MAX => Edit::TooMany,
+        (Some(PATCH_TOOL), Some(cwd)) => {
+            Edit::Files(names.into_iter().map(|name| cwd.join(name)).collect())
+        }
+        _ => Edit::Unplaced,
+    }
 }
 
 /// The file names a Codex patch names on its `*** Add File:`, `*** Update File:`,
-/// `*** Delete File:` and `*** Move to:` lines, only when the text holds a
-/// `*** Begin Patch` line. Takes the patch or the shell command carrying it. Returns at most
-/// `PATCH_PATHS_MAX` names, as written.
-fn patch_paths(command: &str) -> Vec<&str> {
+/// `*** Delete File:` and `*** Move to:` lines. Takes the patch or the shell command
+/// carrying it. Returns at most `PATCH_PATHS_MAX + 1` names as written, so a longer patch
+/// shows, or None when the text holds no `*** Begin Patch` line.
+fn patch_paths(command: &str) -> Option<Vec<&str>> {
     if !command.lines().any(|line| line.trim() == PATCH_BEGIN) {
-        return Vec::new();
+        return None;
     }
-    command
+    let names: Vec<&str> = command
         .lines()
         .filter_map(|line| {
             let line = line.trim_start();
@@ -774,21 +801,28 @@ fn patch_paths(command: &str) -> Vec<&str> {
                 .map(str::trim)
         })
         .filter(|name| !name.is_empty())
-        .take(PATCH_PATHS_MAX)
-        .collect()
+        .take(PATCH_PATHS_MAX + 1)
+        .collect();
+    assert!(names.len() <= PATCH_PATHS_MAX + 1);
+    Some(names)
 }
 
-/// Decides one file of an edit: the native teammate's own worktree rule, then the
-/// Overlaps Block or Wait question to the engine. Takes the folder, the caller-socket
-/// mailbox, the identity and the absolute file. Returns the reason to deny, or None.
-fn guard_path(
+/// Decides the files of one edit together: the native teammate's own worktree rule for
+/// each, then one Overlaps Block or Wait question to the engine for them all, inside one
+/// `ASK_WAIT` (PA1213-F2). Takes the folder, the caller-socket mailbox, the identity and
+/// the absolute files, at most `PATCH_PATHS_MAX`. Returns the reason to deny, or None.
+fn guard_files(
     folder: &Mailbox,
     socket: Option<&Path>,
     who: &Identity,
-    path: &Path,
+    files: &[PathBuf],
 ) -> Option<String> {
-    assert!(path.is_absolute());
-    let target = resolved(path);
+    assert!(files.len() <= PATCH_PATHS_MAX);
+    assert!(files.iter().all(|file| file.is_absolute()));
+    if files.is_empty() {
+        return None;
+    }
+    let targets: Vec<PathBuf> = files.iter().map(|file| resolved(file)).collect();
     let roster = relay::read_roster(folder, who.part);
     let root = roster
         .as_ref()
@@ -800,7 +834,7 @@ fn guard_path(
     let base = match (&who.teammate, &root) {
         (Some(name), Some(root)) => {
             let own = resolved(&root.join(crate::agent_git::TEAMMATES_FOLDER).join(name));
-            if !target.starts_with(&own) {
+            if targets.iter().any(|target| !target.starts_with(&own)) {
                 return Some(format!(
                     "CrazyAgent: you are teammate {name}. Edit files only inside your own worktree {own}, on your own branch <task branch>--{name}, which CrazyAgent makes for you when you start. If it does not exist yet, wait a few seconds and try again; do not make it yourself.",
                     own = own.display(),
@@ -817,19 +851,39 @@ fn guard_path(
         .filter(|overlaps| matches!(overlaps, Overlaps::Block | Overlaps::Wait));
     let tag = who.activity.as_deref()?;
     let option = option?;
-    let relative = target.strip_prefix(&base).ok()?.to_str()?;
-    if relative.is_empty()
-        || relative.starts_with(".git/")
-        || relative.starts_with(&format!("{}/", crate::agent_git::TEAMMATES_FOLDER))
-    {
-        return None;
-    }
-    let held = match socket {
-        Some(mailbox) => request(mailbox, &format!("ask {relative}"), ASK_WAIT)
-            .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
-            .map(|answer| answer.held)
-            .unwrap_or_default(),
-        None => ask(folder, tag, relative),
+    let teammates = format!("{}/", crate::agent_git::TEAMMATES_FOLDER);
+    let relatives: Vec<&str> = targets
+        .iter()
+        .filter_map(|target| target.strip_prefix(&base).ok()?.to_str())
+        .filter(|relative| {
+            !relative.is_empty()
+                && !relative.starts_with(".git/")
+                && !relative.starts_with(&teammates)
+        })
+        .collect();
+    let held = match (socket, relatives.as_slice()) {
+        (_, []) => return None,
+        (Some(mailbox), _) => {
+            let deadline = Instant::now() + ASK_WAIT;
+            let mut held: Vec<Held> = Vec::new();
+            for relative in &relatives {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                if wait.is_zero() {
+                    return Some(PATCH_UNCHECKED.to_owned());
+                }
+                let answer = request(mailbox, &format!("ask {relative}"), wait)
+                    .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
+                    .map(|answer| answer.held)
+                    .unwrap_or_default();
+                for one in answer {
+                    if !held.contains(&one) {
+                        held.push(one);
+                    }
+                }
+            }
+            held
+        }
+        (None, _) => ask(folder, tag, &relatives),
     };
     if held.is_empty() {
         return None;
@@ -846,28 +900,40 @@ fn guard_path(
             "set to Block in this project: message the holder with update_work, or start_work on other files."
         }
     };
+    let named = match relatives.as_slice() {
+        [relative] => format!("{relative} is"),
+        _ => "files this patch writes are".to_owned(),
+    };
     Some(format!(
-        "CrazyAgent: {relative} is claimed by {}. Overlapping edits are {advice}",
+        "CrazyAgent: {named} claimed by {}. Overlapping edits are {advice}",
         holders.join(", ")
     ))
 }
 
-/// Asks the engine which other active agents claim a file and waits up to `ASK_WAIT`
-/// for its answer; with no answer in time the question is withdrawn and the edit runs.
-/// Takes the mailbox, the tag and the repository-relative path. Returns the claims.
-fn ask(folder: &Mailbox, tag: &str, path: &str) -> Vec<Held> {
+/// Asks the engine in one question which other active agents claim any of an edit's files
+/// and waits up to `ASK_WAIT` for its answer; with no answer in time the question is
+/// withdrawn and the edit runs, and a question too large to send is held by CrazyAgent.
+/// Takes the mailbox, the tag and the repository-relative paths, 1 to `PATCH_PATHS_MAX`.
+/// Returns the claims.
+fn ask(folder: &Mailbox, tag: &str, paths: &[&str]) -> Vec<Held> {
+    assert!(!paths.is_empty() && paths.len() <= PATCH_PATHS_MAX);
     let Ok(id) = call_id() else {
         return Vec::new();
     };
     let Ok(bytes) = serde_json::to_vec(&Ask {
         to: tag.to_owned(),
-        path: path.to_owned(),
+        path: paths[0].to_owned(),
+        more: paths[1..].iter().map(|path| (*path).to_owned()).collect(),
     }) else {
         return Vec::new();
     };
-    if bytes.len() as u64 > relay::ASK_BYTES_MAX
-        || relay::put(folder, &format!("{id}{ASK}"), &bytes).is_err()
-    {
+    if bytes.len() as u64 > relay::ASK_BYTES_MAX {
+        return vec![Held {
+            by: "CrazyAgent".to_owned(),
+            pattern: "more file names than one check reads; split the patch".to_owned(),
+        }];
+    }
+    if relay::put(folder, &format!("{id}{ASK}"), &bytes).is_err() {
         return Vec::new();
     }
     let answered = format!("{id}{ANSWER}");

@@ -197,50 +197,64 @@ fn a_full_inbox_is_handed_over_within_the_context_budget() {
     assert_eq!(waiting, INBOX_MAX - 2);
 }
 
-/// A Codex edit names its files in the patch it applies, whether through the patch tool or a
-/// shell call carrying `apply_patch` (PA-12 proof on Codex 0.167.1): every added, updated,
-/// deleted and moved-to file, placed under the call's own folder, at most
-/// `PATCH_PATHS_MAX`. Claude Code's edits keep their one absolute file, and a shell call
-/// with no patch or a folder that is not absolute names none.
+/// A Codex `apply_patch` call names its files in its patch (PA-12 proof on Codex 0.167.1):
+/// every added, updated, deleted and moved-to file, placed under the call's own folder, at
+/// most `PATCH_PATHS_MAX`, and a longer patch is `TooMany` (PA1213-F2). A shell call
+/// carrying a patch, whose working folder or `cd` the hook cannot see, and a patch with no
+/// absolute folder are `Unplaced` (PA1213-F1). Claude Code's edits keep their one absolute
+/// file, and a shell call with no patch names none.
 #[test]
 fn a_codex_patch_names_every_file_it_writes_under_its_cwd() {
     let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** Update File: src/b.rs\n*** Move to: src/c.rs\n@@\n-x\n+y\n*** Delete File: /abs/d.rs\n*** End Patch\n";
     let named = |tool: &str, command: String, cwd: &str| {
-        edited_paths(&json!({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}))
+        edited(&json!({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}))
     };
     let expected: Vec<PathBuf> = ["/w/a.txt", "/w/src/b.rs", "/w/src/c.rs", "/abs/d.rs"]
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    assert_eq!(named("apply_patch", patch.to_owned(), "/w"), expected);
     assert_eq!(
-        named("Bash", format!("apply_patch <<'EOF'\n{patch}EOF\n"), "/w"),
-        expected
+        named("apply_patch", patch.to_owned(), "/w"),
+        Edit::Files(expected)
     );
-    assert!(named("Bash", "ls -la".to_owned(), "/w").is_empty());
-    assert!(named("Bash", "echo '*** Add File: a.txt'".to_owned(), "/w").is_empty());
-    assert!(named("apply_patch", patch.to_owned(), "w").is_empty());
-    let many: String = (0..PATCH_PATHS_MAX + 5)
-        .map(|n| format!("*** Add File: f{n}.txt\n+x\n"))
-        .collect();
+    for shell in [
+        format!("apply_patch <<'EOF'\n{patch}EOF\n"),
+        format!("cd src && apply_patch <<'EOF'\n{patch}EOF\n"),
+    ] {
+        assert_eq!(named("Bash", shell, "/w"), Edit::Unplaced);
+    }
+    assert_eq!(named("apply_patch", patch.to_owned(), "w"), Edit::Unplaced);
     assert_eq!(
-        named(
-            "apply_patch",
-            format!("*** Begin Patch\n{many}*** End Patch\n"),
-            "/w"
-        )
-        .len(),
-        PATCH_PATHS_MAX
+        named("Bash", "ls -la".to_owned(), "/w"),
+        Edit::Files(Vec::new())
     );
     assert_eq!(
-        edited_paths(
+        named("Bash", "echo '*** Add File: a.txt'".to_owned(), "/w"),
+        Edit::Files(Vec::new())
+    );
+    let files = |count: usize| -> String {
+        let body: String = (0..count)
+            .map(|n| format!("*** Add File: f{n}.txt\n+x\n"))
+            .collect();
+        format!("*** Begin Patch\n{body}*** End Patch\n")
+    };
+    assert!(matches!(
+        named("apply_patch", files(PATCH_PATHS_MAX), "/w"),
+        Edit::Files(all) if all.len() == PATCH_PATHS_MAX
+    ));
+    assert_eq!(
+        named("apply_patch", files(PATCH_PATHS_MAX + 1), "/w"),
+        Edit::TooMany
+    );
+    assert_eq!(
+        edited(
             &json!({"tool_name": "Write", "tool_input": {"file_path": "/w/e.rs", "content": ""}})
         ),
-        [PathBuf::from("/w/e.rs")]
+        Edit::Files(vec![PathBuf::from("/w/e.rs")])
     );
-    assert!(
-        edited_paths(&json!({"tool_name": "Write", "tool_input": {"file_path": "e.rs"}}))
-            .is_empty()
+    assert_eq!(
+        edited(&json!({"tool_name": "Write", "tool_input": {"file_path": "e.rs"}})),
+        Edit::Files(Vec::new())
     );
 }
 
@@ -326,5 +340,90 @@ fn a_codex_edit_runs_the_guard_alone() {
         ),
         None,
         "a shell call with no patch edits nothing"
+    );
+
+    let reason = |answer: Option<Value>| {
+        answer.unwrap()["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let shell = json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd src && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** End Patch\nEOF\n"},
+        "cwd": base,
+    });
+    let wide: String = (0..=PATCH_PATHS_MAX)
+        .map(|n| format!("*** Add File: f{n}.rs\n+x\n"))
+        .collect();
+    let wide = json!({
+        "tool_name": "apply_patch",
+        "tool_input": {"command": format!("*** Begin Patch\n{wide}*** End Patch\n")},
+        "cwd": base,
+    });
+    for (overlaps, refused) in [
+        (Overlaps::Block, true),
+        (Overlaps::Wait, true),
+        (Overlaps::Warn, false),
+        (Overlaps::Off, false),
+    ] {
+        roster(overlaps);
+        let me = who(None, false);
+        let answers = [
+            in_mailbox(Event::CodexEdit, &folder, &me, &shell),
+            in_mailbox(Event::CodexEdit, &folder, &me, &wide),
+        ];
+        assert_eq!(answers.iter().all(Option::is_some), refused, "{overlaps:?}");
+        if refused {
+            let [shell, wide] = answers;
+            assert_eq!(reason(shell), UNPLACED_PATCH, "PA1213-F1");
+            assert_eq!(reason(wide), PATCH_TOO_LARGE, "PA1213-F2");
+        }
+    }
+
+    roster(Overlaps::Block);
+    let answering = {
+        let path = base.clone();
+        std::thread::spawn(move || {
+            let folder = Mailbox::open(&path).unwrap();
+            for _ in 0..250 {
+                if let Some((_, stem)) = folder.entries(ASK).into_iter().next() {
+                    let bytes =
+                        relay::read_entry(&folder, &format!("{stem}{ASK}"), relay::ASK_BYTES_MAX)
+                            .unwrap();
+                    let answer = serde_json::to_vec(&Answer {
+                        held: vec![Held {
+                            by: "Linus".to_owned(),
+                            pattern: "src/**".to_owned(),
+                        }],
+                    })
+                    .unwrap();
+                    relay::put(&folder, &format!("{stem}{ANSWER}"), &answer).unwrap();
+                    return serde_json::from_slice::<Ask>(&bytes).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("the guard asked nothing");
+        })
+    };
+    let two = json!({
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: src/b.rs\n+z\n*** End Patch\n"},
+        "cwd": base,
+    });
+    let held = in_mailbox(Event::CodexEdit, &folder, &who(None, false), &two);
+    let asked = answering.join().unwrap();
+    assert_eq!(
+        (
+            asked.to.as_str(),
+            asked.path.as_str(),
+            asked.more.as_slice()
+        ),
+        (LEAD_TAG, "src/a.rs", ["src/b.rs".to_owned()].as_slice()),
+        "one question covers the whole patch (PA1213-F2)"
+    );
+    assert_eq!(
+        reason(held),
+        "CrazyAgent: files this patch writes are claimed by Linus (src/**). Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files."
     );
 }

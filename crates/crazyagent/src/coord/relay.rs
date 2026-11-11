@@ -48,6 +48,9 @@ pub(crate) const INBOX_MAX: usize = 32;
 pub(crate) const LETTER_BYTES_MAX: u64 = 16 * 1024;
 pub(crate) const ROSTER_BYTES_MAX: u64 = 4 * 1024;
 pub(crate) const ASK_BYTES_MAX: u64 = 4 * 1024;
+/// The most files one overlap question names: the files of one Codex patch, asked together
+/// so one answer and one wait cover the whole patch (PA1213-F2).
+pub(crate) const ASK_PATHS_MAX: usize = 32;
 pub(crate) const ANSWER_BYTES_MAX: u64 = 64 * 1024;
 /// The longest tool log one session keeps before the engine takes it; past it, tool calls
 /// are not counted until the next tick.
@@ -167,12 +170,15 @@ pub(crate) struct Roster {
 }
 
 /// A session's question to the engine before an edit under Overlaps Block: whether a file,
-/// relative to the repository root, is claimed by another active agent.
+/// relative to the repository root, is claimed by another active agent; `more` names the
+/// other files of the same patch, so one answer covers them all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ask {
     pub to: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more: Vec<String>,
 }
 
 /// The engine's answer to an `Ask`: the active claims of other agents that cover the
@@ -1141,9 +1147,24 @@ fn answer_asks(
             .and_then(|bytes| serde_json::from_slice::<Ask>(&bytes).ok());
         let _ = folder.remove(&held_name);
         let held = match ask.as_ref().and_then(|ask| Some((team.get(&ask.to)?, ask))) {
-            Some((agent, ask)) => held(db, project, *agent, &ask.path)?,
+            Some((agent, ask)) if ask.more.len() < ASK_PATHS_MAX => {
+                let mut all: Vec<Held> = Vec::new();
+                for path in std::iter::once(&ask.path).chain(&ask.more) {
+                    for one in held(db, project, *agent, path)? {
+                        if all.len() < HELD_MAX && !all.contains(&one) {
+                            all.push(one);
+                        }
+                    }
+                }
+                all
+            }
+            Some(_) => vec![Held {
+                by: "CrazyAgent".to_owned(),
+                pattern: "more files than one check reads; split the patch".to_owned(),
+            }],
             None => Vec::new(),
         };
+        assert!(held.len() <= HELD_MAX);
         let bytes = serde_json::to_vec(&Answer { held }).map_err(state)?;
         assert!(bytes.len() as u64 <= ANSWER_BYTES_MAX);
         let _ = put(folder, &format!("{stem}{ANSWER}"), &bytes);
