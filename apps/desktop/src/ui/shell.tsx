@@ -2,10 +2,11 @@ import type { ReactNode } from "react";
 import { BrandMark } from "./brand";
 import { Icon } from "./icon";
 import { formatRoute, type Route } from "./router";
+import { SidebarFoot, type EngineRestartControl, type EngineState } from "./sidebar-foot";
 
 export { BrandMark };
 
-export type EngineState = "connecting" | "running" | "down" | "outdated";
+export type { EngineRestartControl, EngineState };
 
 /** Says how many agents are working. Input: the count, above zero. Output: the words. */
 export function agentsWorking(count: number): string {
@@ -34,17 +35,19 @@ function WorkingCount({ count }: { count: number }) {
 
 /** The fixed 220 px sidebar as the approved design draws it: the brand, the project list alone
  * on top and scrolling by itself, a dividing line, then Home, New project, Settings and the
- * app-wide Metrics page, and a footer with the profile's initial, its name and the engine
- * state. Inputs: current route, projects, profile name, engine state and a retry action. */
-export function Sidebar({ route, projects, profileName, engine, onRetry }: {
+ * app-wide Metrics page, and a footer with the profile's initial, its name, the engine
+ * state and, on hover or keyboard focus, the Restart engine menu. Inputs: current route,
+ * projects, profile name, engine state, a retry action and the restart control, without which
+ * the footer has no menu. */
+export function Sidebar({ route, projects, profileName, engine, onRetry, restart }: {
   route: Route;
   projects: SidebarProject[] | undefined;
   profileName: string | undefined;
   engine: EngineState;
   onRetry: () => void;
+  restart?: EngineRestartControl;
 }) {
   const current = (match: boolean) => match ? "page" as const : undefined;
-  const name = profileName || "Profile";
   return <aside className="sidebar" aria-label="CrazyAgent">
     <BrandMark />
     <nav className="nav nav-projects" aria-labelledby="nav-projects">
@@ -71,18 +74,7 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
         <Icon name="trending-up" /><span className="name">Metrics</span>
       </a>
     </nav>
-    <div className="sidebar-foot">
-      <span className="avatar" aria-hidden="true">{Array.from(name)[0].toUpperCase()}</span>
-      <span className="foot-text">
-        <span className="foot-name">
-          <a className="me" href={formatRoute({ name: "settings", tab: "profile" })}>{name}</a>
-          {engine !== "running" && engine !== "connecting" && <button type="button" className="btn quiet small foot-retry" onClick={onRetry}>Try again</button>}
-        </span>
-        {engine === "running" ? <span className="engine-state running"><Icon name="server" size={13} />Engine running</span>
-          : engine === "connecting" ? <span className="engine-state connecting"><Icon name="loader-circle" size={13} spin />Connecting...</span>
-          : <span className="engine-state down"><Icon name="wifi-off" size={13} />Engine not running</span>}
-      </span>
-    </div>
+    <SidebarFoot name={profileName || "Profile"} engine={engine} onRetry={onRetry} restart={restart} />
   </aside>;
 }
 
