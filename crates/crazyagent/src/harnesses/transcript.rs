@@ -962,5 +962,51 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
     Some(typed)
 }
 
+/// Reads what was typed into a harness conversation after byte `offset` of its record,
+/// with where each typed line ends, so a caller can read on from one typed message to the
+/// next. Only lines the harness finished are read, from at most `EXCERPT_TAIL_BYTES_MAX`
+/// bytes past the offset, never following a link. Takes the harness, the record and the
+/// offset. Returns the typed texts oldest first, each with the byte offset just past its
+/// line, and the offset just past the last line read; none when the record cannot be read
+/// or is now shorter than the offset.
+pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
+    let mut file = open_plain(record)?;
+    let length = file.metadata().ok()?.len();
+    if length < offset {
+        return None;
+    }
+    let mut read = Vec::new();
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.take(EXCERPT_TAIL_BYTES_MAX)
+        .read_to_end(&mut read)
+        .ok()?;
+    let mut typed = Vec::new();
+    let mut end = offset;
+    for line in read.split_inclusive(|byte| *byte == b'\n') {
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        end += u64::try_from(line.len()).ok()?;
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let said = match harness {
+            "codex" => codex_message(&value),
+            "claude-code" => claude_message(&value),
+            _ => None,
+        };
+        if let Some((Speaker::Input, text)) = said {
+            typed.push((end, text));
+        }
+    }
+    let read_bytes = u64::try_from(read.len()).ok()?;
+    if end == offset && read_bytes == EXCERPT_TAIL_BYTES_MAX {
+        end = offset + read_bytes;
+    }
+    assert!(end >= offset);
+    assert!(end - offset <= EXCERPT_TAIL_BYTES_MAX);
+    Some((typed, end))
+}
+
 #[cfg(all(test, unix))]
 mod tests;

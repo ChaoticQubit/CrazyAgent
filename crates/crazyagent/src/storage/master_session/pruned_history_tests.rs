@@ -162,7 +162,7 @@ async fn the_next_one_turn_prompt_carries_what_was_said_in_the_live_terminal() {
         .find(&format!("Owner: {PROMPT}\nYou: {FIRST_REPLY}"))
         .expect("the engine-run turn is in the history");
     let terminal_turn = text
-        .find("Owner, in the Claude Code terminal: (The typed words were not kept.)\nYou, in the Claude Code terminal: Footer fixed")
+        .find("Typed in the Claude Code terminal: (The typed words were not kept.)\nYou, in the Claude Code terminal: Footer fixed")
         .expect("the terminal turn is in the history");
     assert!(engine_turn < terminal_turn, "{text}");
     assert_eq!(

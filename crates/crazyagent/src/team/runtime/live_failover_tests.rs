@@ -764,7 +764,7 @@ impl Team {
                                   WHERE r.session=?1 AND r.project=?2 AND r.speaker='master' AND r.mode='live'
                                   ORDER BY r.seq DESC LIMIT 1)
                  FROM session_messages t
-                 WHERE t.session=?1 AND t.project=?2 AND t.speaker='owner' AND t.mode='live'",
+                 WHERE t.session=?1 AND t.project=?2 AND t.speaker IN ('owner','engine') AND t.mode='live'",
                 params![session, self.project.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

@@ -4344,6 +4344,95 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     host.close(&[]).unwrap();
 }
 
+/// OB6-F1 and OB6-M1: a turn the one-turn master ran while a session's live terminal was
+/// off is no harness switch for the same harness. The next live start resumes the kept
+/// harness conversation by its id and hands it only that turn, in its launch
+/// instructions, also with On harness switch set to Start fresh, and records no switch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries_the_turn() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::OnHarnessSwitch {
+            project_id: project.clone(),
+            mode: crate::team::SwitchMode::Fresh,
+            version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
+        }],
+    );
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let (first, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    stop_live(&fixture, &mut team);
+    let session = crate::protocol::SessionId::new("s-one").unwrap();
+    let asked = crate::master_sessions::Asked::Owner(Some("Name the release"));
+    crate::master_sessions::one_turn_asked(
+        &fixture.connection,
+        &project,
+        &session,
+        crate::master_session::MasterBackend::Codex,
+        "turn-1",
+        &asked,
+    )
+    .unwrap();
+    crate::master_sessions::one_turn_reply(
+        &fixture.connection,
+        &session,
+        "turn-1",
+        "Call it Aurora",
+    )
+    .unwrap();
+
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the kept conversation starts again", |f| {
+        launches(f, master).len() == 2 && live_agent(&f.connection).is_some()
+    });
+
+    assert!(
+        launches(&fixture, master)[1].ends_with(&format!(" resume {first}")),
+        "{:?}",
+        launches(&fixture, master)
+    );
+    let briefed = codex_instructions(&fixture, master);
+    assert!(
+        briefed.contains(
+            "While your conversation was closed, the one-turn master (Codex) ran this session."
+        ),
+        "{briefed}"
+    );
+    assert!(
+        briefed.contains("Owner: Name the release\nYou: Call it Aurora"),
+        "{briefed}"
+    );
+    assert!(
+        !briefed.contains("You: Done."),
+        "the resumed conversation is not handed its own words: {briefed}"
+    );
+    assert_eq!(pasted(&fixture, master), "", "the turn is never typed");
+    let switches: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_session_switches", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(switches, 0, "a change of mode records no harness switch");
+    assert_eq!(masters(&fixture.connection), [master]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// A session whose kept rollout the harness reader refuses at a resume, here because a
 /// tools-on master rewrote its first line to name another working folder, is not resumed
 /// again: that start ends without turning the live switch off, and the next start begins a

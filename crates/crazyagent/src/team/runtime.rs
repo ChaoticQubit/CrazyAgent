@@ -538,6 +538,7 @@ struct Worker {
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
+    fed: Option<crate::master_sessions::Fed>,
     session: Option<String>,
     seed: Option<String>,
     bound: Option<TurnBound>,
@@ -3691,10 +3692,13 @@ impl TeamRuntime {
     /// resuming that conversation; otherwise the project's last master on this harness
     /// starts again in its own worktree and home, so nothing it left there is lost, or a new
     /// one starts. A session with earlier turns that cannot continue gets a fresh harness
-    /// conversation seeded with them, and its note says so. A session whose conversation ran
-    /// on another harness follows the owner's On harness switch setting: Carry over seeds
-    /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
-    /// note marks the switch. Takes the setup, the model access, the master harness, the account
+    /// conversation seeded with them, and its note says so. A session another harness ran
+    /// since follows the owner's On harness switch setting: Start fresh seeds nothing, Carry
+    /// over hands the other master's turns over, and either note marks the switch. A session
+    /// only the one-turn master of the same harness ran since is no switch and is always
+    /// carried on. What is carried goes into the kept conversation when it can continue, as
+    /// only the turns it has not seen, else into a new conversation as a bounded handoff.
+    /// Takes the setup, the model access, the master harness, the account
     /// and the live session. Returns the agent id with the note to show, Held while a projects
     /// home move holds the project folder, or the plain reason it could not start.
     fn start_master(
@@ -3709,32 +3713,58 @@ impl TeamRuntime {
         let tools = stored.team.master_tools;
         let launch = launch_harness(harness).unwrap_or(harness);
         let session = session.map(SessionId::new).transpose().map_err(error)?;
-        let switched = match &session {
+        let taken = match &session {
             Some(session) => {
-                crate::master_sessions::switched_from(&self.connection, project, session, launch)?
+                crate::master_sessions::taken_from(&self.connection, project, session, launch)?
             }
             None => None,
         };
         let mut switch_note = None;
-        let mut switch_mode = None;
-        let mut plan = match (&session, switched) {
-            (Some(session), Some(from)) => {
-                let to = crate::master_sessions::harness_label(launch);
-                let mode = super::on_harness_switch(&self.connection, project)?;
-                switch_mode = Some(mode);
+        let mut settles = None;
+        let mut carried = None;
+        let mut plan = match (&session, taken) {
+            (Some(session), Some(taken)) => {
+                let mode = if taken.harness {
+                    super::on_harness_switch(&self.connection, project)?
+                } else {
+                    super::SwitchMode::Carry
+                };
+                settles = Some((mode, taken.harness));
+                let note = crate::master_sessions::takeover_note(
+                    crate::master_sessions::MasterMode::Live,
+                    launch,
+                    mode,
+                    taken.harness,
+                );
+                let from = crate::master_sessions::harness_label(&taken.from).to_owned();
                 match mode {
-                    super::SwitchMode::Carry => ResumePlan::Fresh {
-                        seed: crate::master_sessions::handoff(
-                            &self.connection,
-                            project,
-                            session,
-                            crate::master_sessions::harness_label(&from),
-                        )?,
-                        note: crate::master_sessions::switched_note(to, mode),
-                    },
                     super::SwitchMode::Fresh => {
-                        switch_note = Some(crate::master_sessions::switched_note(to, mode));
+                        switch_note = Some(note);
                         ResumePlan::New
+                    }
+                    super::SwitchMode::Carry => {
+                        match self.kept_plan(access, project, session, launch, account)? {
+                            kept @ ResumePlan::Resume { .. } => {
+                                let seed = crate::master_sessions::handoff_resumed(
+                                    &self.connection,
+                                    project,
+                                    session,
+                                    launch,
+                                    &from,
+                                )?;
+                                carried = Some((seed, note, from));
+                                kept
+                            }
+                            ResumePlan::Fresh { .. } | ResumePlan::New => ResumePlan::Fresh {
+                                seed: crate::master_sessions::handoff(
+                                    &self.connection,
+                                    project,
+                                    session,
+                                    &from,
+                                )?,
+                                note,
+                            },
+                        }
                     }
                 }
             }
@@ -3748,19 +3778,7 @@ impl TeamRuntime {
             {
                 ResumePlan::New
             }
-            (Some(session), None) => {
-                let pool = match eligible_accounts(access, project, launch) {
-                    Accounts::Usable(pool) => pool,
-                    Accounts::NoPool => Vec::new(),
-                };
-                crate::master_sessions::resume_harness(
-                    &self.connection,
-                    project,
-                    session,
-                    launch,
-                    &|kept| super::resumes_on(&pool, account, kept),
-                )?
-            }
+            (Some(session), None) => self.kept_plan(access, project, session, launch, account)?,
             (None, _) => ResumePlan::New,
         };
         if let ResumePlan::Resume {
@@ -3784,23 +3802,39 @@ impl TeamRuntime {
                 None,
             );
             self.resuming = None;
+            let session = session.as_ref().expect("only a session resumes");
             if let Ok(id) = revived? {
                 assert_eq!(id, *agent);
-                return Ok(Start::Started(self.seat_session(
-                    id,
-                    session.as_ref(),
-                    None,
-                )));
+                if let Some((mode, changed)) = settles {
+                    settle_takeover(&self.connection, project, session, launch, mode, changed)?;
+                }
+                let seeded = carried.map(|(seed, note, _)| (seed, note));
+                return Ok(Start::Started(self.seat_session(id, Some(session), seeded)));
             }
-            let session = session.as_ref().expect("only a session resumes");
-            let kept =
-                super::master::session_conversation(&self.connection, project, session.as_str())?;
-            plan = crate::master_sessions::fresh_harness(
-                &self.connection,
-                project,
-                session,
-                kept.as_ref(),
-            )?;
+            plan = match carried.take() {
+                Some((_, note, from)) => ResumePlan::Fresh {
+                    seed: crate::master_sessions::handoff(
+                        &self.connection,
+                        project,
+                        session,
+                        &from,
+                    )?,
+                    note,
+                },
+                None => {
+                    let kept = super::master::session_conversation(
+                        &self.connection,
+                        project,
+                        session.as_str(),
+                    )?;
+                    crate::master_sessions::fresh_harness(
+                        &self.connection,
+                        project,
+                        session,
+                        kept.as_ref(),
+                    )?
+                }
+            };
         }
         let seeded = match plan {
             ResumePlan::Fresh { seed, note } => Some((seed, note)),
@@ -3836,11 +3870,36 @@ impl TeamRuntime {
                 Start::Refused(reason) => return Ok(Start::Refused(reason)),
             },
         };
-        if let (Some(session), Some(mode)) = (&session, switch_mode) {
-            super::record_switch(&self.connection, project, session.as_str(), launch, mode)?;
+        if let (Some(session), Some((mode, changed))) = (&session, settles) {
+            settle_takeover(&self.connection, project, session, launch, mode, changed)?;
         }
         let (id, note) = self.seat_session(started, session.as_ref(), seeded);
         Ok(Start::Started((id, note.or(switch_note))))
+    }
+
+    /// Plans a live start of a session no other master ran since: it continues the
+    /// conversation the session kept on an account the schedule accepts for the one about to
+    /// start, else starts as `resume_harness` says. Takes the model access, the project, the
+    /// session, the launch harness and the account. Returns the plan.
+    fn kept_plan(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        session: &SessionId,
+        launch: &str,
+        account: &TeamAccount,
+    ) -> Result<ResumePlan, EngineError> {
+        let pool = match eligible_accounts(access, project, launch) {
+            Accounts::Usable(pool) => pool,
+            Accounts::NoPool => Vec::new(),
+        };
+        crate::master_sessions::resume_harness(
+            &self.connection,
+            project,
+            session,
+            launch,
+            &|kept| super::resumes_on(&pool, account, kept),
+        )
     }
 
     /// Binds a live master that just started to the session it runs, with the seed its
@@ -4426,6 +4485,12 @@ impl TeamRuntime {
                 "A team message could not be typed into the master because it is empty or not plain text.",
             );
         }
+        let fed = if author == "owner" {
+            crate::master_sessions::Fed::Owner(text)
+        } else {
+            crate::master_sessions::Fed::Engine(text)
+        };
+        self.workers.get_mut(&id).expect("master worker exists").fed = Some(fed);
         self.unread.remove(project);
         super::master::clear_problem(&self.connection, project, super::master::MASTER_NOT_READING)?;
         if let Some(edit) = &edit {
@@ -6247,6 +6312,7 @@ impl TeamRuntime {
                 kept_session,
                 fresh,
                 own_turn: None,
+                fed: None,
                 own_rules: None,
                 turn_started: None,
                 session: None,
@@ -8247,6 +8313,7 @@ impl TeamRuntime {
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
+                let fed = worker.fed.take();
                 let live_session = worker
                     .session
                     .clone()
@@ -8254,11 +8321,12 @@ impl TeamRuntime {
                     .map(|session| (worker.project.clone(), session, worker.harness.clone()));
                 super::master::turn_started(&self.connection, id)?;
                 if let Some((project, session, harness)) = live_session {
-                    crate::master_sessions::mark_owner_turn(
+                    crate::master_sessions::mark_live_turn(
                         &self.connection,
                         &project,
                         &session,
                         &harness,
+                        fed.as_ref(),
                     )?;
                 }
                 self.mark_agent(id, AgentStatus::Working, None)?;
@@ -8270,6 +8338,7 @@ impl TeamRuntime {
             } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let started = worker.turn_started.take();
+                worker.fed = None;
                 worker.idle_since = Instant::now();
                 worker.worked = true;
                 worker.ended_well = end == TurnEnd::Success;
@@ -10566,6 +10635,26 @@ fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, us
     assert!((1..=ready.len()).contains(&held));
     assert!(text.len() <= max);
     (text, held)
+}
+
+/// Settles a takeover of a session's conversation by a live master that started: a change
+/// of harness is recorded as the session's switch, a change of mode alone only as the
+/// divider that the turns were handed over. Takes the connection, project, session, launch
+/// harness, the mode it was taken over under and whether the harness changed. Returns any
+/// SQLite failure.
+fn settle_takeover(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    launch: &str,
+    mode: super::SwitchMode,
+    changed: bool,
+) -> Result<(), EngineError> {
+    assert!(changed || mode == super::SwitchMode::Carry);
+    if changed {
+        return super::record_switch(connection, project, session.as_str(), launch, mode);
+    }
+    crate::master_sessions::note_continued(connection, project.as_str(), session.as_str(), launch)
 }
 
 /// Writes what a live master is typed for one pending message: the owner's direct prompt
