@@ -4846,7 +4846,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
 /// harness conversation by its id and hands it only that turn, in its launch
 /// instructions, also with On harness switch set to Start fresh, and records no switch.
 /// OB6-R2-F2: a later start of the same conversation reads that turn again, since only
-/// launch instructions carry it, and stores no second divider.
+/// launch instructions carry it, and stores no further divider.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries_the_turn() {
@@ -4925,6 +4925,20 @@ fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries
         })
         .unwrap();
     assert_eq!(switches, 0, "a change of mode records no harness switch");
+    let dividers = |connection: &rusqlite::Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE session='s-one' AND speaker='switch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        dividers(&fixture.connection),
+        2,
+        "the one-turn master's takeover and the live terminal's are each stored once"
+    );
 
     stop_live(&fixture, &mut team);
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
@@ -4949,15 +4963,11 @@ fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries
         "a later start still reads the turn its record does not hold: {again}"
     );
     assert!(!again.contains("You: Done."), "{again}");
-    let dividers: i64 = fixture
-        .connection
-        .query_row(
-            "SELECT COUNT(*) FROM session_messages WHERE session='s-one' AND speaker='switch'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(dividers, 1, "the takeover is stored once");
+    assert_eq!(
+        dividers(&fixture.connection),
+        2,
+        "a later start of the kept conversation stores no divider"
+    );
     assert_eq!(masters(&fixture.connection), [master]);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
