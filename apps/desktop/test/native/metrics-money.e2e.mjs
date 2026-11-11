@@ -238,8 +238,7 @@ test("CB-E8 history fills the activity chart through the recount", OPTIONS, asyn
     editingTurn(runtime, "cb-h", new Date(Date.now() - 3_600_000).toISOString());
     asBeforeTheRecount(runtime, "no-such-session", 0);
     await me.click("Metrics", ".app-nav a.nav-item");
-    const panelText = () => page.evaluate(`document.querySelector(".mx-page").innerText`);
-    await eventually("the history in By activity", async () => /By activity[\s\S]*Feature/u.test(await panelText()));
+    await eventually("the history in By activity", async () => /By activity[\s\S]*Feature/u.test(await metricsText(page)));
     await me.capture("metrics-activity-history");
   });
 });
