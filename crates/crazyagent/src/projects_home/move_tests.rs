@@ -282,6 +282,17 @@ impl Case {
         crate::sandbox::hidden_paths::save(&self.db, PROJECT, &[self.repo.join("secret")]).unwrap();
     }
 
+    /// Records one research job of the project. Input: its status.
+    fn research(&self, status: &str) {
+        self.db
+            .execute(
+                "INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms)
+                 VALUES (?1,'market_research','codex',1,?2,1)",
+                params![PROJECT, status],
+            )
+            .unwrap();
+    }
+
     fn registered(&self) -> Vec<Registered> {
         vec![Registered {
             project_id: ProjectId::new(PROJECT).unwrap(),
@@ -436,6 +447,7 @@ fn moving_a_project_kept_in_place_updates_every_stored_folder_and_repoints_its_a
     let target = case.target();
     case.own_clone(7);
     case.fill_inventory(7);
+    case.research("needs_pool");
     for (table, column) in PATH_COLUMNS {
         assert!(
             case.rows_under(table, column, &origin) > 0,
@@ -500,6 +512,14 @@ fn a_project_already_inside_the_home_is_refused() {
 fn a_project_with_a_running_agent_is_refused_and_nothing_moves() {
     let case = Case::new();
     let origin = case.repo.clone();
+    case.research("running");
+    assert_eq!(
+        case.move_project(AddMode::Move, &[]).unwrap_err().0,
+        "move_project_busy"
+    );
+    case.db
+        .execute("UPDATE research_jobs SET status='queued'", [])
+        .unwrap();
     case.db
         .execute(
             "INSERT INTO worktree_leases(task,repository,path,body) VALUES ('task-1',?1,?2,?3)",

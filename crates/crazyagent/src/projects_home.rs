@@ -1289,6 +1289,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "move_project_unavailable" => {
             "The engine could not check the project's agents. Nothing was moved."
         }
+        "move_project_interrupted" => {
+            "The move stopped part way. Check the project folder before trying again."
+        }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",
         "folder_size_unreadable" => "Some files in that folder cannot be read.",

@@ -264,8 +264,9 @@ fn count(
 }
 
 /// Names what keeps a project from moving now, as its refusal code: `move_project_busy`
-/// for an agent that runs while the team is not stopped, research that is queued, running
-/// or waiting for a pool, an onboarding step that runs or a change set step in flight;
+/// for an agent that runs while the team is not stopped, research that runs (research
+/// still waiting starts only after the move, which holds the folder), an onboarding step
+/// that runs or a change set step in flight;
 /// `move_project_master_session` for a master session that holds its own working copy of
 /// the repository, which lives outside the folder and would lose it. Inputs: the
 /// transaction, the project and its folder. Output: the code, or None.
@@ -283,7 +284,7 @@ fn busy(
         tx,
         "research_jobs",
         "SELECT COUNT(*) FROM research_jobs
-         WHERE project=?1 AND status IN ('queued','running','needs_pool')",
+         WHERE project=?1 AND status='running'",
         [id],
     )? + count(
         tx,
@@ -476,7 +477,9 @@ pub(crate) fn finish(
     if !done {
         return Ok(Some(Finished::Left));
     }
-    Ok(Some(Finished::Moved { repointed: 0 }))
+    let repointed = repoint(tx, &pending.origin, &pending.target)?;
+    rewrite(tx, &pending.project, &pending.origin, &pending.target)?;
+    Ok(Some(Finished::Moved { repointed }))
 }
 
 /// Re-points the agent copies the store records inside the old folder, now at the same
