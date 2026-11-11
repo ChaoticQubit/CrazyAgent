@@ -1005,13 +1005,17 @@ fn a_lead_worker_takes_in_its_lead_s_gitlink_and_its_own_is_still_refused() {
     );
 }
 
-/// Removes the owner repository's `.git/info`, as a clone or `init --template=` leaves a
-/// project, and writes a grafts file into a case variant of it that gives `child` the only
-/// parent `parent`, as a project-root agent could (land-19 r2 M1). The owner's own git then
-/// answers ancestry from it. Inputs: the case, the grafted commit and its claimed parent.
+/// Leaves the owner repository with no `.git/info`, as a clone or `init --template=` leaves
+/// a project and as the case's repository starts, and writes a grafts file into a case
+/// variant of it that gives `child` the only parent `parent`, as a project-root agent could
+/// (land-19 r2 M1). The owner's own git then answers ancestry from it. Inputs: the case,
+/// the grafted commit and its claimed parent.
 fn forge_grafts(case: &Case, child: &str, parent: &str) {
     let git = case.repo.join(".git");
-    std::fs::remove_dir_all(git.join("info")).unwrap();
+    match std::fs::remove_dir_all(git.join("info")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        removed => removed.unwrap(),
+    }
     write(
         &git.join("INFO").join("grafts"),
         &format!("{child} {parent}\n"),
@@ -3737,6 +3741,7 @@ fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt
 #[test]
 fn a_set_accepted_in_a_place_a_later_build_named_still_lists_and_keeps_that_place() {
     let case = Case::new();
+    closing_tables(&case);
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
