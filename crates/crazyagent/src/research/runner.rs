@@ -4572,6 +4572,50 @@ mod tests {
         assert!(!worktree.join(".git").exists());
     }
 
+    /// A project whose config names a thousand stale branches lists more keys than a pipe
+    /// holds (ScholarScope, v2.2.1 item 8): its agent worktree is still added, at once,
+    /// since the setup step asks only for the filter keys it reads.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_worktree_is_added_when_the_project_config_lists_more_than_64_kib_of_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("home");
+        let tmp = base.join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let sections: String = (0..1000)
+            .map(|number| {
+                format!(
+                    "[branch \"stale-branch-number-{number}\"]\n\tremote = origin\n\tmerge = refs/heads/stale-branch-number-{number}\n"
+                )
+            })
+            .collect();
+        let mut config = OpenOptions::new()
+            .append(true)
+            .open(project.join(".git").join("config"))
+            .unwrap();
+        config.write_all(sections.as_bytes()).unwrap();
+        drop(config);
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = base.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = crate::projects_home::state_folder(&project)
+            .join("worktrees")
+            .join("agent-1");
+        let started = Instant::now();
+
+        let added = add_worktree(&sandbox, &profile, &worktree);
+
+        assert!(added.is_ok(), "{added:?}");
+        assert!(worktree.join(".git").is_file());
+        assert!(started.elapsed() < SETUP_TIMEOUT);
+    }
+
     #[cfg(target_os = "macos")]
     fn repository_git(project: &Path, arguments: &[&str]) {
         let status = crate::spawn_gate::status(

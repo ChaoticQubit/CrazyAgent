@@ -14900,3 +14900,54 @@ fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_workt
     assert!(tried > 0);
     assert_eq!(hits, 0, "planted.bin was written outside the worktree");
 }
+
+/// An owner repository whose config names a thousand stale branches lists more keys than
+/// the listing bound holds (ScholarScope, v2.2.1 item 8): an agent's own clone of it is
+/// still made, since engine git asks only for the filter keys it reads.
+#[test]
+fn an_agent_clone_is_made_when_the_owner_config_lists_more_than_64_kib_of_keys() {
+    let case = Case::new();
+    let mut sections = String::new();
+    for number in 0..1000 {
+        sections.push_str(&format!(
+            "[branch \"stale-branch-number-{number}\"]\n\tremote = origin\n\tmerge = refs/heads/stale-branch-number-{number}\n"
+        ));
+    }
+    let config = case.repo.join(".git/config");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap();
+    std::io::Write::write_all(&mut file, sections.as_bytes()).unwrap();
+    drop(file);
+    assert!(case.owner(&["config", "--list", "--name-only"]).len() > git::LISTING_BYTES_MAX);
+    let worktree = case.repo.parent().unwrap().join("agent-many-branches");
+    add_agent_clone(&case.repo, &worktree).unwrap();
+    assert!(crate::agent_git::git_dir(&worktree).join("HEAD").is_file());
+}
+
+/// The narrowed listing still finds every filter driver git would run: one in the
+/// repository's own config, one whose section name is written in capitals and one in a
+/// file that config includes are each switched off, and a branch named like a filter is
+/// not taken for one.
+#[test]
+fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
+    let case = Case::new();
+    case.owner(&["config", "filter.lfs.smudge", "git-lfs smudge -- %f"]);
+    case.owner(&["config", "branch.filter.fake.remote", "origin"]);
+    let included = case.home.join("included.config");
+    write(
+        &included,
+        "[FILTER \"shouted\"]\n\tclean = cat\n[filter \"included\"]\n\tprocess = cat\n",
+    );
+    case.owner(&["config", "include.path", included.to_str().unwrap()]);
+    let repo = git::Repo::open(&case.repo, &case.repo.join(".git"), None).unwrap();
+    let overrides = repo.overrides();
+    for driver in ["lfs", "shouted", "included"] {
+        for setting in ["smudge=", "clean=", "process=", "required=false"] {
+            let argument = format!("filter.{driver}.{setting}");
+            assert!(overrides.contains(&argument), "{argument} missing");
+        }
+    }
+    assert_eq!(overrides.len(), 3 * 8);
+}
