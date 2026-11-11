@@ -3723,23 +3723,15 @@ impl TeamRuntime {
                 let mode = super::on_harness_switch(&self.connection, project)?;
                 switch_mode = Some(mode);
                 match mode {
-                    super::SwitchMode::Carry => {
-                        let kept = super::master::session_conversation(
+                    super::SwitchMode::Carry => ResumePlan::Fresh {
+                        seed: crate::master_sessions::handoff(
                             &self.connection,
                             project,
-                            session.as_str(),
-                        )?;
-                        ResumePlan::Fresh {
-                            seed: crate::master_sessions::handoff(
-                                &self.connection,
-                                project,
-                                session,
-                                kept.as_ref(),
-                                crate::master_sessions::harness_label(&from),
-                            )?,
-                            note: crate::master_sessions::switched_note(to, mode),
-                        }
-                    }
+                            session,
+                            crate::master_sessions::harness_label(&from),
+                        )?,
+                        note: crate::master_sessions::switched_note(to, mode),
+                    },
                     super::SwitchMode::Fresh => {
                         switch_note = Some(crate::master_sessions::switched_note(to, mode));
                         ResumePlan::New
