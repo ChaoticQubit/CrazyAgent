@@ -38,7 +38,8 @@ export type Reply<T> =
 /** One event the engine pushes on an `ide.events` subscription. */
 export type EngineEvent =
   | { name: (typeof CHANGES)[number] }
-  | { name: "reveal"; request: string; path: string };
+  | { name: "reveal"; request: string; path: string }
+  | { name: "run_command"; request: string; command: string; press_enter: boolean };
 
 /** What a subscription receives: its confirmation, events, or the refusal that ends it. */
 type Pushed = Reply<unknown> | { kind: "event"; event: EngineEvent };
