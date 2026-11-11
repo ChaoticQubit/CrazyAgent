@@ -281,6 +281,13 @@
     "allow-desktop-link-cli",
     "allow-desktop-engine-versions",
     "allow-desktop-restart-engine",
-    "allow-desktop-ide-focus"
+    "allow-desktop-ide-focus",
+    "allow-desktop-overview-read",
+    "allow-desktop-overview-refresh",
+    "allow-desktop-overview-save",
+    "allow-desktop-overview-accept",
+    "allow-desktop-overview-reject",
+    "allow-desktop-overview-set-refresh",
+    "allow-desktop-overview-set-apply"
   ]
 }

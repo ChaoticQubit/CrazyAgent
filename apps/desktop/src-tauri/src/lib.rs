@@ -43,12 +43,14 @@ use crazyagent::plugins::{
     EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
 };
 use crazyagent::pools::PoolSummary;
+use crazyagent::project_overview::{Apply, Overview, Tab};
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
+use crazyagent::roadmap_status::Refresh;
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
@@ -3297,6 +3299,98 @@ async fn desktop_ide_set_run_mode(
 }
 
 #[tauri::command]
+async fn desktop_overview_read(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Overview, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.overview_read(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_overview_refresh(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.overview_refresh(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_overview_save(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    tab: Tab,
+    text: String,
+    version: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .overview_save(project_id, tab, text, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_overview_accept(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    tab: Tab,
+    version: String,
+    proposal_version: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .overview_accept(project_id, tab, version, proposal_version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_overview_reject(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    tab: Tab,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.overview_reject(project_id, tab)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_overview_set_refresh(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    refresh: Refresh,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .overview_set_refresh(project_id, refresh)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_overview_set_apply(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    apply: Apply,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.overview_set_apply(project_id, apply)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_set_reset(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4508,6 +4602,13 @@ native_commands! {
     desktop_ide_run,
     desktop_ide_run_mode,
     desktop_ide_set_run_mode,
+    desktop_overview_read,
+    desktop_overview_refresh,
+    desktop_overview_save,
+    desktop_overview_accept,
+    desktop_overview_reject,
+    desktop_overview_set_refresh,
+    desktop_overview_set_apply,
     desktop_update_settings,
     desktop_set_update_channel,
     desktop_check_update,

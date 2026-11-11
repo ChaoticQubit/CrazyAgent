@@ -36,6 +36,7 @@ mod model_access;
 mod native_auth;
 pub mod notify;
 pub mod open;
+mod overview;
 mod owner_setup;
 pub mod picker;
 mod plugins;
