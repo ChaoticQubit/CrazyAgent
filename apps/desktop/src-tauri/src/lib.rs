@@ -1923,6 +1923,7 @@ fn build_wall(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn desktop_update_project_setup(
     webview: Webview,
     state: State<'_, NativeState>,

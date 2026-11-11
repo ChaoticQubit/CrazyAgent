@@ -1049,7 +1049,7 @@ enum Line {
 
 enum Driver {
     Codex {
-        protocol: CodexProtocol,
+        protocol: Box<CodexProtocol>,
         cwd: PathBuf,
         tools: bool,
         prompt: Option<String>,
@@ -1057,7 +1057,7 @@ enum Driver {
         server_turn: bool,
     },
     Claude {
-        protocol: ClaudeProtocol,
+        protocol: Box<ClaudeProtocol>,
         turns: u64,
         interrupt: Option<String>,
         late: u64,
@@ -1073,7 +1073,7 @@ impl Driver {
                     .initialize()
                     .map_err(|_| failure("launch_protocol_failed"))?;
                 let driver = Self::Codex {
-                    protocol,
+                    protocol: Box::new(protocol),
                     cwd: request.working_dir.clone(),
                     tools: request.tools,
                     prompt: None,
@@ -1099,7 +1099,7 @@ impl Driver {
                     .map_err(|_| failure("launch_protocol_failed"))?;
                 Ok((
                     Self::Claude {
-                        protocol,
+                        protocol: Box::new(protocol),
                         turns: 0,
                         interrupt: None,
                         late: 0,

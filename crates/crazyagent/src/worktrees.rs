@@ -485,11 +485,16 @@ fn trusted(metadata: &Path, path: &Path) -> Result<std::fs::Metadata, EngineErro
     Ok(entry)
 }
 
+/// A step a test runs on a listed .git entry just before the walk reads it, given the
+/// entry and whether the read lists it as a folder.
+#[cfg(test)]
+type BeforeReadStep = Box<dyn Fn(&Path, bool)>;
+
 #[cfg(test)]
 thread_local! {
     /// What a test does to a listed .git entry just before the walk reads it, given the
     /// entry and whether the read lists it as a folder. None leaves every entry alone.
-    static BEFORE_READ: std::cell::RefCell<Option<Box<dyn Fn(&Path, bool)>>> =
+    static BEFORE_READ: std::cell::RefCell<Option<BeforeReadStep>> =
         const { std::cell::RefCell::new(None) };
 }
 
