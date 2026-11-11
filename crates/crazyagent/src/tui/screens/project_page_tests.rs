@@ -675,6 +675,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "setup",
             "team graph",
             "jobs",
+            "overview",
             "context",
             "memories"
         ],

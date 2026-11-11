@@ -7,8 +7,8 @@ use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
-    HarnessKind, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
-    TaskStart,
+    HarnessKind, NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole,
+    SubagentMode, TaskStart, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -2383,7 +2383,7 @@ impl TeamView {
     }
 
     /// Moves one coordination row to its next or previous choice and sends the change.
-    /// Native is offered only for a harness kind with native teammates.
+    /// Native is offered only for a harness kind with native sub-agents.
     /// Takes the row, the current settings and the direction. Output: the change, or Handled.
     fn coord_step(&mut self, row: CoordRow, view: &CoordinationView, forward: bool) -> TeamReply {
         let project_id = self.project.clone();
@@ -2396,9 +2396,7 @@ impl TeamView {
                 };
                 let name = harness_name(kind.as_str(), None);
                 if !current.native {
-                    self.notice = Some(Notice::plain(format!(
-                        "{name} has no native teammates, so its sub-agents are app-spawned."
-                    )));
+                    self.notice = Some(Notice::plain(native_unavailable(kind)));
                     return TeamReply::Handled;
                 }
                 let mode = match current.mode {
@@ -2411,7 +2409,15 @@ impl TeamView {
                         harness: kind,
                         mode,
                     },
-                    format!("{name} sub-agents are now {}.", mode_words(mode)),
+                    match (mode, native_scope(kind)) {
+                        (SubagentMode::Native, Some(scope)) => {
+                            format!(
+                                "{name} sub-agents are now {}. {scope}",
+                                mode_words(kind, mode)
+                            )
+                        }
+                        _ => format!("{name} sub-agents are now {}.", mode_words(kind, mode)),
+                    },
                 )
             }
             CoordRow::Delivery(kind) => {
@@ -2426,9 +2432,10 @@ impl TeamView {
                         delivery,
                     },
                     format!(
-                        "Messages to {} agents: {}.",
+                        "Messages to {} agents: {}. {}",
                         harness_name(kind.as_str(), None),
-                        delivery_words(delivery)
+                        delivery_words(delivery),
+                        delivery_scope(kind)
                     ),
                 )
             }
@@ -2700,12 +2707,16 @@ impl TeamView {
                 CoordRow::Mode(kind) => (
                     format!("{} sub-agents", harness_name(kind.as_str(), None)),
                     found(kind)
-                        .map_or("", |row| mode_words(row.mode))
+                        .map_or("", |row| mode_words(kind, row.mode))
                         .to_owned(),
-                    if found(kind).is_some_and(|row| !row.native) {
-                        "  no native teammates"
-                    } else {
-                        ""
+                    match found(kind) {
+                        Some(row) if !row.native => "  no native sub-agents",
+                        Some(row)
+                            if row.mode == SubagentMode::Native && native_scope(kind).is_some() =>
+                        {
+                            "  shown in the lead's terminal only"
+                        }
+                        _ => "",
                     },
                 ),
                 CoordRow::Delivery(kind) => (
@@ -3694,18 +3705,56 @@ fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
     all[next]
 }
 
-fn mode_words(mode: SubagentMode) -> &'static str {
-    match mode {
-        SubagentMode::AppSpawned => "app-spawned",
-        SubagentMode::Native => "native teammates",
+/// The words a coordination row shows for a harness kind's sub-agent mode (PA-7): Native
+/// names what the kind runs, an agent team's teammates or its own harness's sub-agents.
+/// Takes the kind and the mode. Returns the words.
+fn mode_words(kind: HarnessKind, mode: SubagentMode) -> &'static str {
+    match (mode, native_sub_agents(kind)) {
+        (SubagentMode::AppSpawned, _) => "app-spawned",
+        (SubagentMode::Native, NativeSubAgents::Teams) => "native teammates",
+        (SubagentMode::Native, NativeSubAgents::Threads | NativeSubAgents::Unavailable(_)) => {
+            "native sub-agents"
+        }
     }
 }
+
+/// Why a harness kind's sub-agents stay app-spawned, as the coordination editor says it
+/// when Native is chosen on a kind without native sub-agents (PA-7). Takes the kind.
+/// Returns the kind's own reason, or the general one for a kind this build runs natively.
+fn native_unavailable(kind: HarnessKind) -> &'static str {
+    match native_sub_agents(kind) {
+        NativeSubAgents::Unavailable(reason) => reason,
+        NativeSubAgents::Teams | NativeSubAgents::Threads => NATIVE_UNSUPPORTED,
+    }
+}
+
+/// The general reason a harness kind's sub-agents stay app-spawned (`coord_native_unsupported`).
+const NATIVE_UNSUPPORTED: &str =
+    "This harness has no native sub-agents, so its sub-agents are app-spawned.";
 
 fn delivery_words(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Auto => "Auto: native, typing as fallback",
         Delivery::NativeOnly => "Native only",
         Delivery::TypingOnly => "Typing only",
+    }
+}
+
+/// What the Delivery choices do on one harness kind (PA-11, DEC-141): Native only never
+/// types, and a harness with no channel while its agent works says how its messages arrive
+/// instead. The app shows the same sentences under each Messages to row. Takes the kind.
+/// Returns the sentences.
+fn delivery_scope(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => {
+            "Auto hands a message to a Claude Code agent through its relay and types it in if the relay has not taken it after 60 seconds. Native only uses the relay alone and never types. Typing only types every message in."
+        }
+        HarnessKind::Codex => {
+            "Auto hands a message to a Codex agent with tools on through its app-server bridge and types it in when the bridge can't take it. Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle. Typing only types every message in."
+        }
+        HarnessKind::Rcli => {
+            "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice."
+        }
     }
 }
 
@@ -3845,9 +3894,10 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
 }
 
 /// Which agents Background commands at task end acts on, said with every choice in the
-/// TUI and the desktop alike: Wait and a grace time only where the engine sees background
-/// commands, a Claude Code pane, and turn-end stops only where it ends them (rv-code BHT-M1).
-const BACKGROUND_SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
+/// TUI and the desktop alike: every choice on Claude Code and Codex panes, whose records
+/// report their background commands (PA-10), a turn-end stop for agents run per turn, and
+/// none for rcli, which has no tools (rv-code BHT-M1).
+const BACKGROUND_SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.
@@ -3911,9 +3961,7 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_teammate_not_found" => "That teammate has already ended.".into(),
         "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),
         "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
-        "coord_native_unsupported" => {
-            "This harness has no native teammates, so its sub-agents are app-spawned.".into()
-        }
+        "coord_native_unsupported" => NATIVE_UNSUPPORTED.into(),
         "coord_settings_invalid" => {
             "Count at most 32 tools, each named once with letters, digits, _, - or *.".into()
         }

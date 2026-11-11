@@ -79,6 +79,14 @@ fn access(project: &str, members: &[&str]) -> ModelAccess {
                     credential_ref: reference("key-reference"),
                 },
             ),
+            connection(
+                "anthropic-keyed",
+                "https://api.anthropic.com/v1",
+                "anthropic-messages",
+                ModelAuthentication::ApiKey {
+                    credential_ref: reference("anthropic-key-reference"),
+                },
+            ),
         ],
         pools: vec![AccountPool {
             id: reference("team-pool"),
@@ -427,11 +435,18 @@ fn a_finished_agent_sharing_a_running_agent_s_name_shows_by_number_in_the_team_s
 }
 
 #[test]
-fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
+fn endpoint_accounts_with_or_without_a_key_are_eligible_by_wire_format() {
     let project = ProjectId::new("team-accounts").unwrap();
     let all = access(
         "team-accounts",
-        &["local-a", "keyed", "anthropic-local", "local-b", "local-a"],
+        &[
+            "local-a",
+            "keyed",
+            "anthropic-local",
+            "anthropic-keyed",
+            "local-b",
+            "local-a",
+        ],
     );
     let Accounts::Usable(codex) = eligible_accounts(&all, &project, "codex") else {
         panic!("pool assigned");
@@ -441,17 +456,32 @@ fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
             .iter()
             .map(|a| a.connection.as_str())
             .collect::<Vec<_>>(),
-        ["local-a", "local-b"]
+        ["local-a", "keyed", "local-b"]
     );
     let Accounts::Usable(claude) = eligible_accounts(&all, &project, "claude-code") else {
         panic!("pool assigned");
     };
     assert_eq!(
-        claude
-            .iter()
-            .map(|a| a.connection.as_str())
-            .collect::<Vec<_>>(),
-        ["anthropic-local"]
+        claude,
+        [
+            TeamAccount {
+                connection: reference("anthropic-local"),
+                reach: TeamReach::Endpoint {
+                    base_url: "http://127.0.0.1:11434".into(),
+                    model: "qwen2.5:0.5b".into(),
+                    key: None,
+                },
+            },
+            TeamAccount {
+                connection: reference("anthropic-keyed"),
+                reach: TeamReach::Endpoint {
+                    base_url: "https://api.anthropic.com".into(),
+                    model: "qwen2.5:0.5b".into(),
+                    key: Some(reference("anthropic-key-reference")),
+                },
+            },
+        ],
+        "Claude Code adds /v1/messages itself, so the stored /v1 is dropped"
     );
     assert_eq!(
         eligible_accounts(&all, &ProjectId::new("other").unwrap(), "codex"),
@@ -477,6 +507,7 @@ fn managed_profiles_are_listed_only_for_their_own_harness() {
                 reach: TeamReach::Endpoint {
                     base_url: "http://127.0.0.1:11434/v1".into(),
                     model: "qwen2.5:0.5b".into(),
+                    key: None,
                 },
             },
             TeamAccount {
@@ -484,6 +515,14 @@ fn managed_profiles_are_listed_only_for_their_own_harness() {
                 reach: TeamReach::Managed {
                     profile_ref: reference("codex-signed-in-profile"),
                     model: Some("gpt-5.5".into()),
+                },
+            },
+            TeamAccount {
+                connection: reference("keyed"),
+                reach: TeamReach::Endpoint {
+                    base_url: "https://api.example.org/v1".into(),
+                    model: "qwen2.5:0.5b".into(),
+                    key: Some(reference("key-reference")),
                 },
             },
         ]
@@ -521,6 +560,7 @@ fn a_kept_conversation_moves_only_between_subscriptions_of_the_pool() {
         reach: TeamReach::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         },
     };
     let pool = [
@@ -5271,15 +5311,19 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     };
     assert_eq!(too_many.validate().unwrap_err().0, "coord_settings_invalid");
     assert_eq!(act(too_many).unwrap_err(), "coord_settings_invalid");
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
-        let native = TeamAction::HarnessMode {
-            project_id: project.clone(),
-            harness,
-            mode: SubagentMode::Native,
-        };
-        assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
-        assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
-    }
+    let native = TeamAction::HarnessMode {
+        project_id: project.clone(),
+        harness: HarnessKind::Rcli,
+        mode: SubagentMode::Native,
+    };
+    assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
+    assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
+    let codex = TeamAction::HarnessMode {
+        project_id: project.clone(),
+        harness: HarnessKind::Codex,
+        mode: SubagentMode::Native,
+    };
+    assert!(codex.validate().is_ok());
 
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,

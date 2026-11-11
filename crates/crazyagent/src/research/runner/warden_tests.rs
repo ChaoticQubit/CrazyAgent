@@ -82,6 +82,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "local-model".into(),
+        key: None,
     };
     runner.run_read_only(
         &ReadOnlyRun {

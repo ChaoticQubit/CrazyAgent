@@ -73,9 +73,12 @@ const CODEX_TOOLS_ON: [&str; 8] = [
     "features.plugins=false",
     "features.goals=false",
     "features.multi_agent=false",
-    "features.multi_agent_v2=false",
+    CODEX_MULTI_AGENT_V2_OFF,
     "mcp_servers={}",
 ];
+/// The tools-on Codex setting that keeps multi-agent v2 off; a native lead's launch leaves it
+/// out so the v2 table its `config.toml` holds turns Codex's own sub-agents on (PA-7).
+const CODEX_MULTI_AGENT_V2_OFF: &str = "features.multi_agent_v2=false";
 
 type Invocation = (Vec<OsString>, Vec<(&'static str, OsString)>);
 
@@ -637,7 +640,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref())?,
+        "codex" => codex_invocation(request, installed, key_file.as_deref())?,
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
@@ -718,11 +721,11 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
 
 /// The Codex app-server command line. Every folder of the working folder's walk is recorded
 /// untrusted, so the app server neither loads a repository's `.codex` nor trusts a folder by
-/// itself. Inputs: the request, whether context is on and the key file. Output: the
+/// itself. Inputs: the request, the installed context, if any, and the key file. Output: the
 /// arguments and variables, or `launch_working_dir_unavailable`.
 fn codex_invocation(
     request: &LaunchRequest,
-    context: bool,
+    installed: Option<&Installed>,
     key_file: Option<&str>,
 ) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
@@ -732,7 +735,7 @@ fn codex_invocation(
         .canonicalize()
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file)
+    for setting in codex_launch_settings(request, installed, key_file)
         .into_iter()
         .chain([super::codex_folder::untrusted(&folder)?])
     {
@@ -746,7 +749,7 @@ fn codex_invocation(
 /// Checks the path of an account's key file before a harness is told to read it: an
 /// absolute path that fits inside a single-quoted shell word and a TOML string unchanged.
 /// Input: the path. Output: its text, or `launch_key_file_invalid`.
-pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
+pub(crate) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
     let file = path
         .to_str()
         .filter(|text| !text.chars().any(char::is_control))
@@ -755,6 +758,30 @@ pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
         return Err(failure("launch_key_file_invalid"));
     }
     Ok(file.to_owned())
+}
+
+/// Builds a Codex launch's `-c` settings from [`codex_configuration`] and what its installed
+/// context asks for: a native lead (PA-7) leaves out the multi-agent v2 off switch, so its
+/// `config.toml` turns Codex's own sub-agents on. Inputs: the request, the installed
+/// context, if any, and the key file. Output: the settings, in order.
+pub(super) fn codex_launch_settings(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    key_file: Option<&str>,
+) -> Vec<String> {
+    let native = installed.is_some_and(Installed::native_threads);
+    assert!(!native || request.tools);
+    let mut settings = codex_configuration(request, installed.is_some(), key_file);
+    if native {
+        settings.retain(|setting| setting != CODEX_MULTI_AGENT_V2_OFF);
+    }
+    assert_eq!(
+        settings
+            .iter()
+            .any(|setting| setting == CODEX_MULTI_AGENT_V2_OFF),
+        request.tools && !native
+    );
+    settings
 }
 
 /// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
@@ -1055,6 +1082,7 @@ enum Driver {
         prompt: Option<String>,
         interrupt: bool,
         server_turn: bool,
+        native_threads: bool,
     },
     Claude {
         protocol: ClaudeProtocol,
@@ -1065,7 +1093,15 @@ enum Driver {
 }
 
 impl Driver {
-    fn new(request: &LaunchRequest) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
+    /// Starts the protocol driver of one headless launch: a Codex native lead (PA-7) keeps
+    /// the sub-agent threads its Codex starts, any other Codex launch interrupts each one.
+    /// Inputs: the request and whether it is a Codex native lead. Output: the driver and its
+    /// first frames, or a plain refusal code.
+    fn new(
+        request: &LaunchRequest,
+        native_threads: bool,
+    ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
+        assert!(!native_threads || (harness_id(request) == "codex" && request.tools));
         match harness_id(request) {
             "codex" => {
                 let mut protocol = CodexProtocol::new();
@@ -1079,6 +1115,7 @@ impl Driver {
                     prompt: None,
                     interrupt: false,
                     server_turn: false,
+                    native_threads,
                 };
                 Ok((driver, vec![start]))
             }
@@ -1209,6 +1246,7 @@ impl Driver {
                 prompt,
                 interrupt,
                 server_turn,
+                native_threads,
             } => {
                 let method = crate::adapters::claude::parse_line(line)
                     .map_err(|_| failure("launch_protocol_failed"))?;
@@ -1264,6 +1302,7 @@ impl Driver {
                                 success: status == TurnStatus::Completed,
                             });
                         }
+                        CodexEvent::NativeSubAgentStarted { .. } if *native_threads => {}
                         CodexEvent::NativeSubAgentStarted { thread_id, turn_id } => {
                             writes.push(
                                 protocol
@@ -1456,7 +1495,8 @@ impl Session {
         durable: Option<DurableIo>,
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
-        let (driver, startup) = Driver::new(&request)?;
+        let native_threads = context.as_ref().is_some_and(Installed::native_threads);
+        let (driver, startup) = Driver::new(&request, native_threads)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
         let output_bytes = request.limits.output_bytes;

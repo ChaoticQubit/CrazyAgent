@@ -7,6 +7,8 @@ pub mod transcript;
 pub mod update;
 
 #[cfg(test)]
+mod account_fit_tests;
+#[cfg(test)]
 mod probe_tests;
 
 use serde::{Deserialize, Serialize};
@@ -412,6 +414,64 @@ pub fn canonical(id: &str) -> &str {
     spec(id).map_or(id, |spec| spec.id)
 }
 
+/// Tells whether a harness can run on one account (DEC-141 PA-4), the one rule every master,
+/// team agent and research job uses. Inputs: a catalog id or alias and the stored connection.
+/// Output: true for a sign-in of that harness itself, or for an HTTP endpoint account whose
+/// wire format it speaks (Codex any OpenAI format, Claude Code Anthropic Messages, RCLI all);
+/// the harness an endpoint account was stored with is ignored.
+pub fn account_fits(harness: &str, connection: &crate::config::ModelConnection) -> bool {
+    use crate::config::{ModelAuthentication, ModelEndpoint};
+    let Some(id) = spec(harness).map(|spec| spec.id) else {
+        return false;
+    };
+    let protocol = connection.protocol.as_str();
+    match (&connection.endpoint, &connection.auth) {
+        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
+            protocol == "native"
+                && id != "rcli"
+                && spec(connection.harness.as_str()).is_some_and(|own| own.id == id)
+        }
+        (
+            ModelEndpoint::Http { .. },
+            ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
+        ) => match id {
+            "codex" => protocol.starts_with("openai"),
+            "claude-code" => protocol == "anthropic-messages",
+            "rcli" => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The base URL a harness is given for an endpoint account. Claude Code adds `/v1/messages`
+/// to the URL it is given (2.1.322), so an Anthropic URL stored with its `/v1` loses it there;
+/// every other harness takes the URL as stored. Inputs: the catalog id or alias and the stored
+/// URL. Output: the URL to hand over.
+pub fn endpoint_base_url<'a>(harness: &str, url: &'a str) -> &'a str {
+    let url = url.trim_end_matches('/');
+    match spec(harness).map(|spec| spec.id) {
+        Some("claude-code") => url.strip_suffix("/v1").unwrap_or(url),
+        _ => url,
+    }
+}
+
+/// Starts the engine key relay a keyed endpoint account is reached through (DEC-141 PA-4):
+/// the saved key is read from the engine folder into engine memory only, and the harness
+/// gets the relay's loopback URL and placeholder token instead. Inputs: the engine folder
+/// that holds `account-keys`, the provider base URL as the harness takes it and the key
+/// reference. Output: the running relay, `account_key_missing` when no key is saved, or the
+/// key store's or relay's refusal.
+pub(crate) fn key_relay(
+    engine: &Path,
+    base_url: &str,
+    key: &crate::protocol::CredentialRef,
+) -> Result<crate::model_gateway::relay::Relay, crate::engine::EngineError> {
+    let secret = crate::storage::accounts::read_key_file(engine, key)?
+        .ok_or_else(|| crate::engine::EngineError("account_key_missing".into()))?;
+    crate::model_gateway::relay::Relay::start(base_url, secret)
+}
+
 const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];
 
 const NO_ADAPTER: &str = "installed, but CrazyAgent cannot start it yet";
@@ -453,11 +513,7 @@ static SPECS: [HarnessSpec; 23] = [
         headless: "claude --print with stream-json input and output",
         tools_limited: None,
         model_selection: true,
-        account_kinds: &[
-            AccountKind::Subscription,
-            AccountKind::ApiKey,
-            AccountKind::Local,
-        ],
+        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
         launch: None,
     },
     HarnessSpec {

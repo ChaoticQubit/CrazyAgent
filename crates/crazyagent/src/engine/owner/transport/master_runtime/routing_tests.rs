@@ -1334,14 +1334,12 @@ async fn a_turn_whose_write_waits_on_another_engine_connection_still_ends_with_i
 #[tokio::test]
 async fn an_unregistered_rcli_profile_stops_the_turn_with_its_own_cause() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
-    let returned = case.drive().await;
-    assert_eq!(
-        returned
-            .expect_err("an RCLI master without a registered profile cannot start")
-            .0,
-        "rcli_profile_configuration_required"
-    );
+    let returned = case
+        .drive()
+        .await
+        .expect("an RCLI master without a registered key blocks its turn as every master does");
     let stopped = case.persisted_turn().await;
+    assert_eq!(returned.phase, MasterTurnPhase::Blocked);
     assert_eq!(stopped.id, case.turn.id);
     assert_eq!(stopped.phase, MasterTurnPhase::Blocked);
     assert_eq!(stopped.reason, Some(MasterReason::RuntimeUnavailable));

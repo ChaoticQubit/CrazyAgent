@@ -1299,7 +1299,15 @@ fn settings_show_no_master_step_limit_by_default_with_the_four_options() {
         find(&rows, &format!("A turn stops after {steps} steps."));
     }
     let shown = flat(&rows);
-    assert!(shown.contains("a Codex master counts no steps."), "{shown}");
+    assert!(
+        shown.contains("The limit covers Claude and Codex masters with tools on."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("an rcli master, which has no tools, answers each turn in one step"),
+        "{shown}"
+    );
+    assert!(!shown.contains("counts no steps"), "{shown}");
     assert!(rows.last().unwrap().contains("Enter Save"));
     shell.key(Key::Enter);
     assert!(

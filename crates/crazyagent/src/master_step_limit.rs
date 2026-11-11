@@ -16,7 +16,8 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS configured_master_steps (
 
 /// How many steps a master with its tools on may take for one message before it stops and
 /// waits for the owner: no limit, or 50, 100 or 200 steps. A step is one round in which
-/// the master uses its tools, as Claude Code counts for `--max-turns`.
+/// the master uses its tools: Claude Code counts them for `--max-turns`, the Codex host
+/// counts its model rounds that started a tool (PA-9), and rcli runs no tools.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepLimit {

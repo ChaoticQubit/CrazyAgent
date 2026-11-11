@@ -614,6 +614,7 @@ mod tests {
             account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:9".into(),
                 model: "local".into(),
+                key: None,
             }),
         }
     }

@@ -209,6 +209,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -258,6 +259,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -319,6 +321,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -373,6 +376,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -420,6 +424,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -546,6 +551,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -586,6 +592,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -659,6 +666,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
@@ -719,6 +727,7 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -864,6 +873,7 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
@@ -950,6 +960,7 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -1022,6 +1033,7 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -1074,6 +1086,7 @@ fn a_codex_install_that_cannot_move_earlier_skills_out_of_its_home_is_refused() 
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
@@ -1115,6 +1128,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -1278,6 +1292,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         transcripts: false,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -1472,6 +1487,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -1568,6 +1584,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
@@ -1651,6 +1668,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -1774,6 +1792,7 @@ impl LeftPane {
             transcripts: true,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
@@ -1968,6 +1987,7 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         transcripts: false,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -2016,6 +2036,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -2107,6 +2128,7 @@ fn context_with(
         transcripts: true,
         off_tools,
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -2418,6 +2440,77 @@ fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
     assert!(installed.native().is_none());
     assert!(!off.join(STATE).join(TEAMMATE_INSTRUCTIONS).exists());
     drop(installed);
+}
+
+/// PA-7: a Codex lead in the Native mode gets Codex 0.164's multi-agent v2 on in its
+/// `config.toml`, its sub-agents capped at Max teammates, started with the lead's own
+/// instructions plus the sub-agent section, offered no model or effort on spawn and given no
+/// default that would reset the effort (r1); tools off, App-spawned or Claude Code get none.
+#[test]
+fn a_native_codex_lead_turns_codex_sub_agents_on_with_their_own_instructions_and_cap() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let lead = private_home(&root, "codex-lead");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_native_sub_agents(4)
+        .install("codex", &lead, true)
+        .unwrap();
+    assert!(installed.native_threads());
+    assert!(installed.native().is_none());
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(lead.join("config.toml")).unwrap()).unwrap();
+    let v2 = &config["features"]["multi_agent_v2"];
+    assert_eq!(v2["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        v2["expose_spawn_agent_model_overrides"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(config["agents"]["max_threads"].as_integer(), Some(4));
+    for unset in [
+        "default_subagent_model",
+        "default_subagent_reasoning_effort",
+    ] {
+        assert!(config["agents"].get(unset).is_none(), "{unset}");
+    }
+    let own = config["developer_instructions"].as_str().unwrap();
+    let sub = v2["subagent_developer_instructions"].as_str().unwrap();
+    assert!(sub.starts_with(own), "{sub}");
+    let section = &sub[own.len()..];
+    assert!(section.contains("## You are a sub-agent"), "{section}");
+    for tool in [
+        crate::team::tool::START_WORK_TOOL,
+        crate::team::tool::UPDATE_WORK_TOOL,
+        crate::team::tool::TRANSFER_WORK_TOOL,
+        crate::team::tool::FINISH_WORK_TOOL,
+        crate::team::tool::SPAWN_TOOL,
+        crate::team::tool::STOP_TOOL,
+        crate::team::tool::MERGE_TOOL,
+    ] {
+        assert!(section.contains(tool), "{tool}: {section}");
+    }
+    drop(installed);
+
+    for (name, harness, tools, native) in [
+        ("codex-off", "codex", false, Some(4)),
+        ("codex-spawned", "codex", true, None),
+        ("claude-lead", "claude-code", true, Some(4)),
+    ] {
+        let home = private_home(&root, name);
+        let mut context = context_with(&root, LaunchPlugins::default(), Vec::new());
+        if let Some(cap) = native {
+            context = context.with_native_sub_agents(cap);
+        }
+        let installed = context.install(harness, &home, tools).unwrap();
+        assert!(!installed.native_threads(), "{name}");
+        let config = fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+        assert!(!config.contains("multi_agent_v2"), "{name}: {config}");
+        assert!(!config.contains("max_threads"), "{name}: {config}");
+        assert!(
+            !config.contains("expose_spawn_agent_model_overrides"),
+            "{name}: {config}"
+        );
+        drop(installed);
+    }
 }
 
 /// Cuts the "Tools to use" section out of one launch's instructions, up to the next
@@ -2921,6 +3014,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
@@ -3139,6 +3233,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,

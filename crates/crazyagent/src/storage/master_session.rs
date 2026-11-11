@@ -5,7 +5,9 @@ use super::{
 use crate::config::{EffectiveConfig, ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::conversation::ConversationMutation;
 use crate::coordination::Role;
-use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::bootstrap::{
+    ConfiguredRcliProfileMetadata, NativeProfileUse, NativeProfileUsePurpose,
+};
 use crate::engine::owner::account_profile::{AccountProfileReceipt, AccountProfileRequest};
 use crate::engine::owner::{
     Admission, HostStamp, NativeAuthAction, NativeAuthPhase, NativeAuthStart, NativeProfileBinding,
@@ -311,11 +313,23 @@ struct ConfiguredRegistration {
 }
 
 #[cfg(unix)]
-const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
+const LEGACY_CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     session TEXT NOT NULL UNIQUE CHECK(length(session) BETWEEN 1 AND 128),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
+
+#[cfg(unix)]
+const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+    session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
+    profile TEXT NOT NULL CHECK(length(profile) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
+    UNIQUE(session,profile)
+)";
+
+/// The most configured RCLI registrations kept: one per pool member of every open master.
+const CONFIGURED_PROFILES_MAX: usize = SESSIONS_MAX * crate::config::POOL_MEMBERS_MAX;
 
 #[cfg(unix)]
 const SESSIONS: &str = "CREATE TABLE master_sessions (
@@ -494,6 +508,14 @@ pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
         .optional()
         .map_err(error)?;
     match schema {
+        Some(schema) if schema == LEGACY_CONFIGURED_PROFILES => {
+            tx.execute_batch(
+                "ALTER TABLE configured_master_profiles RENAME TO configured_master_profiles_legacy",
+            )
+            .map_err(error)?;
+            tx.execute_batch(CONFIGURED_PROFILES).map_err(error)?;
+            tx.execute_batch("INSERT INTO configured_master_profiles(id,session,profile,body) SELECT id,session,COALESCE(CASE WHEN json_valid(body) THEN json_extract(body,'$.proof.profile_ref') END,id),body FROM configured_master_profiles_legacy; DROP TABLE configured_master_profiles_legacy").map_err(error)?;
+        }
         Some(schema) if schema != CONFIGURED_PROFILES => {
             return Err(error("master_configured_schema_conflict"));
         }
@@ -1606,54 +1628,97 @@ fn current_scope(
     Ok(())
 }
 
-fn configured_connection<'a>(
+/// The profile an RCLI pool member runs master turns under: the owner's chosen target on
+/// the connection of the chosen account, else the member's own configured profile.
+/// Inputs: the session and the member. Output: the profile, or None for a member whose
+/// authentication has no configured profile.
+fn rcli_profile(
+    session: &MasterSessionView,
+    member: &ModelConnection,
+) -> Option<crate::protocol::CredentialRef> {
+    if member.account_ref == session.selection.route.account_ref {
+        return Some(session.selection.target_profile_ref.clone());
+    }
+    crate::config::configured_profile_ref(member)
+}
+
+/// The target a pool member runs master turns under: its connection for a native master,
+/// its RCLI profile for an RCLI one. Inputs: the session and the member. Output: the target,
+/// or None when the member has none.
+fn master_target(
+    session: &MasterSessionView,
+    member: &ModelConnection,
+) -> Option<crate::protocol::CredentialRef> {
+    match session.selection.backend {
+        MasterBackend::Rcli => rcli_profile(session, member),
+        MasterBackend::Codex | MasterBackend::Claude => Some(member.id.clone()),
+    }
+}
+
+/// Finds the RCLI pool member that runs master turns under one profile (PA-6, DEC-091).
+/// Inputs: the settings, the session and the profile. Output: the one HTTP member with a
+/// configured profile the settings allow, `rcli_profile_configuration_required` when none,
+/// `master_rcli_connection_ambiguous` when two share it, or the member's settings refusal.
+fn configured_member<'a>(
     config: &'a EffectiveConfig,
     session: &MasterSessionView,
+    profile: &crate::protocol::CredentialRef,
 ) -> Result<&'a ModelConnection, EngineError> {
     validate_selection(config, &session.project_id, &session.selection)?;
     if session.selection.backend != MasterBackend::Rcli {
         return Err(error("master_runtime_backend_unsupported"));
     }
-    let catalog = config
-        .settings
-        .model_access
-        .as_ref()
-        .ok_or_else(|| error("master_pool_missing"))?;
-    let pool = catalog
-        .pools
-        .iter()
-        .find(|pool| pool.id == session.selection.pool_ref)
-        .ok_or_else(|| error("master_pool_missing"))?;
-    let mut candidates = catalog.connections.iter().filter(|connection| {
-        pool.members.contains(&connection.id)
-            && connection.account_ref == session.selection.route.account_ref
-            && connection.harness.as_str() == "rcli"
-            && matches!(connection.endpoint, ModelEndpoint::Http { .. })
-            && matches!(
+    let mut found = master_members(config, session)
+        .into_iter()
+        .filter(|(connection, _, _)| {
+            matches!(
                 connection.auth,
                 ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}
-            )
-    });
-    let connection = candidates
+            ) && rcli_profile(session, connection).as_ref() == Some(profile)
+        });
+    let (connection, gap, _) = found
         .next()
         .ok_or_else(|| error("rcli_profile_configuration_required"))?;
-    if candidates.next().is_some() {
+    if found.next().is_some() {
         return Err(error("master_rcli_connection_ambiguous"));
     }
+    if let Some((_, code)) = gap {
+        return Err(error(code));
+    }
+    assert!(crate::master_session::backend_member(
+        MasterBackend::Rcli,
+        connection
+    ));
     Ok(connection)
 }
 
+/// Finds the RCLI member the owner chose: the one under the session's own target.
+/// Inputs: the settings and the session. Output: that member, or why there is none.
+fn configured_connection<'a>(
+    config: &'a EffectiveConfig,
+    session: &MasterSessionView,
+) -> Result<&'a ModelConnection, EngineError> {
+    configured_member(config, session, &session.selection.target_profile_ref)
+}
+
+/// Reads the configured registration of one RCLI member profile of a session.
+/// Inputs: the transaction, the session and the profile. Output: the registration, None
+/// when that member has none, or a conflict when its row does not match its body.
 fn registration(
     tx: &Transaction<'_>,
     session: &SessionId,
+    profile: &crate::protocol::CredentialRef,
 ) -> Result<Option<ConfiguredRegistration>, EngineError> {
     let row: Option<(String, String)> = tx.query_row(
-        "SELECT id,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM configured_master_profiles WHERE session=?1",
-        [session.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
+        "SELECT id,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END FROM configured_master_profiles WHERE session=?1 AND profile=?2",
+        [session.as_str(), profile.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(error)?;
     row.map(|(id, body)| {
         let record: ConfiguredRegistration = serde_json::from_str(&body).map_err(error)?;
-        if record.session_id != *session || record.proof.registration_id.as_str() != id {
+        if record.session_id != *session
+            || record.proof.registration_id.as_str() != id
+            || record.proof.profile_ref != *profile
+        {
             return Err(error("master_configured_receipt_conflict"));
         }
         Ok(record)
@@ -1671,6 +1736,11 @@ fn validate_registration(
         db_instance: proof.database_instance.clone(),
         engine_epoch: proof.engine_epoch.clone(),
     };
+    if proof.engine_epoch != session.engine_epoch()
+        || (&proof.config_id, proof.source_hash.as_str()) != session.binding()
+    {
+        return Err(error("master_configured_receipt_stale"));
+    }
     check_owner_host(tx, &host)?;
     check_owner_admission(
         tx,
@@ -1689,10 +1759,6 @@ fn validate_registration(
         || record.project_id != session.project_id
         || record.bootstrap_task_id != session.bootstrap_task_id
         || record.owner != session.owner
-        || session.owner.engine_epoch != host.engine_epoch
-        || proof.config_id != session.config_id
-        || proof.source_hash != session.source_hash
-        || proof.profile_ref != session.selection.target_profile_ref
         || session.selection.backend != MasterBackend::Rcli
         || proof.at_revision.value() < session.owner.revision_after.value()
         || proof.at_revision.value() > owner_revision(tx)?
@@ -1712,7 +1778,7 @@ fn validate_registration(
     let config = crate::config::resolve_config(&record.global_source, &record.project_source)
         .map_err(|failure| error(failure.0))?;
     if config.id != proof.config_id
-        || configured_connection(&config, session)? != &proof.connection
+        || configured_member(&config, session, &proof.profile_ref)? != &proof.connection
         || settings::verified_source_hash_at(
             &config,
             &record.global_source,
@@ -1733,19 +1799,26 @@ fn validate_registration(
     Ok(())
 }
 
+/// Proves one RCLI member's configured registration can authorize a turn now.
+/// Inputs: the transaction, settings, host, session and member. Output: the member's
+/// proof, or the missing, stale or conflicting registration code.
 fn configured_auth(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     host: &HostStamp,
     session: &MasterSessionView,
+    member: &ModelConnection,
 ) -> Result<RcliConfiguredProfileProof, EngineError> {
-    let record = registration(tx, &session.session_id)?
+    let profile = rcli_profile(session, member)
+        .ok_or_else(|| error("rcli_profile_configuration_required"))?;
+    let record = registration(tx, &session.session_id, &profile)?
         .ok_or_else(|| error("rcli_profile_configuration_required"))?;
     validate_registration(tx, session, &record)?;
     if record.proof.database_instance != host.db_instance
         || record.proof.engine_epoch != host.engine_epoch
         || record.proof.config_id != config.id
-        || configured_connection(config, session)? != &record.proof.connection
+        || &record.proof.connection != member
+        || configured_member(config, session, &profile)? != &record.proof.connection
         || settings::verified_source_hash_at(config, &record.global_source, &record.project_source)?
             != record.proof.source_hash
     {
@@ -1761,7 +1834,7 @@ pub(super) fn validate_bootstrap_auth(
 ) -> Result<(), EngineError> {
     match auth {
         MasterBootstrapAuth::RcliConfigured(proof) => {
-            let record = registration(tx, &session.session_id)?
+            let record = registration(tx, &session.session_id, &proof.profile_ref)?
                 .ok_or_else(|| error("rcli_profile_configuration_required"))?;
             if record.proof != *proof {
                 return Err(error("master_configured_receipt_conflict"));
@@ -1859,7 +1932,8 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         db_instance: proof.database_instance.clone(),
         engine_epoch: proof.engine_epoch.clone(),
     };
-    let actual = configured_auth(tx, current, &host, &session)?;
+    let actual = configured_auth(tx, current, &host, &session, &proof.connection)?;
+    let (member_target, member_route) = member_request(&session, &proof.connection);
     let turn_task = session
         .current_turn
         .as_ref()
@@ -1874,8 +1948,9 @@ pub(crate) fn validate_configured_initial_conversation_receipt(
         || turn_task.as_ref() != Some(&request.task_id)
         || request.role != Role::ProjectLeader
         || request.pool_ref != session.selection.pool_ref
-        || request.target_profile_ref != session.selection.target_profile_ref
-        || request.route != session.selection.route
+        || request.target_profile_ref != member_target
+        || request.target_profile_ref != proof.profile_ref
+        || request.route != member_route
         || request.previous_attempt.is_some()
         || !request.route.required_capabilities.is_empty()
     {
@@ -1980,14 +2055,15 @@ fn current_auth(
     session: &MasterSessionView,
     member: &ModelConnection,
 ) -> Result<MasterBootstrapAuth, EngineError> {
-    if session.selection.backend == MasterBackend::Rcli {
-        return configured_auth(tx, config, host, session).map(MasterBootstrapAuth::RcliConfigured);
-    }
     if !master_members(config, session)
         .into_iter()
         .any(|(connection, gap, _)| connection == member && gap.is_none())
     {
         return Err(error("native_profile_connection_missing"));
+    }
+    if session.selection.backend == MasterBackend::Rcli {
+        return configured_auth(tx, config, host, session, member)
+            .map(MasterBootstrapAuth::RcliConfigured);
     }
     let connection = native_profile_connection(config, &member.id)?;
     native_sign_in(tx, host, connection, Some(&member.account_ref))
@@ -2029,17 +2105,27 @@ type Gap = (MasterReason, String);
 /// out before any check (None when settings allow it) and whether the owner chose it.
 type Member<'a> = (&'a ModelConnection, Option<Gap>, bool);
 
-/// Lists the pool members that may run a native master's turns, the owner's chosen
-/// connection first and then in pool order. Inputs: the settings and the session.
-/// Output: each pool connection of the master harness, ScopeRevoked with the refusal code
-/// when settings do not allow its destination or account, and whether it is the owner's.
+/// Lists the pool members that may run a master's turns, the owner's chosen member first
+/// and then in pool order. Inputs: the settings and the session. Output: each pool
+/// connection of the master harness, ScopeRevoked with the refusal code when settings do
+/// not allow its target or account, ConnectionChanged for RCLI members that share one
+/// profile, and whether it is the owner's.
 fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) -> Vec<Member<'a>> {
-    let mut members: Vec<_> = pool_connections(config, &session.selection.pool_ref)
+    let connections: Vec<_> = pool_connections(config, &session.selection.pool_ref)
         .into_iter()
         .filter(|connection| {
             crate::master_session::backend_member(session.selection.backend, connection)
         })
-        .map(|connection| {
+        .collect();
+    let targets: Vec<_> = connections
+        .iter()
+        .map(|connection| master_target(session, connection))
+        .collect();
+    let mut members: Vec<_> = connections
+        .iter()
+        .zip(&targets)
+        .enumerate()
+        .map(|(index, (connection, target))| {
             let scope = crate::routing::validate_pool_scope(
                 config,
                 &session.selection.pool_ref,
@@ -2047,36 +2133,50 @@ fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) 
                 &Role::ProjectLeader,
                 &connection.account_ref,
             );
-            let gap = if !allowed_destination(config, &connection.id) {
-                Some("master_destination_not_allowed".to_owned())
+            let shared = target.is_some()
+                && targets
+                    .iter()
+                    .enumerate()
+                    .any(|(other, value)| other != index && value == target);
+            let gap = if target
+                .as_ref()
+                .is_none_or(|target| !allowed_destination(config, target))
+            {
+                Some((
+                    MasterReason::ScopeRevoked,
+                    "master_destination_not_allowed".to_owned(),
+                ))
+            } else if shared {
+                Some((
+                    MasterReason::ConnectionChanged,
+                    "master_rcli_connection_ambiguous".to_owned(),
+                ))
             } else {
-                scope.err().map(|refusal| cause_code(&refusal.0))
+                scope
+                    .err()
+                    .map(|refusal| (MasterReason::ScopeRevoked, cause_code(&refusal.0)))
             };
-            let chosen = connection.id == session.selection.target_profile_ref;
-            (
-                connection,
-                gap.map(|code| (MasterReason::ScopeRevoked, code)),
-                chosen,
-            )
+            let chosen = target.as_ref() == Some(&session.selection.target_profile_ref)
+                && targets[..index]
+                    .iter()
+                    .all(|value| value.as_ref() != Some(&session.selection.target_profile_ref));
+            (*connection, gap, chosen)
         })
         .collect();
     members.sort_by_key(|(_, _, chosen)| !chosen);
     assert!(members.iter().filter(|(_, _, chosen)| *chosen).count() <= 1);
+    assert!(members.len() <= crate::config::POOL_MEMBERS_MAX);
     members
 }
 
-/// Lists the members a turn may try, in order: the one configured RCLI profile, or the
-/// native pool members in the owner's schedule order. Inputs: the transaction, settings
-/// and session. Output: each member with its settings or schedule gap and whether the
-/// owner chose it, or the RCLI configuration code.
+/// Lists the members a turn may try, in the owner's schedule order, the same for every
+/// master harness (PA-6, DEC-091). Inputs: the transaction, settings and session.
+/// Output: each member with its settings or schedule gap and whether the owner chose it.
 fn candidates<'a>(
     tx: &Transaction<'_>,
     config: &'a EffectiveConfig,
     session: &MasterSessionView,
 ) -> Result<Vec<Member<'a>>, EngineError> {
-    if session.selection.backend == MasterBackend::Rcli {
-        return Ok(vec![(configured_connection(config, session)?, None, true)]);
-    }
     scheduled(tx, config, session, master_members(config, session))
 }
 
@@ -2137,18 +2237,15 @@ fn scheduled<'a>(
     Ok(ordered)
 }
 
-/// The target and route a turn's attempt uses on one member: the owner's selection for
-/// RCLI, and for a native master the member's connection and account in place of the
-/// chosen ones. Inputs: the session and the member. Output: the target and route.
-fn member_request(
+/// The target and route a turn's attempt uses on one member: the member's target and
+/// account in place of the chosen ones, for every master harness. Inputs: the session and
+/// the member. Output: the target and route; the owner's own for the chosen member.
+pub(crate) fn member_request(
     session: &MasterSessionView,
     member: &ModelConnection,
 ) -> (crate::protocol::CredentialRef, crate::routing::RouteRequest) {
     let route = &session.selection.route;
-    if session.selection.backend == MasterBackend::Rcli {
-        return (session.selection.target_profile_ref.clone(), route.clone());
-    }
-    let target = member.id.clone();
+    let target = master_target(session, member).unwrap_or_else(|| member.id.clone());
     let request = crate::routing::RouteRequest {
         preferred_target: route.preferred_target.as_ref().map(|_| target.clone()),
         required_target: route.required_target.as_ref().map(|_| target.clone()),
@@ -2171,7 +2268,10 @@ fn member_gap(failure: &EngineError) -> Option<Gap> {
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "native_profile_connection_missing"
         | "native_profile_not_managed"
-        | "native_profile_binding_conflict" => MasterReason::ConnectionChanged,
+        | "native_profile_binding_conflict"
+        | "master_rcli_connection_ambiguous" => MasterReason::ConnectionChanged,
+        "master_configured_receipt_stale" => MasterReason::ReadinessStale,
+        "rcli_profile_configuration_required" => MasterReason::RuntimeUnavailable,
         _ => return None,
     };
     Some((reason, cause_code(&failure.0)))
@@ -2835,16 +2935,14 @@ fn bundle(
         true => crate::team::master::switched_off_tools(tx, &session.project_id)?,
         false => Vec::new(),
     };
-    let instructions = match session.selection.backend {
-        MasterBackend::Rcli => String::new(),
-        MasterBackend::Codex | MasterBackend::Claude => crate::launch_context::for_master(
-            tx,
-            &session.project_id,
-            tools.then_some(tools_off.as_slice()),
-            config.settings.model_access.as_ref(),
-        )
-        .map_err(|problem| EngineError(problem.0))?,
-    };
+    let instructions = crate::launch_context::for_master(
+        tx,
+        &session.project_id,
+        tools.then_some(tools_off.as_slice()),
+        config.settings.model_access.as_ref(),
+    )
+    .map_err(|problem| EngineError(problem.0))?;
+    assert!(instructions.ends_with(crate::launch_context::MASTER_LANDING_RULES));
     let agent_project = crate::launch_context::agent_project(tx, &session.project_id)
         .map_err(|problem| EngineError(problem.0))?;
     let agent_policy =
@@ -3380,13 +3478,19 @@ fn registration_session(
     )?;
     if session.project_id != *project_id
         || session.phase != MasterSessionPhase::Configured
-        || session.owner.engine_epoch != host.engine_epoch
-        || session.config_id != config.id
-        || session.source_hash != settings::verified_source_hash(config, sources)?
+        || session.engine_epoch() != host.engine_epoch
+        || session.binding()
+            != (
+                &config.id,
+                settings::verified_source_hash(config, sources)?.as_str(),
+            )
     {
         return Err(error("master_source_conflict"));
     }
-    configured_connection(config, &session)?;
+    validate_selection(config, &session.project_id, &session.selection)?;
+    if session.selection.backend != MasterBackend::Rcli {
+        return Err(error("master_runtime_backend_unsupported"));
+    }
     Ok(session)
 }
 
@@ -3400,26 +3504,38 @@ fn produce_rcli_profile(
     at_revision: Cursor,
 ) -> Result<RcliConfiguredProfileProof, EngineError> {
     assert!(db.is_autocommit());
+    let profile = rcli_profile(session, &connection)
+        .ok_or_else(|| error("rcli_profile_configuration_required"))?;
     let metadata = custody
         .as_mut()
         .map_err(|failure| failure.clone())?
-        .register_configured_rcli_profile(
-            host,
-            &connection,
-            &session.selection.target_profile_ref,
-            configured_home,
-        )?;
-    if metadata.profile_ref != session.selection.target_profile_ref {
+        .register_configured_rcli_profile(host, &connection, &profile, configured_home)?;
+    configured_proof(host, session, connection, &profile, metadata, at_revision)
+}
+
+/// Builds the proof a configured RCLI member registers under the session's current
+/// binding. Inputs: host, session, member, its profile, custody's metadata for the profile
+/// and the revision. Output: the proof, or a conflict when custody names another profile.
+fn configured_proof(
+    host: &HostStamp,
+    session: &MasterSessionView,
+    connection: ModelConnection,
+    profile: &crate::protocol::CredentialRef,
+    metadata: ConfiguredRcliProfileMetadata,
+    at_revision: Cursor,
+) -> Result<RcliConfiguredProfileProof, EngineError> {
+    if metadata.profile_ref != *profile {
         return Err(error("master_configured_receipt_conflict"));
     }
+    let (config_id, source_hash) = session.binding();
     let proof = RcliConfiguredProfileProof {
         registration_id: RequestId::new(format!("master-profile-{}", random_id()?))
             .map_err(error)?,
         generation: metadata.profile_generation,
         database_instance: host.db_instance.clone(),
         engine_epoch: host.engine_epoch.clone(),
-        config_id: session.config_id.clone(),
-        source_hash: session.source_hash.clone(),
+        config_id: config_id.clone(),
+        source_hash: source_hash.to_owned(),
         at_revision,
         connection,
         profile_ref: metadata.profile_ref,
@@ -3429,6 +3545,13 @@ fn produce_rcli_profile(
     if proof.generation == 0 || !is_hex_id(&proof.profile_config_sha256) {
         return Err(error("master_configured_receipt_conflict"));
     }
+    if proof.engine_epoch != session.engine_epoch() {
+        return Err(error("master_configured_receipt_stale"));
+    }
+    assert_eq!(
+        (&proof.config_id, proof.source_hash.as_str()),
+        session.binding()
+    );
     Ok(proof)
 }
 
@@ -3449,24 +3572,37 @@ fn publish_rcli_profile(
         &expected.session_id,
     )?;
     if session != *expected
-        || proof.profile_ref != session.selection.target_profile_ref
-        || configured_connection(config, &session)? != &proof.connection
+        || rcli_profile(&session, &proof.connection).as_ref() != Some(&proof.profile_ref)
+        || configured_member(config, &session, &proof.profile_ref)? != &proof.connection
     {
         return Err(error("master_configured_receipt_conflict"));
     }
     let (global_source, project_source) = sources.retained_paths();
-    if let Some(record) = registration(tx, &session.session_id)? {
-        validate_registration(tx, &session, &record)?;
-        if record.proof.connection != proof.connection
-            || record.proof.custody_id != proof.custody_id
-            || record.proof.profile_config_sha256 != proof.profile_config_sha256
-            || record.proof.generation != proof.generation
-            || record.global_source != global_source
-            || record.project_source != project_source
-        {
-            return Err(error("master_configured_receipt_conflict"));
+    if let Some(record) = registration(tx, &session.session_id, &proof.profile_ref)? {
+        match validate_registration(tx, &session, &record) {
+            Ok(()) => {
+                if record.proof.connection != proof.connection
+                    || record.proof.custody_id != proof.custody_id
+                    || record.proof.profile_config_sha256 != proof.profile_config_sha256
+                    || record.proof.generation != proof.generation
+                    || record.global_source != global_source
+                    || record.project_source != project_source
+                {
+                    return Err(error("master_configured_receipt_conflict"));
+                }
+                return Ok(record.proof);
+            }
+            Err(failure) if failure.0 == "master_configured_receipt_stale" => {
+                let removed = tx
+                    .execute(
+                        "DELETE FROM configured_master_profiles WHERE id=?1",
+                        [record.proof.registration_id.as_str()],
+                    )
+                    .map_err(error)?;
+                assert_eq!(removed, 1);
+            }
+            Err(failure) => return Err(failure),
         }
-        return Ok(record.proof);
     }
     let counted = || -> Result<i64, EngineError> {
         tx.query_row(
@@ -3476,16 +3612,17 @@ fn publish_rcli_profile(
         )
         .map_err(error)
     };
+    let most = i64::try_from(CONFIGURED_PROFILES_MAX).map_err(error)?;
     let mut count = counted()?;
-    if count >= SESSIONS_MAX as i64 {
+    if count >= most {
         tx.execute(
             "DELETE FROM configured_master_profiles WHERE rowid IN (SELECT p.rowid FROM configured_master_profiles p WHERE NOT EXISTS (SELECT 1 FROM master_sessions s WHERE s.id=p.session AND s.phase='configured') ORDER BY p.rowid LIMIT ?1)",
-            [count - (SESSIONS_MAX as i64 - 1)],
+            [count - (most - 1)],
         )
         .map_err(error)?;
         count = counted()?;
     }
-    if count >= SESSIONS_MAX as i64 {
+    if count >= most {
         return Err(error("master_configured_receipt_limit"));
     }
     let database_path = PathBuf::from(
@@ -3508,10 +3645,11 @@ fn publish_rcli_profile(
     validate_registration(tx, &session, &record)?;
     let inserted = tx
         .execute(
-            "INSERT INTO configured_master_profiles(id,session,body) VALUES (?1,?2,?3)",
+            "INSERT INTO configured_master_profiles(id,session,profile,body) VALUES (?1,?2,?3,?4)",
             params![
                 proof.registration_id.as_str(),
                 session.session_id.as_str(),
+                proof.profile_ref.as_str(),
                 encode(&record)?
             ],
         )
@@ -3520,6 +3658,10 @@ fn publish_rcli_profile(
     Ok(proof)
 }
 
+/// Adopts the owner's committed account profile setups for an RCLI master's pool members
+/// at Open (PA-6): each member whose latest setup names its connection and profile gets a
+/// configured registration from custody's profile. Inputs: the transaction, settings,
+/// sources, custody, host and the session. Output: Ok, or the custody or record failure.
 fn adopt_account_profile(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -3538,11 +3680,6 @@ fn adopt_account_profile(
     if !exists {
         return Ok(());
     }
-    let connection = match configured_connection(config, session) {
-        Ok(connection) => connection,
-        Err(failure) if failure.0 == "rcli_profile_configuration_required" => return Ok(()),
-        Err(failure) => return Err(failure),
-    };
     let mut statement = tx.prepare(
         "SELECT request_id,CASE WHEN length(request)<=8192 THEN request END,CASE WHEN length(receipt)<=16384 THEN receipt END FROM account_profile_operations WHERE owner_id=?1 AND owner_epoch=?2 AND phase='committed' ORDER BY request_id LIMIT 1025",
     ).map_err(error)?;
@@ -3552,11 +3689,9 @@ fn adopt_account_profile(
             session.owner.resulting_epoch
         ])
         .map_err(error)?;
-    let mut receipt: Option<AccountProfileReceipt> = None;
-    let mut count = 0;
+    let mut receipts: Vec<AccountProfileReceipt> = Vec::new();
     while let Some(row) = rows.next().map_err(error)? {
-        count += 1;
-        if count > 1024 {
+        if receipts.len() == 1024 {
             return Err(error("account_profile_operations_full"));
         }
         let id: String = row.get(0).map_err(error)?;
@@ -3582,55 +3717,64 @@ fn adopt_account_profile(
         {
             return Err(error("account_profile_record_invalid"));
         }
-        if candidate.connection != *connection
-            || candidate.profile_ref != session.selection.target_profile_ref
+        receipts.push(candidate);
+    }
+    drop(rows);
+    drop(statement);
+    for (connection, gap, _) in master_members(config, session) {
+        let Some(profile) = rcli_profile(session, connection) else {
+            continue;
+        };
+        if gap.is_some()
+            || !matches!(
+                connection.auth,
+                ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}
+            )
         {
             continue;
         }
-        if receipt.as_ref().is_some_and(|previous| {
-            previous.profile_generation == candidate.profile_generation
-                && (previous.custody_id != candidate.custody_id
-                    || previous.profile_config_sha256 != candidate.profile_config_sha256)
+        let mut receipt: Option<&AccountProfileReceipt> = None;
+        for candidate in receipts.iter().filter(|candidate| {
+            candidate.connection == *connection && candidate.profile_ref == profile
         }) {
-            return Err(error("master_configured_receipt_conflict"));
+            if receipt.is_some_and(|previous| {
+                previous.profile_generation == candidate.profile_generation
+                    && (previous.custody_id != candidate.custody_id
+                        || previous.profile_config_sha256 != candidate.profile_config_sha256)
+            }) {
+                return Err(error("master_configured_receipt_conflict"));
+            }
+            if receipt
+                .is_some_and(|previous| previous.profile_generation >= candidate.profile_generation)
+            {
+                continue;
+            }
+            receipt = Some(candidate);
         }
-        if receipt
-            .as_ref()
-            .is_some_and(|previous| previous.profile_generation >= candidate.profile_generation)
-        {
+        let Some(receipt) = receipt else {
             continue;
+        };
+        let metadata = custody
+            .as_mut()
+            .map_err(|failure| failure.clone())?
+            .configured_rcli_profile(host, connection, &profile)?;
+        if metadata.profile_ref != receipt.profile_ref
+            || metadata.custody_id != receipt.custody_id
+            || metadata.profile_config_sha256 != receipt.profile_config_sha256
+            || metadata.profile_generation != receipt.profile_generation
+        {
+            return Err(error("master_configured_receipt_stale"));
         }
-        receipt = Some(candidate);
+        let proof = configured_proof(
+            host,
+            session,
+            connection.clone(),
+            &profile,
+            metadata,
+            Cursor::new(owner_revision(tx)?),
+        )?;
+        publish_rcli_profile(tx, config, sources, host, session, proof)?;
     }
-    let Some(receipt) = receipt else {
-        return Ok(());
-    };
-    let metadata = custody
-        .as_mut()
-        .map_err(|failure| failure.clone())?
-        .configured_rcli_profile(host, connection, &session.selection.target_profile_ref)?;
-    if metadata.profile_ref != receipt.profile_ref
-        || metadata.custody_id != receipt.custody_id
-        || metadata.profile_config_sha256 != receipt.profile_config_sha256
-        || metadata.profile_generation != receipt.profile_generation
-    {
-        return Err(error("master_configured_receipt_stale"));
-    }
-    let proof = RcliConfiguredProfileProof {
-        registration_id: RequestId::new(format!("master-profile-{}", random_id()?))
-            .map_err(error)?,
-        generation: metadata.profile_generation,
-        database_instance: host.db_instance.clone(),
-        engine_epoch: host.engine_epoch.clone(),
-        config_id: session.config_id.clone(),
-        source_hash: session.source_hash.clone(),
-        at_revision: Cursor::new(owner_revision(tx)?),
-        connection: connection.clone(),
-        profile_ref: metadata.profile_ref,
-        custody_id: metadata.custody_id,
-        profile_config_sha256: metadata.profile_config_sha256,
-    };
-    publish_rcli_profile(tx, config, sources, host, session, proof)?;
     Ok(())
 }
 
@@ -3638,6 +3782,7 @@ struct RcliRegistration<'a> {
     host: &'a HostStamp,
     project_id: &'a ProjectId,
     session_id: &'a SessionId,
+    member: Option<&'a ModelConnection>,
     configured_home: &'a Path,
 }
 
@@ -3659,7 +3804,10 @@ fn register_rcli_profile(
         registration.project_id,
         registration.session_id,
     )?;
-    let connection = configured_connection(config, &original)?.clone();
+    let connection = match registration.member {
+        Some(member) => member.clone(),
+        None => configured_connection(config, &original)?.clone(),
+    };
     let revision = Cursor::new(owner_revision(&tx)?);
     tx.commit().map_err(error)?;
     let candidate = produce_rcli_profile(
@@ -3677,10 +3825,12 @@ fn register_rcli_profile(
     Ok(proof)
 }
 
-/// Registers the engine-generated SDK home for an unregistered configured RCLI master.
-/// Inputs: the actor database, settings, custody and the session being prepared.
-/// Output: Ok after registering, or Ok without change when the session is not an RCLI
-/// master awaiting registration or account setup has not generated its home yet.
+/// Registers the configured RCLI members of a session about to prepare a turn (PA-6):
+/// each member without a registration whose engine-generated SDK home exists, and each
+/// member whose registration was made under an older binding, from custody's unchanged
+/// profile. Inputs: the actor database, settings, custody, host and the session.
+/// Output: Ok; a member that cannot register is left for its turn check to name, except the
+/// owner's chosen member, whose failure stops the preparation as before.
 fn register_generated_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -3697,31 +3847,109 @@ fn register_generated_rcli_profile(
     if session.project_id != *project_id
         || session.phase != MasterSessionPhase::Configured
         || session.selection.backend != MasterBackend::Rcli
-        || registration(&tx, session_id)?.is_some()
     {
         return Ok(());
     }
-    let Ok(connection) = configured_connection(config, &session) else {
-        return Ok(());
-    };
-    let profile_ref = super::account_profile::configured_profile_ref(connection)?;
+    let mut pending = Vec::new();
+    for (member, gap, chosen) in master_members(config, &session) {
+        let Some(profile) = rcli_profile(&session, member) else {
+            continue;
+        };
+        if gap.is_some()
+            || !matches!(
+                member.auth,
+                ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}
+            )
+        {
+            continue;
+        }
+        let stale = match registration(&tx, session_id, &profile)? {
+            None => None,
+            Some(record) => match validate_registration(&tx, &session, &record) {
+                Err(failure) if failure.0 == "master_configured_receipt_stale" => Some(record),
+                Ok(()) | Err(_) => continue,
+            },
+        };
+        let account = super::account_profile::configured_profile_ref(member)?;
+        pending.push((member.clone(), account, stale, chosen));
+    }
     drop(tx);
-    let home = custody
-        .as_ref()
+    assert!(pending.len() <= crate::config::POOL_MEMBERS_MAX);
+    for (member, account, stale, chosen) in pending {
+        let home = custody
+            .as_ref()
+            .map_err(|failure| failure.clone())?
+            .generated_configured_home(&account);
+        let registered = if home.join(".backboard/config.json").is_file() {
+            let registration = RcliRegistration {
+                host,
+                project_id,
+                session_id,
+                member: Some(&member),
+                configured_home: &home,
+            };
+            register_rcli_profile(db, config, sources, custody, registration).map(|_| ())
+        } else if let Some(record) = stale {
+            refresh_rcli_profile(db, config, sources, custody, host, &member, record)
+        } else {
+            Ok(())
+        };
+        if let Err(failure) = registered
+            && chosen
+        {
+            return Err(failure);
+        }
+        assert!(db.is_autocommit());
+    }
+    Ok(())
+}
+
+/// Moves a configured RCLI registration made under an older settings binding or engine
+/// run to the session's current one (DEC-092), when custody still holds the same profile
+/// unchanged. Inputs: the actor database, settings, custody, host, member and the stale
+/// registration. Output: Ok after publishing the new proof, or Ok without change when the
+/// profile changed and needs the owner's new registration.
+fn refresh_rcli_profile(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    custody: &mut Result<NativeProfileCustody, EngineError>,
+    host: &HostStamp,
+    member: &ModelConnection,
+    record: ConfiguredRegistration,
+) -> Result<(), EngineError> {
+    let sources = sources.ok_or_else(|| error("master_settings_sources_required"))?;
+    let tx = db.transaction().map_err(error)?;
+    let session = registration_session(
+        &tx,
+        config,
+        Some(sources),
+        host,
+        &record.project_id,
+        &record.session_id,
+    )?;
+    let metadata = custody
+        .as_mut()
         .map_err(|failure| failure.clone())?
-        .generated_configured_home(&profile_ref);
-    if !home.join(".backboard/config.json").is_file() {
+        .configured_rcli_profile(host, member, &record.proof.profile_ref)?;
+    if metadata.custody_id != record.proof.custody_id
+        || metadata.profile_config_sha256 != record.proof.profile_config_sha256
+        || metadata.profile_generation != record.proof.generation
+        || record.proof.connection != *member
+    {
         return Ok(());
     }
-    let registration = RcliRegistration {
+    let proof = configured_proof(
         host,
-        project_id,
-        session_id,
-        configured_home: &home,
-    };
-    register_rcli_profile(db, config, sources, custody, registration)?;
-    assert!(db.is_autocommit());
-    Ok(())
+        &session,
+        member.clone(),
+        &record.proof.profile_ref,
+        metadata,
+        Cursor::new(owner_revision(&tx)?),
+    )?;
+    let published = publish_rcli_profile(&tx, config, sources, host, &session, proof)?;
+    assert_eq!(published.engine_epoch, host.engine_epoch);
+    tx.commit().map_err(error)
 }
 
 fn rcli_registration_scope(
@@ -3747,8 +3975,12 @@ fn rcli_registration_scope(
         || session.owner.engine_epoch != admission.engine_epoch
         || host.db_instance != admission.db_instance
         || host.engine_epoch != admission.engine_epoch
-        || configured_connection(config, &session)? != &registration.expected_connection
     {
+        return Err(error("master_configured_receipt_conflict"));
+    }
+    let member = rcli_profile(&session, &registration.expected_connection)
+        .and_then(|profile| configured_member(config, &session, &profile).ok());
+    if member != Some(&registration.expected_connection) {
         return Err(error("master_configured_receipt_conflict"));
     }
     Ok(session)
@@ -3879,8 +4111,14 @@ pub(super) fn apply_rcli_profile_registration(
             }
             Err(failure) => return Err(error(failure)),
         }
-        if let Some(record) = self::registration(&tx, &session.session_id)? {
-            validate_registration(&tx, &session, &record)?;
+        let profile = rcli_profile(&session, &registration.expected_connection)
+            .ok_or_else(|| error("master_configured_receipt_conflict"))?;
+        if let Some(record) = self::registration(&tx, &session.session_id, &profile)? {
+            match validate_registration(&tx, &session, &record) {
+                Ok(()) => {}
+                Err(failure) if failure.0 == "master_configured_receipt_stale" => {}
+                Err(failure) => return Err(failure),
+            }
         }
         Ok(session)
     })();
@@ -3914,7 +4152,7 @@ pub(super) fn apply_rcli_profile_registration(
         }
         Err(failure) => return Err(failure),
     };
-    let connection = configured_connection(config, &original)?.clone();
+    let connection = registration.expected_connection.clone();
     tx.commit().map_err(error)?;
     let candidate = produce_rcli_profile(
         db,
@@ -4009,6 +4247,7 @@ pub(super) fn runtime(
             host: &host,
             project_id: &project_id,
             session_id: &session_id,
+            member: None,
             configured_home: &configured_home,
         };
         return register_rcli_profile(db, config, sources, custody, registration)
@@ -4337,7 +4576,7 @@ fn rebind(
     if !moved && session.binding() == (&config.id, source_hash) {
         return Ok(true);
     }
-    if session.selection.backend == MasterBackend::Rcli || session.rebound.len() >= REBINDS_MAX {
+    if session.rebound.len() >= REBINDS_MAX {
         return Ok(false);
     }
     if session.binding().0 != &config.id {
@@ -5246,6 +5485,40 @@ fallback_allowed = false
 
     const PROMPT: &str = "Describe this project in one sentence without using tools.";
 
+    const SPARE: &str = r#"[[model_access.connections]]
+id = "spare-connection"
+provider = "local-provider"
+harness = "rcli"
+protocol = "openai-chat"
+account_ref = "spare-account"
+endpoint = { kind = "http", url = "http://127.0.0.1:11435/v1" }
+model = { id = "local-model", author = "local-author" }
+auth = { method = "none" }"#;
+
+    /// The second RCLI key of the pooled fixture, as the settings hold it.
+    fn spare_connection() -> ModelConnection {
+        ModelConnection {
+            id: reference("spare-connection"),
+            provider: reference("local-provider"),
+            harness: reference("rcli"),
+            protocol: reference("openai-chat"),
+            account_ref: reference("spare-account"),
+            endpoint: ModelEndpoint::Http {
+                url: "http://127.0.0.1:11435/v1".into(),
+            },
+            model: crate::config::ModelReference {
+                id: "local-model".into(),
+                author: reference("local-author"),
+            },
+            auth: ModelAuthentication::None {},
+        }
+    }
+
+    /// The profile the second RCLI key runs master turns under: its own configured one.
+    fn spare_profile() -> CredentialRef {
+        crate::config::configured_profile_ref(&spare_connection()).unwrap()
+    }
+
     struct Fixture {
         storage: Storage,
         config: EffectiveConfig,
@@ -5371,13 +5644,53 @@ fallback_allowed = false
         }
 
         async fn build(with_repository: bool, onboarded: bool, message: &str) -> Self {
+            Self::build_with(CONFIG, with_repository, onboarded, message).await
+        }
+
+        /// A master whose pool holds a second RCLI key on its own account and endpoint,
+        /// allowed as a master target under its own configured profile (PA-6).
+        async fn pooled() -> Self {
+            let config = CONFIG
+                .replace(
+                    r#"allowed_destinations = ["local-profile"]"#,
+                    &format!(
+                        r#"allowed_destinations = ["local-profile", "{}"]"#,
+                        spare_profile().as_str()
+                    ),
+                )
+                .replace(
+                    r#"approved_accounts = ["local-account"]"#,
+                    r#"approved_accounts = ["local-account", "spare-account"]"#,
+                )
+                .replace(
+                    r#"accounts = ["local-account"]"#,
+                    r#"accounts = ["local-account", "spare-account"]"#,
+                )
+                .replace(
+                    r#"members = ["local-connection"]"#,
+                    r#"members = ["local-connection", "spare-connection"]"#,
+                )
+                .replace(
+                    "[[model_access.pools]]",
+                    &format!("{SPARE}\n[[model_access.pools]]"),
+                );
+            assert!(config.contains("spare-connection\", ") && config.contains(SPARE));
+            Self::build_with(&config, true, false, PROMPT).await
+        }
+
+        async fn build_with(
+            config: &str,
+            with_repository: bool,
+            onboarded: bool,
+            message: &str,
+        ) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-mrc-")
                 .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
                 .unwrap();
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let global = root.path().join("global.toml");
-            private_file(&global, CONFIG.as_bytes());
+            private_file(&global, config.as_bytes());
             let home = root.path().join("configured-home");
             std::fs::create_dir(&home).unwrap();
             std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -5841,6 +6154,222 @@ fallback_allowed = false
         case.close().await;
     }
 
+    /// PA-5 (DEC-141): an RCLI master turn starts with the startup instruction every master
+    /// of the project gets, the tools-off one since an RCLI master has no tools: the project
+    /// context, approved memories, skill and MCP names and the landing rules.
+    #[tokio::test]
+    async fn an_rcli_master_turn_gets_the_startup_instruction_every_master_gets() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let MasterRuntimeResult::Prepared(prepared) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("registered local RCLI must prepare its turn");
+        };
+        assert!(!prepared.tools);
+        let expected = {
+            let mut db = case.db();
+            let tx = db.transaction().unwrap();
+            crate::launch_context::for_master(
+                &tx,
+                &case.session.project_id,
+                None,
+                case.config.settings.model_access.as_ref(),
+            )
+            .unwrap()
+        };
+        assert!(expected.ends_with(crate::launch_context::MASTER_LANDING_RULES));
+        assert_eq!(prepared.instructions, expected);
+        case.close().await;
+    }
+
+    /// Writes the engine-generated SDK home of one RCLI key, as account setup leaves it.
+    /// Inputs: the fixture, the key and its endpoint. Output: the home's path.
+    fn generated_home(case: &Fixture, connection: &ModelConnection, base_url: &str) -> PathBuf {
+        let profile = super::super::account_profile::configured_profile_ref(connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        if !homes.exists() {
+            std::fs::create_dir(&homes).unwrap();
+            std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = homes.join(format!("{:x}", Sha256::digest(profile.as_str().as_bytes())));
+        let sdk = home.join(".backboard");
+        std::fs::create_dir_all(&sdk).unwrap();
+        for directory in [&home, &sdk] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        private_file(
+            &sdk.join("config.json"),
+            &serde_json::to_vec(&serde_json::json!({
+                "model": {"provider": "local-provider", "model": "local-model"},
+                "providers": [{"id": "local-provider", "name": "Local provider",
+                    "protocol": "openai-chat", "baseUrl": base_url,
+                    "auth": {"type": "none"}}]
+            }))
+            .unwrap(),
+        );
+        home
+    }
+
+    /// Queues the fixture session's next turn and names it. Inputs: the fixture and the
+    /// send's id. Output: the queued turn's prepare command.
+    async fn next_turn(case: &Fixture, id: &str) -> MasterRuntimeCommand {
+        assert_eq!(
+            case.result(case.submit(id, PROMPT)).await,
+            OwnerResult::Applied
+        );
+        let (_, turns) = case.view().await;
+        let queued = turns
+            .into_iter()
+            .find(|turn| turn.phase == MasterTurnPhase::Queued)
+            .expect("the send queues the next turn");
+        MasterRuntimeCommand::Prepare {
+            host: case.started.host.clone(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: queued.id,
+        }
+    }
+
+    /// Ends the fixture's first turn with a failure the runtime reported. Inputs: the
+    /// fixture, the prepared turn and the reason. Output: none; the turn is Failed.
+    async fn fail_first(case: &Fixture, prepared: &PreparedMasterTurn, reason: MasterReason) {
+        case.runtime(MasterRuntimeCommand::Observe {
+            host: case.started.host.clone(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: prepared.attempt.request.id.clone(),
+            observation: MasterRuntimeObservation::Failed {
+                reason,
+                cause: "gateway_rate_limited".into(),
+            },
+        })
+        .await
+        .unwrap();
+        let (_, turns) = case.view().await;
+        let first = turns.iter().find(|turn| turn.id == case.turn.id).unwrap();
+        assert_eq!(first.phase, MasterTurnPhase::Failed);
+        assert_eq!(first.reason, Some(reason));
+    }
+
+    /// PA-6 (DEC-091): an RCLI master moves to the next key of its pool after a limit, as
+    /// the other masters do: the limit pauses the first account and the next turn runs on
+    /// the second key under that key's own profile and account.
+    #[tokio::test]
+    async fn an_rcli_master_moves_to_the_next_pool_key_after_a_limit() {
+        let case = Fixture::pooled().await;
+        case.register().await;
+        generated_home(&case, &spare_connection(), "http://127.0.0.1:11435/v1");
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the owner's chosen key must prepare the first turn");
+        };
+        assert_eq!(first.attempt.connection.id, reference("local-connection"));
+        assert_eq!(
+            first.attempt.request.target_profile_ref,
+            reference("local-profile")
+        );
+        fail_first(&case, &first, MasterReason::RateLimited).await;
+        let paused: bool = case
+            .db()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_paused_accounts WHERE connection='local-connection')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(paused, "a limit pauses the key that hit it");
+        let prepare = next_turn(&case, "after-limit").await;
+        let MasterRuntimeResult::Prepared(second) = case.runtime(prepare).await.unwrap() else {
+            panic!("the pool's second key must prepare the next turn");
+        };
+        assert_eq!(second.attempt.connection, spare_connection());
+        assert_eq!(second.attempt.request.target_profile_ref, spare_profile());
+        assert_eq!(
+            second.attempt.request.route.account_ref,
+            reference("spare-account")
+        );
+        assert_eq!(second.session.session_id, case.session.session_id);
+        let registered: i64 = case
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM configured_master_profiles WHERE session=?1",
+                [case.session.session_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            registered, 2,
+            "each key of the pool holds its own registration"
+        );
+        case.close().await;
+    }
+
+    /// PA-6 (DEC-092): an RCLI master keeps its conversation when settings outside it
+    /// change, as the other masters do: the next send moves the session to the new settings
+    /// and the turn runs on its registration moved there from custody's unchanged profile.
+    #[tokio::test]
+    async fn an_rcli_master_keeps_its_conversation_after_a_settings_change_outside_it() {
+        let case = Fixture::new(true).await;
+        let registered = case.register().await;
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered key must prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        let basis = owner_read(
+            &case.storage,
+            &case.started,
+            OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 1,
+            },
+        )
+        .await;
+        let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+            panic!("actual model source basis missing");
+        };
+        owner_apply(
+            &case.storage,
+            &case.started,
+            "add-outside-account",
+            OwnerMutation::ModelAccess {
+                expected_config_id: basis.config_id.clone(),
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::AddAccount {
+                    account_ref: reference("outside-account"),
+                },
+            },
+        )
+        .await;
+        let prepare = next_turn(&case, "after-settings-change").await;
+        let (session, _) = case.view().await;
+        assert_eq!(session.session_id, case.session.session_id);
+        assert_eq!(session.rebound.len(), 1);
+        assert!(session.rebinds_valid());
+        assert_ne!(session.binding().0, &basis.config_id);
+        let MasterRuntimeResult::Prepared(second) = case.runtime(prepare).await.unwrap() else {
+            panic!("the rebound RCLI master must prepare its next turn");
+        };
+        assert_eq!(&second.attempt.config_id, session.binding().0);
+        assert_eq!(second.attempt.connection, registered.connection);
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(record.proof.registration_id, registered.registration_id);
+        assert_eq!(&record.proof.config_id, session.binding().0);
+        assert_eq!(record.proof.custody_id, registered.custody_id);
+        drop(tx);
+        case.close().await;
+    }
+
     #[tokio::test]
     async fn an_added_folder_project_prepares_its_master_turn_on_its_own_repository() {
         let case = Fixture::onboarded().await;
@@ -5888,12 +6417,17 @@ fallback_allowed = false
     async fn unregistered_local_rcli_is_configuration_required_without_admission_or_allocation() {
         let case = Fixture::new(false).await;
         let before = case.snapshot();
-        let result = case.runtime(case.prepare()).await;
+        let result = case.runtime(case.prepare()).await.unwrap();
+        let MasterRuntimeResult::Turn(blocked) = result else {
+            panic!("a master no pool key can run blocks its turn, as every master does");
+        };
+        assert_eq!(blocked.phase, MasterTurnPhase::Blocked);
+        assert_eq!(blocked.reason, Some(MasterReason::RuntimeUnavailable));
         assert_eq!(
-            result.err().unwrap().0,
-            "rcli_profile_configuration_required"
+            blocked.cause.as_deref(),
+            Some("rcli_profile_configuration_required")
         );
-        assert_eq!(case.snapshot(), before);
+        assert_eq!(case.snapshot().counts, before.counts);
         assert_eq!(before.counts, [0; 6]);
         assert!(!case.home.join(".backboard/keys.json").exists());
         case.close().await;
@@ -5928,9 +6462,13 @@ fallback_allowed = false
         assert_eq!(prepared.attempt.connection, connection);
         let mut db = case.db();
         let tx = db.transaction().unwrap();
-        let record = registration(&tx, &case.session.session_id)
-            .unwrap()
-            .unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             record.proof.profile_ref,
             case.session.selection.target_profile_ref
@@ -6070,7 +6608,7 @@ fallback_allowed = false
             )
             .unwrap();
         assert!(registrations >= 1);
-        assert!(registrations <= crate::master_session::SESSIONS_MAX as i64);
+        assert!(registrations <= CONFIGURED_PROFILES_MAX as i64);
         drop(tx);
         case.close().await;
     }
@@ -6196,10 +6734,10 @@ fallback_allowed = false
             let mut db = Connection::open(&case.path).unwrap();
             db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
             let tx = db.transaction().unwrap();
-            for n in 0..SESSIONS_MAX {
+            for n in 0..CONFIGURED_PROFILES_MAX {
                 tx.execute(
-                    "INSERT INTO configured_master_profiles(id,session,body) VALUES (?1,?1,'{}')",
-                    [format!("closed-{n:02}")],
+                    "INSERT INTO configured_master_profiles(id,session,profile,body) VALUES (?1,?1,?1,'{}')",
+                    [format!("closed-{n:03}")],
                 )
                 .unwrap();
             }
@@ -6210,10 +6748,10 @@ fallback_allowed = false
         let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
         assert_eq!(
             count("SELECT COUNT(*) FROM configured_master_profiles"),
-            SESSIONS_MAX as i64
+            CONFIGURED_PROFILES_MAX as i64
         );
         assert_eq!(
-            count("SELECT COUNT(*) FROM configured_master_profiles WHERE id='closed-00'"),
+            count("SELECT COUNT(*) FROM configured_master_profiles WHERE id='closed-000'"),
             0
         );
         let stored: String = db

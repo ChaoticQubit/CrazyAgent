@@ -970,6 +970,72 @@ fn codex_rollout_of_this_working_folder_is_found_and_read() {
     );
 }
 
+/// PA-7: a native Codex lead's sub-agents write rollouts of their own in its home, in its
+/// folder and newer than its own; a reader, even one that adopts a running pane, takes
+/// only the lead's, never one whose `session_meta` names a sub-agent source.
+#[test]
+fn a_codex_sub_agent_rollout_is_never_taken_as_its_lead_s_record() {
+    let case = Case::new();
+    let sessions = case.path().join("sessions");
+    let since = SystemTime::now();
+    let lead = rollout(
+        &sessions,
+        "2026/11/11",
+        "rollout-lead.jsonl",
+        &case.work(),
+        &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+    );
+    let child = sessions.join("2026/11/11").join("rollout-child.jsonl");
+    let meta = serde_json::json!({
+        "timestamp": "2026-11-11T13:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "child", "cwd": case.work().to_string_lossy(),
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "s", "depth": 1}}}
+        }
+    });
+    std::fs::write(
+        &child,
+        format!(
+            "{meta}\n{}\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child"}]}}"#
+        ),
+    )
+    .unwrap();
+    let older = SystemTime::now() - Duration::from_secs(1);
+    std::fs::File::options()
+        .write(true)
+        .open(&lead)
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+    for mut reader in [
+        TranscriptReader::adopted(
+            Transcript::CodexRollouts {
+                sessions: sessions.clone(),
+            },
+            &case.work(),
+            since - Duration::from_secs(5),
+        ),
+        TranscriptReader::new(
+            Transcript::CodexRollouts {
+                sessions: sessions.clone(),
+            },
+            &case.work(),
+            since - Duration::from_secs(5),
+        ),
+    ] {
+        let events = reader.read().unwrap();
+        assert!(!events.contains(&text("child\n")), "{events:?}");
+    }
+    let mut adopted = TranscriptReader::adopted(
+        Transcript::CodexRollouts { sessions },
+        &case.work(),
+        since - Duration::from_secs(5),
+    );
+    assert_eq!(adopted.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+}
+
 #[test]
 fn codex_rollout_older_than_the_session_is_ignored() {
     let case = Case::new();
@@ -1340,4 +1406,241 @@ fn a_deeply_nested_tool_input_is_formatted_only_up_to_its_bound() {
         deep_took <= flat_took * 3 + Duration::from_millis(1),
         "deep {deep_took:?}, flat {flat_took:?}"
     );
+}
+
+/// A Codex 0.164 command still running when exec_command or write_stdin yields is reported
+/// by its session id, from the "Process running with session ID N" line Codex writes in the
+/// header of that call's output, before its `Output:` line, in the text and the content-list
+/// output shapes; its end is the CommandExecution item Codex writes once the process exits.
+/// A running item, an item without an id, an id that is not a number and a poll of a command
+/// that already exited report nothing.
+#[test]
+fn codex_background_commands_are_followed_by_session_id() {
+    use serde_json::json;
+    let call = |name: &str, id: &str| json!({"type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":"{}"}});
+    let output = |id: &str, output: serde_json::Value| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":output}});
+    let ended = |status: &str, id: serde_json::Value| {
+        json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"u",
+            "item":{"type":"CommandExecution","id":"c1","process_id":id,"command":["sleep","9"],
+                "cwd":"/w","parsed_cmd":[],"source":"agent","status":status,"exit_code":0}}})
+    };
+    let started = |id: &str| TranscriptEvent::BackgroundStarted { id: id.into() };
+    let read = |lines: &[serde_json::Value]| {
+        let mut calls = CodexExecCalls::default();
+        lines
+            .iter()
+            .flat_map(|line| {
+                let exec = calls.sees(line);
+                codex_facts(line, exec)
+            })
+            .filter(|fact| matches!(fact, TranscriptEvent::BackgroundStarted { .. }))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        read(&[
+            call("exec_command", "c1"),
+            output(
+                "c1",
+                json!(
+                    "Chunk ID: 1\nWall time: 1.0002 seconds\nProcess running with session ID 4821\nOutput:\nserving"
+                )
+            ),
+        ]),
+        vec![started("4821")]
+    );
+    assert_eq!(
+        read(&[
+            call("write_stdin", "c2"),
+            output(
+                "c2",
+                json!([
+                    {"type":"input_text","text":"Wall time: 2.0 seconds\nProcess running with session ID 77\nOutput:\n"}
+                ])
+            ),
+        ]),
+        vec![started("77")]
+    );
+    for quiet in [
+        output(
+            "c1",
+            json!("Wall time: 1.0 seconds\nProcess exited with code 0\nOutput:\n"),
+        ),
+        output(
+            "c1",
+            json!("Wall time: 1.0 seconds\nProcess running with session ID 48\u{7}21\nOutput:\n"),
+        ),
+        output(
+            "c1",
+            json!("Wall time: 1.0 seconds\nProcess running with session ID abc\nOutput:\n"),
+        ),
+        output(
+            "c1",
+            json!("Wall time: 1.0 seconds\nProcess running with session ID 5"),
+        ),
+        output("c1", json!({"content":"Process running with session ID 9"})),
+    ] {
+        assert_eq!(
+            read(&[call("exec_command", "c1"), quiet.clone()]),
+            Vec::new(),
+            "{quiet}"
+        );
+    }
+    for quiet in [
+        ended("in_progress", json!("4821")),
+        ended("completed", serde_json::Value::Null),
+        ended("completed", json!("x1")),
+    ] {
+        assert_eq!(codex_facts(&quiet, false), Vec::new(), "{quiet}");
+    }
+    for status in ["completed", "failed", "declined"] {
+        assert_eq!(
+            codex_facts(&ended(status, json!("4821")), false),
+            vec![TranscriptEvent::BackgroundEnded { id: "4821".into() }]
+        );
+    }
+}
+
+/// PA9-F1: only the header Codex writes on an exec output names a command left running.
+/// The same line in the output's body (a file the command printed, an echo, injected text),
+/// in a second content part, in the output of another tool such as an MCP fetch, in a custom
+/// tool output, or in an output no exec call is waiting for starts nothing; an exec call the
+/// reader forgot past `CODEX_EXEC_CALLS_MAX` starts nothing either.
+#[test]
+fn codex_background_commands_come_only_from_an_exec_output_header() {
+    use serde_json::json;
+    const MARKER: &str = "Process running with session ID 4242";
+    let call = |name: &str, id: &str| json!({"type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":"{}"}});
+    let output = |kind: &str, id: &str, output: serde_json::Value| json!({"type":"response_item","payload":{"type":kind,"call_id":id,"output":output}});
+    let header = |running: Option<&str>| {
+        let running = running.map(|id| format!("Process running with session ID {id}\n"));
+        format!(
+            "Chunk ID: 1\nWall time: 0.1 seconds\n{}Output:\n",
+            running.unwrap_or_else(|| "Process exited with code 0\n".to_owned())
+        )
+    };
+    let starts = |calls: &mut CodexExecCalls, line: &serde_json::Value| {
+        let exec = calls.sees(line);
+        codex_facts(line, exec)
+            .into_iter()
+            .filter_map(|fact| match fact {
+                TranscriptEvent::BackgroundStarted { id } => Some(id),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut calls = CodexExecCalls::default();
+    starts(&mut calls, &call("exec_command", "body"));
+    let body = output(
+        "function_call_output",
+        "body",
+        json!(format!("{}{MARKER}\n", header(None))),
+    );
+    assert_eq!(starts(&mut calls, &body), Vec::<String>::new());
+
+    starts(&mut calls, &call("exec_command", "both"));
+    let both = output(
+        "function_call_output",
+        "both",
+        json!(format!(
+            "{}{MARKER}\nProcess running with session ID 5\n",
+            header(Some("4821"))
+        )),
+    );
+    assert_eq!(starts(&mut calls, &both), vec!["4821".to_owned()]);
+    assert_eq!(
+        starts(&mut calls, &both),
+        Vec::<String>::new(),
+        "an output is read once"
+    );
+
+    starts(&mut calls, &call("exec_command", "parts"));
+    let parts = output(
+        "function_call_output",
+        "parts",
+        json!([{"type":"input_text","text":header(None)},{"type":"input_text","text":header(Some("4242"))}]),
+    );
+    assert_eq!(starts(&mut calls, &parts), Vec::<String>::new());
+
+    starts(&mut calls, &call("fetch", "mcp"));
+    let forged = output("function_call_output", "mcp", json!(header(Some("4242"))));
+    assert_eq!(starts(&mut calls, &forged), Vec::<String>::new());
+
+    starts(&mut calls, &call("exec_command", "custom"));
+    let custom = output(
+        "custom_tool_call_output",
+        "custom",
+        json!(header(Some("4242"))),
+    );
+    assert_eq!(starts(&mut calls, &custom), Vec::<String>::new());
+    let stray = output(
+        "function_call_output",
+        "never-called",
+        json!(header(Some("4242"))),
+    );
+    assert_eq!(starts(&mut calls, &stray), Vec::<String>::new());
+
+    let mut calls = CodexExecCalls::default();
+    for index in 0..=CODEX_EXEC_CALLS_MAX {
+        starts(&mut calls, &call("exec_command", &format!("c{index}")));
+    }
+    let forgotten = output("function_call_output", "c0", json!(header(Some("1"))));
+    assert_eq!(starts(&mut calls, &forgotten), Vec::<String>::new());
+    let kept = output(
+        "function_call_output",
+        &format!("c{CODEX_EXEC_CALLS_MAX}"),
+        json!(header(Some("2"))),
+    );
+    assert_eq!(starts(&mut calls, &kept), vec!["2".to_owned()]);
+}
+
+/// Both harnesses with tools report their background commands; only Claude Code starts a
+/// turn of its own when one ends, so a Codex session must end a held turn itself (PA-10).
+#[test]
+fn codex_and_claude_records_report_background_commands() {
+    let case = Case::new();
+    let (_, claude) = case.claude();
+    assert!(claude.reports_background());
+    assert!(claude.notifies_background_end());
+    let codex = TranscriptReader::new(
+        Transcript::CodexRollouts {
+            sessions: case.path(),
+        },
+        &case.work(),
+        SystemTime::now(),
+    );
+    assert!(codex.reports_background());
+    assert!(!codex.notifies_background_end());
+    let none = TranscriptReader::new(Transcript::Unavailable, &case.work(), SystemTime::now());
+    assert!(!none.reports_background());
+    assert!(!none.notifies_background_end());
+}
+
+/// Background commands at task end maps to every harness kind (PA-10, DEC-141): a Claude
+/// Code and a Codex record both report the commands their agent starts in the background,
+/// so Wait, a grace time and Stop act the same on both; rcli runs no team agent and has no
+/// tools, which the setting says. The match names every kind, so a new one fails to build
+/// until it has a mapping.
+#[test]
+fn every_harness_kind_maps_background_commands_at_task_end() {
+    use crate::coord::settings::HarnessKind;
+    let case = Case::new();
+    for kind in HarnessKind::ALL {
+        match kind {
+            HarnessKind::ClaudeCode => {
+                let (_, reader) = case.claude();
+                assert!(reader.reports_background());
+            }
+            HarnessKind::Codex => {
+                let reader = TranscriptReader::new(
+                    Transcript::CodexRollouts {
+                        sessions: case.path(),
+                    },
+                    &case.work(),
+                    SystemTime::now(),
+                );
+                assert!(reader.reports_background());
+            }
+            HarnessKind::Rcli => assert_eq!(crate::team::launch_harness("rcli"), None),
+        }
+    }
 }

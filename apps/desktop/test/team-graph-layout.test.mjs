@@ -493,8 +493,8 @@ test("a hookless card has no receipt ticks and says only its receipts are unavai
   assert.doesNotMatch(html, /✓/);
 });
 
-test("a card whose agent the Delivery setting leaves without messages shows the engine's sentence on the card, in its tip and its Message helper", () => {
-  const note = "Can't receive messages: Native only needs tools on for Codex.";
+test("a card whose agent the Delivery setting leaves without a channel while it works shows the engine's sentence on the card, in its tip and its Message helper", () => {
+  const note = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
   const quiet = { ...talk, nodes: talk.nodes.map((item) => item.id === "team-2" ? { ...item, message_note: note } : item) };
   const layout = graph.layoutGraph(quiet);
   const tip = graph.cardTip(card(layout, "team-2").node, quiet);
@@ -502,8 +502,8 @@ test("a card whose agent the Delivery setting leaves without messages shows the 
   const html = renderToStaticMarkup(createElement(view.GraphCard, {
     placed: card(layout, "team-2"), graph: quiet, items: [], open: false, tipId: null, onOpen() {}, onTip() {},
   }));
-  assert.ok(html.includes(`<span class="tg-chip warn note"><span class="tg-clip">Can&#x27;t receive messages: Native only needs tools on for Codex.</span></span>`), html);
-  assert.equal(view.messageHelper(card(layout, "team-2").node), `${note} It waits in the agent's mailbox until tools are on or message delivery changes.`);
+  assert.ok(html.includes(`<span class="tg-chip warn note"><span class="tg-clip">${note}</span></span>`), html);
+  assert.equal(view.messageHelper(card(layout, "team-2").node), `${note} It waits in the agent's mailbox until then.`);
   const plain = graph.layoutGraph(talk);
   assert.ok(!graph.cardTip(card(plain, "team-2").node, talk).includes(note));
   assert.doesNotMatch(renderToStaticMarkup(createElement(view.GraphCard, {

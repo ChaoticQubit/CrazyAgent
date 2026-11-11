@@ -845,20 +845,22 @@ impl OwnerRuntimeHandle {
                 .await?,
             ))
         } else {
-            MasterHost::Codex(Box::new(
-                CodexHost::spawn(
-                    launch.command,
-                    launch.sandbox,
-                    profile,
-                    launch.home,
-                    action,
-                    account_ref,
-                    prepared.time.run_time(),
-                    resources,
-                    &prepared.instructions,
-                )
-                .await?,
-            ))
+            let mut host = CodexHost::spawn(
+                launch.command,
+                launch.sandbox,
+                profile,
+                launch.home,
+                action,
+                account_ref,
+                prepared.time.run_time(),
+                resources,
+                &prepared.instructions,
+            )
+            .await?;
+            if prepared.tools {
+                host.limit_steps(prepared.steps);
+            }
+            MasterHost::Codex(Box::new(host))
         };
         let mut active = ActiveMaster {
             host,
@@ -1447,7 +1449,7 @@ pub(super) fn timed_out(error: EngineError, limit: TimeLimit) -> EngineError {
     }
 }
 
-fn reason_for_error(error: &EngineError) -> MasterReason {
+pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
     match error.0.as_str() {
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_health_unknown"
@@ -1494,7 +1496,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         }
         "native_profile_lock_unavailable"
         | "master_runtime_host_unavailable"
-        | "rcli_profile_configuration_required" => MasterReason::RuntimeUnavailable,
+        | "rcli_profile_configuration_required"
+        | "codex_host_startup_timeout"
+        | "claude_host_startup_timeout" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }

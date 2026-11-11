@@ -48,7 +48,7 @@ fn a_real_claude_research_run_on_a_fast_model_is_signed_in_inside_the_research_s
     let managed = profile.profile_path().unwrap();
     let started = Instant::now();
     let (ending, _, output) = runner
-        .launch_leased(&jobs, &job, &account, place, Some((profile, None)))
+        .launch_leased(&jobs, &job, &account, place, Some((profile, None)), None)
         .unwrap();
     let seconds = started.elapsed().as_secs();
     let report = fs::read_to_string(&output).unwrap_or_default();

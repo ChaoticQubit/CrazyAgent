@@ -15,13 +15,13 @@ import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, endTerminals, own
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
 const TASK_MS = 120000;
-const HELD_MS = 8000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TASK = "Write fruit.md with one line about apples.";
 const NOTE = "Please add a line about pears too.";
-const NO_CHANNEL = "Can't receive messages: Native only needs tools on for Codex.";
-const WAITS = `${NO_CHANNEL} It waits in the agent's mailbox until tools are on or message delivery changes.`;
+const NO_CHANNEL = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
+const WAITS = `${NO_CHANNEL} It waits in the agent's mailbox until then.`;
+const WAKE_TASK = "A message from your team woke you. It is at the end of this task, under Messages for you. Act on it.";
 
 /** The Codex stand-in the engine runs every team agent with, tools off: it keeps a
  * conversation file as Codex does, answers each turn with "Wrote fruit.md." and writes every
@@ -350,7 +350,27 @@ test("Messages to Codex agents Auto: a tools-off Codex sub-agent gets the owner'
 test("Messages to Codex agents Typing only: a tools-off Codex sub-agent gets the owner's message typed in and nothing says it can't receive messages", { timeout: 600000 },
   (t) => typedOption(t, "ca-nod-typing-", "typing_only"));
 
-test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, card and Message dialog say it can't receive messages, the message stays Sent, and Auto then types it in", { timeout: 600000 }, async (t) => {
+/** Waits until the engine woke the agent with a task of its own that carried the owner's
+ * message, checking on every read that the message was never typed in. Inputs: the engine
+ * root, the project and the agent. Output: the rows then. */
+async function wokenWith(runtime, project, agent) {
+  for (const deadline = Date.now() + TASK_MS; ; await pause(POLL_MS * 5)) {
+    const row = engineRows(runtime, project);
+    assert.notEqual(row.receipt, "typed", `Native only never types the message in: ${JSON.stringify(row)}`);
+    const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+    let woken;
+    try {
+      store.exec("PRAGMA busy_timeout = 5000");
+      woken = store.prepare("SELECT COUNT(*) AS n FROM team_tasks WHERE project=? AND agent=? AND prompt=?").get(project, agent, WAKE_TASK).n;
+    } finally {
+      store.close();
+    }
+    if (woken === 1 && row.reached && (row.receipt === "delivered" || row.receipt === "read")) return row;
+    assert.ok(Date.now() < deadline, `the engine never woke the agent with the message: ${JSON.stringify({ ...row, woken })}`);
+  }
+}
+
+test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, card and Message dialog say its messages come as a task of their own, and the owner's message reaches it in one, never typed in", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-nod-native-", async ({ project, runtime, me, page, status, graph }) => {
     await deliver(me, page, project, status, "native_only");
     const done = await handOff(me, page, project, runtime);
@@ -362,14 +382,9 @@ test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, c
     await shownTo(me, "the sentence on the sub-agent's Agents row", () => rowText(page, name), (text) => (text ?? "").includes(NO_CHANNEL));
     await me.capture("native-only-says-so");
     await message(me, name, WAITS);
-    for (const deadline = Date.now() + HELD_MS; Date.now() < deadline; await pause(POLL_MS * 5)) {
-      const row = engineRows(runtime, project);
-      assert.equal(row.receipt, "sent", `the message stays Sent: ${JSON.stringify(row)}`);
-      assert.equal(row.reached, false, "Native only never types into the agent");
-    }
-    await me.capture("native-only-held");
+    await wokenWith(runtime, project, done.agent);
+    await me.capture("native-only-woken");
     await deliver(me, page, project, status, "auto");
-    await typedIn(runtime, project, "the switch to Auto");
     await shownTo(me, "the sentence gone from the card", () => cardText(page, name), (text) => text !== null && !text.includes(NO_CHANNEL));
     await me.unfold("Agents and tasks");
     await shownTo(me, "the sentence gone from the Agents row", () => rowText(page, name), (text) => text !== null && !text.includes(NO_CHANNEL));

@@ -66,6 +66,33 @@ fn require_rcli_connection(connection: &ModelConnection) -> Result<(), EngineErr
     Ok(())
 }
 
+/// The engine code a failed rcli turn stops with. Input: the provider failure the host
+/// named, if any. Output: the code.
+fn failed_turn_code(failure: Option<crate::rcli_host::RcliProviderFailure>) -> &'static str {
+    match failure {
+        Some(crate::rcli_host::RcliProviderFailure::RateLimited) => "gateway_rate_limited",
+        Some(crate::rcli_host::RcliProviderFailure::QuotaExhausted) => "gateway_quota_exhausted",
+        Some(crate::rcli_host::RcliProviderFailure::InvalidAuthentication) => {
+            "gateway_invalid_authentication"
+        }
+        None => "rcli_master_execution_failed",
+    }
+}
+
+/// What an rcli master's instruction file holds. Inputs: the master's startup instruction
+/// and the owner's app and project instructions. Output: the file text.
+fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) -> String {
+    let fitted = super::master_host_launch::fit_process(
+        instructions,
+        given,
+        crate::rcli_host::INSTRUCTIONS_BYTES_MAX,
+    );
+    let text = super::master_host_launch::master_prompt(instructions, &fitted.text);
+    assert!(text.len() <= crate::rcli_host::INSTRUCTIONS_BYTES_MAX);
+    assert!(text.starts_with(instructions));
+    text
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
@@ -118,7 +145,7 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "rcli_master_closed"
         | "native_profile_lock_unavailable"
         | "master_runtime_host_unavailable" => MasterReason::RuntimeUnavailable,
-        _ => MasterReason::Unknown,
+        _ => super::master_runtime::reason_for_error(error),
     };
     MasterRuntimeObservation::Failed {
         reason,
@@ -198,7 +225,7 @@ impl OwnerRuntimeHandle {
         if launch.binding.project_id != prepared.session.project_id
             || launch.binding.session_id != prepared.session.session_id
             || launch.binding.connection != prepared.attempt.connection
-            || launch.binding.target_profile_ref != prepared.session.selection.target_profile_ref
+            || launch.binding.target_profile_ref != prepared.attempt.request.target_profile_ref
             || launch.home_dir != profile.profile_path()?
             || launch.cwd != prepared.cwd
             || !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
@@ -222,14 +249,15 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             &prepared.hidden_paths,
         )?;
-        if !given.text.is_empty() {
+        let text = instruction_file_text(&prepared.instructions, given);
+        if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(
                 &self.authority.root,
                 &runtime_ref,
-                &given.text,
+                &text,
             )?);
         }
-        assert_eq!(launch.instructions.is_some(), !given.text.is_empty());
+        assert_eq!(launch.instructions.is_some(), !text.is_empty());
         let capture = Capture::new(file, resources.output_bytes)?;
         let launching = self
             .inspect_master_turn(
@@ -392,7 +420,9 @@ impl OwnerRuntimeHandle {
                     });
                 }
                 RcliMasterStatus::Cancelled => return Ok(MasterRuntimeObservation::Cancelled),
-                RcliMasterStatus::Failed => return Err(failure("rcli_master_execution_failed")),
+                RcliMasterStatus::Failed => {
+                    return Err(failure(failed_turn_code(completion.failure)));
+                }
             }
         }
     }
