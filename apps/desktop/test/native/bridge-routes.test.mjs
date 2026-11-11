@@ -137,8 +137,8 @@ test("the end-to-end bridge routes match the app's commands", () => {
 test("every plain bridge command is routed with its own arguments and native ones are left out", () => {
   const planned = new Map(commands(lib).map((command) => [command.name, plan(command, impls)]));
   const setup = planned.get("desktop_update_project_setup").route;
-  assert.deepEqual(setup.args.map((arg) => arg.name), ["id", "setup", "name", "revision", "generation"]);
-  assert.match(setup.body, /^lock\(state\)\s*\.await\?\s*\.update_project_setup\(&id, setup, name, revision, generation\)\s*\.await$/);
+  assert.deepEqual(setup.args.map((arg) => arg.name), ["id", "setup", "name", "revision", "generation", "kept"]);
+  assert.match(setup.body, /^lock\(state\)\s*\.await\?\s*\.update_project_setup\(&id, setup, name, revision, kept, generation\)\s*\.await$/);
   assert.equal(planned.get("desktop_connect").route.body, "let mut bridge = lock(state).await?; bridge.connect().await");
   const catalog = planned.get("desktop_harness_catalog").route;
   assert.deepEqual(catalog.args.map((arg) => arg.name), ["check"]);
