@@ -89,9 +89,65 @@ pub enum QuestionsTo {
     Me,
 }
 
+/// One protection the team gives an agent the same way on every harness that can (DEC-141
+/// PA-12): receipts on the messages it is sent, the owner's hooks, and the edit guard that
+/// holds an edit of a claimed file under Overlapping edits Block or Wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    Receipts,
+    OwnerHooks,
+    EditGuard,
+}
+
+impl Protection {
+    /// Every protection, in the order the parity check walks them.
+    pub const ALL: [Self; 3] = [Self::Receipts, Self::OwnerHooks, Self::EditGuard];
+}
+
+/// Why Claude Code on an API key or URL account runs no hooks: it starts `--bare`, which
+/// skips settings and plugin hooks (DEC-104 bare-hooks, Claude Code 2.1.322 `--help`).
+pub const BARE_NO_HOOKS: &str = "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.";
+/// Why an rcli master runs no hooks: rcli has none.
+pub const RCLI_NO_HOOKS: &str =
+    "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+/// Which owner hooks a Codex agent runs: those on an event Codex has (PA-12).
+pub const CODEX_HOOK_EVENTS_ONLY: &str = "Codex agents run your hooks on the events Codex has.";
+/// What a Codex agent's Messages timeline shows when its app-server lists a hook the launch
+/// pinned as not trusted (PA1213R2-F2), so Codex runs neither the edit guard nor that hook.
+pub const CODEX_HOOKS_UNTRUSTED: &str = "Codex does not trust CrazyAgent's hooks for this agent, so Block and Wait cannot hold its edits and your hooks do not run for it.";
+/// What a Codex agent's Messages timeline shows when the engine cannot ask its app-server
+/// about the pinned hooks in time: another Codex release, another system, or no answer.
+pub const CODEX_HOOKS_UNCHECKED: &str = "CrazyAgent could not confirm that Codex trusts its hooks for this agent, so Block and Wait may not hold its edits and your hooks may not run for it.";
+/// The short form of BARE_NO_HOOKS and RCLI_NO_HOOKS a terminal Hooks heading has room
+/// for: which agents run none of the owner's hooks.
+pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and rcli run none";
+
+impl HarnessKind {
+    /// Says why this harness's agents miss one protection on one account kind, or None
+    /// when they get it (DEC-141 PA-12): Claude Code on a sign-in and Codex on any account
+    /// get all three; Claude Code on an API key or URL account starts bare, without hooks
+    /// or receipts; rcli has no hooks. Takes the kind, whether the account is an API key or
+    /// URL one, and the protection. Returns the sentence the settings show, or None.
+    pub fn lacks(self, endpoint: bool, protection: Protection) -> Option<&'static str> {
+        match (self, endpoint, protection) {
+            (Self::ClaudeCode, true, Protection::Receipts) => Some(BARE_NO_RECEIPTS),
+            (Self::ClaudeCode, true, Protection::OwnerHooks | Protection::EditGuard) => {
+                Some(BARE_NO_HOOKS)
+            }
+            (Self::Rcli, _, Protection::OwnerHooks | Protection::EditGuard) => Some(RCLI_NO_HOOKS),
+            (Self::ClaudeCode, false, _) | (Self::Codex, _, _) | (Self::Rcli, _, _) => None,
+        }
+    }
+}
+
+/// Why receipts are missing for Claude Code on an API key or URL account, in the words the
+/// clients show in place of receipts (`adoption::HOOKLESS_WORDS`).
+pub const BARE_NO_RECEIPTS: &str = "Receipts are unavailable for this account kind.";
+
 /// What an edit to a file another agent claimed does (Q15): warn both sides, block the
-/// edit where the harness has a pre-edit hook, or nothing; Wait (OS-8) also refuses a
-/// start on a file another agent's work holds and prompts the agent once it is free.
+/// edit where the harness runs the edit guard (`Protection::EditGuard`), or nothing; Wait
+/// (OS-8) also refuses a start on a file another agent's work holds and prompts the agent
+/// once it is free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Overlaps {

@@ -6,7 +6,7 @@ use crate::accounts::{
     SignInMethod,
 };
 use crate::config::POOL_MEMBERS_MAX;
-use crate::engine::owner::{AccountSecret, NativeAuthMethod, NativeAuthPhase};
+use crate::engine::owner::{AccountSecret, NativeAuthMethod, NativeAuthPhase, SignInWay};
 use crate::protocol::CredentialRef;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
 use crate::tui::client::settings::{
@@ -33,6 +33,12 @@ const MODEL_CHARS_MAX: usize = crate::accounts::ACCOUNT_MODEL_MAX;
 const NAME_CHARS_MAX: usize = crate::accounts::ACCOUNT_NAME_MAX;
 const FAST_READS_MAX: u32 = 30;
 const MODELS_SHOWN_MAX: usize = 8;
+/// The title of a check of the sign-in an account already has (DEC-141 PA-13).
+pub(super) const CHECK_TITLE: &str = crate::tui::native_auth::CHECK_SIGN_IN;
+/// What a running check of an account's sign-in says, the same for every harness.
+const CHECK_LINE: &str = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this Mac is read.";
+/// What a check that found no sign-in says, the same for every harness.
+const CHECK_SIGNED_OUT: &str = "This account isn't signed in. Choose Sign in again.";
 
 /// One sign-in choice on the method menu.
 /// Input: built from the engine's provider catalog. Output: the title,
@@ -132,8 +138,9 @@ pub fn provider_tiles(catalog: &[ProviderEntry]) -> Vec<Tile> {
 }
 
 /// The sign-in choices of one provider, in menu order.
-/// Input: the engine's catalog entry. Output: choices; a ChatGPT subscription
-/// offers a device code and, next, the Codex sign-in already on this Mac.
+/// Input: the engine's catalog entry. Output: choices; a subscription signs in in
+/// CrazyAgent's own profile for the account, never with a sign-in found elsewhere on this
+/// Mac (DEC-141 PA-13).
 pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
     let mut out = Vec::new();
     for method in &entry.methods {
@@ -145,22 +152,15 @@ pub fn choices(entry: &ProviderEntry) -> Vec<Choice> {
             description,
         };
         match (entry.provider, method.method) {
-            (Provider::Chatgpt, SignInMethod::Subscription) => {
-                out.push(choice(
-                    Some(NativeAuthMethod::CodexDeviceCode),
-                    "Sign in with ChatGPT",
-                    "Recommended. Uses your ChatGPT plan. You get a code to enter on any device.",
-                ));
-                out.push(choice(
-                    Some(NativeAuthMethod::CodexExisting),
-                    "Use the Codex sign-in on this Mac",
-                    "Reuses the account Codex is already signed in to.",
-                ));
-            }
+            (Provider::Chatgpt, SignInMethod::Subscription) => out.push(choice(
+                Some(NativeAuthMethod::CodexDeviceCode),
+                "Sign in with ChatGPT",
+                "Recommended. Uses your ChatGPT plan. You get a code to enter on any device.",
+            )),
             (_, SignInMethod::Subscription) => out.push(choice(
                 Some(NativeAuthMethod::ClaudeOfficial),
                 "Sign in with your Claude subscription",
-                "Recommended. Uses your Claude Pro or Max plan. Claude opens in your browser.",
+                "Recommended. Uses your Claude Pro or Max plan. Claude opens in your browser. Claude Code has no sign-in code.",
             )),
             (Provider::Chatgpt | Provider::OpenaiApi, SignInMethod::ApiKey) => out.push(choice(
                 None,
@@ -583,10 +583,8 @@ impl SignIn {
                     lines.push(Line::default());
                 }
             }
-            Some(NativeAuthMethod::CodexExisting) => {
-                lines.push(Line::raw(
-                    "Checking the account Codex is signed in to on this Mac.",
-                ));
+            Some(NativeAuthMethod::CodexExisting | NativeAuthMethod::ClaudeExisting) => {
+                lines.push(Line::raw(CHECK_LINE));
                 lines.push(Line::default());
             }
             _ => {
@@ -799,22 +797,45 @@ impl AddAccount {
     /// Input: the account. Output: the screen at the sign-in step, or the
     /// method step for an account that is not a subscription.
     pub fn again(account: AccountView) -> Self {
+        let way = if account.provider == Provider::Chatgpt {
+            SignInWay::Code
+        } else {
+            SignInWay::Browser
+        };
+        Self::signing(account, way)
+    }
+
+    /// Checks the sign-in an existing subscription account already has in CrazyAgent's own
+    /// profile for it, from its details (DEC-141 PA-13); nothing outside that profile is
+    /// read. Input: the account. Output: the screen at the sign-in step, or the method step
+    /// for an account that is not a subscription.
+    pub fn check(account: AccountView) -> Self {
+        Self::signing(account, SignInWay::Check)
+    }
+
+    /// The screen at the sign-in step for one way the account's harness has. Inputs: the
+    /// account and the way. Output: the screen, at the method step when the account is no
+    /// subscription or its harness lacks the way.
+    fn signing(account: AccountView, way: SignInWay) -> Self {
         let mut screen = Self::new();
         screen.again = true;
-        if account.method == SignInMethod::Subscription {
-            let native = if account.provider == Provider::Chatgpt {
-                NativeAuthMethod::CodexDeviceCode
-            } else {
-                NativeAuthMethod::ClaudeOfficial
-            };
+        let harness = if account.provider == Provider::Chatgpt {
+            "codex"
+        } else {
+            "claude"
+        };
+        let native = NativeAuthMethod::for_way(harness, way);
+        if account.method == SignInMethod::Subscription
+            && let Some(native) = native
+        {
             let choice = Choice {
                 provider: account.provider,
                 method: SignInMethod::Subscription,
                 native: Some(native),
-                title: if native == NativeAuthMethod::CodexDeviceCode {
-                    "Sign in with ChatGPT"
-                } else {
-                    "Sign in with your Claude subscription"
+                title: match (way, harness) {
+                    (SignInWay::Check, _) => CHECK_TITLE,
+                    (_, "codex") => "Sign in with ChatGPT",
+                    _ => "Sign in with your Claude subscription",
                 },
                 description: "",
             };
@@ -1744,9 +1765,11 @@ pub(super) fn code_left_line(left: std::time::Duration) -> String {
 /// engine's view. Output: the sentence.
 pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
     match (view.phase, native, view.problem.as_deref()) {
-        (NativeAuthPhase::UnauthenticatedObserved, Some(NativeAuthMethod::CodexExisting), _) => {
-            "Codex is not signed in on this Mac. Choose Sign in with ChatGPT instead.".into()
-        }
+        (
+            NativeAuthPhase::UnauthenticatedObserved,
+            Some(NativeAuthMethod::CodexExisting | NativeAuthMethod::ClaudeExisting),
+            _,
+        ) => CHECK_SIGNED_OUT.into(),
         (_, _, Some(code)) => plain_sign_in(code, native),
         (NativeAuthPhase::Cancelled, _, None) => "The sign-in was cancelled.".into(),
         (NativeAuthPhase::Unavailable, _, None) => {
@@ -1839,7 +1862,10 @@ impl Screen for AddAccount {
                 hints
             }
             Stage::SignIn(sign_in)
-                if sign_in.choice.native == Some(NativeAuthMethod::CodexExisting) =>
+                if sign_in
+                    .choice
+                    .native
+                    .is_some_and(|native| native.way() == SignInWay::Check) =>
             {
                 vec![hint("Esc", "Cancel sign-in")]
             }

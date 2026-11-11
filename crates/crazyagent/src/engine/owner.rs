@@ -15,7 +15,7 @@ pub use transport::native_auth_channel::claude::ClaudeAuthInput;
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
-    NativeAuthScope, NativeAuthStart, ends_operation,
+    NativeAuthScope, NativeAuthStart, SignInWay, ends_operation,
 };
 
 pub use transport::accounts::{AccountCheck, AccountPage};

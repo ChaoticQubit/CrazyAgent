@@ -128,6 +128,17 @@ test("Overlapping edits lists the engine's choices in the mockup's order and wor
   assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: [...words, "hold"], checked: ["hold"] });
 });
 
+test("Overlapping edits and Hooks say which harness and account kind each protection misses, in the engine's words (DEC-141 PA-12)", () => {
+  assert.equal(client.BARE_NO_HOOKS, "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.");
+  assert.equal(client.RCLI_NO_HOOKS, "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.");
+  assert.equal(client.CODEX_HOOK_EVENTS_ONLY, "Codex agents run your hooks on the events Codex has.");
+  const coordination = { settings: { questions_to: "lead", overlaps: "block", nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, claude_display: "classic", task_start: "on" }, harnesses: [] };
+  const html = settingsHtml({ coordination }).replaceAll("&#x27;", "'");
+  assert.ok(html.includes(`Block and Wait hold Claude Code and Codex agents' edits alike. ${client.BARE_NO_HOOKS}`), "the Overlapping edits note");
+  const plugins = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.ok(plugins.includes("about={`Hooks are commands Claude Code and Codex agents run on events such as session start or a tool call. ${CODEX_HOOK_EVENTS_ONLY} ${BARE_NO_HOOKS} ${RCLI_NO_HOOKS} They run inside the agent's sandbox."), "the Hooks section says it");
+});
+
 test("a harness's sub-agents read as the mockup words them, native first for every harness", async () => {
   const coord = await import("../src/screens/team/coordination.tsx");
   assert.deepEqual(coord.modeOptions("claude-code", true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);

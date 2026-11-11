@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTerminalsPerWindow, type Result, type SkillView } from "../../api";
 import { loadTeamStatus } from "../../api-projects";
-import { OVERLAP_CHOICES } from "../../engine-client";
+import { BARE_NO_HOOKS, OVERLAP_CHOICES } from "../../engine-client";
 import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
@@ -322,7 +322,7 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
     <SettingRow label="Overlapping edits" wide>
       <span className="set-label" aria-hidden="true">Overlapping edits</span>
-      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
+      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free. Block and Wait hold Claude Code and Codex agents' edits alike. {BARE_NO_HOOKS}</span>
       <Segmented label="Overlapping edits" value={overlaps} options={overlapOptions(overlaps)}
         onValue={(value) => { if (knownOverlap(value)) void change(() => saveCoordSettings(projectId, { overlaps: value }), "overlapping edits", () => holdOverlaps(value)); }} />
     </SettingRow>

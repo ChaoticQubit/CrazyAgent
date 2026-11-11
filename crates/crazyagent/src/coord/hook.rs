@@ -25,6 +25,17 @@ const MEMBERS_MAX: usize = 64;
 const GRAPHIFY: &str = "graphify";
 const GRAPHED: &str = ".graphed";
 const NUDGED: &str = ".nudged";
+/// The most files of one Codex patch the edit guard checks, all in one engine question; a
+/// patch naming more is refused under Block and Wait (PA1213-F2).
+const PATCH_PATHS_MAX: usize = relay::ASK_PATHS_MAX;
+const PATCH_TOOL: &str = "apply_patch";
+const PATCH_BEGIN: &str = "*** Begin Patch";
+const PATCH_HEADS: [&str; 4] = [
+    "*** Add File: ",
+    "*** Update File: ",
+    "*** Delete File: ",
+    "*** Move to: ",
+];
 
 const _: () = assert!(CONTEXT_CHARS_MAX < 10_000 && CONTEXT_CHARS_MAX > 2 * super::BODY_BYTES_MAX);
 const _: () = assert!(ASK_WAIT.as_secs() < Event::Edit.timeout_seconds() as u64);
@@ -44,10 +55,23 @@ const _: () = assert!(
 );
 /// Why an edit of a session the engine placed in no pane is held (DEC-111 Q18).
 const UNNAMED_EDIT: &str = "CrazyAgent: the engine could not tell which agent this session is, so this edit is held. Try again in a moment.";
+/// Why a patch whose files the guard cannot place is refused under Block and Wait: a shell
+/// call's working folder or a `cd` can move it off the files it names (PA1213-F1).
+const UNPLACED_PATCH: &str = "CrazyAgent: overlapping edits are checked in this project, and a patch run through the shell can land in another folder than the one it names. Use the apply_patch tool for this edit.";
+/// Why a patch naming more files than one engine question covers is refused (PA1213-F2).
+const PATCH_TOO_LARGE: &str = "CrazyAgent: overlapping edits are checked in this project, and this patch names more than 32 files. Split it into smaller patches.";
+/// Why a patch is held when the engine did not answer for all its files in one wait.
+const PATCH_UNCHECKED: &str = "CrazyAgent: the engine did not answer whether other agents claim this edit's files, so it is held. Try again in a moment, or split a large patch.";
+const _: () = assert!(PATCH_PATHS_MAX == 32);
+const _: () = assert!(
+    PANE_WAIT.as_millis() + ASK_WAIT.as_millis() + REQUEST_WAIT.as_millis()
+        < 1000 * Event::CodexEdit.timeout_seconds() as u128
+);
 
-/// The Claude Code hook events the relay runs on, each named by its `coord-hook`
-/// argument: after every tool call, at a stop, before AskUserQuestion, on a permission
-/// prompt or elicitation notification, on a submitted prompt, and before a file edit.
+/// The hook events the relay runs on, each named by its `coord-hook` argument: Claude
+/// Code's after every tool call, at a stop, before AskUserQuestion, on a permission prompt
+/// or elicitation notification, on a submitted prompt and before a file edit, and Codex's
+/// before a patch or shell call, which runs the edit guard alone (DEC-141 PA-12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     PostTool,
@@ -56,6 +80,7 @@ pub enum Event {
     Notification,
     Prompt,
     Edit,
+    CodexEdit,
 }
 
 impl Event {
@@ -68,6 +93,7 @@ impl Event {
             Self::Notification => "notification",
             Self::Prompt => "prompt",
             Self::Edit => "edit",
+            Self::CodexEdit => "codex-edit",
         }
     }
 
@@ -80,6 +106,7 @@ impl Event {
             Self::Notification,
             Self::Prompt,
             Self::Edit,
+            Self::CodexEdit,
         ]
         .into_iter()
         .find(|event| event.as_str() == text)
@@ -89,7 +116,7 @@ impl Event {
     /// guard's question to the engine, short for the rest.
     pub const fn timeout_seconds(self) -> u32 {
         match self {
-            Self::Edit => 15,
+            Self::Edit | Self::CodexEdit => 15,
             Self::PostTool | Self::Stop => 10,
             Self::Asked | Self::Notification | Self::Prompt => 5,
         }
@@ -140,7 +167,7 @@ pub fn run(
 ) -> Result<(), String> {
     let Some(event) = Event::parse(event) else {
         return Err(format!(
-            "usage: crazyagent {} post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR",
+            "usage: crazyagent {} post-tool|stop|asked|notification|prompt|edit|codex-edit MAILBOX_DIR",
             relay::HOOK_COMMAND
         ));
     };
@@ -234,6 +261,7 @@ fn in_mailbox(event: Event, folder: &Mailbox, who: &Identity, input: &Value) -> 
             None
         }
         Event::Edit => edit_answer(folder, None, who, input),
+        Event::CodexEdit => guard(folder, None, who, input).map(denied),
     }
 }
 
@@ -298,6 +326,7 @@ fn teammate(
                 })
         }
         Event::Edit => edit_answer(folder, Some(mailbox), who, input),
+        Event::CodexEdit => guard(folder, Some(mailbox), who, input).map(denied),
     }
 }
 
@@ -648,11 +677,7 @@ fn edit_answer(
     input: &Value,
 ) -> Option<Value> {
     if let Some(reason) = guard(folder, socket, who, input) {
-        return Some(json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }}));
+        return Some(denied(reason));
     }
     first_edit(folder, socket, who).map(|text| {
         json!({"hookSpecificOutput": {
@@ -660,6 +685,17 @@ fn edit_answer(
             "additionalContext": text,
         }})
     })
+}
+
+/// The `PreToolUse` answer that refuses one call with the reason the session reads, the
+/// same JSON for Claude Code and Codex (PA-12 proof on Codex 0.167.1). Takes the reason.
+/// Returns the answer.
+fn denied(reason: String) -> Value {
+    json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }})
 }
 
 /// Hands a session the first-edit reminder once (DEC-111 R4): only under the project's
@@ -685,25 +721,116 @@ fn first_edit(folder: &Mailbox, socket: Option<&Path>, who: &Identity) -> Option
     Some(super::adoption::FIRST_EDIT_REMINDER)
 }
 
-/// Decides one file edit before it runs. A session the engine placed in no pane may not
-/// edit (DEC-111 Q18). A native teammate may edit only inside
-/// `<lead worktree>/.worktrees/<its name>/` (Q17); under Overlaps Block or Wait, an edit to
-/// a repository file another active agent claimed is refused after asking the engine (Q15,
-/// OS-8).
-/// The guard is cooperative: the session owns its home and mailbox. Takes the folder, the
-/// mailbox whose caller socket a native teammate asks over, the identity and the hook
-/// input. Returns the reason to deny, or None to let it run.
+/// Decides one edit before it runs (cooperative): an unplaced session may not edit (Q18), a
+/// native teammate edits only in its own worktree (Q17), and under Overlaps Block or Wait a
+/// claimed file, a Codex patch the guard cannot place or one past `PATCH_PATHS_MAX` files is
+/// refused (Q15, OS-8, PA1213-F1, F2). Takes the folder, the caller-socket mailbox, the
+/// identity and the hook input. Returns the reason to deny, or None to let it run.
 fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value) -> Option<String> {
+    let edit = edited(input);
+    if edit == Edit::Files(Vec::new()) {
+        return None;
+    }
     if who.unnamed {
         return Some(UNNAMED_EDIT.to_owned());
     }
+    let refused = match edit {
+        Edit::Files(files) => return guard_files(folder, socket, who, &files),
+        Edit::Unplaced => UNPLACED_PATCH,
+        Edit::TooMany => PATCH_TOO_LARGE,
+    };
+    let checked = who.teammate.is_some()
+        || (who.activity.is_some()
+            && relay::read_roster(folder, who.part)
+                .is_some_and(|roster| matches!(roster.overlaps, Overlaps::Block | Overlaps::Wait)));
+    checked.then(|| refused.to_owned())
+}
+
+/// What one edit call writes, as the guard reads its hook input: `Files` holds the absolute
+/// files, at most `PATCH_PATHS_MAX` and none for a call that edits nothing; `Unplaced` is a
+/// patch whose folder the hook cannot see, carried by a shell call (which its own working
+/// folder or a `cd` can move) or sent with no absolute `cwd`; `TooMany` is a patch naming
+/// more than `PATCH_PATHS_MAX` files.
+#[derive(Debug, PartialEq, Eq)]
+enum Edit {
+    Files(Vec<PathBuf>),
+    Unplaced,
+    TooMany,
+}
+
+/// Reads what one edit call writes: Claude Code's absolute `file_path` or `notebook_path`,
+/// or each file a Codex `apply_patch` call adds, updates, deletes or moves to, placed under
+/// the call's `cwd` (PA-12). A shell call carrying a patch is `Unplaced` (PA1213-F1). Takes
+/// the hook input. Returns the edit.
+fn edited(input: &Value) -> Edit {
     let tool_input = &input["tool_input"];
-    let path = tool_input["file_path"]
+    if let Some(path) = tool_input["file_path"]
         .as_str()
         .or_else(|| tool_input["notebook_path"].as_str())
+    {
+        return Edit::Files(
+            Some(PathBuf::from(path))
+                .filter(|path| path.is_absolute())
+                .into_iter()
+                .collect(),
+        );
+    }
+    let Some(names) = tool_input["command"].as_str().and_then(patch_paths) else {
+        return Edit::Files(Vec::new());
+    };
+    let cwd = input["cwd"]
+        .as_str()
         .map(Path::new)
-        .filter(|path| path.is_absolute())?;
-    let target = resolved(path);
+        .filter(|cwd| cwd.is_absolute());
+    match (input["tool_name"].as_str(), cwd) {
+        (Some(PATCH_TOOL), Some(_)) if names.len() > PATCH_PATHS_MAX => Edit::TooMany,
+        (Some(PATCH_TOOL), Some(cwd)) => {
+            Edit::Files(names.into_iter().map(|name| cwd.join(name)).collect())
+        }
+        _ => Edit::Unplaced,
+    }
+}
+
+/// The file names a Codex patch names on its `*** Add File:`, `*** Update File:`,
+/// `*** Delete File:` and `*** Move to:` lines. Takes the patch or the shell command
+/// carrying it. Returns at most `PATCH_PATHS_MAX + 1` names as written, so a longer patch
+/// shows, or None when the text holds no `*** Begin Patch` line.
+fn patch_paths(command: &str) -> Option<Vec<&str>> {
+    if !command.lines().any(|line| line.trim() == PATCH_BEGIN) {
+        return None;
+    }
+    let names: Vec<&str> = command
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            PATCH_HEADS
+                .iter()
+                .find_map(|head| line.strip_prefix(head))
+                .map(str::trim)
+        })
+        .filter(|name| !name.is_empty())
+        .take(PATCH_PATHS_MAX + 1)
+        .collect();
+    assert!(names.len() <= PATCH_PATHS_MAX + 1);
+    Some(names)
+}
+
+/// Decides the files of one edit together: the native teammate's own worktree rule for
+/// each, then one Overlaps Block or Wait question to the engine for them all, inside one
+/// `ASK_WAIT` (PA1213-F2). Takes the folder, the caller-socket mailbox, the identity and
+/// the absolute files, at most `PATCH_PATHS_MAX`. Returns the reason to deny, or None.
+fn guard_files(
+    folder: &Mailbox,
+    socket: Option<&Path>,
+    who: &Identity,
+    files: &[PathBuf],
+) -> Option<String> {
+    assert!(files.len() <= PATCH_PATHS_MAX);
+    assert!(files.iter().all(|file| file.is_absolute()));
+    if files.is_empty() {
+        return None;
+    }
+    let targets: Vec<PathBuf> = files.iter().map(|file| resolved(file)).collect();
     let roster = relay::read_roster(folder, who.part);
     let root = roster
         .as_ref()
@@ -715,7 +842,7 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
     let base = match (&who.teammate, &root) {
         (Some(name), Some(root)) => {
             let own = resolved(&root.join(crate::agent_git::TEAMMATES_FOLDER).join(name));
-            if !target.starts_with(&own) {
+            if targets.iter().any(|target| !target.starts_with(&own)) {
                 return Some(format!(
                     "CrazyAgent: you are teammate {name}. Edit files only inside your own worktree {own}, on your own branch <task branch>--{name}, which CrazyAgent makes for you when you start. If it does not exist yet, wait a few seconds and try again; do not make it yourself.",
                     own = own.display(),
@@ -732,19 +859,42 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
         .filter(|overlaps| matches!(overlaps, Overlaps::Block | Overlaps::Wait));
     let tag = who.activity.as_deref()?;
     let option = option?;
-    let relative = target.strip_prefix(&base).ok()?.to_str()?;
-    if relative.is_empty()
-        || relative.starts_with(".git/")
-        || relative.starts_with(&format!("{}/", crate::agent_git::TEAMMATES_FOLDER))
-    {
-        return None;
-    }
-    let held = match socket {
-        Some(mailbox) => request(mailbox, &format!("ask {relative}"), ASK_WAIT)
-            .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
-            .map(|answer| answer.held)
-            .unwrap_or_default(),
-        None => ask(folder, tag, relative),
+    let teammates = format!("{}/", crate::agent_git::TEAMMATES_FOLDER);
+    let relatives: Vec<&str> = targets
+        .iter()
+        .filter_map(|target| target.strip_prefix(&base).ok()?.to_str())
+        .filter(|relative| {
+            !relative.is_empty()
+                && !relative.starts_with(".git/")
+                && !relative.starts_with(&teammates)
+        })
+        .collect();
+    let held = match (socket, relatives.as_slice()) {
+        (_, []) => return None,
+        (Some(mailbox), _) => {
+            let deadline = Instant::now() + ASK_WAIT;
+            let mut held: Vec<Held> = Vec::new();
+            for relative in &relatives {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                let answer = (!wait.is_zero())
+                    .then(|| request(mailbox, &format!("ask {relative}"), wait))
+                    .flatten()
+                    .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok());
+                let Some(answer) = answer else {
+                    return Some(PATCH_UNCHECKED.to_owned());
+                };
+                for one in answer.held {
+                    if !held.contains(&one) {
+                        held.push(one);
+                    }
+                }
+            }
+            held
+        }
+        (None, _) => match ask(folder, tag, &relatives) {
+            Some(held) => held,
+            None => return Some(PATCH_UNCHECKED.to_owned()),
+        },
     };
     if held.is_empty() {
         return None;
@@ -761,43 +911,51 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
             "set to Block in this project: message the holder with update_work, or start_work on other files."
         }
     };
+    let named = match relatives.as_slice() {
+        [relative] => format!("{relative} is"),
+        _ => "files this patch writes are".to_owned(),
+    };
     Some(format!(
-        "CrazyAgent: {relative} is claimed by {}. Overlapping edits are {advice}",
+        "CrazyAgent: {named} claimed by {}. Overlapping edits are {advice}",
         holders.join(", ")
     ))
 }
 
-/// Asks the engine which other active agents claim a file and waits up to `ASK_WAIT`
-/// for its answer; with no answer in time the question is withdrawn and the edit runs.
-/// Takes the mailbox, the tag and the repository-relative path. Returns the claims.
-fn ask(folder: &Mailbox, tag: &str, path: &str) -> Vec<Held> {
-    let Ok(id) = call_id() else {
-        return Vec::new();
-    };
-    let Ok(bytes) = serde_json::to_vec(&Ask {
+/// Asks the engine in one question which other active agents claim any of an edit's files
+/// and waits up to `ASK_WAIT` for its answer; a question too large to send is held by
+/// CrazyAgent, and one that cannot be sent, or gets no readable answer in time, is
+/// withdrawn and answered None so the edit is held, never run (PA1213R2-F1). Takes the
+/// mailbox, the tag and the relative paths, 1 to `PATCH_PATHS_MAX`. Returns the claims.
+fn ask(folder: &Mailbox, tag: &str, paths: &[&str]) -> Option<Vec<Held>> {
+    assert!(!paths.is_empty() && paths.len() <= PATCH_PATHS_MAX);
+    let id = call_id().ok()?;
+    let bytes = serde_json::to_vec(&Ask {
         to: tag.to_owned(),
-        path: path.to_owned(),
-    }) else {
-        return Vec::new();
-    };
-    if bytes.len() as u64 > relay::ASK_BYTES_MAX
-        || relay::put(folder, &format!("{id}{ASK}"), &bytes).is_err()
-    {
-        return Vec::new();
+        path: paths[0].to_owned(),
+        more: paths[1..].iter().map(|path| (*path).to_owned()).collect(),
+    })
+    .ok()?;
+    if bytes.len() as u64 > relay::ASK_BYTES_MAX {
+        return Some(vec![Held {
+            by: "CrazyAgent".to_owned(),
+            pattern: "more file names than one check reads; split the patch".to_owned(),
+        }]);
     }
+    let asked = format!("{id}{ASK}");
+    relay::put(folder, &asked, &bytes).ok()?;
     let answered = format!("{id}{ANSWER}");
     let deadline = Instant::now() + ASK_WAIT;
     while Instant::now() < deadline {
         if let Some(bytes) = relay::read_entry(folder, &answered, ANSWER_BYTES_MAX) {
             let _ = folder.remove(&answered);
             return serde_json::from_slice::<Answer>(&bytes)
-                .map(|answer| answer.held)
-                .unwrap_or_default();
+                .ok()
+                .map(|answer| answer.held);
         }
         std::thread::sleep(ASK_POLL);
     }
-    let _ = folder.remove(&format!("{id}{ASK}"));
-    Vec::new()
+    let _ = folder.remove(&asked);
+    None
 }
 
 /// A path with `.` and `..` resolved by name, then its longest existing start resolved by

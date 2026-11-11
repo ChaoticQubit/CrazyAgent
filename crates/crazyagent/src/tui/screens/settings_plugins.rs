@@ -681,7 +681,14 @@ impl Plugins {
             ));
         }
         lines.push(Line::default());
-        lines.push(heading("Hooks", self.hooks.len()));
+        lines.push(join([
+            heading("Hooks", self.hooks.len()),
+            styled(
+                format!("   {}", crate::coord::settings::HOOKS_NONE_SHORT),
+                Role::Muted,
+                theme,
+            ),
+        ]));
         if self.hooks.is_empty() {
             lines.push(styled(
                 "No hooks yet. Press h to add a plugin folder's hooks.",

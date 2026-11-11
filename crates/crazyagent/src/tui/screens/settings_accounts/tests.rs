@@ -454,6 +454,68 @@ fn list_keys_open_add_account_details_and_selection() {
     }
 }
 
+/// Every subscription account, Claude or ChatGPT, offers Check this account's sign-in beside
+/// Sign in again and opens the check of its own profile; a check that finds no sign-in says
+/// so in the same words for both harnesses, and key or URL accounts offer no check (PA-13).
+#[test]
+fn every_subscription_account_offers_the_same_sign_in_check() {
+    for (index, provider) in [Provider::Claude, Provider::Chatgpt]
+        .into_iter()
+        .enumerate()
+    {
+        let subscription = account(
+            index,
+            "Unit subscription",
+            provider,
+            SignInMethod::Subscription,
+            AccountStatus::SignedIn,
+        );
+        let mut details = AccountDetails::new(subscription, Accounts::with(Vec::new()));
+        assert_eq!(
+            details.actions(),
+            [
+                Action::SignIn,
+                Action::CheckSignIn,
+                Action::Rename,
+                Action::Remove
+            ]
+        );
+        assert_eq!(Action::CheckSignIn.label(), "Check this account's sign-in");
+        let mut ctx = list_ctx(80, 24, Vec::new());
+        match details.run(Action::CheckSignIn, &mut ctx) {
+            Flow::Replace(check) => assert_eq!(
+                check.crumbs().last().map(String::as_str),
+                Some("Check this account's sign-in"),
+                "{provider:?}"
+            ),
+            other => panic!("check expected, got {other:?}"),
+        }
+    }
+    for method in [SignInMethod::ApiKey, SignInMethod::Url] {
+        let keyed = account(
+            9,
+            "Unit key",
+            Provider::OpenaiApi,
+            method,
+            AccountStatus::SignedIn,
+        );
+        let details = AccountDetails::new(keyed, Accounts::with(Vec::new()));
+        assert!(!details.actions().contains(&Action::CheckSignIn));
+    }
+    for native in [
+        NativeAuthMethod::CodexExisting,
+        NativeAuthMethod::ClaudeExisting,
+    ] {
+        assert_eq!(
+            sign_in_problem(
+                Some(native),
+                &finished(NativeAuthPhase::UnauthenticatedObserved, None)
+            ),
+            "This account isn't signed in. Choose Sign in again."
+        );
+    }
+}
+
 #[test]
 fn p_opens_a_new_pool_with_the_selected_accounts_ticked() {
     let (accounts, pools) = dataset(None);
@@ -700,20 +762,13 @@ fn api_key_form_masks_the_key_and_counts_it() {
 }
 
 #[test]
-fn chatgpt_offers_three_ways_and_keys_are_checked_locally() {
+fn chatgpt_offers_a_sign_in_and_a_key_and_keys_are_checked_locally() {
     let entry = catalog()
         .into_iter()
         .find(|entry| entry.provider == Provider::Chatgpt)
         .unwrap();
     let titles: Vec<&str> = choices(&entry).iter().map(|choice| choice.title).collect();
-    assert_eq!(
-        titles,
-        [
-            "Sign in with ChatGPT",
-            "Use the Codex sign-in on this Mac",
-            "Use an API key"
-        ]
-    );
+    assert_eq!(titles, ["Sign in with ChatGPT", "Use an API key"]);
     assert_eq!(
         key_problem(Provider::OpenaiApi, 9, true).as_deref(),
         Some("This is too short for an OpenAI key. Paste the whole key.")

@@ -19,8 +19,8 @@ test("repeated names are found once each, ignoring case and spaces at the ends",
 
 test("Add account passes with one OpenAI and one Anthropic tile and fails on OP-45 and OP-58", () => {
   const tiles = ["OpenAI", "Anthropic", "OpenRouter", "OpenAI-compatible server", "Local model"];
-  const methods = { OpenAI: ["ChatGPT subscription", "Use the Codex sign-in on this Mac", "OpenAI API key"], Anthropic: ["Claude subscription", "Anthropic API key"] };
-  assert.match(providerVerdict({ tiles, methods }), /^5 providers, each once: OpenAI \(3 ways\), Anthropic \(2 ways\)/u);
+  const methods = { OpenAI: ["ChatGPT subscription", "OpenAI API key"], Anthropic: ["Claude subscription", "Anthropic API key"] };
+  assert.match(providerVerdict({ tiles, methods }), /^5 providers, each once: OpenAI \(2 ways\), Anthropic \(2 ways\)/u);
   assert.throws(() => providerVerdict({ tiles: [...tiles, "OpenAI"], methods }), { message: "OP-45: Add account lists OpenAI more than once" });
   assert.throws(() => providerVerdict({ tiles: [...tiles, "Anthropic API"], methods }), { message: "OP-58: Add account lists Anthropic API beside Anthropic" });
   assert.throws(() => providerVerdict({ tiles, methods: { ...methods, Anthropic: ["Claude subscription", "Claude subscription"] } }),

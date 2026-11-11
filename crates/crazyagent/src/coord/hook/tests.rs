@@ -196,3 +196,312 @@ fn a_full_inbox_is_handed_over_within_the_context_budget() {
         .count();
     assert_eq!(waiting, INBOX_MAX - 2);
 }
+
+/// A Codex `apply_patch` call names its files in its patch (PA-12 proof on Codex 0.167.1):
+/// every added, updated, deleted and moved-to file, placed under the call's own folder, at
+/// most `PATCH_PATHS_MAX`, and a longer patch is `TooMany` (PA1213-F2). A shell call
+/// carrying a patch, whose working folder or `cd` the hook cannot see, and a patch with no
+/// absolute folder are `Unplaced` (PA1213-F1). Claude Code's edits keep their one absolute
+/// file, and a shell call with no patch names none.
+#[test]
+fn a_codex_patch_names_every_file_it_writes_under_its_cwd() {
+    let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** Update File: src/b.rs\n*** Move to: src/c.rs\n@@\n-x\n+y\n*** Delete File: /abs/d.rs\n*** End Patch\n";
+    let named = |tool: &str, command: String, cwd: &str| {
+        edited(&json!({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}))
+    };
+    let expected: Vec<PathBuf> = ["/w/a.txt", "/w/src/b.rs", "/w/src/c.rs", "/abs/d.rs"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(
+        named("apply_patch", patch.to_owned(), "/w"),
+        Edit::Files(expected)
+    );
+    for shell in [
+        format!("apply_patch <<'EOF'\n{patch}EOF\n"),
+        format!("cd src && apply_patch <<'EOF'\n{patch}EOF\n"),
+    ] {
+        assert_eq!(named("Bash", shell, "/w"), Edit::Unplaced);
+    }
+    assert_eq!(named("apply_patch", patch.to_owned(), "w"), Edit::Unplaced);
+    assert_eq!(
+        named("Bash", "ls -la".to_owned(), "/w"),
+        Edit::Files(Vec::new())
+    );
+    assert_eq!(
+        named("Bash", "echo '*** Add File: a.txt'".to_owned(), "/w"),
+        Edit::Files(Vec::new())
+    );
+    let files = |count: usize| -> String {
+        let body: String = (0..count)
+            .map(|n| format!("*** Add File: f{n}.txt\n+x\n"))
+            .collect();
+        format!("*** Begin Patch\n{body}*** End Patch\n")
+    };
+    assert!(matches!(
+        named("apply_patch", files(PATCH_PATHS_MAX), "/w"),
+        Edit::Files(all) if all.len() == PATCH_PATHS_MAX
+    ));
+    assert_eq!(
+        named("apply_patch", files(PATCH_PATHS_MAX + 1), "/w"),
+        Edit::TooMany
+    );
+    assert_eq!(
+        edited(
+            &json!({"tool_name": "Write", "tool_input": {"file_path": "/w/e.rs", "content": ""}})
+        ),
+        Edit::Files(vec![PathBuf::from("/w/e.rs")])
+    );
+    assert_eq!(
+        edited(&json!({"tool_name": "Write", "tool_input": {"file_path": "e.rs"}})),
+        Edit::Files(Vec::new())
+    );
+}
+
+/// A Codex agent's edit hook runs the edit guard alone (PA-12): it never hands the
+/// first-edit reminder, which the engine gives Codex from its rollouts, it holds an edit of
+/// a session the engine placed nowhere, and it keeps a native teammate's patch inside the
+/// teammate's own worktree with the same answer Claude Code gets.
+#[test]
+fn a_codex_edit_runs_the_guard_alone() {
+    let (root, folder) = mailbox();
+    let base = root.path().to_path_buf();
+    let roster = |overlaps: Overlaps| {
+        let bytes = serde_json::to_vec(&relay::Roster {
+            overlaps,
+            nudges: Nudges::FirstEdit,
+            root: Some(base.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+        relay::put(&folder, relay::ROSTER_FILE, &bytes).unwrap();
+    };
+    let who = |teammate: Option<&str>, unnamed: bool| Identity {
+        inbox: Some(LEAD_TAG.to_owned()),
+        activity: Some(LEAD_TAG.to_owned()),
+        teammate: teammate.map(str::to_owned),
+        cwd: None,
+        unnamed,
+        part: relay::Part::Single,
+    };
+    let patch = |file: &str| {
+        json!({
+            "tool_name": "apply_patch",
+            "tool_input": {"command": format!("*** Begin Patch\n*** Add File: {file}\n+x\n*** End Patch\n")},
+            "cwd": base,
+        })
+    };
+    assert_eq!(Event::parse("codex-edit"), Some(Event::CodexEdit));
+    assert_eq!(
+        Event::CodexEdit.timeout_seconds(),
+        Event::Edit.timeout_seconds()
+    );
+
+    roster(Overlaps::Warn);
+    assert_eq!(
+        in_mailbox(Event::CodexEdit, &folder, &who(None, false), &patch("a.rs")),
+        None,
+        "no first-edit reminder from a Codex hook"
+    );
+    let claude = json!({"tool_name": "Edit", "tool_input": {"file_path": base.join("a.rs")}});
+    assert!(
+        in_mailbox(Event::Edit, &folder, &who(None, false), &claude).is_some(),
+        "Claude Code's edit hook still reminds"
+    );
+    let held = in_mailbox(Event::CodexEdit, &folder, &who(None, true), &patch("a.rs")).unwrap();
+    assert_eq!(held["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        held["hookSpecificOutput"]["permissionDecisionReason"],
+        UNNAMED_EDIT
+    );
+    assert_eq!(
+        in_mailbox(
+            Event::CodexEdit,
+            &folder,
+            &who(None, true),
+            &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": base})
+        ),
+        None,
+        "a shell call that edits nothing is never held, named or not"
+    );
+
+    roster(Overlaps::Block);
+    let outside = in_mailbox(
+        Event::CodexEdit,
+        &folder,
+        &who(Some("ana"), false),
+        &patch("a.rs"),
+    )
+    .unwrap();
+    assert_eq!(outside["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(outside["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        outside["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("CrazyAgent: you are teammate ana."),
+        "{outside}"
+    );
+    assert_eq!(
+        in_mailbox(
+            Event::CodexEdit,
+            &folder,
+            &who(None, false),
+            &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": base})
+        ),
+        None,
+        "a shell call with no patch edits nothing"
+    );
+
+    let reason = |answer: Option<Value>| {
+        answer.unwrap()["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let shell = json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd src && apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** End Patch\nEOF\n"},
+        "cwd": base,
+    });
+    let wide: String = (0..=PATCH_PATHS_MAX)
+        .map(|n| format!("*** Add File: f{n}.rs\n+x\n"))
+        .collect();
+    let wide = json!({
+        "tool_name": "apply_patch",
+        "tool_input": {"command": format!("*** Begin Patch\n{wide}*** End Patch\n")},
+        "cwd": base,
+    });
+    for (overlaps, refused) in [
+        (Overlaps::Block, true),
+        (Overlaps::Wait, true),
+        (Overlaps::Warn, false),
+        (Overlaps::Off, false),
+    ] {
+        roster(overlaps);
+        let me = who(None, false);
+        let answers = [
+            in_mailbox(Event::CodexEdit, &folder, &me, &shell),
+            in_mailbox(Event::CodexEdit, &folder, &me, &wide),
+        ];
+        assert_eq!(answers.iter().all(Option::is_some), refused, "{overlaps:?}");
+        if refused {
+            let [shell, wide] = answers;
+            assert_eq!(reason(shell), UNPLACED_PATCH, "PA1213-F1");
+            assert_eq!(reason(wide), PATCH_TOO_LARGE, "PA1213-F2");
+        }
+    }
+
+    roster(Overlaps::Block);
+    let answering = {
+        let path = base.clone();
+        std::thread::spawn(move || {
+            let folder = Mailbox::open(&path).unwrap();
+            for _ in 0..250 {
+                if let Some((_, stem)) = folder.entries(ASK).into_iter().next() {
+                    let bytes =
+                        relay::read_entry(&folder, &format!("{stem}{ASK}"), relay::ASK_BYTES_MAX)
+                            .unwrap();
+                    let answer = serde_json::to_vec(&Answer {
+                        held: vec![Held {
+                            by: "Linus".to_owned(),
+                            pattern: "src/**".to_owned(),
+                        }],
+                    })
+                    .unwrap();
+                    relay::put(&folder, &format!("{stem}{ANSWER}"), &answer).unwrap();
+                    return serde_json::from_slice::<Ask>(&bytes).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("the guard asked nothing");
+        })
+    };
+    let two = json!({
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: src/b.rs\n+z\n*** End Patch\n"},
+        "cwd": base,
+    });
+    let held = in_mailbox(Event::CodexEdit, &folder, &who(None, false), &two);
+    let asked = answering.join().unwrap();
+    assert_eq!(
+        (
+            asked.to.as_str(),
+            asked.path.as_str(),
+            asked.more.as_slice()
+        ),
+        (LEAD_TAG, "src/a.rs", ["src/b.rs".to_owned()].as_slice()),
+        "one question covers the whole patch (PA1213-F2)"
+    );
+    assert_eq!(
+        reason(held),
+        "CrazyAgent: files this patch writes are claimed by Linus (src/**). Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files."
+    );
+}
+
+/// PA1213R2-F1: under Block or Wait an edit the engine does not answer for, with an
+/// unreadable answer or none in time, is held with `PATCH_UNCHECKED`, for a Codex patch and
+/// a Claude Code edit alike, and the unanswered question is withdrawn.
+#[test]
+fn an_edit_the_engine_does_not_answer_for_is_held_never_run() {
+    let (root, folder) = mailbox();
+    let base = root.path().to_path_buf();
+    let who = Identity {
+        inbox: Some(LEAD_TAG.to_owned()),
+        activity: Some(LEAD_TAG.to_owned()),
+        teammate: None,
+        cwd: None,
+        unnamed: false,
+        part: relay::Part::Single,
+    };
+    let patch = json!({
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch\n*** Add File: src/a.rs\n+x\n*** End Patch\n"},
+        "cwd": base,
+    });
+    let claude = json!({"tool_name": "Edit", "tool_input": {"file_path": base.join("src/a.rs")}});
+    let reason = |answer: Option<Value>| {
+        answer.expect("the edit is held")["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    for overlaps in [Overlaps::Block, Overlaps::Wait] {
+        let bytes = serde_json::to_vec(&relay::Roster {
+            overlaps,
+            nudges: Nudges::Off,
+            root: Some(base.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+        relay::put(&folder, relay::ROSTER_FILE, &bytes).unwrap();
+        let garbled = {
+            let path = base.clone();
+            std::thread::spawn(move || {
+                let folder = Mailbox::open(&path).unwrap();
+                for _ in 0..250 {
+                    if let Some((_, stem)) = folder.entries(ASK).into_iter().next() {
+                        let _ = folder.remove(&format!("{stem}{ASK}"));
+                        relay::put(&folder, &format!("{stem}{ANSWER}"), b"not an answer").unwrap();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                panic!("the guard asked nothing");
+            })
+        };
+        let held = in_mailbox(Event::CodexEdit, &folder, &who, &patch);
+        garbled.join().unwrap();
+        assert_eq!(
+            reason(held),
+            PATCH_UNCHECKED,
+            "{overlaps:?} unreadable answer"
+        );
+    }
+    let started = Instant::now();
+    let held = in_mailbox(Event::Edit, &folder, &who, &claude);
+    assert!(
+        started.elapsed() >= ASK_WAIT,
+        "it waited for the engine first"
+    );
+    assert_eq!(reason(held), PATCH_UNCHECKED, "no answer in time");
+    assert!(folder.entries(ASK).is_empty(), "the question is withdrawn");
+}

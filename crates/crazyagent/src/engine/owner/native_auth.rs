@@ -52,6 +52,69 @@ impl NativeAuthMethod {
         assert!(window >= Duration::from_secs(600));
         window
     }
+
+    /// The method one harness runs for one way to sign in (DEC-141 PA-13), None where the
+    /// harness has no such way: Claude Code has no sign-in code and a harness without managed
+    /// sign-in, such as RCLI, has none at all. Inputs: the connection's harness (`codex`,
+    /// `claude` or any other) and the way. Output: the method.
+    pub fn for_way(harness: &str, way: SignInWay) -> Option<Self> {
+        match (harness, way) {
+            ("codex", SignInWay::Browser) => Some(Self::CodexBrowser),
+            ("codex", SignInWay::Code) => Some(Self::CodexDeviceCode),
+            ("codex", SignInWay::Check) => Some(Self::CodexExisting),
+            ("claude", SignInWay::Browser) => Some(Self::ClaudeOfficial),
+            ("claude", SignInWay::Check) => Some(Self::ClaudeExisting),
+            _ => None,
+        }
+    }
+
+    /// The way to sign in this method is for the owner. Input: the method. Output: the way.
+    pub fn way(self) -> SignInWay {
+        match self {
+            Self::CodexBrowser | Self::ClaudeOfficial => SignInWay::Browser,
+            Self::CodexDeviceCode => SignInWay::Code,
+            Self::CodexExisting | Self::ClaudeExisting => SignInWay::Check,
+        }
+    }
+
+    /// The connection harness this method signs in. Input: the method. Output: `codex` or
+    /// `claude`.
+    pub fn harness(self) -> &'static str {
+        match self {
+            Self::CodexBrowser | Self::CodexDeviceCode | Self::CodexExisting => "codex",
+            Self::ClaudeOfficial | Self::ClaudeExisting => "claude",
+        }
+    }
+}
+
+/// One way the owner signs a subscription account in, the same app feature for every harness
+/// (DEC-141 PA-13): in the browser, with a code entered on any device, or a check of the
+/// sign-in the account already has in CrazyAgent's own profile for it. A check never reads a
+/// sign-in outside that profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignInWay {
+    Browser,
+    Code,
+    Check,
+}
+
+impl SignInWay {
+    /// Every way, in the order the clients offer them.
+    pub const ALL: [Self; 3] = [Self::Browser, Self::Code, Self::Check];
+
+    /// Why one harness cannot offer this way, as the sign-in screens say it. Input: the
+    /// connection's harness. Output: the sentence, None when the harness offers the way.
+    pub fn unavailable(self, harness: &str) -> Option<&'static str> {
+        if NativeAuthMethod::for_way(harness, self).is_some() {
+            return None;
+        }
+        Some(match (harness, self) {
+            ("claude", Self::Code) => {
+                "Claude Code has no sign-in code. It signs in through your browser."
+            }
+            _ => "This account kind has no managed sign-in.",
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1169,6 +1232,44 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             succeeded.apply(&mut fact),
             Err(failure("native_auth_observation_order"))
         );
+    }
+
+    #[test]
+    fn every_harness_kind_maps_each_way_to_sign_in_or_says_it_has_none() {
+        let mut seen = Vec::new();
+        for harness in ["claude", "codex", "rcli"] {
+            let managed = harness != "rcli";
+            for way in SignInWay::ALL {
+                let method = NativeAuthMethod::for_way(harness, way);
+                match (managed, way) {
+                    (false, _) => assert_eq!(method, None, "{harness} {way:?}"),
+                    (true, SignInWay::Browser | SignInWay::Check) => {
+                        assert!(method.is_some(), "{harness} {way:?}")
+                    }
+                    (true, SignInWay::Code) => {
+                        assert_eq!(method.is_some(), harness == "codex", "{harness} {way:?}")
+                    }
+                }
+                if let Some(method) = method {
+                    assert_eq!(method.way(), way);
+                    assert_eq!(method.harness(), harness);
+                    assert!(!seen.contains(&method), "{method:?} maps twice");
+                    seen.push(method);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 5);
+        assert_eq!(
+            NativeAuthMethod::for_way("claude", SignInWay::Check),
+            Some(NativeAuthMethod::ClaudeExisting)
+        );
+        assert_eq!(
+            NativeAuthMethod::for_way("codex", SignInWay::Check),
+            Some(NativeAuthMethod::CodexExisting)
+        );
+        assert!(SignInWay::Code.unavailable("claude").is_some());
+        assert!(SignInWay::Code.unavailable("codex").is_none());
+        assert!(SignInWay::Check.unavailable("rcli").is_some());
     }
 
     #[test]

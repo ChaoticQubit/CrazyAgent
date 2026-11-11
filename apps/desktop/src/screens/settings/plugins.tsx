@@ -5,6 +5,7 @@ import {
   type ImportCandidate, type ImportedSkill, type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope,
   type Result, type SkillDetail, type SkillView, type Failure,
 } from "../../api";
+import { BARE_NO_HOOKS, CODEX_HOOK_EVENTS_ONLY, RCLI_NO_HOOKS } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
   Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, SecretField, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea,
@@ -466,7 +467,7 @@ export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry 
   if (hooks.kind === "error") return <LoadError message="Couldn't load hooks." onRetry={onRetry} />;
   const add = <Button icon="folder-plus" onClick={onAdd}>Add hooks from a plugin</Button>;
   return <SettingSection title="Hooks" actions={hooks.value.length > 0 ? add : undefined}
-    about="Hooks are commands Claude Code agents run on events such as session start or a tool call. They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.">
+    about={`Hooks are commands Claude Code and Codex agents run on events such as session start or a tool call. ${CODEX_HOOK_EVENTS_ONLY} ${BARE_NO_HOOKS} ${RCLI_NO_HOOKS} They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.`}>
     {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
     {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hooks.value.map((hook, index) => {
       const on = pluginSwitch(hook, projectId);
