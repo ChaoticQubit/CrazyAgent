@@ -622,8 +622,7 @@ test("the running harness comes from the team status agent behind the master car
   assert.match(shown, /data-testid="master-switch-waits"[^>]*>Codex from the next start</, shown);
   const same = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
   assert.doesNotMatch(same, /master-switch-waits/);
-  assert.doesNotMatch(shown, /claude-account-f2fa/, "the head never shows the account's id (OB-4)");
-  assert.match(shown, /<span class="pj-console-detail">An account in the pool<\/span>/, "before the account names are read");
+  assert.match(shown, /<span class="pj-console-detail">claude-account-f2fa<\/span>/, "with no name read yet the head falls back to the account's id (OB-4)");
   loads.cacheLoad(loads.loadKey("accounts", []), { kind: "ok", value: [{ id: "claude-account-f2fa", name: "Claude-ScholarScope" }] });
   const named = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
   assert.match(named, /<span class="pj-console-detail">Claude-ScholarScope<\/span>/, "the head names the master's account as Accounts does");

@@ -2257,7 +2257,7 @@ export interface MasterTurn {
   phase: "queued" | "blocked" | "prepared" | "delivering" | "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled" | "uncertain";
   reason: string | null;
   reply: { text: string } | null;
-  attempt?: { connection: { id?: string; account_ref: string } } | null;
+  attempt?: { connection: { id: string; account_ref: string } } | null;
   accounts?: MasterAccount[];
   detail?: string | null;
   cause?: string | null;

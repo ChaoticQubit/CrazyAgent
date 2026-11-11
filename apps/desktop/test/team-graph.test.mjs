@@ -41,7 +41,7 @@ const team = {
   ],
 };
 
-const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? "An account in the pool");
+const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? id);
 
 test("graph nodes name their account as the Team panel does, never by its id", () => {
   assert.deepEqual(named.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
@@ -60,7 +60,7 @@ test("every team graph read names its accounts, so no view of it shows an accoun
   assert.equal(shown.stale, null);
   assert.equal(shown.gone, false);
   const unlisted = view.namedRead(read, []);
-  assert.equal(unlisted.shown.value.nodes[0].account, "An account in the pool", "an account with no name read yet is never its id");
+  assert.equal(unlisted.shown.value.nodes[0].account, "acct-work", "an account with no name known goes by its id");
   const failed = { shown: { kind: "error", code: "x", message: "No." }, stale: null, gone: false };
   assert.equal(view.namedRead(failed, []), failed, "a read with no graph is left as it was");
   assert.equal(view.namedRead(view.GRAPH_UNREAD, []), view.GRAPH_UNREAD);

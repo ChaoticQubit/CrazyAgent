@@ -32,8 +32,9 @@ test("a turn's account line names the account as Accounts does, not by the engin
   assert.deepEqual(named.filter((line) => line.id === "t1-account-0").map((line) => line.text), ["On account Claude-ChaoticQubit"]);
   assert.ok(!named.some((line) => /claude-(account|login)-/u.test(line.text)), "no id or reference in any line");
   const unread = consoleLines([ran], {}, {}, 0);
-  assert.deepEqual(unread.filter((line) => line.id === "t1-account-0").map((line) => line.text), ["On account claude-login-6fe9"],
-    "the reference is the fallback only while no name is known");
+  assert.deepEqual(unread.filter((line) => line.id === "t1-account-0").map((line) => line.text), ["On account claude-account-6fe9"],
+    "the id is the fallback only while no name is known");
+  assert.ok(!unread.some((line) => line.text.includes("claude-login-")), "the sign-in reference is never shown");
 });
 
 test("a resumed session's turns show the owner's words read back from the engine, and this window's text wins", () => {
