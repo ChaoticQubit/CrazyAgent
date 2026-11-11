@@ -325,10 +325,15 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         "the next engine ends a team pane it has no record of: {alive:?}"
     );
     assert!(socket.exists(), "the next engine keeps its tmux server");
+    let last = server_pid(&tmux, &socket);
+    assert_eq!(
+        last, server,
+        "the next engine works on in the server the team agent kept"
+    );
     engine.stop();
     assert!(
         !socket.exists(),
         "with no team agent left the engine stop ends its tmux server and removes its socket"
     );
-    assert!(ended(server), "the tmux server process is gone");
+    assert!(ended(last), "the tmux server process is gone");
 }
