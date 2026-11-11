@@ -3,6 +3,7 @@ use super::*;
 mod barrier_tests;
 #[cfg(all(test, unix))]
 mod dispatch_identity_tests;
+pub(crate) mod master_activity;
 #[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
@@ -1890,12 +1891,13 @@ impl Engine {
                     .await?,
             },
             OwnerOperation::Read { query } => OwnerResponse::Read {
-                state: self
-                    .kept_named(
+                state: self.with_master_activity(
+                    self.kept_named(
                         self.owner_job(|reply| Job::OwnerRead(a, query.clone(), reply))
                             .await?,
                     )
                     .await?,
+                ),
             },
             OwnerOperation::Reconcile {
                 operation_id,

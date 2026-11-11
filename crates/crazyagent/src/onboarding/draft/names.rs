@@ -60,7 +60,7 @@ const EXTENSION_BYTES_MAX: usize = 8;
 /// Whether the file or folder `name` looks like it holds a secret: one of its words, split
 /// at every character that is not an ASCII letter or digit, or two adjacent words joined,
 /// is in [`SECRET_WORDS`], ignoring case. Takes the full name, extensions included.
-pub(super) fn secret_like(name: &str) -> bool {
+pub(crate) fn secret_like(name: &str) -> bool {
     let words: Vec<&str> = name
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())

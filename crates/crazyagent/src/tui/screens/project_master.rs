@@ -312,6 +312,7 @@ mod tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         }
