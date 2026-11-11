@@ -673,10 +673,11 @@ export function openLink(url: string): Promise<Result<void>> {
 }
 
 /** Changes a project's details, research, pool and team in one engine change. Inputs: project id,
- * the whole new setup (no documents), a generation, the new name or null to keep it, and the
- * setup revision the screen showed, so a change made elsewhere is refused. Output: the receipt. */
-export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
+ * the whole new setup (no documents), a generation, the new name or null to keep it, the setup
+ * revision the screen showed, so a change made elsewhere is refused, and the files the setup
+ * mapping found that the owner keeps linked, null to leave the links alone. Output: the receipt. */
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null, kept: string[] | null = null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation, kept });
 }
 
 /** What removing a project would do, read before the owner picks how: its stored name, the folders

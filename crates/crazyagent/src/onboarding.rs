@@ -655,6 +655,55 @@ fn restart(
     Ok(())
 }
 
+/// The files the setup mapping found that the owner kept, as the project's links: each
+/// roadmap file as a roadmap and each research file under its kind, a roadmap planning file
+/// as a roadmap too. A path the links store refuses, such as one in the engine folder, is
+/// left out, and at most [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX) links are
+/// kept. Takes the transaction, the project and the paths the owner kept. Returns the
+/// links, none for a project that was not onboarded or whose mapping found nothing.
+pub(crate) fn found_links(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    kept: &[String],
+) -> Result<Vec<crate::project_setup::links::DocLink>, EngineError> {
+    use crate::project_setup::ResearchKind;
+    use crate::project_setup::links::{self, DocLink, LinkKind};
+    let column = tx
+        .query_row(
+            "SELECT mapping_found FROM onboarding WHERE project=?1",
+            [project_id.as_str()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(error)?
+        .flatten();
+    let mut facts = MappingFacts::default();
+    draft::restore_found(&mut facts, column.as_deref()).map_err(error)?;
+    let roadmap = facts.roadmap.iter().map(|path| (path, LinkKind::Roadmap));
+    let research = facts.research.iter().flat_map(|found| {
+        let kind = match found.kind {
+            ResearchKind::RoadmapPlanning => LinkKind::Roadmap,
+            kind => LinkKind::Research(kind),
+        };
+        found.files.iter().map(move |path| (path, kind))
+    });
+    let mut linked: Vec<DocLink> = Vec::new();
+    for (path, kind) in roadmap.chain(research) {
+        let link = DocLink {
+            path: path.clone(),
+            kind,
+        };
+        if linked.len() < links::LINKS_MAX
+            && kept.contains(path)
+            && links::below_folder(path)
+            && !linked.contains(&link)
+        {
+            linked.push(link);
+        }
+    }
+    Ok(linked)
+}
+
 /// The onboarding of `project_id`: both steps, the draft, its proposed name, the extra
 /// facts, the fields still missing and the overview, read bounded and never through a link,
 /// as the mapping agent's only while it holds the text this engine sealed on writing it.

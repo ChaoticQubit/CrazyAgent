@@ -1064,6 +1064,7 @@ async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page()
     shell.ctx.request(Request::Setup(SetupQuery::Change {
         action: crate::project_setup::SetupAction::Update {
             project_id: notes.clone(),
+            kept: None,
             expected_revision: stored.revision,
             name: None,
             setup: ProjectSetup {

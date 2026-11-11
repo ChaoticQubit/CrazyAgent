@@ -291,6 +291,24 @@ impl OwnerController {
         setup: ProjectSetup,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
+        self.confirm_project_setup(project_id, expected_revision, name, setup, None, generation)
+            .await
+    }
+
+    /// Changes a project's setup as [`Self::update_project_setup`] does and, with `kept`,
+    /// links the files the setup mapping found that the owner kept in place of earlier links.
+    /// Takes the project id, the setup revision the owner edited, an optional new name, the
+    /// new setup, the kept paths (none leaves the links alone) and the client generation.
+    /// Returns the actual owner response.
+    pub async fn confirm_project_setup(
+        &mut self,
+        project_id: ProjectId,
+        expected_revision: u64,
+        name: Option<String>,
+        setup: ProjectSetup,
+        kept: Option<Vec<String>>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
         self.project_setup(project_id.clone()).await?;
         self.begin_mutation(
             OwnerMutation::UpdateProjectSetup {
@@ -298,6 +316,7 @@ impl OwnerController {
                 expected_revision,
                 name,
                 setup,
+                kept,
             },
             generation,
         )?;

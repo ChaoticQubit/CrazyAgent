@@ -13,6 +13,7 @@ const { AddFolderView, AnywayDialog, MoveConfirmDialog } = await import("../src/
 const intakeApi = await import("../src/api-intake.ts");
 const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/clone.tsx");
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
+const fields = await import("../src/screens/new-project/fields.tsx");
 const { ToolsSetupView } = await import("../src/screens/intake/setup-step.tsx");
 const { Welcome } = await import("../src/screens/first-run/index.tsx");
 const { Icon } = await import("../src/ui/icon.tsx");
@@ -735,11 +736,68 @@ test("the setup review shows each research toggle the repo already covers and th
   const research = markup.slice(markup.indexOf("<legend>Research</legend>"), markup.indexOf("</fieldset>", markup.indexOf("<legend>Research</legend>")));
   const items = research.split('class="pj-switch-item"').slice(1);
   assert.equal(items.length, 2, "one switch per research kind; the roadmap switch sits outside the Research fieldset");
-  assert.doesNotMatch(items[0], /Already in the repo/);
-  assert.match(items[1], /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.doesNotMatch(items[0], /Linked|Already in the repo|Use these files/);
+  assert.match(items[1], /Linked: research\/landscape-2026\.md, notes\/rivals\.txt\. CrazyAgent reads them from your repo; edits go to those files\./);
+  assert.match(items[1], /<input type="checkbox" checked=""\/><span>Use these files<\/span>/);
+  assert.match(items[1], /id="ob-research-competitor_research"[^>]*aria-checked="false"[^>]*aria-disabled="true"/);
   assert.match(markup, /Project documents found[\s\S]*<li>docs\/q3-plan\.md<\/li>/);
+  const off = html(OnboardingReviewView, { ...base, view: ok(mapped), draft: intake.onboardingDraft(mapped, stored()), dropped: ["competitor_research"] });
+  assert.match(off, /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.match(off, /<input type="checkbox"\/><span>Use these files<\/span>/);
+  const saved = view({ facts, finished: true });
+  const later = html(OnboardingReviewView, { ...base, view: ok(saved), draft: intake.onboardingDraft(saved, stored()) });
+  assert.match(later, /Already in the repo: research\/landscape-2026\.md/);
+  assert.doesNotMatch(later, /Linked:|Use these files/);
   const plain = html(OnboardingReviewView, { ...base, view: ok(view()), draft: intake.onboardingDraft(view(), stored()) });
-  assert.doesNotMatch(plain, /Already in the repo|Project documents found/);
+  assert.doesNotMatch(plain, /Linked:|Already in the repo|Project documents found|Roadmap found|Use these files/);
+});
+
+test("a research kind the repo already holds starts off and names the linked files", () => {
+  const markup = html(fields.ResearchSwitches, {
+    prefix: "t", catalog: undefined, value: ["competitor_research"], onChange: noop,
+    found: { competitor_research: ["docs/research-competitors.md"] },
+  });
+  assert.match(markup, /Linked: docs\/research-competitors\.md\. CrazyAgent reads them from your repo; edits go to those files\./);
+  assert.match(markup, /id="t-research-competitor_research"[^>]*aria-checked="false"[^>]*aria-disabled="true"/);
+  assert.doesNotMatch(markup, /Use these files/, "the checkbox comes only with its handler");
+  const plain = html(fields.ResearchSwitches, { prefix: "t", catalog: undefined, value: ["competitor_research"], onChange: noop });
+  assert.match(plain, /id="t-research-competitor_research"[^>]*aria-checked="true"/);
+  assert.doesNotMatch(plain, /Linked|aria-disabled/);
+});
+
+test("the setup review links a found roadmap and hides roadmap planning while it is used", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const mapped = view({ facts: { ...view().facts, roadmap: ["research/docs/ss-phase1-revision/report.md"] } });
+  const draft = intake.onboardingDraft(mapped, stored());
+  const linked = html(OnboardingReviewView, { ...base, view: ok(mapped), draft });
+  assert.match(linked, /<legend>Roadmap found<\/legend><p class="pj-help">Linked: research\/docs\/ss-phase1-revision\/report\.md\. CrazyAgent reads them from your repo; edits go to those files\.<\/p>/);
+  assert.match(linked, /<input type="checkbox" checked=""\/><span>Use these files<\/span>/);
+  assert.doesNotMatch(linked, /id="ob-roadmap"/);
+  const off = html(OnboardingReviewView, { ...base, view: ok(mapped), draft, dropped: ["roadmap"] });
+  assert.match(off, /In the repo: research\/docs\/ss-phase1-revision\/report\.md/);
+  assert.match(off, /id="ob-roadmap"/);
+  const saved = html(OnboardingReviewView, { ...base, view: ok({ ...mapped, finished: true }), draft });
+  assert.doesNotMatch(saved, /Roadmap found/);
+});
+
+test("the first confirm keeps the found roadmap and research files the owner left ticked", () => {
+  const facts = {
+    ...view().facts,
+    roadmap: ["research/docs/ss-phase1-revision/report.md"],
+    research: [
+      { kind: "competitor_research", files: ["docs/rivals.md", "research/docs/ss-phase1-revision/report.md"] },
+      { kind: "market_research", files: ["docs/market.md"] },
+    ],
+  };
+  const mapped = view({ facts });
+  assert.deepEqual(intake.confirmKept(mapped, []), ["research/docs/ss-phase1-revision/report.md", "docs/rivals.md", "docs/market.md"]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "market_research"]), ["docs/rivals.md", "research/docs/ss-phase1-revision/report.md"]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "competitor_research", "market_research"]), []);
+  assert.equal(intake.confirmKept(view({ facts, finished: true }), []), null, "a saved setup leaves its links alone");
+  assert.equal(intake.confirmKept(view(), []), null, "nothing found, nothing to link");
+  const many = view({ facts: { ...view().facts, research: [{ kind: "market_research", files: Array.from({ length: 40 }, (_, at) => `docs/${at}.md`) }] } });
+  assert.equal(intake.confirmKept(many, []).length, intake.LINKS_MAX);
 });
 
 test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {

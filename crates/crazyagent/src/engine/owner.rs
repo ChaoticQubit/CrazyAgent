@@ -186,6 +186,8 @@ pub enum OwnerMutation {
         expected_revision: u64,
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<String>>,
     },
     RemoveProject {
         project_id: ProjectId,
@@ -410,12 +412,14 @@ impl OwnerMutation {
                 expected_revision,
                 name,
                 setup,
+                kept,
             } => {
                 let action = crate::project_setup::SetupAction::Update {
                     project_id: project_id.clone(),
                     expected_revision: *expected_revision,
                     name: name.clone(),
                     setup: setup.clone(),
+                    kept: kept.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }

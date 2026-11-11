@@ -415,10 +415,30 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
 /** What the mapping read in the project's own documents: per research kind the files that already
  * hold it, and the other project documents, each path made safe to show. Input: the mapping facts.
  * Output: { research, documents }. */
-export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[] } {
+export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[]; roadmap: string[] } {
   const research: Partial<Record<ResearchKind, string[]>> = {};
   for (const found of facts.research ?? []) research[found.kind] = found.files.map(displayText);
-  return { research, documents: (facts.documents ?? []).map(displayText) };
+  return { research, documents: (facts.documents ?? []).map(displayText), roadmap: (facts.roadmap ?? []).map(displayText) };
+}
+
+/** The most repository files one project links, as the engine's links store bounds them. */
+export const LINKS_MAX = 32;
+
+/** The repository files a first confirm links: the mapping's roadmap files unless the owner
+ * turned "roadmap" off, then each research kind's files unless the owner turned that kind off,
+ * each once and at most LINKS_MAX, as the mapping wrote them. Null once the setup is saved or
+ * when the mapping found no file, so the engine leaves the links alone. Inputs: the onboarding
+ * view and the turned-off keys ("roadmap" or a research kind). Output: the paths or null. */
+export function confirmKept(view: OnboardingView, dropped: readonly string[]): string[] | null {
+  const kept: string[] = [];
+  const keep = (paths: readonly string[]) => {
+    for (const path of paths) if (kept.length < LINKS_MAX && !kept.includes(path)) kept.push(path);
+  };
+  const found = [...(view.facts.roadmap ?? []), ...(view.facts.research ?? []).flatMap((item) => item.files)];
+  if (view.finished || found.length === 0) return null;
+  if (!dropped.includes("roadmap")) keep(view.facts.roadmap ?? []);
+  for (const item of view.facts.research ?? []) if (!dropped.includes(item.kind)) keep(item.files);
+  return kept;
 }
 
 /** Tells whether the mapping step has stopped changing or the setup is already saved. A failed

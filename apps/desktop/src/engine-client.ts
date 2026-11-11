@@ -1326,6 +1326,7 @@ export interface MappingFacts {
   entry_points: string[];
   research?: FoundResearch[];
   documents?: string[];
+  roadmap?: string[];
 }
 
 /** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or

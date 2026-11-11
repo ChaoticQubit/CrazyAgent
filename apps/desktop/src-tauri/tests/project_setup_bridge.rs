@@ -318,7 +318,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         ..setup(vec![])
     };
     let drafted_before = bridge
-        .update_project_setup(&id, edited.clone(), None, Some(1), 14)
+        .update_project_setup(&id, edited.clone(), None, Some(1), None, 14)
         .await?;
     assert_eq!(
         drafted_before.rejection.as_deref(),
@@ -344,6 +344,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             edited.clone(),
             Some("Chore board two".into()),
             None,
+            None,
             15,
         )
         .await?;
@@ -366,7 +367,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
             .any(|row| row.id == id && row.name == "Chore board two")
     );
     let stale = bridge
-        .update_project_setup(&id, edited, None, Some(1), 16)
+        .update_project_setup(&id, edited, None, Some(1), None, 16)
         .await?;
     assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 
