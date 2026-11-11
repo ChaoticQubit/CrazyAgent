@@ -1244,6 +1244,22 @@ pub fn pick_account<'a>(
     paused: &BTreeSet<CredentialRef>,
     choice: &crate::scheduling::Choice,
 ) -> Option<&'a TeamAccount> {
+    pick_account_held(accounts, load, paused, choice, None)
+}
+
+/// Picks the usable account as `pick_account` does, for work that may already run on one
+/// of them: the held account wins every tie, so another account is picked only when the
+/// schedule puts it strictly first or the held one cannot take work. Takes the usable
+/// accounts in pool order, live agents per connection, paused connections, the scheduling
+/// choice and the held connection, none for new work. Returns the chosen account, or none
+/// when every account is paused or left out by the schedule.
+pub fn pick_account_held<'a>(
+    accounts: &'a [TeamAccount],
+    load: &dyn Fn(&CredentialRef) -> usize,
+    paused: &BTreeSet<CredentialRef>,
+    choice: &crate::scheduling::Choice,
+    held: Option<&CredentialRef>,
+) -> Option<&'a TeamAccount> {
     let open: Vec<&TeamAccount> = accounts
         .iter()
         .filter(|account| !paused.contains(&account.connection))
@@ -1253,7 +1269,7 @@ pub fn pick_account<'a>(
         .map(|account| crate::scheduling::Candidate {
             connection: account.connection.clone(),
             load: load(&account.connection),
-            current: false,
+            current: held == Some(&account.connection),
         })
         .collect();
     choice

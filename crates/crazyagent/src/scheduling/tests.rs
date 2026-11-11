@@ -188,6 +188,7 @@ fn owner_choices_are_stored_read_back_and_cleared() {
         schedule,
         Schedule {
             strategy: Strategy::Balanced,
+            live_master: LiveMasterAccount::Keep,
             pools: vec![ScopedStrategy {
                 id: reference("pool-a"),
                 strategy: Strategy::ManualRank,
@@ -216,6 +217,105 @@ fn owner_choices_are_stored_read_back_and_cleared() {
     let cleared = load(&connection).unwrap();
     assert!(cleared.accounts.is_empty() && cleared.pools.is_empty());
     assert_eq!(cleared.projects.len(), 1);
+}
+
+#[test]
+fn the_live_master_account_choice_is_keep_until_stored_and_each_option_reads_back() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b"]);
+    assert_eq!(LiveMasterAccount::default(), LiveMasterAccount::Keep);
+    assert_eq!(live_master(&connection).unwrap(), LiveMasterAccount::Keep);
+    assert_eq!(
+        load(&connection).unwrap().live_master,
+        LiveMasterAccount::Keep
+    );
+    for (choice, version) in [
+        (LiveMasterAccount::MoveWhenIdle, 1),
+        (LiveMasterAccount::Keep, 2),
+        (LiveMasterAccount::MoveWhenIdle, 3),
+    ] {
+        let edit = ScheduleChange::LiveMaster { choice };
+        let mut held = load(&connection).unwrap();
+        assert_eq!(
+            change(&mut connection, &access, edit.clone()),
+            Outcome::Applied
+        );
+        held.update(&edit);
+        let stored = load(&connection).unwrap();
+        assert_eq!(stored.live_master, choice);
+        assert_eq!(stored.version, version);
+        assert_eq!(live_master(&connection).unwrap(), choice);
+        assert_eq!(
+            stored,
+            held,
+            "a view's own update matches the stored schedule"
+        );
+        assert_eq!(load_page(&connection, None).unwrap().0.live_master, choice);
+    }
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM account_live_master",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "three changes keep one row");
+    let tx = connection.transaction().unwrap();
+    let keep = ScheduleChange::LiveMaster {
+        choice: LiveMasterAccount::Keep,
+    };
+    assert_eq!(
+        apply(&tx, &access, &keep, 2).unwrap(),
+        Outcome::Rejected {
+            code: "stale_revision".into()
+        }
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        live_master(&connection).unwrap(),
+        LiveMasterAccount::MoveWhenIdle,
+        "a stale change stores nothing"
+    );
+}
+
+#[test]
+fn the_live_master_account_choice_travels_by_its_codes_and_an_unknown_code_is_refused() {
+    let (_directory, connection) = database();
+    for choice in LiveMasterAccount::ALL {
+        assert_eq!(
+            serde_json::to_value(choice).unwrap(),
+            serde_json::Value::from(choice.code())
+        );
+        assert_eq!(LiveMasterAccount::parse(choice.code()), Some(choice));
+        assert!(!choice.label().is_empty() && !choice.detail().is_empty());
+    }
+    assert_eq!(
+        serde_json::to_value(ScheduleChange::LiveMaster {
+            choice: LiveMasterAccount::MoveWhenIdle,
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "live_master", "choice": "move_when_idle" })
+    );
+    let old: Schedule = serde_json::from_value(serde_json::json!({
+        "strategy": "balanced", "pools": [], "projects": [], "accounts": [], "version": 3
+    }))
+    .unwrap();
+    assert_eq!(
+        old.live_master,
+        LiveMasterAccount::Keep,
+        "a schedule written before the setting reads Keep"
+    );
+    connection
+        .execute(
+            "INSERT INTO account_live_master(id,choice) VALUES (1,'sometimes')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        live_master(&connection).unwrap_err().0,
+        "account_schedule_record"
+    );
+    assert_eq!(load(&connection).unwrap_err().0, "account_schedule_record");
 }
 
 #[test]

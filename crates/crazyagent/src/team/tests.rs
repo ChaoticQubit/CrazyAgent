@@ -612,6 +612,56 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
 }
 
 #[test]
+fn work_that_holds_an_account_keeps_it_on_a_tie_and_leaves_it_only_for_one_strictly_first() {
+    let project = ProjectId::new("team-held").unwrap();
+    let Accounts::Usable(accounts) = eligible_accounts(
+        &access("team-held", &["local-a", "local-b"]),
+        &project,
+        "codex",
+    ) else {
+        panic!("pool assigned");
+    };
+    let held = reference("local-b");
+    let pick = |choice: &crate::scheduling::Choice,
+                paused: &BTreeSet<CredentialRef>,
+                held: Option<&CredentialRef>| {
+        pick_account_held(&accounts, &|_| 0, paused, choice, held)
+            .map(|account| account.connection.as_str().to_owned())
+    };
+    let mut paused = BTreeSet::new();
+    let tie = crate::scheduling::Choice::default();
+    assert_eq!(
+        pick(&tie, &paused, None).as_deref(),
+        Some("local-a"),
+        "new work takes pool order"
+    );
+    assert_eq!(
+        pick(&tie, &paused, Some(&held)).as_deref(),
+        Some("local-b"),
+        "the held account wins a tie"
+    );
+    let mut behind = crate::scheduling::Choice::default();
+    behind.schedule.accounts.push(crate::scheduling::AccountEntry {
+        connection: held.clone(),
+        plan: crate::scheduling::AccountPlan {
+            pin: Some(crate::scheduling::Pin::UseLast),
+            ..crate::scheduling::AccountPlan::default()
+        },
+    });
+    assert_eq!(
+        pick(&behind, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "an account the schedule puts strictly first wins over the held one"
+    );
+    paused.insert(held.clone());
+    assert_eq!(
+        pick(&tie, &paused, Some(&held)).as_deref(),
+        Some("local-a"),
+        "a held account that rests gives way"
+    );
+}
+
+#[test]
 fn admission_follows_the_team_plan_and_the_pool() {
     let (_directory, mut connection) = database();
     let setup = stored(

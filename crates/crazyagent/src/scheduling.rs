@@ -57,6 +57,52 @@ impl Strategy {
     }
 }
 
+/// What a live master does once its pool's account order puts another account ahead of
+/// the one it started on (DEC-139): keep that account until its next start, or move to
+/// the top account at its next idle point.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveMasterAccount {
+    #[default]
+    Keep,
+    MoveWhenIdle,
+}
+
+impl LiveMasterAccount {
+    /// Every choice in the order the owner sees them.
+    pub const ALL: [Self; 2] = [Self::Keep, Self::MoveWhenIdle];
+
+    /// The plain name the owner sees.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keep => "Keep start account",
+            Self::MoveWhenIdle => "Move when idle",
+        }
+    }
+
+    /// One plain line on what the choice does, shown beside it.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Keep => "A live master stays on the account it started on until it restarts.",
+            Self::MoveWhenIdle => {
+                "An idle live master moves to its pool's top account and starts again there."
+            }
+        }
+    }
+
+    /// The stored code of this choice.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::MoveWhenIdle => "move_when_idle",
+        }
+    }
+
+    fn parse(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|choice| choice.code() == code)
+    }
+}
+
 /// An owner pin on one account: never give it work, or only after every other account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,13 +175,15 @@ pub struct AccountEntry {
     pub plan: AccountPlan,
 }
 
-/// Every stored scheduling choice: the app default strategy, pool strategies, project
-/// overrides and account plans, each list sorted by id, and the version an owner change
-/// names.
+/// Every stored scheduling choice: the app default strategy, what a live master does when
+/// its account is no longer first, pool strategies, project overrides and account plans,
+/// each list sorted by id, and the version an owner change names.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     pub strategy: Strategy,
+    #[serde(default)]
+    pub live_master: LiveMasterAccount,
     pub pools: Vec<ScopedStrategy>,
     pub projects: Vec<ScopedStrategy>,
     pub accounts: Vec<AccountEntry>,
@@ -177,6 +225,7 @@ impl Schedule {
         self.version += 1;
         match change {
             ScheduleChange::AppStrategy { strategy } => self.strategy = *strategy,
+            ScheduleChange::LiveMaster { choice } => self.live_master = *choice,
             ScheduleChange::PoolStrategy { pool, strategy } => {
                 set_scoped(&mut self.pools, pool, *strategy);
             }
@@ -232,6 +281,9 @@ pub enum ScheduleChange {
     AppStrategy {
         strategy: Strategy,
     },
+    LiveMaster {
+        choice: LiveMasterAccount,
+    },
     PoolStrategy {
         pool: CredentialRef,
         strategy: Option<Strategy>,
@@ -281,6 +333,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 rank INTEGER,
                 reserve_percent INTEGER NOT NULL,
                 pin TEXT
+            );
+            CREATE TABLE IF NOT EXISTS account_live_master (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                choice TEXT NOT NULL
             );",
         )
         .map_err(error)
@@ -326,6 +382,16 @@ pub fn apply(
     match change {
         ScheduleChange::AppStrategy { strategy } => {
             set_strategy(tx, "app", "", Some(*strategy))?;
+        }
+        ScheduleChange::LiveMaster { choice } => {
+            let changed = tx
+                .execute(
+                    "INSERT INTO account_live_master(id,choice) VALUES (1,?1)
+                     ON CONFLICT(id) DO UPDATE SET choice=excluded.choice",
+                    [choice.code()],
+                )
+                .map_err(error)?;
+            assert_eq!(changed, 1);
         }
         ScheduleChange::PoolStrategy { pool, strategy } => {
             if !set_strategy(tx, "pool", pool.as_str(), *strategy)? {
@@ -459,6 +525,27 @@ fn project_known(connection: &Connection, project: &str) -> Result<bool, EngineE
         .map_err(error)
 }
 
+/// Reads what a live master does when its account is no longer first. Takes the engine
+/// connection; a database without the row, or without its table, holds the default.
+/// Returns the choice; a stored value this engine cannot read is an
+/// `account_schedule_record` failure.
+pub fn live_master(connection: &Connection) -> Result<LiveMasterAccount, EngineError> {
+    if !table_exists(connection, "account_live_master")? {
+        return Ok(LiveMasterAccount::default());
+    }
+    let code: Option<String> = connection
+        .query_row(
+            "SELECT choice FROM account_live_master WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    code.map_or(Ok(LiveMasterAccount::default()), |code| {
+        LiveMasterAccount::parse(&code).ok_or_else(|| error("account_schedule_record"))
+    })
+}
+
 /// Reads every stored scheduling choice and the schedule's version. Takes the engine
 /// connection; a database without the scheduling tables holds no choices yet.
 /// Returns the schedule with lists sorted by id; a stored value this engine cannot read
@@ -490,6 +577,7 @@ pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
         .map_err(error)?;
     let mut schedule = Schedule {
         version,
+        live_master: live_master(connection)?,
         ..Schedule::default()
     };
     for (scope, id, code) in rows {
@@ -632,6 +720,7 @@ pub fn load_page(
     };
     let schedule = Schedule {
         strategy: all.strategy,
+        live_master: all.live_master,
         pools: page.take(ScheduleList::Pools, all.pools, |row| &row.id)?,
         projects: page.take(ScheduleList::Projects, all.projects, |row| &row.id)?,
         accounts: page.take(ScheduleList::Accounts, all.accounts, |row| &row.connection)?,
