@@ -64,6 +64,20 @@ pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
+/// The Windows file attribute of a reparse point: a junction, a link or a mount point.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// What [`open_plain_beneath`] answers on Windows when the folder itself is a junction, a
+/// link or a mount point, so nothing below it is read. Callers that show a reason match it.
+#[cfg(windows)]
+pub(crate) const BENEATH_FOLDER_LINKED: &str = "beneath_folder_linked";
+
+/// What [`open_plain_beneath`] answers on Windows when a part below the folder is a
+/// junction, a link or a mount point, or is no longer directly inside the part before it.
+#[cfg(windows)]
+pub(crate) const BENEATH_PATH_LINKED: &str = "beneath_path_linked";
+
 /// Reports whether the engine's effective user owns the file the metadata describes.
 /// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
 /// Unix owner to compare, so an ownership check refuses rather than passes.
@@ -324,11 +338,11 @@ pub(crate) fn open_beneath(
 }
 
 /// Opens a file below a folder the engine holds to read, with no link followed from that
-/// folder down and no FIFO waited on ([`open_beneath`]). On Windows the file opens through
-/// [`open_plain`] and is kept only when its real place, read from the open handle, is below
-/// the folder's own ([`name_under`]), so a folder junction or link in any part, the folder
-/// itself included, is refused, not followed. Inputs: the folder and the path below it,
-/// plain names only. Output: the open file or the I/O error.
+/// folder down and no FIFO waited on ([`open_beneath`]). On Windows every part opens as
+/// itself ([`open_real_beneath`]), so a junction, link or mount point in any part, the
+/// folder itself included, is refused wherever it leads, inside the folder or out of it.
+/// Inputs: the folder and the path below it, plain names only. Output: the open file or the
+/// I/O error.
 pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -338,28 +352,78 @@ pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<s
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
         let plain = below
             .components()
             .all(|part| matches!(part, Component::Normal(_)));
         if !plain || below.as_os_str().is_empty() {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
-        let folder = std::fs::OpenOptions::new()
+        open_real_beneath(base, below)
+    }
+}
+
+/// The Windows way of [`open_plain_beneath`]: opens the folder and then each name below it
+/// as itself, never as a link's target, and goes on only while the opened thing is no
+/// reparse point and its real place, read from its handle, is directly inside the real
+/// place of the one before ([`name_child`]). A part swapped between two opens so gives
+/// nothing. Inputs: the folder and at least one plain name below it. Output: the open file,
+/// `BENEATH_FOLDER_LINKED` when the folder itself is a reparse point, `BENEATH_PATH_LINKED`
+/// for a part below it, or the I/O error.
+#[cfg(windows)]
+fn open_real_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let refused =
+        |code: &'static str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, code);
+    let folder = |path: &Path| {
+        std::fs::OpenOptions::new()
             .access_mode(0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(base)?;
-        let file = open_plain(&base.join(below))?;
-        let held = crazyagent_win_sandbox::final_name(&folder)?;
-        let found = crazyagent_win_sandbox::final_name(&file)?;
-        if !name_under(&held, &found) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "the path leaves its folder",
-            ));
-        }
-        Ok(file)
+            .open(path)
+    };
+    let mut held = folder(base)?;
+    if reparse_point(&held)? {
+        return Err(refused(BENEATH_FOLDER_LINKED));
     }
+    let mut place = crazyagent_win_sandbox::final_name(&held)?;
+    let mut path = base.to_path_buf();
+    let mut parts = below.components().peekable();
+    assert!(parts.peek().is_some(), "a path below a folder has a name");
+    while let Some(part) = parts.next() {
+        assert!(matches!(part, Component::Normal(_)), "plain names only");
+        path.push(part);
+        let opened = if parts.peek().is_some() {
+            folder(&path)?
+        } else {
+            open_plain(&path)?
+        };
+        let found = crazyagent_win_sandbox::final_name(&opened)?;
+        if reparse_point(&opened)? || !name_child(&place, &found) {
+            return Err(refused(BENEATH_PATH_LINKED));
+        }
+        (held, place) = (opened, found);
+    }
+    Ok(held)
+}
+
+/// Tells whether an open file or folder is a reparse point: a junction, a link or a mount
+/// point, opened as itself. Takes the open handle. Returns the answer or the I/O error.
+#[cfg(windows)]
+fn reparse_point(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::fs::MetadataExt;
+    Ok(file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+/// Tells whether a real place is directly inside a folder's real place: below it
+/// ([`name_under`]) by exactly one name, with no further `\`. Inputs: the folder's name and
+/// the found name, as the device names Windows gives for open handles, in UTF-16 units.
+/// Output: the answer.
+#[cfg(any(windows, test))]
+fn name_child(folder: &[u16], found: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let start = folder.strip_suffix(&[SEPARATOR]).unwrap_or(folder).len() + 1;
+    let child = name_under(folder, found) && !found[start..].contains(&SEPARATOR);
+    assert!(!child || found.len() > start);
+    child
 }
 
 /// Tells whether a real place lies below a folder's real place, both as the device names
