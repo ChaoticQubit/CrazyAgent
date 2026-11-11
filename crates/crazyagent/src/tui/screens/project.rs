@@ -38,6 +38,20 @@ const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
 const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
+/// The Overview tabs the project view lists, in the desktop's order: the four an agent
+/// writes, in `project_overview::Tab::ALL` order, then the README.
+pub(in crate::tui) const OVERVIEW_TAB_LABELS: [&str; 5] = [
+    "Quick info",
+    "Features",
+    "Competitors",
+    "Install & use",
+    "README",
+];
+/// How many lines PgUp and PgDn move the picked Overview tab's text.
+const OVERVIEW_PAGE_ROWS: usize = 10;
+/// The most lines the picked Overview tab's text can be scrolled down; the view stops at
+/// the text's last line.
+pub(in crate::tui) const OVERVIEW_SCROLL_MAX: usize = 1 << 16;
 
 /// Names the seven tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
@@ -656,6 +670,9 @@ pub(in crate::tui) struct ProjectScreen {
     pub files: Option<(String, Vec<String>)>,
     pub transcript_scroll: usize,
     pub overview_cursor: usize,
+    pub overview_tabs: Option<crate::project_overview::Overview>,
+    pub overview_tab: usize,
+    pub overview_scroll: usize,
     pub agents_cursor: usize,
     pub tree_cursor: usize,
     pub preview: Option<Preview>,
@@ -739,6 +756,9 @@ impl ProjectScreen {
             files: None,
             transcript_scroll: 0,
             overview_cursor: 0,
+            overview_tabs: None,
+            overview_tab: 0,
+            overview_scroll: 0,
             agents_cursor: 0,
             tree_cursor: 0,
             preview: None,
@@ -1936,7 +1956,25 @@ impl ProjectScreen {
         if let Some(reply) = self.planning_reply(key.code) {
             return reply;
         }
+        let tabs = self.overview_tabs.is_some();
         match key.code {
+            KeyCode::Left | KeyCode::Right if tabs => {
+                let count = OVERVIEW_TAB_LABELS.len();
+                let step = if key.code == KeyCode::Right {
+                    1
+                } else {
+                    count - 1
+                };
+                self.overview_tab = (self.overview_tab + step) % count;
+                self.overview_scroll = 0;
+            }
+            KeyCode::PageDown if tabs => {
+                let down = self.overview_scroll + OVERVIEW_PAGE_ROWS;
+                self.overview_scroll = down.min(OVERVIEW_SCROLL_MAX);
+            }
+            KeyCode::PageUp if tabs => {
+                self.overview_scroll = self.overview_scroll.saturating_sub(OVERVIEW_PAGE_ROWS);
+            }
             KeyCode::Up => self.overview_cursor = self.overview_cursor.saturating_sub(1),
             KeyCode::Down => {
                 self.overview_cursor = (self.overview_cursor + 1).min(rows.saturating_sub(1));
@@ -2723,6 +2761,8 @@ impl ProjectScreen {
     }
 
     fn assert_consistent(&self) {
+        assert!(self.overview_tab < OVERVIEW_TAB_LABELS.len());
+        assert!(self.overview_scroll <= OVERVIEW_SCROLL_MAX);
         if let Some(cursor) = self.pool_picker {
             assert!(!self.pool_choices.is_empty() && cursor <= self.pool_choices.len());
         }
