@@ -1146,40 +1146,58 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_port_inside_this_machines_picked_ports_refuses_the_open_network() {
+    fn a_kept_port_inside_this_machines_picked_ports_refuses_every_network() {
         let picked = read_picked_ports().expect("Linux test machines show their port range");
         let inside = (*picked.start()).max(1);
         let helper = std::env::current_exe().unwrap();
         let landlock = || LinuxBackend::Landlock {
             helper: helper.clone(),
         };
-        let (_kept, sandbox) = project(SandboxNetwork::Open);
-        let sandbox = sandbox.keep_ports(&[inside]).unwrap();
-        match LinuxSandbox::new(sandbox, landlock()) {
-            Err(SandboxError::Unavailable(reason)) => {
-                assert!(reason.contains(&format!("port {inside} ")), "{reason}");
+        for network in [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        ] {
+            let (_kept, sandbox) = project(network.clone());
+            let sandbox = sandbox.keep_ports(&[inside]).unwrap();
+            match LinuxSandbox::new(sandbox, landlock()) {
+                Err(SandboxError::Unavailable(reason)) => {
+                    assert!(reason.contains(&format!("port {inside} ")), "{reason}");
+                }
+                other => panic!(
+                    "a kept port Linux could pick must refuse the launch on {network:?}: {other:?}"
+                ),
             }
-            other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
         }
-        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
-        let closed = sandbox.keep_ports(&[inside]).unwrap();
-        assert!(
-            LinuxSandbox::new(closed, landlock()).is_ok(),
-            "a network that binds nothing is not held to the range"
-        );
     }
 
     #[test]
-    fn a_limited_network_policy_names_no_kept_port() {
+    fn a_limited_network_policy_names_the_kept_ports_for_the_helper_to_check() {
         let (_temp, sandbox) = project(SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
+        let sandbox = sandbox.keep_ports(&[8080]).unwrap();
         let grants = Grants {
             read: Vec::new(),
             write: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
-        assert!(policy.keep_free.is_empty());
-        assert!(!policy.args().iter().any(|arg| arg == KEEP_FREE));
+        let mut expected = vec![1455, 8080, 11434];
+        expected.extend(PROXY_PORTS);
+        assert_eq!(policy.keep_free, expected);
+        assert_eq!(
+            HelperRequest::parse(
+                policy
+                    .args()
+                    .into_iter()
+                    .chain(["--".into(), "/bin/true".into()])
+                    .collect()
+            ),
+            Ok(HelperRequest::Run {
+                policy,
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+            })
+        );
     }
 
     #[test]
@@ -1201,10 +1219,28 @@ mod tests {
                 keep_free: false,
             })
         );
+        assert_eq!(
+            parse(&[PROBE, LIMIT_NETWORK, KEEP_FREE, "1455"]),
+            Ok(HelperRequest::Probe {
+                limit_network: true,
+                open_sockets: false,
+                keep_free: true,
+            })
+        );
+        assert_eq!(
+            parse(&[LIMIT_NETWORK, KEEP_FREE, "1455", "--", "/bin/true"]),
+            Ok(HelperRequest::Run {
+                policy: LandlockPolicy {
+                    limit_network: true,
+                    keep_free: vec![1455],
+                    ..LandlockPolicy::default()
+                },
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+            })
+        );
         for refused in [
-            &[PROBE, LIMIT_NETWORK, KEEP_FREE, "1455"][..],
-            &[LIMIT_NETWORK, KEEP_FREE, "1455", "--", "/bin/true"],
-            &[KEEP_FREE, "0", "--", "/bin/true"],
+            &[KEEP_FREE, "0", "--", "/bin/true"][..],
             &[KEEP_FREE, "--", "/bin/true"],
             &[PROBE, KEEP_FREE],
         ] {
