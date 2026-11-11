@@ -344,15 +344,19 @@ fn kept_out_mark(kept: &[PathBuf], hidden: &[PathBuf]) -> String {
     format!("keep-out v1 {:x}\n", digest.finalize())
 }
 
-/// The mark the graph in `out` carries, read without following a link and within 128
-/// bytes. Takes the graph folder. Returns the mark's text, or `None` when it has none.
+/// The mark the graph in `out` carries, read without following a link, without waiting on
+/// a FIFO or device placed at its name, only from a regular file and within 128 bytes.
+/// Takes the graph folder. Returns the mark's text, or `None` when it has none.
 #[cfg(unix)]
-fn marked(out: &Path) -> Option<String> {
+pub(super) fn marked(out: &Path) -> Option<String> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(out.join(KEPT_OUT_MARK))
         .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut text = String::new();
     file.take(MARK_BYTES_MAX).read_to_string(&mut text).ok()?;
     Some(text)

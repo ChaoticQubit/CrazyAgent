@@ -139,20 +139,21 @@ fn excerpt(path: &Path, max: u64) -> io::Result<Option<(String, bool)>> {
     Ok(Some((text, valid < read)))
 }
 
-/// Opens a file for reading, refusing a link at its name.
+/// Opens a file for reading, refusing a link at its name and never waiting on a FIFO or
+/// device swapped in at it; the caller keeps only a regular file.
 /// Takes the path. Returns the open file or the failure.
 #[cfg(unix)]
-fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
+pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
 }
 
 /// Opens a file for reading where no no-follow open exists; the caller checked it is no link.
 /// Takes the path. Returns the open file or the failure.
 #[cfg(not(unix))]
-fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
+pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
