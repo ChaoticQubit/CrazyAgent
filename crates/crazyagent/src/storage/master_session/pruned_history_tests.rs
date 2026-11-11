@@ -113,3 +113,68 @@ async fn a_conversation_past_the_prune_bound_still_reads_its_turns_and_starts_a_
     );
     case.close().await;
 }
+
+/// OB-6, Claude Code to the one-turn master: a turn run in the session's live terminal is
+/// part of the one conversation, so the next turn the one-turn master runs carries it in
+/// its history after the engine-run turn it followed, and the store holds the divider of
+/// that switch before the new turn.
+#[tokio::test]
+async fn the_next_one_turn_prompt_carries_what_was_said_in_the_live_terminal() {
+    let case = Fixture::new(true).await;
+    case.register().await;
+    case.reply_with(FIRST_REPLY, Vec::new(), 1).await;
+    let writer = Connection::open(&case.path).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let (project, session) = (&case.session.project_id, case.session.session_id.as_str());
+    crate::master_sessions::mark_owner_turn(&writer, project, session, "claude-code").unwrap();
+    crate::master_sessions::mark_owner_reply(
+        &writer,
+        project,
+        session,
+        "claude-code",
+        "Footer fixed",
+    )
+    .unwrap();
+    drop(writer);
+
+    assert_eq!(
+        case.result(case.submit("after-terminal", NEXT)).await,
+        OwnerResult::Applied
+    );
+
+    let (_, turns) = case.view().await;
+    let mut db = case.db();
+    let tx = db.transaction().unwrap();
+    let text = prompt(&tx, &case.session, &turns[1]).unwrap();
+    let stored: Vec<String> = tx
+        .prepare(
+            "SELECT speaker || '/' || mode FROM session_messages WHERE session=?1 ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([session], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(tx);
+    let engine_turn = text
+        .find(&format!("Owner: {PROMPT}\nYou: {FIRST_REPLY}"))
+        .expect("the engine-run turn is in the history");
+    let terminal_turn = text
+        .find("Typed in the Claude Code terminal: (The typed words were not kept.)\nYou, in the Claude Code terminal: Footer fixed")
+        .expect("the terminal turn is in the history");
+    assert!(engine_turn < terminal_turn, "{text}");
+    assert_eq!(
+        stored,
+        [
+            "owner/one_turn",
+            "master/one_turn",
+            "owner/live",
+            "master/live",
+            "switch/one_turn",
+            "owner/one_turn",
+        ]
+    );
+    case.close().await;
+}

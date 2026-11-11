@@ -4270,7 +4270,8 @@ pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<boo
 const SWITCH_HARNESS_BYTES_MAX: i64 = 64;
 
 /// Records that a session's master harness switched, replacing the session's earlier switch,
-/// so its conversation shows where the new harness took over. Takes a connection, the
+/// and stores the divider of the switch in the session's one conversation, so every view
+/// shows where the new harness took over and the switch is settled. Takes a connection, the
 /// project, the session, the new launch harness and the owner's mode. Returns nothing.
 pub fn record_switch(
     connection: &Connection,
@@ -4288,7 +4289,14 @@ pub fn record_switch(
             params![session, project.as_str(), harness, mode.name(), now_ms()],
         )
         .map_err(error)?;
-    Ok(())
+    crate::master_sessions::note_switch(
+        connection,
+        project.as_str(),
+        session,
+        crate::master_sessions::MasterMode::Live,
+        harness,
+        mode,
+    )
 }
 
 /// The latest master harness switch of the project's live session, if it ever switched.
