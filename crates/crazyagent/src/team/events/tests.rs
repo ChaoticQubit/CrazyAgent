@@ -433,6 +433,86 @@ fn a_watched_agent_that_stops_being_busy_loses_its_waiting_mark() {
     assert!(!watch.due(), "a second scan waits for SCAN_EVERY");
 }
 
+/// OB-1 r1: only an app's own input prompt at the bottom of its screen is an idle prompt:
+/// Claude Code's prompt row between two rules, empty or with a draft, with its footer rows
+/// below, or Codex's composer row. A dialog, a notice, a picker or a quoted line in its
+/// place is not one, and neither is a prompt with too many rows below it.
+#[test]
+fn only_an_app_s_own_input_prompt_at_the_bottom_is_an_idle_prompt() {
+    let rule = "\u{2500}".repeat(12);
+    let idle = [
+        (
+            "Claude Code's empty prompt",
+            format!(" Done.\n\n{rule}\n > \n{rule}\n  ? for shortcuts\n"),
+        ),
+        (
+            "Claude Code's prompt with a status line below",
+            format!(
+                "{rule}\n\u{276f} \n{rule}\n  opus \u{b7} blog\n  \u{23f5}\u{23f5} accept edits on\n"
+            ),
+        ),
+        (
+            "Claude Code's prompt with a draft",
+            format!("{rule}\n\u{276f} fix the build\n{rule}\n"),
+        ),
+        (
+            "Claude Code's boxed prompt",
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}\r\n\u{2502} >  \u{2502}\r\n\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}\r\n  ? for shortcuts\r\n"
+                .to_owned(),
+        ),
+        (
+            "Codex's composer",
+            "header\r\n\r\n\u{203a} Ask Codex to do anything\r\n\r\n  ? for shortcuts\r\n".to_owned(),
+        ),
+        (
+            "Codex's composer with its key hints",
+            "\u{203a} Ask Codex to do anything\r\n  \u{23ce} send   \u{2303}J newline   \u{2303}C quit\r\n"
+                .to_owned(),
+        ),
+    ];
+    for (case, screen) in &idle {
+        assert!(idle_prompt(screen.as_bytes()), "{case}");
+    }
+
+    let other = [
+        ("an empty screen", String::new()),
+        ("a screen with no prompt", "stand-in ready\n".to_owned()),
+        (
+            "a permission prompt",
+            " Do you want to proceed?\n \u{276f} 1. Yes\n   2. No\n".to_owned(),
+        ),
+        (
+            "a notice below a prompt the owner sent",
+            " > Fix the build\n\n Press Enter to continue\n".to_owned(),
+        ),
+        (
+            "a free answer field between rules",
+            format!("{rule}\n Tell the agent what to do differently:\n{rule}\n"),
+        ),
+        (
+            "a picker with its marker on an unnumbered row",
+            " Resume a conversation\n \u{276f} Fix the build\n   Review the page\n Enter to select \u{b7} Esc to cancel\n"
+                .to_owned(),
+        ),
+        (
+            "a quoted line under a rule with no rule below",
+            format!("{rule}\n > quoted\n The quote ends here.\n"),
+        ),
+        (
+            "a Codex notice below a message the owner sent",
+            "\u{203a} fix it\r\n\r\n  Update available\r\n  Press enter to continue\r\n  esc to skip\r\n"
+                .to_owned(),
+        ),
+        (
+            "Claude Code's prompt with too many rows below",
+            format!("{rule}\n > \n{rule}\n a\n b\n c\n d\n e\n f\n"),
+        ),
+    ];
+    for (case, screen) in &other {
+        assert!(!idle_prompt(screen.as_bytes()), "{case}");
+    }
+}
+
 #[test]
 fn choice_prompts_of_claude_code_and_codex_are_questions_and_plain_lists_are_not() {
     let claude = "\x1b[0m\x1b[H\x1b[2J\x1b]0;claude\x07\u{256d}\u{2500}\u{2500}\u{256e}\r\n\u{2502} Bash command                    \u{2502}\r\n\u{2502}   cargo test                    \u{2502}\r\n\u{2502} Do you want to proceed?         \u{2502}\r\n\u{2502} \x1b[36m\u{276f} 1. Yes\x1b[0m                      \u{2502}\r\n\u{2502}   2. Yes, and don't ask again   \u{2502}\r\n\u{2502}   3. No, and tell Claude what to do differently (esc) \u{2502}\r\n\u{2570}\u{2500}\u{2500}\u{256f}\x1b[0m\x1b[9;3H";

@@ -437,6 +437,19 @@ pub struct MasterTurnView {
     pub changes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_request: Option<MasterEngineRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<MasterActivityLine>,
+}
+
+/// One line of what a running master turn is doing, as the engine words it from the
+/// harness's stream: a fixed phrase with at most one screened project-relative path, and
+/// when the engine last saw it. Held in the engine's memory while the turn runs and added
+/// when turns are read; never stored with the turn (OB-2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterActivityLine {
+    pub at_ms: u64,
+    pub text: String,
 }
 
 /// What the engine asked the master in a turn the owner started with Ask agent to update

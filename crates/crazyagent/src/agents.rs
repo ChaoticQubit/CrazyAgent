@@ -1552,12 +1552,16 @@ fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
 }
 
 /// Opens an agent output log read-only to probe its lock, refusing a link, anything but
-/// a regular file and a file another user owns. Input: the log path. Output: the open.
+/// a regular file and a file another user owns, and never waiting on a FIFO or device
+/// placed at its name. Input: the log path. Output: the open.
 #[cfg(unix)]
 fn log_probe(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .ok()

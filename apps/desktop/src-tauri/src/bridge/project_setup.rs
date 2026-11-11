@@ -6,8 +6,8 @@ use crazyagent::activity::ActivityItem;
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchJob, ResearchKind,
-    StoredSetup,
+    ContextChunk, KeptFile, ProjectCatalog, ProjectContext, ProjectSetup, ResearchJob,
+    ResearchKind, StoredSetup,
 };
 use crazyagent::protocol::RequestId;
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
@@ -535,14 +535,17 @@ impl NativeBridge {
 
     /// Changes a project's name, description, stack, platforms, research, pool and team.
     /// Takes the project id, the new setup, an optional new name, the setup revision the screen
-    /// showed (the current one when absent) and the client generation. Returns the actual
-    /// commit receipt; a change made in between is the plain rejection `stale_revision`.
+    /// showed (the current one when absent), the files the setup mapping found that the owner
+    /// keeps linked, each with its group (none leaves the links alone) and the client
+    /// generation. Returns the actual commit receipt; a change made in between is the plain
+    /// rejection `stale_revision`.
     pub async fn update_project_setup(
         &mut self,
         id: &str,
         setup: ProjectSetup,
         name: Option<String>,
         revision: Option<u64>,
+        kept: Option<Vec<KeptFile>>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
@@ -573,6 +576,7 @@ impl NativeBridge {
                     expected_revision: revision.unwrap_or(stored.revision),
                     name,
                     setup,
+                    kept,
                 },
                 generation,
             )

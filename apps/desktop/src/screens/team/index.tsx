@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { loadTeamGraph, loadTerminalsPerWindow, nextGeneration, openTerminalWindows } from "../../api";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { listAccounts, loadTeamGraph, loadTerminalsPerWindow, nextGeneration, openTerminalWindows } from "../../api";
 import type { Result } from "../../api";
+import { useLoad } from "../../state";
 import { loadChanges } from "../../api-changes";
 import { AGENT_MESSAGE_BYTES_MAX, failureCopy, receiptState, sendAgentMessage, stopTeamAgent, stopTeammate } from "../../api-projects";
 import { HOOKLESS_WORDS, type GraphEdge, type GraphNode, type TeamGraph } from "../../engine-client";
@@ -8,6 +9,7 @@ import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, Menu, NotRe
 import { actions } from "../changes/model";
 import { displayText } from "../conversation";
 import { AgentSkillsDialog } from "../process";
+import { accountName } from "../project/research";
 import {
   BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, LIVE_LABEL_WIDTH_MAX, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
   graphLive, graphSummary, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView,
@@ -206,11 +208,22 @@ export function graphRead(state: GraphState, result: Result<TeamGraph>): GraphSt
   return { shown: state.shown, stale: result.kind === "error" ? result.message : "The team graph isn't ready in this build.", gone };
 }
 
+/** Puts each account's name in place of its id in a graph read, so every view of the team
+ * graph, the master's console and each terminal head included, names accounts as Accounts
+ * does. Inputs: the graph state and the owner's account names. Output: the state with a good
+ * graph's accounts named; any other state as it was. */
+export function namedRead(state: GraphState, accounts: { id: string; name: string }[]): GraphState {
+  if (state.shown?.kind !== "ok") return state;
+  const value = namedAccounts(state.shown.value, (id) => accountName(accounts, id));
+  return { ...state, shown: { ...state.shown, value } };
+}
+
 /** Reads one project's team graph, again every 2 s while work is live and every 10 s
- * otherwise. Input: the project id. Output: the graph state and a reload action that keeps
- * the graph on screen while it reads. */
+ * otherwise, with each node's account named. Input: the project id. Output: the graph state
+ * and a reload action that keeps the graph on screen while it reads. */
 export function useTeamGraph(projectId: string): [GraphState, () => void] {
   const [state, setState] = useState<GraphState>(GRAPH_UNREAD);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
   const [round, setRound] = useState(0);
   useEffect(() => setState(GRAPH_UNREAD), [projectId]);
   useEffect(() => {
@@ -229,7 +242,8 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
       window.clearTimeout(timer);
     };
   }, [projectId, round]);
-  return [state, () => setRound((value) => value + 1)];
+  const named = useMemo(() => namedRead(state, accounts.kind === "ok" ? accounts.value : []), [state, accounts]);
+  return [named, () => setRound((value) => value + 1)];
 }
 
 /** The Agents toolbar, one row as the mockup draws it above both Agents views: `lead`, then
@@ -295,11 +309,11 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
  * `asks` the owner and the `pool`), then `tools` and Open all terminals; it shows while the
  * graph loads, fails or is empty too.
  * Inputs: the project id and name, the terminals per window, the agent whose terminal is open
- * and the open action, optional harness and account name lookups, and the head's parts.
- * Output: the graph section. */
-export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, account, lead, asks, pool, tools }: {
+ * and the open action, an optional harness name lookup, and the head's parts. Accounts come
+ * named from the graph read. Output: the graph section. */
+export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, lead, asks, pool, tools }: {
   projectId: string; name?: string; perWindow?: PerWindow; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
-  harness?: (id: string) => string; account?: (id: string) => string; lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
+  harness?: (id: string) => string; lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
 }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
@@ -413,7 +427,7 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
     };
   }, [element]);
 
-  const team = graph?.kind === "ok" ? (account ? namedAccounts(graph.value, account) : graph.value) : null;
+  const team = graph?.kind === "ok" ? graph.value : null;
   const side = (node: GraphNode) => {
     const stop = nodeActions(node, team?.nodes ?? []).stop;
     const onStop = stop === null ? undefined : () => setActing({ kind: "stop", node, stop });

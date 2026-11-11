@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { accountRanking, listAccounts, poolSummaries, type Result } from "../../api";
+import { accountLabels, accountRanking, listAccounts, poolSummaries, type Result } from "../../api";
 import { refreshUsage, setManualReset, usageRefusal } from "../../api-usage";
 import { useAppSession, useLoad } from "../../state";
 import { PageHeader, type SidebarProject } from "../../ui";
@@ -40,7 +40,7 @@ export function AppMetrics({ projects }: { projects: SidebarProject[] }) {
     setRevision((old) => old + 1);
   }
 
-  const names = new Map(accounts.kind === "ok" ? accounts.value.map((row) => [row.id, row.name]) : []);
+  const names = accountLabels(accounts.kind === "ok" ? accounts.value : []);
   const limits: LimitsControls = {
     pools: new Map(pools.kind === "ok" ? pools.value.map((row) => [row.id, row.name]) : []),
     failure,

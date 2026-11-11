@@ -43,6 +43,7 @@ pub mod project_setup;
 pub mod questions;
 mod queue;
 mod recovery;
+mod roadmap;
 mod scheduling;
 mod team;
 pub mod terminal;
@@ -1340,6 +1341,7 @@ mod tests {
             ("agents", agents::agent_error(engine())),
             ("process", process::process_error(engine())),
             ("questions", questions::questions_error(engine())),
+            ("roadmap", roadmap::roadmap_error(engine())),
             ("recovery", recovery::recovery_error(engine())),
             ("cleanup", cleanup::cleanup_error(engine())),
             ("ide reveal", ide_reveal::ide_error(engine())),

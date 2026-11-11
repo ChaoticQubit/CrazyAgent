@@ -111,6 +111,9 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
+/// The most folder links one sandbox makes readable by name beside its roots: the links
+/// its process is started through.
+const LINKS_MAX: usize = 4;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
 /// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
@@ -745,6 +748,13 @@ pub enum LinuxSockets {
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
+/// Why a sandbox with an open network does not start on a Linux that cannot keep ports
+/// free. Only Landlock network rules (Linux 6.7 or newer) keep an agent's listeners off the
+/// owner's fixed ports, the kept local model ports and the model proxy ports; without them
+/// the launch is refused instead of started unprotected (DEC-137 addendum 2).
+pub const LINUX_OPEN_NETWORK_NEEDS_LANDLOCK: &str = "keeping the owner's ports free of an \
+     open-network agent needs Landlock network rules (Linux 6.7 or newer)";
+
 /// The launch refusal when, under `TcpOnly`, a harness that looks host names up is not a
 /// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
 pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
@@ -799,6 +809,7 @@ pub struct ProjectSandbox {
     hidden: Vec<PathBuf>,
     kept_out: Vec<PathBuf>,
     revealed: Vec<PathBuf>,
+    links: Vec<PathBuf>,
     network: SandboxNetwork,
     linux_sockets: LinuxSockets,
     kept_ports: Vec<u16>,
@@ -877,6 +888,7 @@ impl ProjectSandbox {
             hidden: Vec::new(),
             kept_out: Vec::new(),
             revealed: Vec::new(),
+            links: Vec::new(),
             network,
             linux_sockets: LinuxSockets::default(),
             kept_ports: Vec::new(),
@@ -1262,6 +1274,46 @@ impl ProjectSandbox {
         }
         granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets the agent follow one folder link that leads to a read root it already has, such
+    /// as the version link uv keeps beside a managed Python: only the link's own text becomes
+    /// readable, and no deny gives way to it, since the profile writes it before every deny.
+    /// Input: a clean absolute link in a real folder, outside the hidden, kept-out and
+    /// [`Self::secret_paths`], leading to a read root. Output: the sandbox, or `Invalid`.
+    pub fn allow_read_link(mut self, link: &Path) -> Result<Self, SandboxError> {
+        if self.links.len() >= LINKS_MAX {
+            return Err(invalid("too many links to read roots"));
+        }
+        clear_of_secrets(link, &self.secret_paths())?;
+        let is_link =
+            std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        let in_real_folder = link
+            .parent()
+            .is_some_and(|parent| canonical(parent).is_ok_and(|real| real == parent));
+        if !clean_absolute(link) || !is_link || !in_real_folder {
+            return Err(invalid(
+                "a link to a read root must be a clean absolute link in a real folder",
+            ));
+        }
+        let denied = self
+            .hidden
+            .iter()
+            .chain(self.kept_out.iter())
+            .any(|path| link.starts_with(path));
+        if denied {
+            return Err(invalid(
+                "a link to a read root must lie outside every hidden and kept-out path",
+            ));
+        }
+        let target = canonical(link)?;
+        assert!(target.is_absolute());
+        if !self.read_roots.contains(&target) {
+            return Err(invalid("a link must lead to a read root already granted"));
+        }
+        self.links.push(link.to_path_buf());
+        assert!(self.links.len() <= LINKS_MAX);
         Ok(self)
     }
 
@@ -1919,6 +1971,13 @@ impl ProjectSandbox {
                 seatbelt_pattern(&self.project_root),
                 regex_escape(crate::agent_git::LINKED_PREFIX.trim_end_matches('/')),
                 regex_escape(branch)
+            ));
+        }
+        assert!(self.links.len() <= LINKS_MAX);
+        for link in self.links.iter().filter(|link| clean_absolute(link)) {
+            text.push_str(&format!(
+                "(allow file-read* (literal \"{}\"))\n",
+                link.display()
             ));
         }
         text.push_str("(deny file-read* file-write*");

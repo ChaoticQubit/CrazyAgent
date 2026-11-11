@@ -36,6 +36,7 @@ pub use transport::recovery::{
     BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
     RecoveryBanner, RunShown,
 };
+pub use transport::roadmap::ROADMAP_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
@@ -186,6 +187,8 @@ pub enum OwnerMutation {
         expected_revision: u64,
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<crate::project_setup::KeptFile>>,
     },
     RemoveProject {
         project_id: ProjectId,
@@ -422,12 +425,14 @@ impl OwnerMutation {
                 expected_revision,
                 name,
                 setup,
+                kept,
             } => {
                 let action = crate::project_setup::SetupAction::Update {
                     project_id: project_id.clone(),
                     expected_revision: *expected_revision,
                     name: name.clone(),
                     setup: setup.clone(),
+                    kept: kept.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -896,7 +901,10 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectContextItem { path, .. } => {
-                if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+                if path.is_empty()
+                    || path.len() > crate::project_setup::CONTEXT_PATH_BYTES_MAX
+                    || path.chars().any(char::is_control)
+                {
                     return Err(failure("context_path_invalid"));
                 }
                 return Ok(None);

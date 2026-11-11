@@ -45,11 +45,12 @@ use crazyagent::plugins::{
 };
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
+    ContextChunk, KeptFile, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
+use crazyagent::roadmap_status::RoadmapStatus;
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
@@ -1928,11 +1929,12 @@ async fn desktop_update_project_setup(
     name: Option<String>,
     revision: Option<u64>,
     generation: u64,
+    kept: Option<Vec<KeptFile>>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .update_project_setup(&id, setup, name, revision, generation)
+        .update_project_setup(&id, setup, name, revision, kept, generation)
         .await
 }
 
@@ -2017,6 +2019,40 @@ async fn desktop_plan_roadmap(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.plan_roadmap(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_roadmap_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<RoadmapStatus, BridgeError> {
+    main_window(&webview)?;
+    let call = read(&state).await?.roadmap_status(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_refresh_roadmap_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.refresh_roadmap_status(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_set_roadmap_refresh(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    refresh: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.set_roadmap_refresh(id, refresh)?;
+    call.await
 }
 
 #[tauri::command]
@@ -4349,6 +4385,9 @@ native_commands! {
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
+    desktop_roadmap_status,
+    desktop_refresh_roadmap_status,
+    desktop_set_roadmap_refresh,
     desktop_research_log,
     desktop_projects_home,
     desktop_set_projects_home,

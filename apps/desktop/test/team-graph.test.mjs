@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -40,13 +41,33 @@ const team = {
   ],
 };
 
-const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? "An account in the pool");
+const named = graph.namedAccounts(team, (id) => ({ "acct-work": "Work ChatGPT" })[id] ?? id);
 
 test("graph nodes name their account as the Team panel does, never by its id", () => {
   assert.deepEqual(named.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
   assert.equal(team.nodes[0].account, "acct-work", "the engine's graph is left as it was");
   assert.deepEqual(graph.namedAccounts(team, () => "x").edges, team.edges);
   assert.equal(view.nodeLabel(named.nodes[0]), "codex-2, Sub-agent, codex, Work ChatGPT, Working. No task yet. Opens its terminal.");
+});
+
+test("every team graph read names its accounts, so no view of it shows an account id (OB-4)", () => {
+  assert.equal(typeof view.namedRead, "function", "the graph read names accounts in one place");
+  const read = { shown: { kind: "ok", value: team }, stale: null, gone: false };
+  const shown = view.namedRead(read, [{ id: "acct-work", name: "Work ChatGPT" }]);
+  assert.deepEqual(shown.shown.value.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
+  assert.ok(!JSON.stringify(shown.shown.value.nodes).includes("acct-work"), "the id is gone from every node");
+  assert.deepEqual(shown.shown.value.edges, team.edges);
+  assert.equal(shown.stale, null);
+  assert.equal(shown.gone, false);
+  const unlisted = view.namedRead(read, []);
+  assert.equal(unlisted.shown.value.nodes[0].account, "acct-work", "an account with no name known goes by its id");
+  const failed = { shown: { kind: "error", code: "x", message: "No." }, stale: null, gone: false };
+  assert.equal(view.namedRead(failed, []), failed, "a read with no graph is left as it was");
+  assert.equal(view.namedRead(view.GRAPH_UNREAD, []), view.GRAPH_UNREAD);
+  const source = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
+  const hook = source.slice(source.indexOf("export function useTeamGraph"), source.indexOf("export function AgentsToolbar"));
+  assert.match(hook, /namedRead\(state, /u, "the shared graph hook hands out the named read");
+  assert.doesNotMatch(hook, /return \[state,/u, "never the engine's graph with its account ids");
 });
 
 test("nodes and edges use the engine's status words with fixed tones", () => {

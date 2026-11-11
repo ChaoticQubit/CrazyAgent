@@ -18,6 +18,7 @@ use crate::master_sessions::MasterSessionSummary;
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
 use crate::routing::{ResourceBudget, RouteRequest};
 use crate::tui::screens::project_master::TURNS_SHOWN_MAX as INPUTS_SHOWN_MAX;
+use crate::tui::seam::{AccountRow, account_label};
 use std::time::{Duration, Instant};
 
 const DIMENSIONS: [&str; 7] = [
@@ -176,6 +177,7 @@ pub(super) struct State {
     home_confirmation: Option<RcliProfileRegistration>,
     registered_home: Option<RegisteredHome>,
     sessions_shown: bool,
+    accounts: Vec<AccountRow>,
     pub notice: String,
 }
 
@@ -199,6 +201,7 @@ impl Default for State {
             home_confirmation: None,
             registered_home: None,
             sessions_shown: false,
+            accounts: Vec::new(),
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
         }
@@ -206,6 +209,12 @@ impl Default for State {
 }
 
 impl State {
+    /// Keeps the owner's account rows, so the classic master view names each account in a
+    /// turn line as Accounts does. Input: the rows from a full account read. Output: none.
+    pub fn name_accounts(&mut self, accounts: Vec<AccountRow>) {
+        self.accounts = accounts;
+    }
+
     /// The current master transcript, read-only, for the Project screen.
     /// Input: none. Output: the session, its turns and the latest owner input
     /// once a read arrived; None before the first read.
@@ -1379,7 +1388,7 @@ impl State {
                 self.setup_lines(&mut lines);
             }
         } else if let Some(view) = &self.view {
-            view.lines(&mut lines);
+            view.lines(&self.accounts, &mut lines);
         } else {
             lines.push("Waiting for actual master state; stored notes remain notes".into());
         }
@@ -1503,7 +1512,7 @@ impl State {
 }
 
 impl View {
-    fn lines(&self, lines: &mut Vec<String>) {
+    fn lines(&self, accounts: &[AccountRow], lines: &mut Vec<String>) {
         if let Some(session) = &self.session {
             lines.push(format!(
                 "Master: {:?} | {} | {} | pool {}",
@@ -1513,7 +1522,7 @@ impl View {
                 session.selection.pool_ref.as_str()
             ));
             for turn in &self.turns {
-                turn_lines(turn, lines);
+                turn_lines(turn, accounts, lines);
             }
         } else {
             lines.push(
@@ -1935,7 +1944,15 @@ pub(crate) fn turn_holds(current: Option<&RequestId>, turns: &[MasterTurnView]) 
     })
 }
 
-fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
+/// Adds one master turn's lines: its phase with why and the account it runs on, each account
+/// of the pool a blocked turn could not use, the engine's detail and the reply. An account
+/// goes by the name Accounts shows ([`account_label`]), by its id while no name is known,
+/// and never by its sign-in reference. Takes the turn, the owner's account rows and the
+/// lines to add to. Returns nothing.
+fn turn_lines(turn: &MasterTurnView, accounts: &[AccountRow], lines: &mut Vec<String>) {
+    let named = |id: &CredentialRef| {
+        account_label(id.as_str(), accounts).unwrap_or_else(|| id.as_str().to_owned())
+    };
     let phase = match turn.phase {
         MasterTurnPhase::Queued => "Queued",
         MasterTurnPhase::Blocked => "Blocked",
@@ -1960,19 +1977,15 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
     }
     if let Some(attempt) = &turn.attempt {
         line.push_str(" | on account ");
-        line.push_str(attempt.connection.account_ref.as_str());
+        line.push_str(&named(&attempt.connection.id));
     }
     lines.push(line);
     for account in &turn.accounts {
         lines.push(match &account.reason {
-            Some(reason) => format!(
-                "  {}: {}",
-                account.account_ref.as_str(),
-                reason_text(reason)
-            ),
+            Some(reason) => format!("  {}: {}", named(&account.connection), reason_text(reason)),
             None => format!(
                 "  {} is ready on {}: open a {} master to use it",
-                account.account_ref.as_str(),
+                named(&account.connection),
                 account.harness.as_str(),
                 account.harness.as_str()
             ),
@@ -3082,9 +3095,10 @@ mod turn_line_tests {
             cause: None,
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         let mut lines = Vec::new();
-        turn_lines(&turn, &mut lines);
+        turn_lines(&turn, &[], &mut lines);
         assert!(lines.last().unwrap().ends_with(&text), "{lines:?}");
     }
 
@@ -3106,6 +3120,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -3155,6 +3170,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         for (reason, cause, expected) in [
             (
@@ -3174,7 +3190,7 @@ mod turn_line_tests {
             ),
         ] {
             let mut lines = Vec::new();
-            turn_lines(&turn(reason, cause), &mut lines);
+            turn_lines(&turn(reason, cause), &[], &mut lines);
             assert_eq!(lines, vec![expected.to_owned()]);
         }
     }
@@ -3195,11 +3211,12 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         };
         let mut lines = Vec::new();
-        turn_lines(&turn, &mut lines);
+        turn_lines(&turn, &[], &mut lines);
         assert_eq!(
             lines,
             vec![
@@ -3212,7 +3229,7 @@ mod turn_line_tests {
             ..turn
         };
         let mut lines = Vec::new();
-        turn_lines(&changed, &mut lines);
+        turn_lines(&changed, &[], &mut lines);
         assert_eq!(
             lines,
             vec![
@@ -3273,17 +3290,36 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         };
         let mut lines = Vec::new();
-        turn_lines(&running, &mut lines);
+        turn_lines(&running, &[], &mut lines);
         assert_eq!(
             lines,
-            vec!["Turn 2: Running | on account claude-account-b".to_string()]
+            vec!["Turn 2: Running | on account claude-b".to_string()],
+            "with no account rows the account goes by its id, not by its sign-in reference (OB-4)"
+        );
+        let row = |id: &str, name: &str| AccountRow {
+            id: CredentialRef::new(id).unwrap(),
+            name: name.into(),
+            provider: "Claude".into(),
+            status: "Signed in".into(),
+        };
+        let mut lines = Vec::new();
+        turn_lines(
+            &running,
+            &[row("claude-b", "Claude-ChaoticQubit")],
+            &mut lines,
+        );
+        assert_eq!(
+            lines,
+            vec!["Turn 2: Running | on account Claude-ChaoticQubit".to_string()],
+            "the classic view names the account as Accounts does (OB4-F2)"
         );
         let state = |account: &str, harness: &str, reason| MasterAccountState {
-            account_ref: CredentialRef::new(account).unwrap(),
+            account_ref: CredentialRef::new(format!("login-of-{account}")).unwrap(),
             connection: CredentialRef::new(account).unwrap(),
             harness: CredentialRef::new(harness).unwrap(),
             reason,
@@ -3308,7 +3344,7 @@ mod turn_line_tests {
             ..running
         };
         let mut lines = Vec::new();
-        turn_lines(&blocked, &mut lines);
+        turn_lines(&blocked, &[], &mut lines);
         assert_eq!(
             lines,
             vec![
@@ -3317,6 +3353,26 @@ mod turn_line_tests {
                 "  claude-account-b: Rate limited; try again shortly".to_string(),
                 "  codex-account-c is ready on codex: open a codex master to use it".to_string(),
             ]
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("login-of-")),
+            "no line shows a sign-in reference: {lines:?}"
+        );
+        let twins = [
+            row("claude-account-a", "Claude"),
+            row("claude-account-b", "Claude"),
+            row("codex-account-c", "Work ChatGPT"),
+        ];
+        let mut lines = Vec::new();
+        turn_lines(&blocked, &twins, &mut lines);
+        assert_eq!(
+            lines[1..],
+            [
+                "  Claude (claude-account-a): Not signed in: sign in to this account (Settings, 2 Connections, F2), then send again",
+                "  Claude (claude-account-b): Rate limited; try again shortly",
+                "  Work ChatGPT is ready on codex: open a codex master to use it",
+            ],
+            "two accounts of one name carry their ids; a name used once stays plain (OB4-F1)"
         );
     }
 }

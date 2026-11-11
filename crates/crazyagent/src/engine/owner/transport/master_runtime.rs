@@ -1091,6 +1091,15 @@ impl OwnerRuntimeHandle {
         active: &mut ActiveMaster,
         mailbox: Option<&std::path::Path>,
     ) -> Result<MasterRuntimeObservation, EngineError> {
+        let screen = super::master_activity::Screen::new(
+            &prepared.cwd,
+            &prepared.repository,
+            &prepared.hidden_paths,
+        );
+        let watch = self
+            .engine
+            .master_activity
+            .watch(&prepared.session.session_id, turn_id);
         self.record_master_child(prepared, turn_id, active.host.process_group())
             .await?;
         self.observe_master_turn(
@@ -1170,6 +1179,11 @@ impl OwnerRuntimeHandle {
             };
             validate_event(&active.provenance, turn_id, &event)?;
             active.capture.record(&event)?;
+            if let Some(watch) = &watch
+                && let Some(text) = screen.label(&event.kind)
+            {
+                watch.record(text, super::master_activity::now_ms());
+            }
             if let EventKind::TurnFinished { usage, .. } = &event.kind {
                 active.reported = Tokens::reported(usage);
             }

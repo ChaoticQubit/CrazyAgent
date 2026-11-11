@@ -31,6 +31,7 @@ impl OwnerController {
                 schedule.version = page.version;
             }
             schedule.strategy = page.strategy;
+            schedule.live_master = page.live_master;
             schedule.pools.extend(page.pools);
             schedule.projects.extend(page.projects);
             schedule.accounts.extend(page.accounts);

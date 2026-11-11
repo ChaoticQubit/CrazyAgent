@@ -1,5 +1,5 @@
 use super::{BridgeError, NativeBridge, failure};
-use crazyagent::project_setup::StoredSetup;
+use crazyagent::project_setup::{LINKED_PREFIX, ProjectContext, StoredSetup};
 use std::path::{Path, PathBuf};
 
 const LINK_BYTES_MAX: usize = 2048;
@@ -42,16 +42,47 @@ pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, BridgeErro
     crazyagent::platform::context_file(folder, relative).map_err(failure)
 }
 
-/// Resolves one context file the engine listed for a project, from the folder it lists the
+/// Resolves one of a project's own context files, from the folder the engine lists the
 /// context in (`.crazyagent/` for projects in the projects home, else the project folder),
-/// with the [`context_file`] checks. Inputs: the project's stored setup and the listed path.
-/// Output: the file's canonical path, `project_folder_missing` or `context_item_not_openable`.
+/// with the [`context_file`] checks. A `repo/<path>` is refused: only [`linked_item`] opens
+/// a repository file. Inputs: the stored setup and the listed path. Output: the canonical
+/// path, `project_folder_missing` or `context_item_not_openable`.
 pub fn context_item(setup: &StoredSetup, relative: &str) -> Result<PathBuf, BridgeError> {
+    if relative.starts_with(LINKED_PREFIX) {
+        return Err(failure("context_item_not_openable"));
+    }
     let state = setup.state_folder();
     let state = state
         .to_str()
         .ok_or_else(|| failure("project_folder_missing"))?;
     context_file(&project_folder(state)?, relative)
+}
+
+/// Resolves one file linked from the repository, asked for as `repo/<path>`: only a path the
+/// engine lists as linked in this project's context, the paths its own read answers, and
+/// then below the project folder with the [`context_file`] checks. Inputs: the stored setup,
+/// the engine's context list and the asked path. Output: the canonical path,
+/// `project_folder_missing` or `context_item_not_openable`.
+pub fn linked_item(
+    setup: &StoredSetup,
+    context: &ProjectContext,
+    relative: &str,
+) -> Result<PathBuf, BridgeError> {
+    let listed = context.project_id == setup.project_id
+        && context
+            .items
+            .iter()
+            .any(|item| item.linked && item.path == relative);
+    let Some(linked) = relative.strip_prefix(LINKED_PREFIX).filter(|_| listed) else {
+        return Err(failure("context_item_not_openable"));
+    };
+    let folder = setup.project_folder();
+    let folder = folder
+        .to_str()
+        .ok_or_else(|| failure("project_folder_missing"))?;
+    let file = context_file(&project_folder(folder)?, linked)?;
+    assert!(file.is_absolute());
+    Ok(file)
 }
 
 async fn launch(
@@ -85,14 +116,19 @@ impl NativeBridge {
         launch(move || crazyagent::platform::reveal(&folder)).await
     }
 
-    /// Opens one document or research file from a project folder with its default app.
-    /// Inputs: the project id and the file's path inside the folder.
+    /// Opens one document or research file of a project with its default app; a file linked
+    /// from the repository opens only while the engine lists it in the project's context.
+    /// Inputs: the project id and the file's context path.
     pub async fn open_context_item(&mut self, id: &str, path: &str) -> Result<(), BridgeError> {
         let setup = self
             .project_setup(id)
             .await?
             .ok_or_else(|| failure("project_folder_missing"))?;
-        let file = context_item(&setup, path)?;
+        let file = if path.starts_with(LINKED_PREFIX) {
+            linked_item(&setup, &self.project_context(id).await?, path)?
+        } else {
+            context_item(&setup, path)?
+        };
         launch(move || crazyagent::platform::open(file.as_os_str())).await
     }
 }

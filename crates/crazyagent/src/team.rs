@@ -1244,6 +1244,24 @@ pub fn pick_account<'a>(
     paused: &BTreeSet<CredentialRef>,
     choice: &crate::scheduling::Choice,
 ) -> Option<&'a TeamAccount> {
+    pick_account_held(accounts, load, paused, choice, None)
+}
+
+/// Picks the usable account as `pick_account` does, for work that may already run on one
+/// of them: the held account keeps the work unless it cannot take work or the schedule puts
+/// the top account clearly before it (`Choice::clearly_before`: a pin, a limit, the
+/// strategy's order with its margin under Balanced, or a rank), so near-equal usage
+/// readings never move running work back and forth. Takes the usable accounts in pool
+/// order, live agents per connection, paused connections, the scheduling choice and the
+/// held connection, none for new work. Returns the chosen account, or none when every
+/// account is paused or left out by the schedule.
+pub fn pick_account_held<'a>(
+    accounts: &'a [TeamAccount],
+    load: &dyn Fn(&CredentialRef) -> usize,
+    paused: &BTreeSet<CredentialRef>,
+    choice: &crate::scheduling::Choice,
+    held: Option<&CredentialRef>,
+) -> Option<&'a TeamAccount> {
     let open: Vec<&TeamAccount> = accounts
         .iter()
         .filter(|account| !paused.contains(&account.connection))
@@ -1253,14 +1271,40 @@ pub fn pick_account<'a>(
         .map(|account| crate::scheduling::Candidate {
             connection: account.connection.clone(),
             load: load(&account.connection),
-            current: false,
+            current: held == Some(&account.connection),
         })
         .collect();
-    choice
-        .order(&candidates)
-        .ready
-        .first()
-        .map(|index| open[*index])
+    let ready = choice.order(&candidates).ready;
+    let top = *ready.first()?;
+    let stays = ready
+        .iter()
+        .copied()
+        .find(|index| candidates[*index].current)
+        .filter(|kept| !choice.clearly_before(&candidates[top], &candidates[*kept]));
+    Some(open[stays.unwrap_or(top)])
+}
+
+/// The accounts a pick looks at first under Spread harnesses across accounts: every usable
+/// account no other agent of the project runs on, and the held account even when another
+/// agent shares it, so `pick_account_held` weighs work that already runs against the unused
+/// accounts and it never leaves a shared account for one that is not clearly before it.
+/// Takes the usable accounts in pool order, the connections other agents of the project
+/// run on and the held connection, none for new work. Returns those accounts in pool order.
+pub fn spread_candidates(
+    accounts: &[TeamAccount],
+    used: &BTreeSet<&CredentialRef>,
+    held: Option<&CredentialRef>,
+) -> Vec<TeamAccount> {
+    let apart: Vec<TeamAccount> = accounts
+        .iter()
+        .filter(|account| {
+            let connection = &account.connection;
+            !used.contains(connection) || held == Some(connection)
+        })
+        .cloned()
+        .collect();
+    assert!(apart.len() <= accounts.len());
+    apart
 }
 
 /// Tells whether a master conversation kept while the master ran on `kept` may resume on the

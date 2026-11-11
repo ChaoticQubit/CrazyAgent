@@ -2,16 +2,16 @@ import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadOnboarding, startOnboarding } from "../../api-intake";
 import {
-  loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, setProjectPool, updateProjectSetup, type ProjectCatalog, type StoredSetup,
+  loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, setProjectPool, updateProjectSetup, type ProjectCatalog, type ResearchKind, type StoredSetup,
 } from "../../api-projects";
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, StatusBadge, navigate } from "../../ui";
-import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
+import { Button, Checkbox, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, StatusBadge, navigate } from "../../ui";
+import { BasicsFields, LINKED_COPY, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ImportMoveCommit } from "../process";
-import { ONBOARDING_POLL_MS, confirmReady, inRepo, mappingRetry, missingLabels, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
+import { ONBOARDING_POLL_MS, confirmKept, confirmReady, inRepo, mappingRetry, missingLabels, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -21,10 +21,13 @@ const STEPS = [{ key: "graph", title: "Build the code graph" }, { key: "mapping"
  * overview or a labelled one found in the folder, the pre-filled form with missing items marked,
  * and a Confirm that waits for the agent.
  * A failed mapping offers Retry and Skip until skipped; a saved setup shows its saved values.
+ * Before the first confirm the roadmap and research files the mapping found are linked, each
+ * group with a "Use these files" checkbox.
  * Inputs: the project name, the onboarding read, the form draft or null before it fills in, the
- * catalog, field errors, flags, the last problem, the handlers and the Commit the move choice
- * shown under the moved instruction files. Output: the page. */
-export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping, onUseProposed, importMove }: {
+ * catalog, field errors, flags, the last problem, the handlers, the Commit the move choice
+ * shown under the moved instruction files and the found groups the owner turned off ("roadmap"
+ * or a research kind) with their toggle. Output: the page. */
+export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping, onUseProposed, importMove, dropped = [], onDropped }: {
   name: string;
   view: Loaded<OnboardingView>;
   draft: ProjectDraft | null;
@@ -43,6 +46,8 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   onSkipMapping?: () => void;
   onUseProposed?: () => void;
   importMove?: ReactNode;
+  dropped?: readonly string[];
+  onDropped?: (key: string) => void;
 }) {
   const finished = view.kind === "ok" && view.value.finished;
   const header = <PageHeader title={`Set up ${name}`} description={finished ? "This project is set up. You can change its setup here." : "Review what CrazyAgent found, fill in anything missing, then confirm."} />;
@@ -54,6 +59,8 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   const missing = missingLabels(value.missing);
   const offerRetry = mappingRetry(value) && !skipped;
   const repo = inRepo(value.facts);
+  const unlinked = finished ? (Object.keys(repo.research) as ResearchKind[]) : dropped.filter((key): key is ResearchKind => key !== "roadmap");
+  const roadmapLinked = !finished && repo.roadmap.length > 0 && !dropped.includes("roadmap");
   return <div className="pj in-page">
     {header}
     <ol className="in-list" aria-label="Setup steps">{STEPS.map((step) => {
@@ -86,9 +93,15 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <fieldset className="pj-field">
         <legend>Research</legend>
         <p className="pj-help">Research is off for existing code. Turn on what you want; it runs on the project's pool.</p>
-        <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} found={repo.research} />
+        <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} found={repo.research}
+          unlinked={unlinked} onLinked={finished ? undefined : (kind) => onDropped?.(kind)} />
       </fieldset>
-      {!finished && <RoadmapSwitch prefix="ob" value={draft.roadmap} onChange={(roadmap) => onDraft({ ...draft, roadmap })} />}
+      {!finished && repo.roadmap.length > 0 && <fieldset className="pj-field">
+        <legend>Roadmap found</legend>
+        <p className="pj-help">{roadmapLinked ? `Linked: ${repo.roadmap.join(", ")}. ${LINKED_COPY}` : `In the repo: ${repo.roadmap.join(", ")}`}</p>
+        <Checkbox label="Use these files" checked={roadmapLinked} onChecked={() => onDropped?.("roadmap")} />
+      </fieldset>}
+      {!finished && !roadmapLinked && <RoadmapSwitch prefix="ob" value={draft.roadmap} onChange={(roadmap) => onDraft({ ...draft, roadmap })} />}
       {repo.documents.length > 0 && <fieldset className="pj-field">
         <legend>Project documents found</legend>
         <p className="pj-help">The mapping read these files in the repository as project documents.</p>
@@ -121,6 +134,7 @@ export function OnboardingReview({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [moveLeft, setMoveLeft] = useState(false);
+  const [dropped, setDropped] = useState<string[]>([]);
   const value = view.kind === "ok" ? view.value : null;
   const waiting = (value?.imported ?? []).filter((file) => file.uncommitted === true).map((file) => file.path);
   const saved: StoredSetup | null = stored.kind === "ok" ? stored.value : null;
@@ -171,8 +185,10 @@ export function OnboardingReview({ id }: { id: string }) {
     if (started.kind === "unconfirmed" && receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm the mapping started again. Check again in a moment."); return; }
     setDraft(null);
     setTouched(false);
+    setDropped([]);
     reloadView();
   };
+  const toggleDropped = (key: string) => setDropped((list) => list.includes(key) ? list.filter((item) => item !== key) : [...list, key]);
 
   const skipMapping = () => {
     setSkipped(true);
@@ -186,7 +202,8 @@ export function OnboardingReview({ id }: { id: string }) {
     const request = editRequest(saved, draft, value?.finished ? undefined : draft.roadmap);
     setBusy(true);
     setProblem("");
-    const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision);
+    const kept = value ? confirmKept(value, dropped) : null;
+    const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision, kept);
     if (result.kind !== "ok") { setBusy(false); setProblem(result.kind === "not_ready" ? "Confirming setup isn't in this build." : intakeCopy(result)); return; }
     const state = receiptState(result.value);
     if (state.kind === "rejected") { setBusy(false); setProblem(intakeCopy(state)); return; }
@@ -204,5 +221,6 @@ export function OnboardingReview({ id }: { id: string }) {
   return <OnboardingReviewView name={name} view={view} draft={draft} catalog={catalog} errors={errors} showErrors={showErrors} busy={busy} problem={problem}
     onDraft={editDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} onRetry={reloadView}
     skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping} onUseProposed={takeProposed}
+    dropped={dropped} onDropped={toggleDropped}
     importMove={waiting.length > 0 && !moveLeft ? <ImportMoveCommit projectId={id} files={waiting} onCommitted={reloadView} onLeave={() => setMoveLeft(true)} /> : undefined} />;
 }

@@ -3,7 +3,7 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
-use super::planning_line::{Planning, planning, planning_key};
+use super::planning_line::{Planning, StatusLine, planning, planning_key, refreshes_status};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
@@ -27,6 +27,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
+pub(in crate::tui) const ACTIVITY_SHOWN: usize = 5;
+pub(in crate::tui) const ACTIVITY_MAX: usize = 20;
+const _: () = assert!(ACTIVITY_SHOWN <= ACTIVITY_MAX);
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
 const MEMORY_BYTES_MAX: usize = 4096;
 pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
@@ -202,11 +205,15 @@ pub(in crate::tui) struct Message {
 
 /// The master's status word in the conversation header.
 /// Uses the status words of DESIGN.md section 2.
-/// NotReady is shown until the engine reports the master; Thinking carries the start time when the engine knows it.
+/// NotReady is shown until the engine reports the master. Thinking carries the start time when
+/// the engine knows it and the running turn's activity, oldest first, at most `ACTIVITY_MAX` lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum MasterStatus {
     Ready,
-    Thinking { since_ms: Option<i64> },
+    Thinking {
+        since_ms: Option<i64>,
+        activity: Vec<crate::master_session::MasterActivityLine>,
+    },
     Replied,
     NeedsYou,
     NeedsPool,
@@ -221,6 +228,16 @@ impl MasterStatus {
     /// Returns true for Stopped and Not signed in.
     pub fn retryable(&self) -> bool {
         matches!(self, Self::Stopped | Self::NotSignedIn)
+    }
+
+    /// Counts the activity lines of a running turn.
+    /// Takes the status.
+    /// Returns the count, zero for every status but Thinking.
+    pub fn activity_len(&self) -> usize {
+        match self {
+            Self::Thinking { activity, .. } => activity.len(),
+            _ => 0,
+        }
     }
 }
 
@@ -505,6 +522,7 @@ impl GeneralEdit {
         }
         Some(SetupAction::Update {
             project_id: setup.project_id.clone(),
+            kept: None,
             expected_revision: self.revision,
             name: (name != setup.name).then(|| name.to_owned()),
             setup: ProjectSetup {
@@ -656,6 +674,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub cleared: Option<(usize, Message)>,
     pub files: Option<(String, Vec<String>)>,
     pub transcript_scroll: usize,
+    pub activity_open: bool,
     pub overview_cursor: usize,
     pub agents_cursor: usize,
     pub tree_cursor: usize,
@@ -687,6 +706,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub changes: ProjectChanges,
     pub questions: ProjectQuestions,
     pub recovery: ProjectRecovery,
+    pub roadmap: StatusLine,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -715,6 +735,7 @@ impl ProjectScreen {
             changes: ProjectChanges::new(project.clone()),
             questions: ProjectQuestions::new(project.clone()),
             recovery: ProjectRecovery::new(project.clone()),
+            roadmap: StatusLine::new(project.clone()),
             sessions: Sessions::default(),
             project,
             name,
@@ -740,6 +761,7 @@ impl ProjectScreen {
             cleared: None,
             files: None,
             transcript_scroll: 0,
+            activity_open: false,
             overview_cursor: 0,
             agents_cursor: 0,
             tree_cursor: 0,
@@ -1379,9 +1401,20 @@ impl ProjectScreen {
     }
 
     /// Names one context file to open: the folder its context paths start from, as the
-    /// engine listed them, and the path inside it. Takes the path inside that folder.
-    /// Returns the request, or none before the folder is known.
+    /// engine listed them, and the path inside it; a linked repository file, listed as
+    /// `repo/<path>`, is named by the project folder and its path below it. Takes the path
+    /// the context tree lists. Returns the request, or none before the folder is known.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
+        if let Some(linked) = path.strip_prefix(crate::project_setup::LINKED_PREFIX) {
+            if linked.is_empty() {
+                return None;
+            }
+            let folder = self.project_folder()?;
+            return Some(OpenRequest::Context {
+                folder: folder.to_string_lossy().into_owned(),
+                path: linked.to_owned(),
+            });
+        }
         let folder = self
             .context
             .as_ref()
@@ -1649,8 +1682,10 @@ impl ProjectScreen {
                 self.input.set("");
                 self.console_note.clear();
                 self.transcript_scroll = 0;
+                self.activity_open = false;
                 ProjectReply::Send(text)
             }
+            KeyCode::Char('o') if control && self.more_activity() => self.toggle_activity(),
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
             KeyCode::Char('t') if control => ProjectReply::Team,
             KeyCode::PageUp => self.scroll_transcript(5),
@@ -1791,6 +1826,21 @@ impl ProjectScreen {
             })
     }
 
+    /// Says whether the running turn has more activity lines than the console lists at once.
+    /// Takes the screen.
+    /// Returns true while Ctrl-O has a longer list to open or close.
+    pub fn more_activity(&self) -> bool {
+        self.transcript
+            .as_ref()
+            .is_some_and(|transcript| transcript.status.activity_len() > ACTIVITY_SHOWN)
+    }
+
+    fn toggle_activity(&mut self) -> ProjectReply {
+        assert!(self.more_activity());
+        self.activity_open = !self.activity_open;
+        ProjectReply::Handled
+    }
+
     fn scroll_transcript(&mut self, by: isize) -> ProjectReply {
         self.transcript_scroll = self.transcript_scroll.saturating_add_signed(by);
         ProjectReply::Handled
@@ -1831,6 +1881,7 @@ impl ProjectScreen {
             {
                 ProjectReply::Retry
             }
+            KeyCode::Char('o') if control && self.more_activity() => self.toggle_activity(),
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
             KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
@@ -2169,6 +2220,9 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Char('d') => match item {
+                Some(item) if item.linked => {
+                    self.problem = Some(LINKED_KEPT.into());
+                }
                 Some(item) if item.kind == ContextKind::Plan => {
                     self.problem = Some("The roadmap and release process can't be deleted.".into());
                 }
@@ -2476,7 +2530,8 @@ impl ProjectScreen {
     }
 
     /// Whether a planning run can replace roadmap documents the owner may have edited: a plan
-    /// ran before, the context lists one of them, or the context is not read yet.
+    /// ran before, the context lists one of them, or the context is not read yet. A roadmap
+    /// linked from the repository is never written by planning, so it does not count.
     /// Takes the planning state. Returns true when the owner must confirm first.
     fn plan_replaces(&self, state: &Planning) -> bool {
         *state != Planning::Idle
@@ -2484,7 +2539,7 @@ impl ProjectScreen {
                 context
                     .items
                     .iter()
-                    .any(|item| item.kind == ContextKind::Plan)
+                    .any(|item| item.kind == ContextKind::Plan && !item.linked)
             })
     }
 
@@ -2505,6 +2560,12 @@ impl ProjectScreen {
     /// none for a key the planning line does not use.
     fn planning_reply(&mut self, key: KeyCode) -> Option<ProjectReply> {
         let state = planning(self.jobs.as_ref()?);
+        if refreshes_status(&state, key) {
+            if let Err(line) = self.roadmap.refresh() {
+                self.problem = Some(line.into());
+            }
+            return Some(ProjectReply::Handled);
+        }
         match planning_key(&state, &self.project, key)? {
             Ok(action) if self.plan_replaces(&state) => {
                 self.confirm_plan = Some(action);
@@ -2830,7 +2891,12 @@ impl ProjectScreen {
             );
         }
         if let Some(preview) = &self.preview {
-            assert!(preview.path.starts_with(CONTEXT_DIRECTORY));
+            assert!(
+                preview.path.starts_with(CONTEXT_DIRECTORY)
+                    || preview
+                        .path
+                        .starts_with(crate::project_setup::LINKED_PREFIX)
+            );
         }
     }
 }
@@ -2853,6 +2919,10 @@ pub(in crate::tui) fn memory_source(memory: &KnowledgeEntry) -> Option<ResearchK
         expected.get(..32) == Some(digest)
     })
 }
+
+/// What the Context tab says when the owner asks to delete a file linked from the repository.
+pub(in crate::tui) const LINKED_KEPT: &str =
+    "This file is linked from your repo. It can't be deleted here.";
 
 /// Finds the research kind of a report path.
 /// Takes a context path such as `context/research/market_research.md`.

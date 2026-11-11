@@ -79,6 +79,9 @@ test("MAP-2 passes a review and a row that name the seeded competitor and market
   ];
   assert.deepEqual(mapping.repoFiles(items)["Competitor research"], [RESEARCH_DOCS.competitor, "docs/other.md"]);
   assert.deepEqual(mapping.missingInReview(mapping.repoFiles(items)), []);
+  const linked = items.map((item) => ({ ...item, notes: item.notes.map((note) => note.replace(/^Already in the repo: (.*)$/, "Linked: $1. CrazyAgent reads them from your repo; edits go to those files.")) }));
+  assert.deepEqual(mapping.repoFiles(linked)["Competitor research"], [RESEARCH_DOCS.competitor, "docs/other.md"]);
+  assert.deepEqual(mapping.missingInReview(mapping.repoFiles(linked)), []);
   const facts = { ...FACTS_1814, research: [{ kind: "competitor_research", files: [RESEARCH_DOCS.competitor] }, { kind: "market_research", files: [RESEARCH_DOCS.market] }], documents: [RESEARCH_DOCS.design] };
   const row = mapping.rowResearch({ project_id: ID, facts }, ID);
   assert.deepEqual(row, { competitor_research: [RESEARCH_DOCS.competitor], market_research: [RESEARCH_DOCS.market] });

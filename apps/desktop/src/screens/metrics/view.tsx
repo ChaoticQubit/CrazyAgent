@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { listAccounts, type Result } from "../../api";
+import { accountLabels, listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
@@ -651,7 +651,7 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
       agents.set(agentKey(id, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harness}`);
     }
   }
-  const names: MetricsNames = { agents, accounts: new Map(accounts.kind === "ok" ? accounts.value.map((row) => [row.id, row.name]) : []) };
+  const names: MetricsNames = { agents, accounts: accountLabels(accounts.kind === "ok" ? accounts.value : []) };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
     sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter} notices={notices.kind === "ok" ? notices.value : ""}

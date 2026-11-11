@@ -1,8 +1,13 @@
 #![cfg(unix)]
 
-use crazyagent::project_setup::{Platform, ResearchKind, StoredSetup, TeamPlan, list_context};
+use crazyagent::project_setup::{
+    ContextItem, ContextKind, Platform, ProjectContext, ResearchKind, StoredSetup, TeamPlan,
+    list_context,
+};
 use crazyagent::protocol::ProjectId;
-use crazyagent_desktop::bridge::open::{context_file, context_item, link_allowed, project_folder};
+use crazyagent_desktop::bridge::open::{
+    context_file, context_item, link_allowed, linked_item, project_folder,
+};
 use std::os::unix::fs::symlink;
 
 #[test]
@@ -151,4 +156,89 @@ fn every_listed_context_file_opens_from_the_folder_the_engine_listed_it_in() {
             "{project:?}"
         );
     }
+}
+
+/// Open in default app on a file linked from the repository: only a path the engine lists as
+/// linked for this project opens, below the project folder itself, not below `.crazyagent`.
+/// Any other `repo/` path is refused though it is a document in the repository, and a listed
+/// path that is a link, leaves the folder, is missing or is no document type is refused too.
+#[test]
+fn only_a_repo_file_the_engine_lists_as_linked_opens_from_the_project_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let project = home.join("notes-cli");
+    std::fs::create_dir_all(project.join(".crazyagent/context")).unwrap();
+    std::fs::create_dir_all(project.join("docs")).unwrap();
+    for document in [
+        "docs/plan.md",
+        "docs/plan",
+        "docs/other.md",
+        "docs/unmarked.md",
+    ] {
+        std::fs::write(project.join(document), "# Plan").unwrap();
+    }
+    std::fs::write(home.join("outside.md"), "outside").unwrap();
+    symlink(home.join("outside.md"), project.join("docs/link.md")).unwrap();
+    let setup = setup_at(&project);
+    assert_eq!(setup.state_folder(), project.join(".crazyagent"));
+    let item = |path: &str, linked: bool| ContextItem {
+        path: path.into(),
+        kind: ContextKind::Plan,
+        bytes: 6,
+        linked,
+    };
+    let context = ProjectContext {
+        project_id: setup.project_id.clone(),
+        folder: setup.folder.clone(),
+        items: vec![
+            item("repo/docs/plan.md", true),
+            item("repo/docs/link.md", true),
+            item("repo/../outside.md", true),
+            item("repo/docs/missing.md", true),
+            item("repo/docs/plan", true),
+            item("repo/", true),
+            item("docs/plan.md", true),
+            item("repo/docs/unmarked.md", false),
+        ],
+    };
+    assert_eq!(
+        linked_item(&setup, &context, "repo/docs/plan.md").unwrap(),
+        project.join("docs/plan.md")
+    );
+    for refused in [
+        "repo/docs/other.md",
+        "repo/docs/unmarked.md",
+        "repo/docs/link.md",
+        "repo/../outside.md",
+        "repo/docs/missing.md",
+        "repo/docs/plan",
+        "repo/",
+        "docs/plan.md",
+    ] {
+        assert_eq!(
+            linked_item(&setup, &context, refused).unwrap_err().code,
+            "context_item_not_openable",
+            "{refused}"
+        );
+    }
+    let elsewhere = ProjectContext {
+        project_id: ProjectId::new("other-project").unwrap(),
+        ..context.clone()
+    };
+    let empty = ProjectContext {
+        items: vec![],
+        ..context.clone()
+    };
+    for list in [&elsewhere, &empty] {
+        assert_eq!(
+            linked_item(&setup, list, "repo/docs/plan.md")
+                .unwrap_err()
+                .code,
+            "context_item_not_openable"
+        );
+    }
+    assert_eq!(
+        context_item(&setup, "repo/docs/plan.md").unwrap_err().code,
+        "context_item_not_openable"
+    );
 }

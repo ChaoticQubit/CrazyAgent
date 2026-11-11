@@ -1,11 +1,14 @@
-use super::project::{MasterStatus, Message, Speaker, Transcript};
-use super::project_time::clock;
+use super::project::{ACTIVITY_MAX, ACTIVITY_SHOWN, MasterStatus, Message, Speaker, Transcript};
+use super::project_time::{clock, duration};
 use crate::conversation::ConversationEntry;
-use crate::master_session::{MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView};
+use crate::master_session::{
+    MasterActivityLine, MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView,
+};
 use crate::master_step_limit::steps_of_cause;
 use crate::master_time_limit::minutes_of_cause;
 
 pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
+pub(in crate::tui) const ACTIVITY_QUIET_MS: i64 = 60_000;
 
 /// The engine's master conversation for one project, as read through the owner connection.
 /// Holds the session phase (none before the master is opened), its turns in order and the owner's messages.
@@ -141,6 +144,7 @@ fn status(turn: &MasterTurnView) -> MasterStatus {
                 .attempt
                 .as_ref()
                 .and_then(|attempt| i64::try_from(attempt.selected_at_ms).ok()),
+            activity: newest(&turn.activity),
         },
         MasterTurnPhase::WaitingApproval => MasterStatus::NeedsYou,
         MasterTurnPhase::Blocked => match turn.reason {
@@ -157,6 +161,63 @@ fn status(turn: &MasterTurnView) -> MasterStatus {
             MasterStatus::Stopped
         }
     }
+}
+
+/// Keeps the newest activity lines of a running turn.
+/// Takes the lines as the engine sent them, oldest first.
+/// Returns at most `ACTIVITY_MAX` of them, oldest first.
+fn newest(activity: &[MasterActivityLine]) -> Vec<MasterActivityLine> {
+    let kept = activity[activity.len().saturating_sub(ACTIVITY_MAX)..].to_vec();
+    assert!(kept.len() <= ACTIVITY_MAX);
+    assert_eq!(kept.last(), activity.last());
+    kept
+}
+
+fn age_ms(line: &MasterActivityLine, now_ms: i64) -> i64 {
+    let at_ms = i64::try_from(line.at_ms).unwrap_or(i64::MAX);
+    now_ms.saturating_sub(at_ms).max(0)
+}
+
+/// Words what a running turn was last seen doing, for the Thinking row.
+/// Takes the turn's activity lines, oldest first, and now in milliseconds.
+/// Returns the newest line with its age, or how long nothing new came once that line is
+/// `ACTIVITY_QUIET_MS` old, or none without lines.
+pub(in crate::tui) fn last_activity(
+    activity: &[MasterActivityLine],
+    now_ms: i64,
+) -> Option<String> {
+    let last = activity.last()?;
+    let age = age_ms(last, now_ms);
+    assert!(age >= 0);
+    Some(if age >= ACTIVITY_QUIET_MS {
+        format!("no new activity for {}", duration(age))
+    } else {
+        format!("{}, {} ago", last.text, duration(age))
+    })
+}
+
+/// Lists a running turn's activity for the rows under the Thinking row.
+/// Takes the lines, oldest first, whether the whole list is open and now in milliseconds.
+/// Returns each listed line's age and text, oldest first: the newest `ACTIVITY_SHOWN`, or
+/// the newest `ACTIVITY_MAX` when open.
+pub(in crate::tui) fn activity_rows(
+    activity: &[MasterActivityLine],
+    open: bool,
+    now_ms: i64,
+) -> Vec<(String, String)> {
+    let listed = if open { ACTIVITY_MAX } else { ACTIVITY_SHOWN };
+    let rows: Vec<(String, String)> = activity[activity.len().saturating_sub(listed)..]
+        .iter()
+        .map(|line| {
+            (
+                format!("{} ago", duration(age_ms(line, now_ms))),
+                line.text.clone(),
+            )
+        })
+        .collect();
+    assert!(rows.len() <= listed);
+    assert!(rows.len() <= activity.len());
+    rows
 }
 
 fn asks_approval(turn: &MasterTurnView) -> bool {
@@ -331,6 +392,7 @@ mod tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         }
@@ -398,7 +460,7 @@ mod tests {
                 ),
             ]
         );
-        assert_ne!(transcript.status, MasterStatus::Thinking { since_ms: None });
+        assert_eq!(transcript.status, MasterStatus::Stopped);
     }
 
     #[test]
@@ -480,7 +542,13 @@ mod tests {
             turn(2, 7, MasterTurnPhase::Running, None),
         ];
         let transcript = build(Some(MasterSessionPhase::Configured), &turns, &inputs);
-        assert_eq!(transcript.status, MasterStatus::Thinking { since_ms: None });
+        assert_eq!(
+            transcript.status,
+            MasterStatus::Thinking {
+                since_ms: None,
+                activity: Vec::new(),
+            }
+        );
         assert_eq!(
             said(&transcript),
             [
@@ -535,7 +603,10 @@ mod tests {
             (
                 MasterTurnPhase::Queued,
                 None,
-                MasterStatus::Thinking { since_ms: None },
+                MasterStatus::Thinking {
+                    since_ms: None,
+                    activity: Vec::new(),
+                },
             ),
             (MasterTurnPhase::Succeeded, None, MasterStatus::Replied),
         ];
@@ -937,5 +1008,126 @@ mod tests {
                 (Speaker::Master, "I kept both notes.", false),
             ]
         );
+    }
+
+    fn activity(lines: &[(u64, &str)]) -> Vec<MasterActivityLine> {
+        lines
+            .iter()
+            .map(|(at_ms, text)| MasterActivityLine {
+                at_ms: *at_ms,
+                text: (*text).into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_running_turn_carries_its_newest_activity_and_a_turn_that_is_not_running_carries_none() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let configured = Some(MasterSessionPhase::Configured);
+        let sent: Vec<MasterActivityLine> = (0..25u64)
+            .map(|step| MasterActivityLine {
+                at_ms: 1_000 + step,
+                text: format!("Step {step}"),
+            })
+            .collect();
+        let mut running = turn(1, 3, MasterTurnPhase::Running, None);
+        running.activity = sent.clone();
+        let transcript = build(configured, &[running], &inputs);
+        assert_eq!(
+            transcript.status,
+            MasterStatus::Thinking {
+                since_ms: None,
+                activity: sent[5..].to_vec(),
+            }
+        );
+        assert_eq!(transcript.status.activity_len(), ACTIVITY_MAX);
+        for phase in [
+            MasterTurnPhase::WaitingApproval,
+            MasterTurnPhase::Uncertain,
+            MasterTurnPhase::Succeeded,
+            MasterTurnPhase::Failed,
+            MasterTurnPhase::Cancelled,
+        ] {
+            let mut ended = turn(1, 3, phase, None);
+            ended.activity = sent.clone();
+            let transcript = build(configured, &[ended], &inputs);
+            assert_eq!(transcript.status.activity_len(), 0, "{phase:?}");
+            assert!(
+                !transcript.messages.iter().any(|m| m.text.contains("Step")),
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_thinking_row_names_the_last_activity_and_its_age_then_how_long_nothing_new_came() {
+        assert_eq!(last_activity(&[], 60_000), None);
+        let lines = activity(&[
+            (10_000, "Searching the code"),
+            (56_000, "Reading src/app/page.tsx"),
+        ]);
+        assert_eq!(
+            last_activity(&lines, 60_000).as_deref(),
+            Some("Reading src/app/page.tsx, 4 s ago")
+        );
+        assert_eq!(
+            last_activity(&lines, 56_000 + ACTIVITY_QUIET_MS - 1).as_deref(),
+            Some("Reading src/app/page.tsx, 59 s ago")
+        );
+        assert_eq!(
+            last_activity(&lines, 56_000 + ACTIVITY_QUIET_MS).as_deref(),
+            Some("no new activity for 1 min")
+        );
+        assert_eq!(
+            last_activity(&lines, 56_000 + 6 * 60_000 + 30_000).as_deref(),
+            Some("no new activity for 6 min")
+        );
+        assert_eq!(
+            last_activity(&lines, 50_000).as_deref(),
+            Some("Reading src/app/page.tsx, 0 s ago"),
+            "a line stamped after this screen's clock counts as just seen"
+        );
+        assert_eq!(
+            last_activity(&activity(&[(u64::MAX, "Working")]), 60_000).as_deref(),
+            Some("Working, 0 s ago")
+        );
+    }
+
+    #[test]
+    fn the_activity_list_shows_the_newest_five_lines_and_every_kept_line_when_open() {
+        let lines: Vec<MasterActivityLine> = (0..7u64)
+            .map(|step| MasterActivityLine {
+                at_ms: 10_000 * (step + 1),
+                text: format!("Step {step}"),
+            })
+            .collect();
+        let now = 74_000;
+        let row = |age: &str, step: u64| (age.to_owned(), format!("Step {step}"));
+        assert_eq!(
+            activity_rows(&lines, false, now),
+            [
+                row("44 s ago", 2),
+                row("34 s ago", 3),
+                row("24 s ago", 4),
+                row("14 s ago", 5),
+                row("4 s ago", 6),
+            ]
+        );
+        let open = activity_rows(&lines, true, now);
+        assert_eq!(open.len(), 7);
+        assert_eq!(open[0], row("1 min ago", 0));
+        assert_eq!(open[6], row("4 s ago", 6));
+        assert_eq!(activity_rows(&lines[..2], false, now).len(), 2);
+        assert!(activity_rows(&[], true, now).is_empty());
+        let many: Vec<MasterActivityLine> = (0..30u64)
+            .map(|step| MasterActivityLine {
+                at_ms: step,
+                text: format!("Step {step}"),
+            })
+            .collect();
+        let kept = activity_rows(&many, true, now);
+        assert_eq!(kept.len(), ACTIVITY_MAX);
+        assert_eq!(kept[0].1, "Step 10");
+        assert_eq!(ACTIVITY_SHOWN, 5);
     }
 }

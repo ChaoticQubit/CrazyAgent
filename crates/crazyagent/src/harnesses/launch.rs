@@ -214,13 +214,16 @@ pub const RUN_TIME_MAX: Duration = Duration::from_secs(86_400);
 
 /// Bounds for one launched harness process.
 /// `run_time` caps the whole session, `stop_grace` the wait between TERM and KILL,
-/// `output_bytes` the total stdout read and `events` the events delivered.
+/// `output_bytes` the total stdout read and `events` the events delivered. `stale_turn` is
+/// how long an open turn of a session that follows every turn may get no new byte in the
+/// session record, on a pane whose app waits, before it counts as no turn.
 #[derive(Clone, Copy, Debug)]
 pub struct LaunchLimits {
     pub run_time: Duration,
     pub stop_grace: Duration,
     pub output_bytes: usize,
     pub events: usize,
+    pub stale_turn: Duration,
 }
 
 impl Default for LaunchLimits {
@@ -230,6 +233,7 @@ impl Default for LaunchLimits {
             stop_grace: Duration::from_secs(2),
             output_bytes: 8 * 1024 * 1024,
             events: 10_000,
+            stale_turn: Duration::from_secs(600),
         }
     }
 }
