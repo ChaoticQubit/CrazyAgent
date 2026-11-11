@@ -5,7 +5,7 @@ use crazyagent::config::resolve_config;
 use crazyagent::engine::Engine;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerServer};
-use crazyagent::harnesses::{HarnessStatus, TeamUse, specs};
+use crazyagent::harnesses::{HarnessEntry, HarnessStatus, TeamUse, specs};
 use crazyagent::team::launch_harness;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -100,4 +100,66 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
     assert!(labels.iter().all(|(_, label)| {
         *label == "Ready" || *label == "Not installed" || label.starts_with("Limited control: ")
     }));
+}
+
+#[tokio::test]
+async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-harness-update-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let host = root.path().join("crazyagent-pin-only");
+    let old = root.path().join("cask/2.1.309/claude");
+    let new = root.path().join("cask/2.1.322/claude");
+    let link = root.path().join("bin/claude");
+    for path in [&host, &old, &new] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, path.as_os_str().as_encoded_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&old, &link).unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_claude_executable(&link).unwrap();
+    service.ensure_ready(&stopped).unwrap();
+    let claude = |entries: Vec<HarnessEntry>| {
+        entries
+            .into_iter()
+            .find(|entry| entry.id == "claude-code")
+            .and_then(|entry| entry.executable)
+    };
+    let before = OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        claude(before.harness_catalog(false).await.unwrap()),
+        Some(old.clone())
+    );
+    std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&new, &link).unwrap();
+    let reopened =
+        OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(5))
+            .await
+            .unwrap();
+    let entries = reopened.harness_catalog(false).await;
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claude(entries.unwrap()), Some(new));
 }

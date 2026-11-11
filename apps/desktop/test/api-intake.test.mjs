@@ -24,6 +24,10 @@ test("every DEC-078 intake, GitHub and setup name has a client function", () => 
     ["setPackEntry", "desktop_set_pack_entry"], ["removePackEntry", "desktop_remove_pack_entry"],
   ]) assert.match(client, new RegExp(`export function ${name}\\([^)]*\\)[^{]*\\{\\s*return invoke<[A-Za-z\\[\\]]+>\\("${command}"`), name);
   assert.match(client, /invoke<CloneReceipt>\("desktop_clone_repo", \{ fullName \}\)/);
+  for (const name of ["downloadFromIcloud", "loadIcloudProgress", "cancelIcloudDownload"]) assert.equal(typeof api[name], "function", name);
+  assert.match(client, /export function icloudDownload\(path: string\): Promise<number> \{\s*return invoke<number>\("desktop_icloud_download", \{ path \}\)/);
+  assert.match(client, /return invoke<IcloudProgress \| null>\("desktop_icloud_progress"\)/);
+  assert.match(client, /return invoke<boolean>\("desktop_icloud_cancel"\)/);
   assert.match(client, /invoke<SetupStatus>\("desktop_run_setup", \{ pack, generation \}\)/);
   assert.match(client, /invoke<SetupStatus>\("desktop_set_pack_entry", \{ id, on, version, generation \}\)/);
 });
@@ -123,4 +127,10 @@ test("an add anyway sends the overrides with the add and a bad override reads as
   assert.match(client, /export type AddOverride = "worktrees" \| "linked_checkout" \| "too_large";/);
   assert.match(client, /invoke<IntentReceipt>\("desktop_add_existing_folder", \{ source, mode, overrides, generation \}\)/);
   assert.equal(api.intakeCopy("home_override_invalid"), "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.");
+});
+
+test("an iCloud refusal reads as a plain sentence that keeps the folder safe", () => {
+  assert.equal(api.intakeCopy("home_icloud_not_downloaded"), "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.");
+  assert.match(api.intakeCopy("home_permission_denied"), /System Settings > Privacy & Security > Files and Folders/);
+  assert.equal(api.intakeCopy("icloud_download_busy"), "Another iCloud download is running. Wait for it to finish.");
 });

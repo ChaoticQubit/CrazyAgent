@@ -3,19 +3,21 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, QUESTIONS_CODES};
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{
-    ANSWER_BYTES_MAX, Answer, OPTIONS_MAX, Question, QuestionStatus, Settlement,
+    ANSWER_BYTES_MAX, Answer, OPTIONS_MAX, Question, QuestionKind, QuestionStatus, Settlement,
 };
 use serde::Serialize;
 use std::sync::Arc;
 
-/// One question an agent or an engine step asked the owner, as the window shows it: plain
-/// status words and the version an answer or dismissal sends back.
+/// One question an agent or an engine step asked the owner, as the window shows it: how it
+/// is answered (`single`, `multi` or `text`), plain status words and the version an answer
+/// or dismissal sends back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QuestionRow {
     pub id: u64,
     pub project_id: String,
     pub asker: String,
     pub question: String,
+    pub kind: QuestionKind,
     pub options: Vec<String>,
     pub recommended: Option<String>,
     pub context: Option<String>,
@@ -33,6 +35,7 @@ impl From<Question> for QuestionRow {
             project_id: question.project.as_str().to_owned(),
             asker: question.asker,
             question: question.question,
+            kind: question.kind,
             options: question.options,
             recommended: question.recommended,
             context: question.context,

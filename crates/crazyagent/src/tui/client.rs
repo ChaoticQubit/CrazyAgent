@@ -653,7 +653,13 @@ impl Connection {
                             let event = match native.as_mut() {
                                 Some(native) => {
                                     let was_ready = native.ready;
-                                    let event = runtime.block_on(native.intake(*job));
+                                    let progress = |event| {
+                                        let _ = owner_replies.try_send(OwnerReply {
+                                            finished: false,
+                                            event: OwnerEvent::Intake(Box::new(event)),
+                                        });
+                                    };
+                                    let event = runtime.block_on(native.intake(*job, progress));
                                     let problem = None;
                                     if !report_loss(
                                         was_ready,

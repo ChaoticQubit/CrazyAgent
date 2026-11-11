@@ -409,6 +409,25 @@ fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owne
 }
 
 #[test]
+fn a_question_outside_the_kind_rules_hears_those_rules_and_is_not_logged() {
+    let case = Case::new();
+    let call = Call::Ask {
+        question: "Which database?".into(),
+        kind: crate::questions::QuestionKind::Single,
+        options: vec!["Postgres".into()],
+        recommended: Some("Postgres".into()),
+        context: None,
+    };
+    assert_eq!(
+        logged_ask(&case.db, &case.project, &Asker::Master(41), call).as_deref(),
+        Some(
+            "Your question \"Which database?\" was not logged for the owner: it is not one plain question of kind single or multi with 2 to 6 one-line options and one of them recommended, or of kind text with no options."
+        )
+    );
+    assert!(open_ids(&case).is_empty());
+}
+
+#[test]
 fn a_conversation_master_records_only_from_its_turns_owner_message_and_before_new_questions() {
     let case = Case::new();
     let drop = case.drop_file();

@@ -150,7 +150,7 @@ impl Owner {
             .await
         {
             Ok(state) => match state.data {
-                OwnerData::FolderSize { bytes } => Ok(bytes),
+                OwnerData::FolderSize { bytes, .. } => Ok(bytes),
                 other => panic!("{other:?}"),
             },
             Err(e) => Err(e.0),
@@ -969,5 +969,91 @@ async fn a_move_anyway_lands_only_when_the_owner_asked_past_that_one_refusal() {
         fs::read_to_string(home.join("linked").join("main.rs")).unwrap(),
         "linked"
     );
+    engine.stop().await;
+}
+
+/// A project left outside the projects home, after the owner picked another home, moves
+/// into it through the owner transport: the folder lands in the home, the setup and the
+/// declared repository point at it, no move stays pending, and a second ask is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_kept_outside_the_home_moves_into_it_through_the_owner_transport() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let first = place.join("first");
+    let second = place.join("second");
+    for folder in [&first, &second] {
+        fs::create_dir(folder).unwrap();
+    }
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    let pick = |home: &Path| OwnerMutation::SetProjectsHome {
+        path: home.to_str().unwrap().into(),
+    };
+    assert_eq!(owner.apply(pick(&first)).await, OwnerResult::Applied);
+    let reading = ProjectId::new("reading").unwrap();
+    owner.generation += 1;
+    let made = owner
+        .controller
+        .setup_project(
+            reading.clone(),
+            ProjectSpec {
+                name: "Reading list".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Tracks reading lists.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            owner.generation,
+        )
+        .await
+        .unwrap();
+    match made {
+        OwnerResponse::Applied { operation } => assert_eq!(operation.result, OwnerResult::Applied),
+        other => panic!("{other:?}"),
+    }
+    let origin = first.join("reading-list");
+    let target = second.join("reading-list");
+    ready_at(&mut owner, &reading, &origin).await;
+    fs::write(origin.join("notes.txt"), b"kept\n").unwrap();
+    assert_eq!(owner.apply(pick(&second)).await, OwnerResult::Applied);
+    let ask = || OwnerMutation::MoveProjectHome {
+        project_id: reading.clone(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+    };
+    assert_eq!(owner.apply(ask()).await, OwnerResult::Applied);
+    assert!(!origin.exists());
+    assert_eq!(fs::read(target.join("notes.txt")).unwrap(), b"kept\n");
+    let database = engine.root.path().join("engine.db");
+    assert_eq!(
+        repositories(&database, &reading),
+        [target.to_str().unwrap()]
+    );
+    ready_at(&mut owner, &reading, &target).await;
+    let pending: i64 = {
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.query_row(
+            "SELECT COUNT(*) FROM projects_home_project_move",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(pending, 0);
+    assert_eq!(
+        owner.apply(ask()).await,
+        rejected("move_project_already_home")
+    );
+    assert!(target.join("notes.txt").is_file());
     engine.stop().await;
 }

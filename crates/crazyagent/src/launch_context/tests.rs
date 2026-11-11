@@ -1317,8 +1317,15 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     );
     assert!(told.contains("A for me question reaches the owner only; no agent answers it."));
     assert!(told.contains("one question per call"));
-    assert!(told.contains("Put up to 6 choices in `options`"));
-    assert!(told.contains("the one you recommend in `recommended`"));
+    assert_eq!(
+        (crate::questions::OPTIONS_MIN, crate::questions::OPTIONS_MAX),
+        (2, 6)
+    );
+    assert!(told.contains(
+        "Set `kind` to `single` (the owner picks one) or `multi` (the owner picks any), with 2 to 6 choices in `options` and one of them in `recommended`"
+    ));
+    assert!(told.contains("use `text` with no options only when no short list of answers fits"));
+    assert!(!told.contains("Put up to 6 choices"));
     assert!(told.contains(&format!(
         "record it with `{}`",
         crate::team::tool::RECORD_TOOL
@@ -1671,8 +1678,14 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
 
     let headless = crate::harnesses::launch::command_with_context(&request(), &context());
     let refused = headless.err().unwrap();
-    assert_eq!(refused, named);
-    let sentence = secret_in_command_text(&refused).unwrap();
+    match std::env::consts::OS {
+        "macos" => assert_eq!(refused, named),
+        _ => assert_eq!(
+            refused,
+            LaunchError("launch_sandbox_unavailable".into(), None)
+        ),
+    }
+    let sentence = secret_in_command_text(&named).unwrap();
     assert_eq!(
         sentence,
         "The MCP server \"tools\" secret \"TOKEN\" is part of the launch command, so it cannot \

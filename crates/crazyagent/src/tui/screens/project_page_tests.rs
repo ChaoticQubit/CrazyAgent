@@ -151,6 +151,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::AgentPolicy { .. } => "agent policy",
                         SetupQuery::CoordQuestions { .. } => "coord questions",
                         SetupQuery::OpenLiveSession { .. } => "live session open",
+                        SetupQuery::MoveHome { .. } => "move home",
                     });
                     connection.project_setup(query).unwrap();
                 }

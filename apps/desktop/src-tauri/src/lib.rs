@@ -1936,6 +1936,22 @@ async fn desktop_update_project_setup(
 }
 
 #[tauri::command]
+async fn desktop_move_project_home(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: AddMode,
+    overrides: Vec<AddOverride>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .move_project_home(&id, mode, overrides, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_remove_project(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2214,6 +2230,37 @@ async fn desktop_clone_repo(
 ) -> Result<CloneReceipt, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.clone_repo(full_name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_icloud_download(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    path: String,
+) -> Result<u64, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.icloud_download(path)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_icloud_progress(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Option<crazyagent::projects_home::icloud::Progress>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.icloud_progress()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_icloud_cancel(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.icloud_cancel()?;
     call.await
 }
 
@@ -3508,14 +3555,13 @@ async fn desktop_answer_question(
     state: State<'_, NativeState>,
     id: u64,
     version: u64,
-    option: Option<u8>,
-    text: Option<String>,
+    picks: Vec<u8>,
+    comment: Option<String>,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call =
-        lock(&state)
-            .await?
-            .answer_question(id, version, option.into_iter().collect(), text)?;
+    let call = lock(&state)
+        .await?
+        .answer_question(id, version, picks, comment)?;
     call.await
 }
 
@@ -4251,6 +4297,7 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
@@ -4273,6 +4320,9 @@ native_commands! {
     desktop_github_sign_out,
     desktop_github_repos,
     desktop_clone_repo,
+    desktop_icloud_download,
+    desktop_icloud_progress,
+    desktop_icloud_cancel,
     desktop_setup_status,
     desktop_run_setup,
     desktop_set_pack_entry,

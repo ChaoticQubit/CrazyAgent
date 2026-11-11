@@ -1,5 +1,5 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
-import type { AgentAccess, HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
+import type { AccessLevel, AgentAccess, HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
@@ -26,6 +26,21 @@ export const SUB_HARNESSES_MAX = 8;
 
 /** The agent access level New Project preselects (DEC-102). Projects saved before the setting stay Sandboxed. */
 export const NEW_PROJECT_ACCESS: AgentAccess = "own_branch";
+
+/** Why the engine says one access level can't run agents on this computer. Inputs: the levels
+ * from the project catalog, absent while it loads or from an engine that names none, and the
+ * level. Output: the reason, or null when the level runs or nothing is known. */
+export function levelUnavailable(levels: AccessLevel[] | undefined, access: AgentAccess): string | null {
+  return levels?.find((level) => level.access === access)?.unavailable ?? null;
+}
+
+/** The access level the New Project form holds: the owner's pick, or the preselect, unless the
+ * engine says that level can't run here, then Sandboxed, which is never saved (the TUI form's
+ * rule). Inputs: the draft and the catalog's levels. Output: the level to show and to save. */
+export function draftAccess(draft: Pick<ProjectDraft, "access">, levels: AccessLevel[] | undefined): AgentAccess {
+  const wanted = draft.access ?? NEW_PROJECT_ACCESS;
+  return levelUnavailable(levels, wanted) === null ? wanted : "sandboxed";
+}
 
 export const RESEARCH_COPY: Record<ResearchKind, string> = {
   market_research: "Who needs this, how big the market is, and how people pay today.",

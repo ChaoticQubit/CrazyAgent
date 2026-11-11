@@ -18,7 +18,10 @@ use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
-const METADATA_ENTRIES_MAX: usize = 8192;
+/// The most entries of a repository's .git outside its object store that the metadata walk
+/// reads, each one checked. A long-used repository holds thousands in its rerere cache and
+/// ref logs, so the bound leaves room for those and still ends the walk on a planted tree.
+const METADATA_ENTRIES_MAX: usize = 65_536;
 const OBJECT_ENTRIES_MAX: usize = 262_144;
 const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
 const SHOWN_ENTRY_BYTES_MAX: usize = 160;
@@ -1001,14 +1004,17 @@ pub(crate) fn refused_config_line(code: &str, repository: &str) -> Option<String
     ))
 }
 
+/// Checks every entry of a repository's own Git config against [`REFUSED_KEYS`]. Input: the
+/// repository. Output: nothing, or `repository_config_refused:` with the refusing rule's
+/// code. The listing is bounded by the engine Git output bound, [`OUTPUT_BYTES_MAX`], so a
+/// repository with thousands of tracked branches is read whole and a longer one fails as
+/// that command does.
 fn validate_config(repository: &Path) -> Result<(), EngineError> {
     let bytes = git(
         repository,
         &["config", "--local", "--no-includes", "--null", "--list"],
     )?;
-    if bytes.len() > 65536 {
-        return Err(error("git_config_capacity"));
-    }
+    assert!(bytes.len() <= OUTPUT_BYTES_MAX);
     for record in bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         let record = std::str::from_utf8(record).map_err(error)?;
         let (key, value) = record
@@ -1021,7 +1027,6 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
             return Err(error(format!("{CONFIG_REFUSED}{}", rule.code)));
         }
     }
-    assert!(bytes.len() <= 65536);
     Ok(())
 }
 
@@ -1182,6 +1187,11 @@ pub(crate) fn reserve_master_bootstrap(
     repository: &str,
 ) -> Result<Outcome, EngineError> {
     assert!(!connection.is_autocommit());
+    if crate::projects_home::project_move_holds(connection, std::path::Path::new(repository))
+        .map_err(error)?
+    {
+        return Ok(rejected("move_project_in_progress"));
+    }
     let body: Option<String> = connection
         .query_row(
             "SELECT body FROM repository_admissions WHERE project=?1 AND repository=?2",
@@ -3036,5 +3046,112 @@ mod tests {
             .unwrap();
             assert!(worktree_config_on(&listing));
         }
+    }
+
+    /// Appends tracked branch sections to a repository's config, as a repository with many
+    /// branches holds them. Inputs: the repository and how many branches. Output: none; the
+    /// config file grows by about 105 bytes a branch.
+    #[cfg(unix)]
+    fn track_branches(repository: &Path, count: usize) {
+        use std::fmt::Write;
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        for branch in 0..count {
+            let name = format!("feature/scholar-scope-{branch:04}");
+            write!(
+                text,
+                "[branch \"{name}\"]\n\tremote = origin\n\tmerge = refs/heads/{name}\n"
+            )
+            .unwrap();
+        }
+        std::fs::write(&config, text).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_config_lists_more_than_64_kib_is_inspected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        track_branches(&repository, 1000);
+        let listing = git(
+            &repository,
+            &["config", "--local", "--no-includes", "--null", "--list"],
+        )
+        .unwrap();
+        assert!(listing.len() > 100_000);
+        let admission = inspect(repository.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&admission.repository), repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_key_after_64_kib_of_config_is_still_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        track_branches(&repository, 1000);
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "repository_config_refused:core_fsmonitor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_listing_past_the_git_output_bound_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[user]\n\tname = ");
+        text.push_str(&"n".repeat(OUTPUT_BYTES_MAX + 1));
+        text.push('\n');
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "git_operation_failed_or_output_capacity"
+        );
+    }
+
+    /// Fills a folder inside a repository's .git with empty files, as a long-used
+    /// repository's `rr-cache` or `logs` holds them. Inputs: the repository, the folder's
+    /// name and how many files. Output: none.
+    #[cfg(unix)]
+    fn fill_git_folder(repository: &Path, name: &str, count: usize) {
+        let folder = repository.join(".git").join(name);
+        std::fs::create_dir(&folder).unwrap();
+        for entry in 0..count {
+            std::fs::write(folder.join(format!("{entry:06}")), b"").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_git_folder_holds_more_than_8192_entries_is_inspected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        fill_git_folder(&repository, "rr-cache", 9000);
+        let admission = inspect(repository.to_str().unwrap()).unwrap();
+        assert_eq!(Path::new(&admission.repository), repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_git_folder_past_the_metadata_bound_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        fill_git_folder(&repository, "rr-cache", METADATA_ENTRIES_MAX + 1);
+        assert_eq!(
+            inspect(repository.to_str().unwrap()).unwrap_err().0,
+            "git_metadata_capacity"
+        );
     }
 }

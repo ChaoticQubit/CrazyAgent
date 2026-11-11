@@ -11,7 +11,7 @@ import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "../new-project/fi
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ImportMoveCommit } from "../process";
-import { ONBOARDING_POLL_MS, confirmReady, inRepo, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
+import { ONBOARDING_POLL_MS, confirmReady, inRepo, mappingRetry, missingLabels, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -24,7 +24,7 @@ const STEPS = [{ key: "graph", title: "Build the code graph" }, { key: "mapping"
  * Inputs: the project name, the onboarding read, the form draft or null before it fills in, the
  * catalog, field errors, flags, the last problem, the handlers and the Commit the move choice
  * shown under the moved instruction files. Output: the page. */
-export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping, importMove }: {
+export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping, onUseProposed, importMove }: {
   name: string;
   view: Loaded<OnboardingView>;
   draft: ProjectDraft | null;
@@ -41,6 +41,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   retrying?: boolean;
   onRetryMapping?: () => void;
   onSkipMapping?: () => void;
+  onUseProposed?: () => void;
   importMove?: ReactNode;
 }) {
   const finished = view.kind === "ok" && view.value.finished;
@@ -66,6 +67,10 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <Button pending={retrying} pendingLabel="Retrying..." onClick={() => onRetryMapping?.()}>Retry mapping</Button>
       <Button disabled={retrying} onClick={() => onSkipMapping?.()}>Skip mapping</Button>
     </span>}
+    {offerProposed(value) && onUseProposed && <Notice tone="info">
+      <span className="pj-row">This setup was saved without the mapping's description and tech stack.
+        <Button onClick={onUseProposed}>Use the mapping's answers</Button></span>
+    </Notice>}
     {(value.imported ?? []).length > 0 && <Notice tone="info">
       <span className="pj-stack">
         <span>CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:</span>
@@ -99,9 +104,9 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
 }
 
 /** Setup review for a found or cloned project: reads its progress until the mapping agent stops,
- * fills the form from the agent's draft once, and confirms through the project setup change. A
- * failed mapping can start again on the project's folder and pool, or be skipped.
- * Input: the project id. */
+ * fills the form from the agent's draft, again when that draft arrives after an empty one while
+ * the owner has not typed, and confirms through the project setup change. A failed mapping can
+ * start again on the project's folder and pool, or be skipped. Input: the project id. */
 export function OnboardingReview({ id }: { id: string }) {
   const session = useAppSession();
   const [view, reloadView] = useLoad(() => loadOnboarding(id), [id]);
@@ -111,6 +116,7 @@ export function OnboardingReview({ id }: { id: string }) {
   const [catalog, setCatalog] = useState<Result<ProjectCatalog>>();
   const [names, setNames] = useState<string[]>([]);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
+  const [touched, setTouched] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
@@ -134,8 +140,21 @@ export function OnboardingReview({ id }: { id: string }) {
   }, [id]);
 
   useEffect(() => {
-    if (draft === null && value !== null && saved !== null && confirmReady(value).ready) setDraft(onboardingDraft(value, saved));
-  }, [value, saved, draft]);
+    if (value === null || saved === null || !confirmReady(value).ready) return;
+    const empty = (about: string, stack: number) => about.trim() === "" && stack === 0;
+    const arrived = draft !== null && !touched && empty(draft.about, draft.stack.length) && !empty(value.draft.about, value.draft.tech_stack.length);
+    if (draft === null || arrived) setDraft(onboardingDraft(value, saved));
+  }, [value, saved, draft, touched]);
+
+  const editDraft = (next: ProjectDraft) => {
+    setTouched(true);
+    setDraft(next);
+  };
+  const takeProposed = () => {
+    if (value === null || draft === null) return;
+    setTouched(true);
+    setDraft(withProposed(draft, value));
+  };
 
   const name = draft?.name.trim() || value?.name?.trim() || saved?.name || "this project";
 
@@ -151,6 +170,7 @@ export function OnboardingReview({ id }: { id: string }) {
     if (started.kind === "rejected") { setProblem(intakeCopy(started)); return; }
     if (started.kind === "unconfirmed" && receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm the mapping started again. Check again in a moment."); return; }
     setDraft(null);
+    setTouched(false);
     reloadView();
   };
 
@@ -182,7 +202,7 @@ export function OnboardingReview({ id }: { id: string }) {
   };
 
   return <OnboardingReviewView name={name} view={view} draft={draft} catalog={catalog} errors={errors} showErrors={showErrors} busy={busy} problem={problem}
-    onDraft={setDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} onRetry={reloadView}
-    skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping}
+    onDraft={editDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} onRetry={reloadView}
+    skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping} onUseProposed={takeProposed}
     importMove={waiting.length > 0 && !moveLeft ? <ImportMoveCommit projectId={id} files={waiting} onCommitted={reloadView} onLeave={() => setMoveLeft(true)} /> : undefined} />;
 }

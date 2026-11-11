@@ -9,7 +9,7 @@ const intake = await import("../src/screens/intake/intake.ts");
 const router = await import("../src/ui/router.ts");
 const { HomeFolderView } = await import("../src/screens/intake/home-folder.tsx");
 const { FoundProjectsView, SetUpDialogBody } = await import("../src/screens/intake/found.tsx");
-const { AddFolderView, AnywayDialog, MoveConfirmDialog } = await import("../src/screens/intake/add-folder.tsx");
+const { AddFolderView, AnywayDialog, ICloudDialog, MoveConfirmDialog } = await import("../src/screens/intake/add-folder.tsx");
 const intakeApi = await import("../src/api-intake.ts");
 const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/clone.tsx");
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
@@ -258,18 +258,55 @@ test("the review form starts from the mapping agent's draft and keeps the saved 
   assert.equal(intake.onboardingDraft(view({ name: undefined }), stored()).name, "shop");
 });
 
+test("a failed graph alone does not make the form ready while the mapping waits", () => {
+  const waiting = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "waiting" } });
+  assert.equal(intake.confirmReady(waiting).ready, false);
+  assert.equal(intake.settled(waiting), false);
+  const running = view({ graph: { kind: "failed", reason: "Graph build failed" }, mapping: { kind: "running" } });
+  assert.equal(intake.confirmReady(running).ready, false);
+  assert.equal(intake.settled(running), false);
+});
+
+test("a saved empty setup with a finished mapping offers the mapping's answers", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"] }) });
+  assert.equal(intake.offerProposed(saved), true);
+  assert.equal(intake.offerProposed(view({ finished: true })), false);
+  assert.equal(intake.offerProposed(view({ finished: false, proposed: setup({ about: "A research reader." }) })), false);
+  assert.equal(intake.offerProposed(view({ finished: true, proposed: setup({ about: "  ", tech_stack: [] }) })), false);
+  const before = intake.onboardingDraft(saved, stored());
+  const used = intake.withProposed(before, saved);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.equal(intake.withProposed(before, view()), before);
+});
+
+test("using the mapping's answers keeps the owner's unsaved name, research and pool", () => {
+  const saved = view({ finished: true, mapping: { kind: "done" }, proposed: setup({ about: "A research reader.", tech_stack: ["Rust"], platforms: ["website"] }) });
+  const edited = { ...intake.onboardingDraft(saved, stored()), name: "ScholarScope", research: ["market_research"], pool: "work", poolChosen: true };
+  const used = intake.withProposed(edited, saved);
+  assert.equal(used.name, "ScholarScope");
+  assert.deepEqual(used.research, ["market_research"]);
+  assert.equal(used.pool, "work");
+  assert.equal(used.poolChosen, true);
+  assert.equal(used.about, "A research reader.");
+  assert.deepEqual(used.stack, ["Rust"]);
+  assert.deepEqual(used.platforms, ["website"]);
+});
+
 test("confirm waits for the mapping agent unless a step failed", () => {
   assert.deepEqual(intake.confirmReady(view()), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "failed", reason: "x" } })), { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })),
-    { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." });
+    { ready: false, line: "The code graph couldn't be built. The mapping agent still reads the project; the form fills in when it finishes." });
+  assert.deepEqual(intake.confirmReady(view({ graph: { kind: "failed", reason: "x" } })),
+    { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "running" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." });
   assert.deepEqual(intake.confirmReady(view({ mapping: { kind: "running" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.equal(intake.settled(view()), true);
   assert.equal(intake.settled(view({ mapping: { kind: "running" } })), false);
-  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), true);
+  assert.equal(intake.settled(view({ graph: { kind: "failed", reason: "x" }, mapping: { kind: "waiting" } })), false);
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" }, mapping: { kind: "waiting" } })),
     { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." });
   assert.deepEqual(intake.confirmReady(view({ graph: { kind: "off" } })), { ready: true, line: "Check the answers, fill in anything missing, then confirm." });
@@ -679,6 +716,16 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.doesNotMatch(found, />Overview</);
 });
 
+test("a setup saved without the mapping's answers offers them in the review", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
+  const proposed = setup({ about: "A research reader.", tech_stack: ["Rust"] });
+  const offered = html(OnboardingReviewView, { ...base, view: ok(view({ finished: true, draft: setup(), proposed })), onUseProposed: noop });
+  assert.match(offered, /This setup was saved without the mapping&#x27;s description and tech stack\./);
+  assert.match(offered, />Use the mapping&#x27;s answers</);
+  assert.doesNotMatch(html(OnboardingReviewView, { ...base, view: ok(view({ finished: true })), onUseProposed: noop }), /Use the mapping/);
+});
+
 test("the setup review shows each research toggle the repo already covers and the documents found", () => {
   const catalog = ok({ tech_stack: [], platforms: [], research: [{ kind: "market_research", label: "Market research" }, { kind: "competitor_research", label: "Competitor research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
   const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
@@ -886,4 +933,123 @@ test("a soft engine refusal asks again only when the override for it was not sen
   assert.equal(intake.asksAgain("home_destination_exists", []), false);
   assert.equal(intake.asksAgain("home_move_project", ["worktrees", "too_large"]), false);
   assert.equal(intake.asksAgain("constructor", []), false);
+});
+
+const icloudProps = (extra = {}) => ({
+  open: true, name: "shop", source: "/Users/mira/Desktop/shop", placeholders: 3, way: "move", downloading: false, progress: null, stopping: false,
+  onDownload: noop, onStop: noop, onCancel: noop, ...extra,
+});
+const footerButtons = (dialog) => {
+  const footer = dialog.props.footer;
+  return typeof footer.type === "function" ? [footer] : [].concat(footer.props.children ?? []).filter(Boolean);
+};
+const footerButton = (dialog, label) => footerButtons(dialog).find((button) => button.props.children === label);
+
+test("the iCloud question names the files, the download and what a move does on other Macs", () => {
+  const page = html(ICloudDialog, icloudProps());
+  assert.match(page, /Download shop from iCloud first\?/);
+  assert.match(page, /3 files are only in iCloud; CrazyAgent downloads them first \(needs internet, can take a while\)\./);
+  assert.match(page, /Moving takes the folder out of iCloud Desktop on your other Macs too\./);
+  const order = ["Download and move", "Download and copy", "Cancel"].map((label) => page.indexOf(label));
+  assert.ok(order.every((at) => at >= 0), page);
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  assert.equal(footerButton(ICloudDialog(icloudProps()), "Download and move").props.variant, "primary");
+  assert.equal(footerButton(ICloudDialog(icloudProps({ way: "copy" })), "Download and copy").props.variant, "primary");
+  assert.match(html(ICloudDialog, icloudProps({ placeholders: null })), /Some files are only in iCloud/);
+  assert.equal(html(ICloudDialog, icloudProps({ open: false })), "");
+});
+
+test("Download and move in the iCloud question downloads, then moves", () => {
+  const calls = [];
+  footerButton(ICloudDialog(icloudProps({ onDownload: (way) => calls.push(way) })), "Download and move").props.onClick();
+  assert.deepEqual(calls, ["move"]);
+});
+
+test("Download and copy in the iCloud question downloads, then copies, even when Move was picked", () => {
+  const calls = [];
+  footerButton(ICloudDialog(icloudProps({ onDownload: (way) => calls.push(way) })), "Download and copy").props.onClick();
+  assert.deepEqual(calls, ["copy"]);
+});
+
+test("Cancel in the iCloud question closes it and downloads nothing", () => {
+  const calls = [];
+  const dialog = ICloudDialog(icloudProps({ onDownload: (way) => calls.push(way), onCancel: () => calls.push("cancel") }));
+  footerButton(dialog, "Cancel").props.onClick();
+  assert.deepEqual(calls, ["cancel"]);
+});
+
+test("a running iCloud download shows its progress and only Stop download, which stops it", () => {
+  const calls = [];
+  const props = icloudProps({ downloading: true, progress: { total: 3, done: 1 }, onStop: () => calls.push("stop") });
+  const page = html(ICloudDialog, props);
+  assert.match(page, /Downloading from iCloud: 1 of 3 files/);
+  assert.doesNotMatch(page, /Download and move|Download and copy/);
+  const dialog = ICloudDialog(props);
+  assert.equal(dialog.props.busy, true);
+  footerButton(dialog, "Stop download").props.onClick();
+  assert.deepEqual(calls, ["stop"]);
+  assert.match(html(ICloudDialog, icloudProps({ downloading: true })), /Downloading from iCloud\.\.\./);
+  assert.match(html(ICloudDialog, icloudProps({ downloading: true, stopping: true })), /Stopping the download\.\.\./);
+});
+
+test("the iCloud lines count files, name the iCloud place and read progress", () => {
+  assert.equal(intake.icloudCountLine(1), "1 file is only in iCloud; CrazyAgent downloads them first (needs internet, can take a while).");
+  assert.throws(() => intake.icloudCountLine(0));
+  assert.match(intake.icloudMoveLine("/Users/mira/Documents/shop"), /out of iCloud Documents on/);
+  assert.match(intake.icloudMoveLine("/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop"), /out of iCloud Drive on/);
+  assert.match(intake.icloudMoveLine("/Volumes/Work/shop"), /out of iCloud Drive on/);
+  assert.equal(intake.icloudProgressLine({ total: 0, done: 0 }), "Downloading from iCloud...");
+  assert.throws(() => intake.icloudProgressLine({ total: 1, done: 2 }));
+  assert.equal(intake.icloudPlaceholders({ kind: "ok", value: { bytes: 1, placeholders: 7 } }), 7);
+  assert.equal(intake.icloudPlaceholders({ kind: "ok", value: { bytes: 1 } }), 0);
+  assert.equal(intake.icloudPlaceholders({ kind: "loading" }), 0);
+  assert.equal(intake.icloudPlaceholders(null), 0);
+});
+
+test("a running iCloud download reads progress each tick and goes on to the add only when nobody stopped it", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls = [];
+  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, ["read", "read"]);
+  assert.equal(run.end(), "go");
+  t.mock.timers.tick(5000);
+  assert.deepEqual(calls, ["read", "read"]);
+  assert.throws(() => intake.icloudRun(() => {}, () => {}, 0));
+});
+
+test("Stop download asks the engine to stop at once and again each tick until the download returns", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls = [];
+  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
+  run.stop();
+  assert.deepEqual(calls, ["cancel"]);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(calls, ["cancel", "cancel", "read"]);
+  assert.equal(run.end(), "stopped");
+  t.mock.timers.tick(3000);
+  assert.equal(calls.length, 3);
+});
+
+test("leaving Add folder mid-download stops it and reads no more progress", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls = [];
+  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
+  run.leave();
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, ["cancel", "cancel", "cancel"]);
+  assert.equal(run.end(), "left");
+});
+
+test("after an iCloud download Add folder adds only when it finished and was neither stopped nor left", () => {
+  const ok = { kind: "ok", value: 3 };
+  const ended = { kind: "error", code: "home_icloud_not_downloaded", message: "Some files are still only in iCloud." };
+  const denied = { kind: "error", code: "home_permission_denied", message: "Allow it in System Settings." };
+  assert.deepEqual(intake.icloudOutcome("go", ok), { next: "add" });
+  assert.deepEqual(intake.icloudOutcome("stopped", ok), { next: "say", text: intake.ICLOUD_STOPPED });
+  assert.deepEqual(intake.icloudOutcome("stopped", ended), { next: "say", text: intake.ICLOUD_STOPPED });
+  assert.deepEqual(intake.icloudOutcome("stopped", denied), { next: "say", text: denied.message });
+  assert.deepEqual(intake.icloudOutcome("go", ended), { next: "say", text: ended.message });
+  assert.deepEqual(intake.icloudOutcome("go", { kind: "not_ready" }), { next: "say", text: "Downloading from iCloud isn't in this build." });
+  for (const result of [ok, ended, { kind: "not_ready" }]) assert.deepEqual(intake.icloudOutcome("left", result), { next: "none" });
 });

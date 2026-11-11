@@ -698,6 +698,11 @@ impl NativeBridge {
             OwnerMutation::SetProjectsHome { .. } => ("projects_home", None, None),
             OwnerMutation::MoveProjectsHome { .. } => ("move_projects_home", None, None),
             OwnerMutation::AddExistingFolder { .. } => ("add_existing_folder", None, None),
+            OwnerMutation::MoveProjectHome { project_id, .. } => (
+                "project_move_home",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::StartOnboarding { path, .. } => {
                 ("start_onboarding", onboarded_project(path), None)
             }

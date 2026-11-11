@@ -203,9 +203,12 @@ impl Renewal {
 
 /// Builds a harness command that runs in the managed home with nothing of the engine's
 /// own environment, the way the sign-in custodian runs it, in its own process group.
-/// Inputs: the executable and the managed home. Output: the command.
-fn managed_command(executable: &Path, managed: &Path) -> Command {
-    let mut command = Command::new(executable);
+/// Inputs: the harness entry and the managed home. Output: the command for the install
+/// the entry leads to now, or the error when the harness is not installed.
+fn managed_command(executable: &Path, managed: &Path) -> Result<Command, EngineError> {
+    let program = crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
+        .map_err(crate::engine::io_error)?;
+    let mut command = Command::new(program);
     command
         .env_clear()
         .env("HOME", managed)
@@ -218,7 +221,7 @@ fn managed_command(executable: &Path, managed: &Path) -> Command {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
-    command
+    Ok(command)
 }
 
 /// Starts a renewal child that also holds the account's renewal lock, so the lock outlives
@@ -261,7 +264,7 @@ fn settle(child: &mut Child, deadline: Instant) -> bool {
 /// Output: whether it succeeded within a minute, which outlasts Claude Code's own refresh
 /// request bound.
 fn claude_turn(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
-    let mut command = managed_command(executable, managed);
+    let mut command = managed_command(executable, managed)?;
     command.args(RENEWAL_TURN).env("CLAUDE_CONFIG_DIR", managed);
     let mut child = spawn_locked(&mut command, lock)?;
     Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME))
@@ -272,7 +275,7 @@ fn claude_turn(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<boo
 /// otherwise ignored. Inputs: the executable, the managed home and the renewal lock.
 /// Output: whether the reply arrived in time.
 fn codex_refresh(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
-    let mut command = managed_command(executable, managed);
+    let mut command = managed_command(executable, managed)?;
     command
         .args([
             "-c",

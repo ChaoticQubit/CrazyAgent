@@ -1334,6 +1334,22 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .update_project_setup(&id, setup, name, revision, generation) .await }.await;
             routed(result)
         }
+        "desktop_move_project_home" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                mode: AddMode,
+                overrides: Vec<AddOverride>,
+                generation: u64,
+            }
+            let Args { id, mode, overrides, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .move_project_home(&id, mode, overrides, generation) .await }.await;
+            routed(result)
+        }
         "desktop_remove_project" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -1606,6 +1622,27 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.clone_repo(full_name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_icloud_download" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                path: String,
+            }
+            let Args { path } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_download(path)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_icloud_progress" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_progress()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_icloud_cancel" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_cancel()?; call.await }.await;
             routed(result)
         }
         "desktop_setup_status" => {
@@ -2813,14 +2850,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: u64,
                 version: u64,
-                option: Option<u8>,
-                text: Option<String>,
+                picks: Vec<u8>,
+                comment: Option<String>,
             }
-            let Args { id, version, option, text } = match parse(args) {
+            let Args { id, version, picks, comment } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option.into_iter().collect(), text)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, picks, comment)?; call.await }.await;
             routed(result)
         }
         "desktop_dismiss_question" => {

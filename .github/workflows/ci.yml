@@ -23,6 +23,7 @@ env:
   TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
   CLAUDE_CODE_VERSION: "2.1.309"
   CODEX_VERSION: "0.164.0"
+  UV_VERSION: "0.13.5"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
@@ -68,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           command -v dpkg >/dev/null || { echo "::error::this job needs a Debian or Ubuntu runner with dpkg"; exit 1; }
-          packages=(build-essential pkg-config curl libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap libevent-dev libncurses-dev)
+          packages=(build-essential pkg-config curl libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev bubblewrap libevent-dev libncurses-dev dbus gnome-keyring)
           missing=()
           for package in "${packages[@]}"; do
             [ "$(dpkg -s "$package" 2>/dev/null | sed -n 's/^Status: //p')" = "install ok installed" ] || missing+=("$package")
@@ -138,6 +139,29 @@ jobs:
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
+      - name: Install uv
+        env:
+          UV_TARGET: x86_64-unknown-linux-gnu
+          UV_SHA256: f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/uv/$UV_VERSION/x64"
+          work="$RUNNER_TEMP/uv"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/uv.tar.gz" ]; then
+            cp "$prefix/uv.tar.gz" "$work/uv.tar.gz"
+          fi
+          if ! echo "$UV_SHA256  $work/uv.tar.gz" | sha256sum -c --status - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+            echo "$UV_SHA256  $work/uv.tar.gz" | sha256sum -c -
+            cp "$work/uv.tar.gz" "$prefix/uv.tar.gz.$$"
+            mv "$prefix/uv.tar.gz.$$" "$prefix/uv.tar.gz"
+          fi
+          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
@@ -171,14 +195,31 @@ jobs:
         run: npm run build
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
+      - name: Show the kernel's sandbox features
+        run: |
+          set -euo pipefail
+          echo "kernel $(uname -r)"
+          echo "lsm $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
+          cargo build -p crazyagent --bin crazyagent-landlock --locked --offline
+          helper="${CARGO_TARGET_DIR:-target}/debug/crazyagent-landlock"
+          for args in "--probe" "--probe --limit-network" "--probe --limit-network --open-sockets"; do
+            status=0
+            "$helper" $args || status=$?
+            echo "crazyagent-landlock $args: exit $status"
+          done
       - name: Lint workspace
         run: make lint
       - name: Test engine and desktop crates
-        run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
+        run: |
+          set -euo pipefail
+          dbus-run-session -- bash -euo pipefail -c '
+            printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null
+            make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
+          '
 
   macos:
     name: macOS lint and tests
-    runs-on: ${{ fromJSON(github.event_name == 'push' && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","macOS","badal"]' || '"macos-15"') }}
     timeout-minutes: 150
     env:
       PLATFORM_TESTS_EXCLUDE: credential_platforms linux_sandbox windows_terminal instruction_files::tests::import::a_reftable_checkout_names_the_branch_it_switched_to

@@ -220,6 +220,12 @@ pub enum OwnerMutation {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         overrides: Vec<crate::projects_home::AddOverride>,
     },
+    MoveProjectHome {
+        project_id: ProjectId,
+        mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
+    },
     DeleteProjectFolder {
         path: String,
     },
@@ -478,6 +484,19 @@ impl OwnerMutation {
             } => {
                 let action = crate::projects_home::HomeAction::Added {
                     source: source.clone(),
+                    mode: *mode,
+                    overrides: overrides.clone(),
+                };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveProject {
+                    project_id: project_id.clone(),
                     mode: *mode,
                     overrides: overrides.clone(),
                 };
@@ -1154,6 +1173,12 @@ pub enum OwnerSummary {
     },
 }
 
+/// True for a folder with no iCloud placeholders, whose `FolderSize` reply leaves the count
+/// out, so a client from before the count still reads it.
+fn no_placeholders(count: &u64) -> bool {
+    *count == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
@@ -1283,6 +1308,8 @@ pub enum OwnerData {
     },
     FolderSize {
         bytes: u64,
+        #[serde(default, skip_serializing_if = "no_placeholders")]
+        placeholders: u64,
     },
     Onboarding {
         onboarding: Box<crate::onboarding::OnboardingView>,

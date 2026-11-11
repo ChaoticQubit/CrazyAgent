@@ -412,6 +412,25 @@ pub(in crate::tui) fn project_screen(
         rows = modal(&rows, width, box_width, "Remove project", body, 2, look);
         help = keys;
     }
+    if screen.confirm_move {
+        let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
+        let body = move_ask(screen, box_width - 4, look);
+        rows = modal(
+            &rows,
+            width,
+            box_width,
+            "Move into CrazyAgent folder",
+            body,
+            2,
+            look,
+        );
+        help = vec![
+            ("m", "Move"),
+            ("c", "Copy"),
+            ("n", "Keep it here"),
+            ("Esc", "Keep it here"),
+        ];
+    }
     if let Some(path) = &screen.confirm_delete {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
         let body = vec![
@@ -554,6 +573,42 @@ fn header_status(running: usize, look: &Look) -> Option<Row> {
 }
 
 type Help = Vec<(&'static str, &'static str)>;
+
+/// What the move ask says about the team and its work before a project moves.
+pub(in crate::tui) const MOVE_ASK_TEAM: &str = "Stop the team first (Stop all on the Team tab). Work not landed yet stays in the agents' copies, which follow the move.";
+
+/// What the move ask says about its two ways.
+pub(in crate::tui) const MOVE_ASK_WAYS: &str = "Move takes the folder into your CrazyAgent folder. Copy leaves the old folder where it is and the project uses the copy.";
+
+/// Draws the move ask: that the team must be stopped and its work follows, then Move, Copy
+/// or keeping the project where it is. Inputs: the screen, the box's inner width and the
+/// look. Output: the box rows.
+fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
+    assert!(inner >= REMOVE_BOX_MIN - 4);
+    let mut body = vec![
+        Row::of(
+            format!("Move {} into your CrazyAgent folder?", screen.name),
+            look.fg,
+        ),
+        Row::default(),
+    ];
+    for text in [MOVE_ASK_TEAM, MOVE_ASK_WAYS] {
+        body.extend(
+            wrap_words(text, inner)
+                .iter()
+                .map(|line| Row::of(line.as_str(), look.muted)),
+        );
+        body.push(Row::default());
+    }
+    body.push(
+        Row::of("[ m Move ]", look.fg)
+            .push("   ", Style::new())
+            .push("[ c Copy ]", look.fg)
+            .push("   ", Style::new())
+            .push("[> Keep it here ]", look.selection),
+    );
+    body
+}
 
 /// Draws the remove ask: Remove from dashboard, which keeps every file, and Delete everything
 /// when the engine's preview allows it, with the folders it moves to the Trash, what would be
@@ -2184,7 +2239,9 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry(
             "Folder",
-            Row::of(folder(screen), look.fg).push("   x Remove project", look.muted),
+            Row::of(folder(screen), look.fg)
+                .push("   x Remove project", look.muted)
+                .push("   m Move into CrazyAgent folder", look.muted),
         ),
         entry("Pool", pool),
         entry(

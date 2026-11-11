@@ -85,8 +85,8 @@ fn the_window_passes_only_ids_versions_and_the_choice() {
             &[
                 "id: u64,",
                 "version: u64,",
-                "option: Option<u8>,",
-                "text: Option<String>,"
+                "picks: Vec<u8>,",
+                "comment: Option<String>,"
             ]
         ]
         .concat()

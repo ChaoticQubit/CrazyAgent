@@ -69,6 +69,31 @@ test("New Project preselects Own branch and every level the engine knows has the
   assert.ok(tui.includes(`"${access.FULL_ACCESS_WARNING}"`));
 });
 
+test("New Project preselects Sandboxed where the engine says Own branch can't run, and greys what can't", () => {
+  const linux = "On Linux, agents run Sandboxed in this version.";
+  const levels = (reason) => [
+    { access: "sandboxed", label: "Sandboxed", unavailable: null },
+    { access: "own_branch", label: "Own branch", unavailable: reason },
+    { access: "full", label: "Full access", unavailable: reason },
+  ];
+  const draft = wizard.emptyDraft();
+  assert.equal(wizard.draftAccess(draft, levels(null)), "own_branch");
+  assert.equal(wizard.draftAccess(draft, levels(linux)), "sandboxed");
+  assert.equal(wizard.draftAccess({ ...draft, access: "full" }, levels(null)), "full");
+  assert.equal(wizard.draftAccess({ ...draft, access: "full" }, levels(linux)), "sandboxed");
+  assert.equal(wizard.draftAccess({ ...draft, access: undefined }, levels(linux)), "sandboxed", "a draft kept from before the setting follows the same rule");
+  assert.equal(wizard.draftAccess(draft, undefined), "own_branch", "an engine that names no levels keeps the preselect");
+  assert.equal(wizard.levelUnavailable(levels(linux), "own_branch"), linux);
+  assert.equal(wizard.levelUnavailable(levels(linux), "sandboxed"), null);
+  assert.equal(wizard.levelUnavailable(undefined, "full"), null);
+  const page = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
+  assert.match(page, /const access = draftAccess\(draft, catalogValue\?\.agent_access\);/, "create saves the level the form shows");
+  assert.match(page, /<AccessLevels name="np-access" value=\{draftAccess\(draft, catalogValue\?\.agent_access\)\} unavailable=\{\(level\) => levelUnavailable\(catalogValue\?\.agent_access, level\)\}/);
+  assert.ok(!page.includes("unavailable={() => null}"));
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/project_setup.rs", import.meta.url), "utf8");
+  assert.match(engine, /pub agent_access: Vec<LevelView>,/, "the project catalog carries the levels this computer can run");
+});
+
 test("every engine refusal for agent access has its own sentence", () => {
   const missing = new Set();
   for (const file of ["sandbox/policy.rs", "project_setup.rs", "storage.rs"]) {

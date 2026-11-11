@@ -22,7 +22,12 @@ const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/r
 const DEVELOPER_TOOLS: &str = "/Library/Developer/CommandLineTools";
 /// The base path entry holding the xcrun shims the Command Line Tools' folder goes before.
 const SYSTEM_BIN: &str = "/usr/bin";
+/// The system temp folder by its real path, which the agent short temp folders sit in.
+#[cfg(target_os = "macos")]
 const TMP_PARENT: &str = "/private/tmp";
+/// The system temp folder, which the agent short temp folders sit in.
+#[cfg(not(target_os = "macos"))]
+const TMP_PARENT: &str = "/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
 /// The folder of a native lead's short temp folder that is the lead's own temp folder.
@@ -512,8 +517,8 @@ pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
     parts.join(":")
 }
 
-/// The short temp folder of the agent whose home is `home`: `/private/tmp/ca-` and 16 hex
-/// digits of the home path's SHA-256, short enough for Unix socket paths. Input: the agent
+/// The short temp folder of the agent whose home is `home`: `ca-` and 16 hex digits of the
+/// home path's SHA-256 in [`TMP_PARENT`] (`/private/tmp` on macOS, `/tmp` elsewhere), short enough for Unix socket paths. Input: the agent
 /// home. Output: the path, which may not exist.
 pub fn tmp_path(home: &Path) -> PathBuf {
     let digest = Sha256::digest(home.as_os_str().as_encoded_bytes());

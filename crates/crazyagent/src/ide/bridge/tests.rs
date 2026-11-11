@@ -1478,6 +1478,9 @@ async fn the_ide_pushes_its_project_folder_through_the_engine_and_nothing_else()
 /// SECAUDIT-IDE-SERVER-INDEX: the shim's index call reaches the engine over the real frame
 /// and carries one command's staged change into the project's index, while a slot of any
 /// other shape and another project's folder are refused.
+/// macOS only: the private index is carried by the Command Line Tools git under Seatbelt;
+/// elsewhere the step is refused with `index_git_unavailable`, asserted in its own Linux row.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn the_ide_carries_a_private_index_through_the_engine() {
     use super::remote_git::tests::{Daemon, ok, owner_repository};

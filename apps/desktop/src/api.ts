@@ -341,6 +341,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
+  project_move_home: "moving the project into your projects folder",
   start_onboarding: "starting project setup",
   run_setup: "running project setup",
   pack_set: "changing the default pack",

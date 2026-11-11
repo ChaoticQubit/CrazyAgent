@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -57,6 +57,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
+  agent_access?: AccessLevel[];
 }
 
 export interface StoredSetup {
@@ -156,6 +157,14 @@ export interface ContextChunk {
 /** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
+/** One access level as the engine names it, with the reason it can't run agents on this
+ * computer, null when it runs. */
+export interface AccessLevel {
+  access: AgentAccess;
+  label: string;
+  unavailable: string | null;
+}
+
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
  * the whole network, https is port 443 only, none is the model alone: a hosted model's own
  * hosts through the engine's model proxy, or only a local model's port on loopback. It does
@@ -191,7 +200,7 @@ export interface AgentPolicy {
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
-  levels: { access: AgentAccess; label: string; unavailable: string | null }[];
+  levels: AccessLevel[];
   networks: { network: AgentNetwork; label: string }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;
@@ -713,6 +722,14 @@ export async function removeProject(id: string, generation: number, deleteName: 
   const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
   if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
   return result;
+}
+
+/** Moves or copies a project kept where it is into the projects folder. The engine waits for
+ * its team to stop, moves the folder and points the project and its agents' copies at the new
+ * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
+ * generation. Output: the receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
 }
 
 export const PAGES_MAX = 50;

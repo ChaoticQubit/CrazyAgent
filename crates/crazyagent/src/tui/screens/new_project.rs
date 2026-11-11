@@ -395,7 +395,9 @@ impl Wizard {
             picker: None,
             note: None,
             phase: Phase::Editing,
-            access: AgentAccess::NEW_PROJECT,
+            access: Some(AgentAccess::NEW_PROJECT)
+                .filter(|level| level.unavailable().is_none())
+                .unwrap_or_default(),
         };
         wizard.assert_consistent();
         wizard
