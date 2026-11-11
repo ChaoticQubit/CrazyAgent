@@ -147,9 +147,10 @@ fn owner_turn_condition(connection: &Connection) -> Result<&'static str, EngineE
 
 /// One master session as the Sessions list shows it. `created` and `last_activity` are
 /// engine revisions; `started_ms` and `active_ms` are wall-clock times, absent for sessions
-/// older than the marks. `turns` counts the engine-run owner turns and the turns run in the
-/// live terminal; `last_line` is the newest engine-run line, else the newest terminal reply
-/// kept. `agents` names the session's own sub-agents, newest first;
+/// older than the marks. `turns`, `first_line` and `last_line` come from the session's
+/// stored messages, whatever master ran them: the turns the owner or the engine opened,
+/// the first line the owner wrote and the newest line the owner or a master wrote.
+/// `agents` names the session's own sub-agents, newest first;
 /// `results_waiting` counts finished sub-agent results queued for this session's master.
 /// `mode` and `harness` name the master that ran the session's newest stored message, or
 /// took the conversation over last; both are absent for a session with no stored message.
@@ -803,7 +804,7 @@ pub(crate) fn list(
         if created == 0 || version < created || active < version {
             return Err(error("master_session_record"));
         }
-        let (terminal_turns, terminal_line) = terminal(connection, &session_id)?;
+        let (turns, first_line, last_line) = listed_conversation(connection, &session_id)?;
         let (mode, harness) = newest_runner(connection, &session_id)?.unzip();
         let summary = MasterSessionSummary {
             phase,
@@ -811,11 +812,9 @@ pub(crate) fn list(
             last_activity: Cursor::new(active),
             started_ms: started_ms.map(u64::try_from).transpose().map_err(error)?,
             active_ms: active_ms.map(u64::try_from).transpose().map_err(error)?,
-            turns: turn_count(connection, &session_id)?
-                .checked_add(terminal_turns)
-                .ok_or_else(|| error("master_session_record"))?,
-            first_line: first_line(connection, &session_id)?,
-            last_line: last_line(connection, &session_id)?.or(terminal_line),
+            turns,
+            first_line,
+            last_line,
             agents: agent_names(connection, project, &session_id)?,
             results_waiting: results_waiting(connection, &session_id)?,
             mode,
@@ -834,70 +833,45 @@ pub(crate) fn list(
     Ok(sessions)
 }
 
-fn turn_count(connection: &Connection, session: &SessionId) -> Result<u64, EngineError> {
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM master_turns WHERE session=?1",
-            [session.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    u64::try_from(count).map_err(error)
-}
-
-/// The turns a session ran in its live terminal and the newest line kept from them, clipped
-/// for the list. Takes the connection and session. Returns 0 and None for a session with none.
-fn terminal(
+/// What the Sessions list shows of a session's stored conversation, whatever master ran
+/// it: how many turns the owner or the engine opened, the first line the owner wrote and
+/// the newest line the owner or a master wrote, both clipped for the list. Takes the
+/// connection and session. Returns the three; 0 and no lines for a session with nothing
+/// stored or a database without the store.
+fn listed_conversation(
     connection: &Connection,
     session: &SessionId,
-) -> Result<(u64, Option<String>), EngineError> {
-    let row: Option<(i64, Option<String>)> = connection
+) -> Result<(u64, Option<String>, Option<String>), EngineError> {
+    if !table_exists(connection, "session_messages")? {
+        return Ok((0, None, None));
+    }
+    let turns: i64 = connection
         .query_row(
-            "SELECT turns,CASE WHEN length(CAST(last_line AS BLOB))<=1024 THEN last_line END
-             FROM session_owner_turns WHERE session=?1",
-            [session.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(error)?;
-    let (turns, line) = row.unwrap_or((0, None));
-    Ok((
-        u64::try_from(turns).map_err(error)?,
-        line.and_then(|line| clip(&line, LINE_CHARS_MAX)),
-    ))
-}
-
-/// The first line of a session's first owner message, clipped for the list.
-/// Takes the connection and session. Returns the line, or None before any message.
-fn first_line(connection: &Connection, session: &SessionId) -> Result<Option<String>, EngineError> {
-    let text: Option<Option<String>> = connection
-        .query_row(
-            "SELECT CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END FROM master_turns t
-             JOIN conversation_entries c ON c.event_cursor=t.input AND c.kind='message'
-             WHERE t.session=?1 ORDER BY t.ordinal LIMIT 1",
+            "SELECT COUNT(*) FROM session_messages
+             WHERE session=?1 AND speaker IN ('owner','engine')",
             [session.as_str()],
             |row| row.get(0),
         )
-        .optional()
         .map_err(error)?;
-    Ok(text.flatten().and_then(|text| clip(&text, LINE_CHARS_MAX)))
-}
-
-/// The newest line of a session: its last turn's reply, else that turn's owner message.
-/// Takes the connection and session. Returns the clipped line, or None before any turn.
-fn last_line(connection: &Connection, session: &SessionId) -> Result<Option<String>, EngineError> {
-    let text: Option<Option<String>> = connection
-        .query_row(
-            "SELECT COALESCE(CASE WHEN length(CAST(t.body AS BLOB))<=16384 THEN json_extract(t.body,'$.reply.text') END,
-                             CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END)
-             FROM master_turns t LEFT JOIN conversation_entries c ON c.event_cursor=t.input AND c.kind='message'
-             WHERE t.session=?1 ORDER BY t.ordinal DESC LIMIT 1",
-            [session.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    Ok(text.flatten().and_then(|text| clip(&text, LINE_CHARS_MAX)))
+    let line = |sql: &str| -> Result<Option<String>, EngineError> {
+        let text: Option<Option<String>> = connection
+            .query_row(sql, [session.as_str()], |row| row.get(0))
+            .optional()
+            .map_err(error)?;
+        Ok(text.flatten().and_then(|text| clip(&text, LINE_CHARS_MAX)))
+    };
+    let first = line(
+        "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM session_messages
+         WHERE session=?1 AND speaker='owner' AND text IS NOT NULL ORDER BY seq LIMIT 1",
+    )?;
+    let last = line(
+        "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM session_messages
+         WHERE session=?1 AND speaker IN ('owner','master') AND text IS NOT NULL
+         ORDER BY seq DESC LIMIT 1",
+    )?;
+    let turns = u64::try_from(turns).map_err(error)?;
+    assert!(turns > 0 || first.is_none());
+    Ok((turns, first, last))
 }
 
 /// One agent a session owns, as its master's context and the list name it.
@@ -4301,5 +4275,32 @@ mod tests {
 
         assert!(text.contains("You: Said since"), "{text}");
         assert!(!text.contains("Left behind"), "{text}");
+    }
+    /// The Sessions list reads one store for every master: a session whose turns ran on the
+    /// one-turn master and then in a Codex terminal counts them all, shows the owner's first
+    /// line and the newest line whoever wrote it, and names the master that ran last.
+    #[cfg(unix)]
+    #[test]
+    fn the_session_list_counts_and_quotes_every_master_s_messages() {
+        let (_folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let session = SessionId::new("s-listed").unwrap();
+        old_session(&connection, "s-listed", "rcli");
+        let rcli = crate::master_session::MasterBackend::Rcli;
+        let asked = super::Asked::Owner(Some("Name the release\nand date it"));
+        super::one_turn_asked(&connection, &project, &session, rcli, "turn-1", &asked).unwrap();
+        super::one_turn_reply(&connection, &session, "turn-1", "Call it Aurora").unwrap();
+        super::mark_owner_turn(&connection, &project, "s-listed", "codex").unwrap();
+        super::mark_owner_reply(&connection, &project, "s-listed", "codex", "Dated for May")
+            .unwrap();
+
+        let listed = super::list(&connection, &project).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].turns, 2);
+        assert_eq!(listed[0].first_line.as_deref(), Some("Name the release"));
+        assert_eq!(listed[0].last_line.as_deref(), Some("Dated for May"));
+        assert_eq!(listed[0].mode, Some(super::MasterMode::Live));
+        assert_eq!(listed[0].harness.as_deref(), Some("codex"));
     }
 }

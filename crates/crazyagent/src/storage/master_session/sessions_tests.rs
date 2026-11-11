@@ -1554,8 +1554,8 @@ fn summary_of<'a>(
 }
 
 /// N-D14: the Sessions list counts every turn run in a session's live terminal as a message,
-/// added to its engine-run turns, also when an 18.14 engine recorded it in the two-column
-/// table: a row of a session with no engine turn counts as the one turn it proves, a row of
+/// added to its engine-run turns, also when an 18.14 engine, which had no message store,
+/// recorded it in the two-column table and this engine moves it into the store: a row of a session with no engine turn counts as the one turn it proves, a row of
 /// a session with engine turns may be a kept conversation's backfill and adds none (ND14-L1),
 /// and later turns count on.
 #[tokio::test]
@@ -1602,7 +1602,8 @@ async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18
     let root = case.close().await;
     let db = Connection::open(root.path().join("engine.db")).unwrap();
     db.execute_batch(
-        "DROP TABLE session_owner_turns;
+        "DROP TABLE session_messages;
+         DROP TABLE session_owner_turns;
          CREATE TABLE session_owner_turns (
              session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
              project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128)
@@ -1796,6 +1797,7 @@ async fn delete_removes_a_parked_session_and_its_transcript_inside_the_master_ho
         "SELECT COUNT(*) FROM master_preparations WHERE session=?1",
         "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1",
         "SELECT COUNT(*) FROM session_owner_turns WHERE session=?1",
+        "SELECT COUNT(*) FROM session_messages WHERE session=?1",
         "SELECT COUNT(*) FROM session_marks WHERE session=?1",
     ] {
         assert_eq!(count(&case, table, &kept.session_id), 0, "{table}");

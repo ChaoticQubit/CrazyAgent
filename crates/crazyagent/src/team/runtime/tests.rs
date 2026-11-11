@@ -25642,12 +25642,16 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
     let marked: i64 = fixture
         .connection
         .query_row(
-            "SELECT COUNT(*) FROM session_owner_turns WHERE session=?1 AND project=?2",
+            "SELECT COUNT(*) FROM session_messages
+             WHERE session=?1 AND project=?2 AND speaker='owner' AND mode='live'",
             params![session.as_str(), PROJECT],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(marked, 1);
+    assert_eq!(
+        marked, 2,
+        "one owner message per terminal turn in the store"
+    );
 }
 
 /// Ends the tmux servers one native lead test started, on every exit of the test: the lead's
