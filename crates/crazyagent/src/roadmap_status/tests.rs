@@ -1059,6 +1059,7 @@ fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "local-model".into(),
+        key: None,
     };
     let project = alpha();
     let ask = |name: &str| {

@@ -1563,8 +1563,8 @@ fn lead_delegate(
 }
 
 /// Tells whether a project's pool holds an account a harness kind can run on now
-/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: a keyless endpoint,
-/// or a native managed profile whose latest sign-in observed an account. Takes the
+/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: an endpoint, keyed or
+/// not, or a native managed profile whose latest sign-in observed an account. Takes the
 /// database, the live access, the project and the launch harness. Returns the answer, or
 /// a SQLite failure.
 fn signed_in_account(
