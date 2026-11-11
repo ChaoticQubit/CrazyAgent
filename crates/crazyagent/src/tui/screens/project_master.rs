@@ -5,7 +5,7 @@ use crate::conversation::ConversationEntry;
 use crate::master_session::{
     MasterActivityLine, MasterReason, MasterSessionPhase, MasterTurnPhase, MasterTurnView,
 };
-use crate::master_sessions::{MasterMode, MessageSpeaker, SessionMessage};
+use crate::master_sessions::{MasterMode, MessageSource, MessageSpeaker, SessionMessage};
 
 pub(in crate::tui) const TURNS_SHOWN_MAX: usize = 200;
 pub(in crate::tui) const ACTIVITY_QUIET_MS: i64 = 60_000;
@@ -25,14 +25,32 @@ pub(in crate::tui) struct MasterRead<'a> {
 pub(in crate::tui) const TYPED_IN_TERMINAL: &str =
     "Typed in the master's terminal. The words were not read.";
 
+/// What marks a stored message whose words the engine did not see typed.
+pub(in crate::tui) const FROM_RECORD: &str = "read from the harness record";
+/// What leads the owner's words in the transcript when they were read from the harness record.
+pub(in crate::tui) const RECORD_TYPED: &str =
+    "Typed in the master's terminal, as the harness record has it:";
+
+/// Whether a stored message holds words the engine did not see typed: text read from the
+/// harness's own record, or a row that stands for a terminal turn an older engine only
+/// counted. Input: the row. Output: whether a view marks it.
+pub(in crate::tui) fn from_record(row: &SessionMessage) -> bool {
+    matches!(row.source, MessageSource::Record | MessageSource::Counter)
+}
+
 /// One stored message as the transcript shows it: the owner's words, the master's reply,
 /// or a notice for a request the engine typed, for the divider where another master took
-/// the conversation over and for a terminal turn whose typed words were not read. Input:
-/// the row. Output: the message, or none for any other row with no text. Stored text is
-/// untrusted: its terminal escapes and control characters are removed here, before the
-/// transcript wraps or measures it.
+/// the conversation over and for a terminal turn whose typed words were not read. Owner
+/// words read from the harness record are a notice that says so, never the owner's own
+/// message. Input: the row. Output: the message, or none for any other row with no text.
+/// Stored text is untrusted: its terminal escapes and control characters are removed here,
+/// before the transcript wraps or measures it.
 fn stored_message(row: &SessionMessage) -> Option<Message> {
     let (speaker, text) = match (row.speaker, &row.text) {
+        (MessageSpeaker::Owner, Some(text)) if from_record(row) => (
+            Speaker::Notice,
+            format!("{RECORD_TYPED} {}", sanitize(text)),
+        ),
         (MessageSpeaker::Owner, Some(text)) => (Speaker::You, sanitize(text)),
         (MessageSpeaker::Owner, None) => (Speaker::Notice, TYPED_IN_TERMINAL.to_owned()),
         (MessageSpeaker::Master, Some(text)) => (Speaker::Master, sanitize(text)),
@@ -681,6 +699,50 @@ mod tests {
                 message.text
             );
         }
+    }
+
+    #[test]
+    fn owner_words_read_from_the_harness_record_are_a_notice_and_never_the_owner_s_message() {
+        use MasterMode::Live;
+        use MessageSpeaker::{Engine, Master, Owner};
+        let from = |source: MessageSource, row: SessionMessage| SessionMessage { source, ..row };
+        let rows = [
+            from(
+                MessageSource::Record,
+                stored(1, Owner, Live, Some("Ship it.\u{1b}[2J")),
+            ),
+            from(
+                MessageSource::Record,
+                stored(2, Master, Live, Some("Shipped.")),
+            ),
+            from(MessageSource::Counter, stored(3, Owner, Live, None)),
+            from(
+                MessageSource::Counter,
+                stored(4, Master, Live, Some("Last line.")),
+            ),
+            stored(5, Engine, Live, Some("A result came in.")),
+            stored(6, Owner, Live, Some("Seen typed.")),
+            stored(7, Master, Live, Some("Done.")),
+        ];
+        assert_eq!(
+            rows.iter().map(from_record).collect::<Vec<_>>(),
+            [true, true, true, true, false, false, false]
+        );
+        let transcript = build_stored(Some(MasterSessionPhase::Configured), &[], &[], &rows);
+        let typed = format!("{RECORD_TYPED} Ship it.");
+        assert_eq!(
+            said(&transcript),
+            [
+                (Speaker::Notice, typed.as_str(), false),
+                (Speaker::Master, "Shipped.", false),
+                (Speaker::Notice, TYPED_IN_TERMINAL, false),
+                (Speaker::Master, "Last line.", false),
+                (Speaker::Notice, "A result came in.", false),
+                (Speaker::You, "Seen typed.", false),
+                (Speaker::Master, "Done.", false),
+            ],
+            "only the words the engine saw typed are the owner's message"
+        );
     }
 
     fn said(transcript: &Transcript) -> Vec<(Speaker, &str, bool)> {

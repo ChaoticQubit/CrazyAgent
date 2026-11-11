@@ -697,3 +697,53 @@ fn an_opened_session_draws_stored_text_without_terminal_escapes_and_inside_its_w
         "every hidden character shows as an escape"
     );
 }
+
+#[test]
+fn an_opened_session_says_so_beside_who_said_it_when_words_come_from_the_harness_record() {
+    use crate::master_sessions::MessageSource;
+    use MasterMode::Live;
+    use MessageSpeaker::{Master, Owner};
+    let look = Look::plain();
+    let mut sessions = opened();
+    sessions.key(press(KeyCode::Down), true, false);
+    sessions.key(press(KeyCode::Char('m')), true, false);
+    let from = |source: MessageSource, row: SessionMessage| SessionMessage { source, ..row };
+    let rows = [
+        from(
+            MessageSource::Record,
+            stored(1, Owner, Live, "claude-code", Some("Ship it.")),
+        ),
+        from(
+            MessageSource::Record,
+            stored(2, Master, Live, "claude-code", Some("Shipped.")),
+        ),
+        from(
+            MessageSource::Counter,
+            stored(3, Owner, Live, "claude-code", None),
+        ),
+        from(
+            MessageSource::Counter,
+            stored(4, Master, Live, "claude-code", Some("Last line.")),
+        ),
+        stored(5, Owner, Live, "claude-code", Some("Seen typed.")),
+        stored(6, Master, Live, "claude-code", Some("Done.")),
+    ];
+    sessions.set_messages(Some((&rows[..], true)));
+    let (body, _) = sessions.view(76, 40, NOW, 0, &look).unwrap();
+    assert_eq!(
+        &texts(&body)[2..],
+        [
+            "You (read from the harness record)",
+            "  Ship it.",
+            "Claude Code (read from the harness record)",
+            "  Shipped.",
+            TYPED_IN_TERMINAL,
+            "Claude Code (read from the harness record)",
+            "  Last line.",
+            "You",
+            "  Seen typed.",
+            "Claude Code",
+            "  Done.",
+        ]
+    );
+}
