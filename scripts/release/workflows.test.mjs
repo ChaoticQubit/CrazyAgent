@@ -129,6 +129,16 @@ test("the update manifests cover exactly the targets the release matrix builds, 
   assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]);
 });
 
+test("the Windows CI job runs on every event and shows its failures, but cannot fail the CI workflow until its sandbox holds", async () => {
+  const jobs = block(await workflow("ci.yml"), 0, "jobs").join("\n");
+  const windows = block(jobs, 2, "windows");
+  assert(windows.includes("    name: Windows lint and tests (informational until v2.2.1)"));
+  assert(windows.includes("    continue-on-error: true"));
+  assert(!windows.some((line) => /^ {4}if:/.test(line)), "the job always runs");
+  assert.equal(windows.filter((line) => line.includes("continue-on-error")).length, 1, "no Windows step hides its own failure");
+  for (const job of ["linux", "macos"]) assert(!block(jobs, 2, job).some((line) => line.includes("continue-on-error")), job);
+});
+
 test("every badal job refuses to run under Rosetta before anything else", async () => {
   const [ci] = steps(await workflow("ci.yml"), "macos");
   assert.match(ci, new RegExp(`^ {6}- name: ${ROSETTA}\n {8}run: \\|`));
