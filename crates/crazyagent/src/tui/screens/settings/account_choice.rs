@@ -1,8 +1,8 @@
 use crate::pools::PoolSummary;
 use crate::protocol::CredentialRef;
 use crate::scheduling::{
-    AccountPlan, Pin, PoolRanking, RANK_MAX, RESERVE_PERCENT_MAX, Schedule, ScheduleChange,
-    Standing, Strategy,
+    AccountPlan, LiveMasterAccount, Pin, PoolRanking, RANK_MAX, RESERVE_PERCENT_MAX, Schedule,
+    ScheduleChange, Standing, Strategy,
 };
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Modal, hint};
@@ -15,10 +15,22 @@ const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// The account choice editor over one pool, shown as a modal on Settings, Pools: row 0 is
 /// the app strategy, row 1 the pool's own strategy and each later row one member's rank,
-/// reserve and pin. Each change goes to the engine at once.
+/// reserve and pin. The app-wide Live master account choice (DEC-139) shows under the
+/// strategies and changes with `m` from any row. Each change goes to the engine at once.
 pub struct ChoiceEditor {
     pub pool: CredentialRef,
     pub row: usize,
+}
+
+/// The Live master account choice after the given one, wrapping to the first.
+/// Takes the current choice. Returns the choice to save.
+pub fn next_live_master(current: LiveMasterAccount) -> LiveMasterAccount {
+    let all = LiveMasterAccount::ALL;
+    let at = all
+        .iter()
+        .position(|choice| *choice == current)
+        .expect("every choice is listed");
+    all[(at + 1) % all.len()]
 }
 
 /// The next strategy in the picker. Takes the current one, the direction and whether the
@@ -237,8 +249,9 @@ impl ChoiceEditor {
         Self { pool, row: 0 }
     }
 
-    /// Handles one key: arrows move and change, `<` and `>` move a reserve and `p` cycles a
-    /// pin. Takes the key, the schedule with every change sent so far, and the pool.
+    /// Handles one key: arrows move and change, `<` and `>` move a reserve, `p` cycles a
+    /// pin and `m` changes the Live master account choice. Takes the key, the schedule with
+    /// every change sent so far, and the pool.
     /// Returns the change the key makes, for the caller to apply and send to the engine.
     pub fn key(
         &mut self,
@@ -265,6 +278,9 @@ impl ChoiceEditor {
             Key::Char('p') => self.member(schedule, pool, |plan| AccountPlan {
                 pin: next_pin(plan.pin),
                 ..plan
+            }),
+            Key::Char('m') => Some(ScheduleChange::LiveMaster {
+                choice: next_live_master(schedule.live_master),
             }),
             _ => None,
         }
@@ -335,6 +351,12 @@ impl ChoiceEditor {
                     |own| own.label().to_owned()
                 )
             )),
+            Line::raw(format!(
+                "  {}{}",
+                clipped("Live master account", NAME_WIDTH),
+                schedule.live_master.label()
+            )),
+            Line::raw(format!("    {}", schedule.live_master.detail())),
             Line::default(),
         ];
         for (index, member) in pool.members.iter().enumerate() {
@@ -371,6 +393,7 @@ impl ChoiceEditor {
                 hint(&arrows, "Order or rank"),
                 hint("< >", "Reserve"),
                 hint("p", "Pin"),
+                hint("m", "Live master account"),
                 hint("Esc", "Close"),
             ],
         )

@@ -76,7 +76,9 @@ const INSTRUCTION_CHECK_EVERY: Duration = Duration::from_secs(2);
 /// How often an idle live master's account is compared with its pool's top account under
 /// the Live master account choice Move when idle (DEC-139).
 const MOVE_CHECK_EVERY: Duration = Duration::from_secs(2);
-/// The one team note a live master's move to its pool's top account leaves (DEC-139).
+/// The one team note a live master's move to its pool's top account leaves (DEC-139). It is
+/// written after any note of the start itself, so it is the newest engine note, which the
+/// desktop master area shows.
 const LIVE_MASTER_MOVED: &str = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
 const SESSION_EVENTS_MAX: usize = 200_000;
@@ -3642,11 +3644,11 @@ impl TeamRuntime {
         match self.start_master(stored, access, &harness, &account, session.as_deref())? {
             Start::Started((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
-                if left.is_some_and(|left| left != account.connection) {
-                    self.note(project, LIVE_MASTER_MOVED)?;
-                }
                 if let Some(note) = note {
                     self.note(project, &note)?;
+                }
+                if left.is_some_and(|left| left != account.connection) {
+                    self.note(project, LIVE_MASTER_MOVED)?;
                 }
                 self.brief(stored, access, id)
             }

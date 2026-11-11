@@ -1087,6 +1087,54 @@ mod tests {
     }
 
     #[test]
+    fn account_choice_shows_the_live_master_account_choice_and_m_sets_each_option() {
+        use crate::scheduling::{LiveMasterAccount, ScheduleChange};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.key(&Key::Char('o'), &mut ctx);
+        assert!(matches!(
+            ctx.next_request(),
+            Some(Request::Settings(job)) if matches!(*job, SettingsJob::Schedule)
+        ));
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let shown = body(&screen.modal(&ctx).expect("the editor shows").0);
+        let line = |shown: &str| {
+            shown
+                .lines()
+                .find(|line| line.contains("Live master account"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{shown}"))
+        };
+        assert!(
+            line(&shown).ends_with("Keep start account"),
+            "nothing stored reads the default: {shown}"
+        );
+        assert!(shown.contains(LiveMasterAccount::Keep.detail()), "{shown}");
+        for choice in [LiveMasterAccount::MoveWhenIdle, LiveMasterAccount::Keep] {
+            screen.key(&Key::Char('m'), &mut ctx);
+            assert_eq!(change(&mut ctx), ScheduleChange::LiveMaster { choice });
+            let shown = body(&screen.modal(&ctx).unwrap().0);
+            assert!(line(&shown).ends_with(choice.label()), "{shown}");
+            assert!(shown.contains(choice.detail()), "{shown}");
+        }
+        assert_eq!(ctx.queued(), 0);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Char('m'), &mut ctx);
+        assert_eq!(
+            change(&mut ctx),
+            ScheduleChange::LiveMaster {
+                choice: LiveMasterAccount::MoveWhenIdle
+            },
+            "the key works from a member's row too"
+        );
+    }
+
+    #[test]
     fn account_choice_steps_stay_in_range() {
         use super::super::account_choice::{cycle, next_pin, plan_line, rank_step, reserve_step};
         use crate::scheduling::{AccountPlan, Pin, Strategy};
