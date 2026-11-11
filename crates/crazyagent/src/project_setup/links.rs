@@ -2,7 +2,8 @@ use super::{ResearchKind, failure};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, Transaction, params};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -11,6 +12,11 @@ mod tests;
 pub const LINKS_MAX: usize = 32;
 /// The most bytes of one linked path, below the project folder.
 pub const LINK_PATH_BYTES_MAX: usize = 512;
+/// The most bytes read from one linked file; a longer file is not read at all.
+pub const LINK_BYTES_MAX: u64 = 256 * 1024;
+/// The most stored rows one listing looks at, so rows of kinds a newer engine wrote
+/// cannot hide the links this engine reads.
+const LINK_ROWS_SCANNED: usize = 8 * LINKS_MAX;
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS project_doc_links (
     project TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -32,6 +38,13 @@ pub enum LinkKind {
 pub struct DocLink {
     pub path: String,
     pub kind: LinkKind,
+}
+
+/// The text of one file read below the project folder, with its path below that folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedText {
+    pub path: String,
+    pub text: String,
 }
 
 /// Creates the links table. Input: the engine connection. Output: unit or `projects_unavailable`.
@@ -67,7 +80,6 @@ pub fn set(
         )
         .map_err(|_| failure("projects_unavailable"))?;
     }
-    assert!(links.len() <= LINKS_MAX);
     Ok(())
 }
 
@@ -84,7 +96,7 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<DocLink>, Engine
         )
         .map_err(unavailable)?;
     let rows = statement
-        .query_map(params![project.as_str(), LINKS_MAX as i64], |row| {
+        .query_map(params![project.as_str(), LINK_ROWS_SCANNED as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(unavailable)?;
@@ -94,77 +106,125 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<DocLink>, Engine
         if let Some(kind) = parse_kind(&kind).filter(|_| below_folder(&path)) {
             links.push(DocLink { path, kind });
         }
+        if links.len() == LINKS_MAX {
+            break;
+        }
     }
-    assert!(links.len() <= LINKS_MAX);
     Ok(links)
 }
 
-/// The file the project's roadmap is read from: the first linked roadmap that is a regular
-/// file inside `folder`, else the roadmap the planning job wrote under the engine folder.
-/// Inputs: the engine connection, the project and its folder. Output: the path, none when
-/// neither exists, or `projects_unavailable`.
-pub fn roadmap_file(
+/// The project's roadmap: the first linked roadmap [`read_linked`] reads, else the roadmap
+/// the planning job wrote in the engine folder, read the same way. Inputs: the engine
+/// connection, the project and its folder. Output: the roadmap, none when neither reads, or
+/// `projects_unavailable`.
+pub fn roadmap(
     db: &Connection,
     project: &ProjectId,
     folder: &Path,
-) -> Result<Option<PathBuf>, EngineError> {
+) -> Result<Option<LinkedText>, EngineError> {
     let linked = list(db, project)?
         .into_iter()
         .filter(|link| link.kind == LinkKind::Roadmap)
-        .find_map(|link| inside(folder, &link.path));
-    let planned = crate::projects_home::state_folder(folder).join(crate::planning::ROADMAP);
-    Ok(linked.or_else(|| regular(&planned).then_some(planned)))
+        .find_map(|link| {
+            read_linked(folder, &link.path).map(|text| LinkedText {
+                path: link.path,
+                text,
+            })
+        });
+    if linked.is_some() {
+        return Ok(linked);
+    }
+    let planned = if crate::projects_home::state_folder(folder) == folder {
+        crate::planning::ROADMAP.to_owned()
+    } else {
+        format!(
+            "{}/{}",
+            crate::projects_home::CRAZYAGENT_DIRECTORY,
+            crate::planning::ROADMAP
+        )
+    };
+    Ok(
+        read_beneath(folder, Path::new(&planned)).map(|text| LinkedText {
+            path: planned,
+            text,
+        }),
+    )
 }
 
-/// The linked research files that are regular files inside `folder`, in path order.
-/// Inputs: the engine connection, the project and its folder. Output: each file's research
-/// kind and path, or `projects_unavailable`.
-pub fn research_files(
+/// The linked research files [`read_linked`] reads, in path order. Inputs: the engine
+/// connection, the project and its folder. Output: each file's research kind and text, or
+/// `projects_unavailable`.
+pub fn research(
     db: &Connection,
     project: &ProjectId,
     folder: &Path,
-) -> Result<Vec<(ResearchKind, PathBuf)>, EngineError> {
-    let files: Vec<(ResearchKind, PathBuf)> = list(db, project)?
+) -> Result<Vec<(ResearchKind, LinkedText)>, EngineError> {
+    Ok(list(db, project)?
         .into_iter()
         .filter_map(|link| match link.kind {
-            LinkKind::Research(kind) => inside(folder, &link.path).map(|path| (kind, path)),
+            LinkKind::Research(kind) => read_linked(folder, &link.path).map(|text| {
+                (
+                    kind,
+                    LinkedText {
+                        path: link.path,
+                        text,
+                    },
+                )
+            }),
             LinkKind::Roadmap => None,
         })
-        .collect();
-    assert!(files.len() <= LINKS_MAX);
-    Ok(files)
+        .collect())
+}
+
+/// Reads one linked file below `folder` as text, opened with no link followed at any part
+/// of its path and no FIFO waited on, then checked through the open file itself, so nothing
+/// swapped in after the link was saved is read. Inputs: the project folder and the stored
+/// path. Output: the text, or none for a path [`set`] refuses, a missing file, a link, a
+/// folder, a FIFO, a hard-linked file, more than [`LINK_BYTES_MAX`] bytes or invalid UTF-8.
+pub fn read_linked(folder: &Path, path: &str) -> Option<String> {
+    if !below_folder(path) {
+        return None;
+    }
+    read_beneath(folder, Path::new(path))
+}
+
+/// Reads one regular file below `folder` through [`crate::platform::open_plain_beneath`],
+/// refusing a file with a second hard link, since its other name may lie outside the folder.
+/// Inputs: the folder and the relative path. Output: the text, or none.
+fn read_beneath(folder: &Path, below: &Path) -> Option<String> {
+    let file = crate::platform::open_plain_beneath(folder, below).ok()?;
+    let opened = file.metadata().ok()?;
+    #[cfg(unix)]
+    let single = std::os::unix::fs::MetadataExt::nlink(&opened) == 1;
+    #[cfg(not(unix))]
+    let single = true;
+    if !opened.is_file() || !single || opened.len() > LINK_BYTES_MAX {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(LINK_BYTES_MAX + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > LINK_BYTES_MAX {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Whether `path` is a plain relative path below the project folder and outside the
-/// engine's own folder: not empty, not absolute, no `.`, `..` or empty names, no control
-/// characters, within [`LINK_PATH_BYTES_MAX`]. Input: the path. Output: the answer.
+/// engine's own folder in any letter case: not empty, not absolute, no `.`, `..` or empty
+/// names, no control characters, `\` or `:`, within [`LINK_PATH_BYTES_MAX`]. Input: the
+/// path. Output: the answer.
 fn below_folder(path: &str) -> bool {
     let names: Vec<&str> = path.split('/').collect();
     !path.is_empty()
         && path.len() <= LINK_PATH_BYTES_MAX
         && !path.starts_with('/')
-        && !path.chars().any(char::is_control)
+        && !path
+            .chars()
+            .any(|letter| letter.is_control() || letter == '\\' || letter == ':')
         && names
             .iter()
             .all(|name| !name.is_empty() && *name != "." && *name != "..")
-        && names[0] != crate::projects_home::CRAZYAGENT_DIRECTORY
-}
-
-/// The linked file joined to `folder` when it is a regular file, not a link, whose real path
-/// stays inside the folder's real path, so a linked folder cannot lead out of the project.
-/// Inputs: the project folder and the stored path. Output: the joined path, or none.
-fn inside(folder: &Path, path: &str) -> Option<PathBuf> {
-    assert!(below_folder(path));
-    let joined = folder.join(path);
-    let root = std::fs::canonicalize(folder).ok()?;
-    let real = std::fs::canonicalize(&joined).ok()?;
-    (regular(&joined) && real.starts_with(&root)).then_some(joined)
-}
-
-/// Whether `path` names a regular file itself rather than a link to one.
-/// Input: the path. Output: the answer.
-fn regular(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+        && !names[0].eq_ignore_ascii_case(crate::projects_home::CRAZYAGENT_DIRECTORY)
 }
 
 /// The stored name of a link kind: `roadmap`, or `research:` and the research kind's name.
