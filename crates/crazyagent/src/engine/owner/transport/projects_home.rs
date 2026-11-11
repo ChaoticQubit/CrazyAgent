@@ -1,7 +1,7 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
 use crate::projects_home::{
-    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, folder_size,
+    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, ProjectMove, folder_size,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +23,7 @@ enum Step {
 enum Work {
     Add(AddPlan),
     Move(MovePlan),
+    MoveProject(ProjectMove),
     New(NewProjectPlan),
     Delete(DeletePlan, Vec<i64>),
 }
@@ -32,6 +33,7 @@ impl Work {
         match self {
             Self::Add(_) => "home_add_interrupted",
             Self::Move(_) => "home_move_interrupted",
+            Self::MoveProject(_) => "move_project_interrupted",
             Self::New(_) => "home_new_project_interrupted",
             Self::Delete(..) => "project_delete_interrupted",
         }
@@ -44,6 +46,10 @@ impl Work {
                 Step::Record(plan.run().map(|()| Some(source)).map_err(|e| e.0))
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
+            Self::MoveProject(plan) => {
+                let source = plan.source().to_path_buf();
+                Step::Record(plan.run().map(|()| Some(source)).map_err(|e| e.0))
+            }
             Self::New(plan) => Step::Staged(plan.run()),
             Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
                 let files = plan.engine_files(&research);
@@ -59,8 +65,9 @@ enum Planned {
 }
 
 /// True for the owner requests that touch folders outside the engine data:
-/// AddExistingFolder, MoveProjectsHome that moves the projects, SetupProject
-/// (New Project), DeleteProject (Delete everything), FolderSize and ProjectFiles.
+/// AddExistingFolder, MoveProjectsHome that moves the projects, MoveProjectHome,
+/// SetupProject (New Project), DeleteProject (Delete everything), FolderSize and
+/// ProjectFiles.
 /// These run their slow disk work here, off the storage actor, and only then
 /// reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
@@ -72,6 +79,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                     move_projects: true,
                     ..
                 }
+                | OwnerMutation::MoveProjectHome { .. }
                 | OwnerMutation::SetupProject { .. }
                 | OwnerMutation::DeleteProject { .. }
         } | OwnerOperation::Read {
@@ -80,8 +88,8 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
     )
 }
 
-/// Serves AddExistingFolder, MoveProjectsHome, SetupProject and FolderSize
-/// for one owner. Input: the stream, engine, authority, owner packet and
+/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject and
+/// FolderSize for one owner. Input: the stream, engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
 /// the replay check, the plan, a grant check under the owner barrier and, for a
@@ -92,7 +100,10 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// move then sends a settle job for this exchange's pending move, trying again
 /// when that fails: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
-/// is finished from disk, and one whose disk work never ran is forgotten. A Delete
+/// is finished from disk, and one whose disk work never ran is forgotten. A project
+/// move (MoveProjectHome) stops the project's IDE server and refuses its opens from
+/// before its wait for the team until this exchange ends, and is settled the same way
+/// after the reply, a Copy never from disk alone. A Delete
 /// everything stops the project's IDE server before its wait and moves, and forgets
 /// its plan before its reply, trying again when that fails, so the reply means projects
 /// home moves may go again; a plan the reply could not reach is forgotten after it.
@@ -127,6 +138,14 @@ pub(super) async fn serve(
             mutation: OwnerMutation::DeleteProject { .. }
         }
     );
+    let moving_project = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::MoveProjectHome { .. }
+        }
+    );
+    #[cfg(unix)]
+    let mut _moved_ide = None;
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -157,6 +176,11 @@ pub(super) async fn serve(
                         }
                         _ => None,
                     };
+                    #[cfg(unix)]
+                    if let Work::MoveProject(plan) = &work {
+                        _moved_ide =
+                            Some(authority.ide_servers.hold_for_delete(plan.project()).await);
+                    }
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
                         .await
@@ -222,6 +246,12 @@ pub(super) async fn serve(
     if moving {
         settled(engine, "projects_home_move_not_settled", |reply| {
             Job::HomeMoveSettle(exchange, ran, reply)
+        })
+        .await;
+    }
+    if moving_project {
+        settled(engine, "project_move_not_settled", |reply| {
+            Job::HomeProjectMoveSettle(exchange, ran, reply)
         })
         .await;
     }
@@ -314,6 +344,30 @@ async fn plan(
                 })
                 .await
                 .map(Work::Move)
+        }
+        OwnerMutation::MoveProjectHome {
+            project_id,
+            mode,
+            overrides,
+        } => {
+            let (project, mode, overrides): (ProjectId, AddMode, Vec<AddOverride>) =
+                (project_id.clone(), *mode, overrides.clone());
+            let id = request.request_id.clone();
+            engine
+                .owner_job(|reply| {
+                    Job::HomeProjectMovePlan(
+                        a.clone(),
+                        expected,
+                        project,
+                        mode,
+                        overrides,
+                        id,
+                        exchange,
+                        reply,
+                    )
+                })
+                .await
+                .map(Work::MoveProject)
         }
         OwnerMutation::DeleteProject { .. } => {
             let request = Box::new(request.clone());

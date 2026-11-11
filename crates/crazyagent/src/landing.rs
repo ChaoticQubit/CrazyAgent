@@ -623,6 +623,44 @@ pub fn add_agent_clone_on(
     }
 }
 
+/// Points an agent's own clone at its project's object store after the project folder
+/// moved or was copied into the projects home, so its commits not landed yet stay
+/// readable. Inputs: the clone's git folder and the old and new owner checkout roots.
+/// Output: true once rewritten, false when it already names the new store, else
+/// `changes_workspace_invalid` for a clone that is not as the engine left it.
+pub(crate) fn repoint_agent_clone(
+    git_dir: &Path,
+    from: &Path,
+    to: &Path,
+) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return clone::repoint(git_dir, from, to);
+    #[cfg(not(unix))]
+    {
+        let _ = (git_dir, from, to);
+        Err(unavailable())
+    }
+}
+
+/// Points an agent's linked git worktree and its admin folder at each other after the
+/// repository that holds both moved. Inputs: the admin folder and the worktree where they
+/// are now, then where they were. Output: true once either pointer was rewritten, false
+/// when both already name the new places, else `changes_workspace_invalid`.
+pub(crate) fn repoint_linked_worktree(
+    admin: &Path,
+    worktree: &Path,
+    old_admin: &Path,
+    old_worktree: &Path,
+) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return clone::repoint_linked(admin, worktree, old_admin, old_worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = (admin, worktree, old_admin, old_worktree);
+        Err(unavailable())
+    }
+}
+
 /// Names and stores the task branch a new harness works on (DEC-100), `crazyagent/<name>`
 /// or its first free `-2` to `-64` form, before its worktree is made: its own clone is then
 /// made on it ([`add_agent_clone_on`]) or its linked worktree put on it
