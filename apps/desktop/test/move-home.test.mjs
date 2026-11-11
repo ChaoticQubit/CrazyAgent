@@ -78,13 +78,29 @@ test("each refusal of a project move reads as a plain sentence", () => {
   const codes = [...new Set([...engine.matchAll(/"(move_project_[a-z_]+)"/g)].map((match) => match[1]))]
     .filter((code) => !["move_project_copy_not_repointed", "move_project_record_invalid"].includes(code));
   assert.ok(codes.length >= 6, `only ${codes.length} codes read from the engine`);
-  for (const code of [...codes, "home_move_project", "move_project_interrupted"]) {
+  for (const code of [...codes, "home_move_project", "move_project_interrupted", view.OLD_FOLDER_LEFT]) {
     const line = view.moveCopy(code);
     assert.match(line, /^[A-Z][^_]*\.$/, code);
     assert.ok(!line.includes(code), code);
   }
   assert.equal(view.moveCopy("move_project_busy"), "The team is still stopping, or research or a change is still running. Move again in a few seconds.");
   assert.match(view.moveCopy("home_icloud_not_downloaded"), /iCloud/);
+});
+
+test("a move that left part of the old folder is told as moved, with the old folder to check", () => {
+  assert.equal(view.OLD_FOLDER_LEFT, "move_project_old_folder_left");
+  const transport = read("../../crates/crazyagent/src/engine/owner/transport/projects_home.rs");
+  assert.ok(transport.includes(`"${view.OLD_FOLDER_LEFT}"`), "the engine answers this code");
+  const clean = view.movedNotice("TessyAI", "move", "/Users/o/Desktop/TessyAI", false);
+  assert.equal(clean, "TessyAI is now in your CrazyAgent folder. The team is stopped; start it again from Team.");
+  const left = view.movedNotice("TessyAI", "move", "/Users/o/Desktop/TessyAI", true);
+  assert.match(left, /^TessyAI is now in your CrazyAgent folder\. Some items in the old folder couldn't be deleted: check .*Desktop\/TessyAI and delete it yourself\./);
+  assert.match(left, /start it again from Team\.$/);
+  assert.match(view.movedNotice("TessyAI", "copy", "/Users/o/Desktop/TessyAI", false), /now uses the copy/);
+  const source = read("src/screens/project/move-home.tsx");
+  assert.match(source, /const left = code === OLD_FOLDER_LEFT;/);
+  assert.match(source, /result\.kind === "error" && !left/);
+  assert.match(source, /data\.notify\(movedNotice\(name, chosen, folder, left\)\)/);
 });
 
 test("the move command is wired from the settings page to the engine mutation", () => {
