@@ -565,7 +565,7 @@ test("a refused or failed owner Open is named in the live master area while its 
   const data = {
     id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
     pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch: null } }, at: 1 }, reloadTeam: () => {},
+    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch: null, messages: [] } }, at: 1 }, reloadTeam: () => {},
   };
   const view = (openNote) => renderToStaticMarkup(createElement(live.LiveMasterView, {
     data, harness: "codex", live: { kind: "running", node: null }, onStart: async () => undefined, openNote,
@@ -628,7 +628,7 @@ test("the master area is headed by the harness the running master uses and names
 test("the running harness comes from the team status agent behind the master card, not the card, which names the saved plan (N-D26)", () => {
   assert.equal(typeof live.runningHarness, "function", "the area reads the running master's harness from the team status");
   const agent = (id, harness, status) => ({ id, role: "master", label: "Master", harness, tools: true, account: null, worktree: null, status, status_label: status, task: null, turns: 1, problem: null, process_group: null, created_ms: id });
-  const team = { kind: "ok", value: { project_id: "p-1", live_switch: null, agents: [agent(71, "codex", "stopped"), agent(72, "claude", "idle")] } };
+  const team = { kind: "ok", value: { project_id: "p-1", live_switch: null, messages: [], agents: [agent(71, "codex", "stopped"), agent(72, "claude", "idle")] } };
   assert.equal(live.runningHarness(team, "p-1", 72), "claude", "the agent behind the card");
   assert.equal(live.runningHarness(team, "p-1", 71), "codex", "the card's own agent even when an older one");
   assert.equal(live.runningHarness(team, "p-1", null), "claude", "no agent on the card: the newest live master");
