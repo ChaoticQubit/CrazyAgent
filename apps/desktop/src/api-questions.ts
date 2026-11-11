@@ -52,6 +52,23 @@ export const ANSWER_BYTES_MAX = 4096;
 export const COMMENT_BYTES_MAX = 2048;
 export const OPTIONS_MAX = 6;
 
+/** Where a waiting question shows while the owner is on a project, besides the Questions tab:
+ * a pop-up on the Conversation tab, a pop-up on every project tab, or the Questions tab only. */
+export type QuestionsShown = "conversation" | "every" | "tab";
+export const QUESTIONS_SHOWN_DEFAULT: QuestionsShown = "conversation";
+export const QUESTIONS_SHOWN_CHOICES: { value: QuestionsShown; label: string }[] = [
+  { value: "conversation", label: "Pop-up on Conversation" },
+  { value: "every", label: "Pop-up on every tab" },
+  { value: "tab", label: "Questions tab only" },
+];
+
+/** Reads the stored Questions show choice. Input: the stored text, if any. Output: the
+ * choice, or `QUESTIONS_SHOWN_DEFAULT` for anything else. */
+export function questionsShown(stored: string | null): QuestionsShown {
+  const known = QUESTIONS_SHOWN_CHOICES.find((choice) => choice.value === stored);
+  return known ? known.value : QUESTIONS_SHOWN_DEFAULT;
+}
+
 /** What the owner reads when a question changed since it was shown. */
 export const STALE_LINE = "This question changed. Review it again.";
 

@@ -8,3 +8,8 @@
 .qs-option input { flex: none; }
 .qs-recommended { padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); }
 .qs-answer { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qp-dock { display: grid; gap: var(--space-2); }
+.qp-dock[hidden], .qp-popup[hidden] { display: none; }
+.qp-popup { display: grid; gap: var(--space-2); max-height: 40vh; overflow: auto; padding: var(--space-3); border: 1px solid var(--accent); border-radius: var(--radius-panel); background: var(--surface); }
+.qp-popup .qs-card { padding: 0; border: 0; }
+.qp-title { margin: 0; font-size: inherit; font-weight: 600; }
