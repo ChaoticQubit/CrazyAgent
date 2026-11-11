@@ -976,6 +976,9 @@ impl ProjectPage {
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
         if matches!(query, SetupQuery::MoveHome { .. }) {
+            if matches!(&event.result, Err(code) if code == "move_project_old_folder_left") {
+                ctx.request(Request::Projects);
+            }
             if applied {
                 ctx.request(Request::Projects);
                 ctx.say(Message::success(

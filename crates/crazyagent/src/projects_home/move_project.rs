@@ -146,8 +146,11 @@ impl ProjectMove {
         self.add.place_by_copy()
     }
 
-    /// Waits until no agent of the project runs. Input: the wait. Output: Ok when the
-    /// folder may move now, `move_project_busy` past the wait.
+    /// Waits until no agent of the project runs, then asks again, under the move's hold,
+    /// what [`busy`] asked at the plan: work that started since (a master session's working
+    /// copy, a change set step, an onboarding step, research) refuses the move before
+    /// anything moves. Input: the wait. Output: Ok when the folder may move now,
+    /// `move_project_busy` past the wait, or the code of the work found.
     fn ready(&self, wait: Duration) -> Result<(), EngineError> {
         let unavailable = |_| refused("move_project_unavailable");
         let db =
@@ -162,7 +165,16 @@ impl ProjectMove {
             }
             std::thread::sleep(MOVE_POLL);
         }
-        Ok(())
+        let origin = self
+            .add
+            .source()
+            .to_str()
+            .ok_or_else(|| refused("move_project_unavailable"))?;
+        assert!(self.add.source().is_absolute());
+        match busy(&db, &self.project, origin)? {
+            Some(code) => Err(refused(code)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -265,7 +277,7 @@ pub(crate) fn forget(tx: &Transaction<'_>, exchange: i64) -> Result<(), EngineEr
 }
 
 fn count(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     table: &str,
     query: &str,
     parameters: impl rusqlite::Params,
@@ -285,10 +297,11 @@ fn count(
 /// still waiting starts only after the move, which holds the folder), an onboarding step
 /// that runs or a change set step in flight;
 /// `move_project_master_session` for a master session that holds its own working copy of
-/// the repository, which lives outside the folder and would lose it. Inputs: the
-/// transaction, the project and its folder. Output: the code, or None.
+/// the repository, which lives outside the folder and would lose it. It is asked when the
+/// move is planned and again right before the folder moves. Inputs: an engine connection,
+/// the project and its folder. Output: the code, or None.
 fn busy(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     project: &ProjectId,
     origin: &str,
 ) -> Result<Option<&'static str>, EngineError> {
@@ -461,10 +474,12 @@ pub(crate) enum Finished {
     Left,
 }
 
-/// Finishes the pending project move from what is on disk now and clears it. A Move counts
-/// once the folder is a real folder in the home and gone from its old place; a Copy only
-/// when its disk work reported success (`verified`), since a copy cut short looks the
-/// same on disk. A finished move re-points the project's agent copies and rewrites every
+/// Finishes the pending project move from what is on disk now and clears it. A Move whose
+/// disk work reported success (`verified`) counts once the folder is a real folder in the
+/// home: a move that went by copy still has its whole old folder, which is cleared only
+/// after this record. Without that report a Move counts only when the old folder is gone
+/// (a rename), since a copy cut short looks the same on disk; a Copy counts only when
+/// verified. A finished move re-points the project's agent copies and rewrites every
 /// stored path of the folder in the caller's write. Inputs: the transaction, which pending
 /// move to finish and whether its disk work reported success. Output: None when no such
 /// move is pending, else what was found.
@@ -488,7 +503,7 @@ pub(crate) fn finish(
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
     let left = std::fs::symlink_metadata(&pending.origin).is_ok();
     let done = match pending.mode {
-        AddMode::Move => landed && !left,
+        AddMode::Move => landed && (verified || !left),
         AddMode::Copy => verified && landed && left,
     };
     if !done {

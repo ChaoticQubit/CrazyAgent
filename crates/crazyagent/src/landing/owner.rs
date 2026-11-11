@@ -1837,10 +1837,18 @@ fn list_accept(db: &Connection, id: &ChangeSetId) {
 
 /// Loads a change set for an owner action, first settling an intent a failed or stopped
 /// Accept, update or restore left on it, so the owner's next click repairs the change set
-/// instead of finding it stale until the next upkeep. The caller holds [`hold`] on its
-/// repository. Inputs: the store and the change set. Output: the record, holding no intent.
+/// instead of finding it stale until the next upkeep. Nothing is settled or loaded for an
+/// action while the project's folder is being moved into the projects home
+/// (`move_project_in_progress`), since a step would write a repository that is on its way
+/// out. The caller holds [`hold`] on its repository. Inputs: the store and the change set.
+/// Output: the record, holding no intent.
 pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, EngineError> {
     let mut record = store::load(db, id)?;
+    if crate::projects_home::project_move_holds(db, &record.repository)
+        .map_err(|_| failure("changes_unavailable"))?
+    {
+        return Err(failure("move_project_in_progress"));
+    }
     if record.intent.is_some() {
         settle(db, &mut record)?;
         record = store::load(db, id)?;

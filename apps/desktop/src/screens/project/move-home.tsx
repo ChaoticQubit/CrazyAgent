@@ -26,11 +26,26 @@ const MOVE_COPY: Record<string, string> = {
   move_project_already_home: "This project is already in your CrazyAgent folder.",
   move_project_copy_worktrees: "An agent works in a git worktree of this project, which a copy would leave behind. Move the project instead.",
   move_project_folder_link: "This project's folder is reached through a link, so it can't be moved from here.",
-  move_project_in_progress: "Another project is being moved. Try again when it is done.",
+  move_project_in_progress: "A project is being moved. Try again when it is done.",
   move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
   move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
+  move_project_old_folder_left: "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself.",
   home_move_project: "Another project uses this folder too, so it can't be moved or copied.",
 };
+
+/** The code the engine answers when the project was moved and recorded in the projects folder,
+ * and part of its old folder could not be deleted. It is a finished move, not a refusal. */
+export const OLD_FOLDER_LEFT = "move_project_old_folder_left";
+
+/** What the owner is told once a project is in the projects folder. Inputs: the project name,
+ * move or copy, the old folder and whether part of it could not be deleted. Output: the notice,
+ * which names the old folder when something is left in it. */
+export function movedNotice(name: string, way: AddFolderMode, folder: string, left: boolean): string {
+  const team = "The team is stopped; start it again from Team.";
+  if (way === "copy") return `${name} now uses the copy in your CrazyAgent folder. ${team}`;
+  if (!left) return `${name} is now in your CrazyAgent folder. ${team}`;
+  return `${name} is now in your CrazyAgent folder. Some items in the old folder couldn't be deleted: check ${folderLabel(folder)} and delete it yourself. ${team}`;
+}
 
 /** Whether a project folder is the projects folder or inside it. Inputs: the project folder and
  * the projects folder, null when the owner has not picked one. Output: the answer. */
@@ -172,14 +187,13 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     const code = result.kind === "error" ? result.code : state?.kind === "rejected" ? state.code : null;
     if (stopped && code !== null && asksAgain(code, overrides)) { setRefused(code); setAsking(true); return; }
     if (stopped && code === "home_icloud_not_downloaded" && !downloaded.current) { setIcloud({ placeholders: null }); return; }
-    if (result.kind === "error") { setProblem(`${moveCopy(result)}${after}`); return; }
-    if (state?.kind === "rejected") { setProblem(`${moveCopy(state)}${after}`); return; }
+    const left = code === OLD_FOLDER_LEFT;
+    if (result.kind === "error" && !left) { setProblem(`${moveCopy(result)}${after}`); return; }
+    if (state?.kind === "rejected" && !left) { setProblem(`${moveCopy(state)}${after}`); return; }
     if (state?.kind === "unconfirmed") { setProblem(`We couldn't confirm the move. Check the project folder before trying again.${after}`); return; }
     close();
     await session?.refreshProjects();
-    data.notify(chosen === "move"
-      ? `${name} is now in your CrazyAgent folder. The team is stopped; start it again from Team.`
-      : `${name} now uses the copy in your CrazyAgent folder. The team is stopped; start it again from Team.`);
+    data.notify(movedNotice(name, chosen, folder, left));
     data.reload();
   };
 

@@ -14,6 +14,7 @@ pub use intake::{
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
+pub(crate) use move_project::holds as project_move_holds;
 pub(crate) use move_project::{Asked, Finished, finish, forget, pending, plan};
 pub use move_project::{MOVE_STOP_WAIT, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
@@ -1285,6 +1286,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "move_project_old_folder_left" => {
+            "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself."
         }
         "move_project_unavailable" => {
             "The engine could not check the project's agents. Nothing was moved."
