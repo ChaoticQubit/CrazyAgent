@@ -9,7 +9,7 @@ import { Badge, NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
 import "./questions.css";
 
-const LIST_POLL_MS = 5000;
+export const LIST_POLL_MS = 5000;
 
 function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? questionsRefusal({ code: failure.code, cause: failure.cause }) : "";
@@ -160,26 +160,14 @@ export function olderAfter(older: OlderPages, event: OlderEvent): OlderPages {
   }
 }
 
-/** Questions tab: every question the project's agents and engine steps asked the owner,
- * pending first, with Answer and Dismiss. Input: the project data. Output: the tab; the list
- * rereads every few seconds while it is open. */
-export function QuestionsTab({ data }: { data: ProjectData }) {
-  const [first, setFirst] = useState<Result<QuestionPage>>();
-  const [older, setOlder] = useState<OlderPages>({ items: [], next: null });
-  const [round, setRound] = useState(0);
+/** The one way the owner settles a question, wherever its card shows: Answer sends the
+ * choice, Dismiss asks first, and either tells the owner what the asker hears or why it was
+ * refused. Inputs: the project data and what to do after each settle, such as reading the
+ * list again. Output: whether an action runs, the refusal line, the handlers and the dialog. */
+export function useQuestionActions(data: ProjectData, after: () => void) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [dismissing, setDismissing] = useState<OwnerQuestion | null>(null);
-  useEffect(() => {
-    let current = true;
-    void loadQuestions(data.id, null).then((result) => {
-      if (!current) return;
-      setFirst(result);
-      if (result.kind === "ok") setOlder((shown) => olderAfter(shown, { kind: "first", next: result.value.next }));
-    });
-    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
-    return () => { current = false; clearInterval(timer); };
-  }, [data.id, round]);
 
   async function settle(result: Result<void>, kind: "answered" | "dismissed", question: OwnerQuestion) {
     setBusy(false);
@@ -188,8 +176,7 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
       setNote("");
       data.notify(settledNote(kind, question.asker));
     } else setNote(notReady(result) ? "Questions aren't ready in this engine yet." : refusalOf(result));
-    setOlder((shown) => olderAfter(shown, { kind: "settled" }));
-    setRound((value) => value + 1);
+    after();
   }
 
   async function answer(question: OwnerQuestion, choice: QuestionChoice) {
@@ -201,6 +188,35 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
     setBusy(true);
     await settle(await dismissQuestion(question.id, question.version), "dismissed", question);
   }
+
+  const dialog = <ConfirmDialog open={dismissing !== null} pending={busy} title="Dismiss this question?" confirmLabel="Dismiss" cancelLabel="Keep it"
+    onCancel={() => setDismissing(null)} onConfirm={() => { if (dismissing) void dismiss(dismissing); }}>
+    {dismissing ? dismissNote(dismissing.asker) : ""}
+  </ConfirmDialog>;
+  return { busy, setBusy, note, setNote, answer: (question: OwnerQuestion, choice: QuestionChoice) => void answer(question, choice), askDismiss: setDismissing, dialog };
+}
+
+/** Questions tab: every question the project's agents and engine steps asked the owner,
+ * pending first, with Answer and Dismiss. Input: the project data. Output: the tab; the list
+ * rereads every few seconds while it is open. */
+export function QuestionsTab({ data }: { data: ProjectData }) {
+  const [first, setFirst] = useState<Result<QuestionPage>>();
+  const [older, setOlder] = useState<OlderPages>({ items: [], next: null });
+  const [round, setRound] = useState(0);
+  const { busy, setBusy, note, setNote, answer, askDismiss, dialog } = useQuestionActions(data, () => {
+    setOlder((shown) => olderAfter(shown, { kind: "settled" }));
+    setRound((value) => value + 1);
+  });
+  useEffect(() => {
+    let current = true;
+    void loadQuestions(data.id, null).then((result) => {
+      if (!current) return;
+      setFirst(result);
+      if (result.kind === "ok") setOlder((shown) => olderAfter(shown, { kind: "first", next: result.value.next }));
+    });
+    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
+    return () => { current = false; clearInterval(timer); };
+  }, [data.id, round]);
 
   async function showOlder() {
     if (older.next === null) return;
@@ -222,12 +238,9 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
     </ProjectEmpty>}
     {questions.length > 0 && <div className="pj-stack-s qs-list">
       {questions.map((question) => <QuestionCard key={`${question.id}:${question.version}`} question={question} now={data.now} busy={busy}
-        onAnswer={(asked, choice) => void answer(asked, choice)} onDismiss={setDismissing} />)}
+        onAnswer={answer} onDismiss={askDismiss} />)}
     </div>}
     {older.next !== null && <span><Button disabled={busy} onClick={() => void showOlder()}>Show older questions</Button></span>}
-    <ConfirmDialog open={dismissing !== null} pending={busy} title="Dismiss this question?" confirmLabel="Dismiss" cancelLabel="Keep it"
-      onCancel={() => setDismissing(null)} onConfirm={() => { if (dismissing) void dismiss(dismissing); }}>
-      {dismissing ? dismissNote(dismissing.asker) : ""}
-    </ConfirmDialog>
+    {dialog}
   </div>;
 }
