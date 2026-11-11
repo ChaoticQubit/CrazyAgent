@@ -363,7 +363,7 @@ test("nothing macOS CI runs on the owner's runner installs globally or reads or 
   assert.match(home, /\n\s+state="\$RUNNER_TOOL_CACHE\/crazyagent-ci"\n/);
   assert.match(home, /\n\s+home="\$RUNNER_TEMP\/home"\n/);
   assert.match(home, /\n\s+if \(\( size_kib > 20 \* 1024 \* 1024 \)\); then\n[^\n]+\n\s+rm -rf "\$state"\n\s+fi\n/, "the kept CI state stays under 20 GiB");
-  for (const line of ['echo "HOME=$home"', 'echo "CARGO_HOME=$state/cargo-home"', 'echo "CARGO_TARGET_DIR=$state/target"',
+  for (const line of ['echo "HOME=$home"', 'echo "CARGO_HOME=$state/cargo-home"', 'echo "CARGO_TARGET_DIR=$target"',
     'echo "npm_config_cache=$state/npm-cache"', 'echo "BUN_INSTALL_CACHE_DIR=$state/bun-cache"']) {
     assert(home.includes(`\n            ${line}\n`), line);
   }
@@ -378,6 +378,34 @@ test("nothing macOS CI runs on the owner's runner installs globally or reads or 
       assert.match(step, /\n\s+work="\$RUNNER_TEMP\/[a-z0-9-]+"\n/, `${title}: PATH gains only a folder under RUNNER_TEMP`);
     }
   }
+});
+
+test("macOS CI on the owner's runner builds with line tables only, shows the free disk, refuses below 25 GiB free and trims only its own cache to 10 GiB at the end", async () => {
+  const ci = await workflow("ci.yml");
+  const all = steps(ci, "macos");
+  const home = all[1];
+  assert.match(block(ci, 0, "env").join("\n"), /\n  CARGO_INCREMENTAL: "0"\n/, "no incremental state in a CI target");
+  for (const line of ['echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"', 'echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"', 'echo "CARGO_TARGET_DIR=$target"']) {
+    assert(home.includes(`\n            ${line}\n`), line);
+  }
+  assert.match(home, /\n\s+target="\$state\/target-line-tables"\n/);
+  assert.match(home, /\n\s+find "\$state" -mindepth 1 -maxdepth 1 -name 'target\*' ! -name target-line-tables -exec rm -rf \{\} \+\n/, "a target built with other debug settings goes");
+  assert.match(home, /\n\s+free_kib="\$\(df -Pk "\$RUNNER_TOOL_CACHE" \| awk 'NR == 2 \{ print \$4 \}'\)"\n\s+echo "[^"\n]*\$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*"\n/, "the free space shows before the build");
+  assert.match(home, /\n\s+if \(\( free_kib < 25 \* 1024 \* 1024 \)\); then\n\s+echo "::error::badal has \$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*needs 25 GiB[^"\n]*free disk on badal[^"\n]*"\n\s+exit 1\n\s+fi\n/);
+  assert(home.indexOf("free_kib < 25") < home.indexOf('>> "$GITHUB_ENV"'), "the refusal comes before the job sets anything up");
+  const last = all.at(-1);
+  const tests = all.findIndex((step) => /- name: Test Bun suites\n/.test(step));
+  assert(tests > 0 && tests === all.length - 2, "the trim is the last step, right after the tests");
+  assert.match(last, /^ {6}- name: [^\n]+\n {8}if: always\(\) && runner\.environment != 'github-hosted'\n/, "it runs even when a step failed, only on the owner's runner");
+  assert.match(last, /\n\s+state="\$RUNNER_TOOL_CACHE\/crazyagent-ci"\n/);
+  assert.match(last, /\n\s+case "\$RUNNER_TOOL_CACHE" in \/\?\*\) ;; \*\) echo "::error::[^"\n]+"; exit 1 ;; esac\n/);
+  assert.match(last, /\n\s+if \[ -d "\$state" \] && \[ ! -L "\$state" \]; then\n/);
+  assert.equal((last.match(/df -Pk "\$RUNNER_TOOL_CACHE"/g) ?? []).length, 1, "one free-space reader");
+  assert.equal((last.match(/\$\(free_gib\) GiB free/g) ?? []).length, 2, "free space after the tests and after the trim");
+  assert.equal((last.match(/\(\( size_kib > 10 \* 1024 \* 1024 \)\)/g) ?? []).length, 2, "targets first, then everything, down to 10 GiB");
+  const removals = last.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
+  assert.deepEqual(removals, ["find \"$state\" -mindepth 1 -maxdepth 1 -name 'target*' -exec rm -rf {} +", 'rm -rf "$state"'], "nothing outside this runner's crazyagent-ci folder");
+  assert.doesNotMatch(last, /\$RUNNER_TOOL_CACHE\/(?!crazyagent-ci")|\.\.\//);
 });
 
 test("make test and test-rust-selected give every cargo test the native-auth host, desktop tests included", async () => {

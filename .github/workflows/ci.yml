@@ -244,18 +244,29 @@ jobs:
           set -euo pipefail
           state="$RUNNER_TOOL_CACHE/crazyagent-ci"
           home="$RUNNER_TEMP/home"
+          target="$state/target-line-tables"
           mkdir -p "$state"
           size_kib="$(du -sk "$state" | cut -f1)"
           if (( size_kib > 20 * 1024 * 1024 )); then
             echo "pruning $state: ${size_kib} KiB"
             rm -rf "$state"
           fi
+          mkdir -p "$state"
+          find "$state" -mindepth 1 -maxdepth 1 -name 'target*' ! -name target-line-tables -exec rm -rf {} +
+          free_kib="$(df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print $4 }')"
+          echo "runner tool cache volume: $(( free_kib / 1024 / 1024 )) GiB free before the build"
+          if (( free_kib < 25 * 1024 * 1024 )); then
+            echo "::error::badal has $(( free_kib / 1024 / 1024 )) GiB free on the runner tool cache volume and this job needs 25 GiB; free disk on badal, then run the job again"
+            exit 1
+          fi
           rm -rf "$home"
-          mkdir -p "$home" "$state/target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
+          mkdir -p "$home" "$target" "$state/cargo-home" "$state/npm-cache" "$state/bun-cache"
           {
             echo "HOME=$home"
             echo "CARGO_HOME=$state/cargo-home"
-            echo "CARGO_TARGET_DIR=$state/target"
+            echo "CARGO_TARGET_DIR=$target"
+            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+            echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
             echo "npm_config_cache=$state/npm-cache"
             echo "BUN_INSTALL_CACHE_DIR=$state/bun-cache"
           } >> "$GITHUB_ENV"
@@ -531,6 +542,27 @@ jobs:
         env:
           BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}
         run: make test-bun BUN="$BUN" BUN_TESTS_EXCLUDE="$BUN_TESTS_EXCLUDE"
+      - name: Show the free disk and trim the CI cache on the owner's runner
+        if: always() && runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          case "$RUNNER_TOOL_CACHE" in /?*) ;; *) echo "::error::RUNNER_TOOL_CACHE is not an absolute path; nothing trimmed"; exit 1 ;; esac
+          state="$RUNNER_TOOL_CACHE/crazyagent-ci"
+          free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
+          echo "runner tool cache volume: $(free_gib) GiB free after the tests"
+          if [ -d "$state" ] && [ ! -L "$state" ]; then
+            size_kib="$(du -sk "$state" | cut -f1)"
+            if (( size_kib > 10 * 1024 * 1024 )); then
+              echo "trimming the Rust targets in $state: ${size_kib} KiB"
+              find "$state" -mindepth 1 -maxdepth 1 -name 'target*' -exec rm -rf {} +
+            fi
+            size_kib="$(du -sk "$state" | cut -f1)"
+            if (( size_kib > 10 * 1024 * 1024 )); then
+              echo "pruning $state: ${size_kib} KiB"
+              rm -rf "$state"
+            fi
+          fi
+          echo "runner tool cache volume: $(free_gib) GiB free after the trim"
 
   windows:
     name: Windows lint and tests (informational until v2.2.1)
