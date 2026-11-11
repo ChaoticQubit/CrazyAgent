@@ -1127,6 +1127,56 @@ fn a_limited_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
     );
 }
 
+/// REL220-F2 follow-up: bubblewrap starts a closed agent in a network of its own, where a
+/// port it listens on is never a host port, so a kept port inside the range Linux picks
+/// from refuses no closed bubblewrap launch. Landlock leaves the agent in the host's
+/// network, where a listen with no bind takes a picked port, so the same port still refuses
+/// an open, a limited and a closed Landlock launch.
+#[test]
+fn a_kept_port_linux_could_pick_refuses_every_landlock_launch_but_no_closed_bubblewrap_one() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let low = lowest_picked_port();
+    let kept = |network: SandboxNetwork| policy(&case, network).keep_ports(&[low]).unwrap();
+    for network in [
+        SandboxNetwork::Open,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        SandboxNetwork::Only(Vec::new()),
+    ] {
+        match LinuxSandbox::detect(kept(network.clone()), Path::new(HELPER)) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(
+                    reason.contains(&format!("port {low} ")),
+                    "{network:?}: {reason}"
+                );
+            }
+            other => panic!(
+                "a kept port Linux could pick must refuse a Landlock launch on {network:?}: \
+                 {other:?}"
+            ),
+        }
+    }
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        kept(SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        port_probe(&bubblewrap, &case, LISTENERS, &[]),
+        "bind0=listened\nlisten=listened\nunix=listened\n"
+    );
+}
+
 /// REL220-F2: a limited launch whose kept ports lie outside the range Linux picks from
 /// starts, and its agent keeps every listen: a bare TCP listen on a port Linux picks, and,
 /// on bubblewrap, a Unix socket listen. A bind stays refused on Landlock, which allows a

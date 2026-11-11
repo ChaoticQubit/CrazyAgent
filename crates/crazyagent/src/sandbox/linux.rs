@@ -1138,13 +1138,22 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_port_inside_this_machines_picked_ports_refuses_every_network() {
+    fn a_kept_port_inside_this_machines_picked_ports_refuses_every_landlock_launch_only() {
         let picked = read_picked_ports().expect("Linux test machines show their port range");
         let inside = (*picked.start()).max(1);
         let helper = std::env::current_exe().unwrap();
         let landlock = || LinuxBackend::Landlock {
             helper: helper.clone(),
         };
+        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let closed = sandbox.keep_ports(&[inside]).unwrap();
+        let bubblewrap = LinuxBackend::Bubblewrap {
+            bwrap: helper.clone(),
+        };
+        assert!(
+            LinuxSandbox::new(closed, bubblewrap).is_ok(),
+            "bubblewrap starts a closed agent in a network of its own"
+        );
         for network in [
             SandboxNetwork::Open,
             SandboxNetwork::Only(Vec::new()),
