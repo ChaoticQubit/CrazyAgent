@@ -69,8 +69,11 @@ impl AddPlan {
     }
 
     /// Moves or copies the folder into the home. A move is a rename; across
-    /// disks it copies, checks the copy and only then deletes the source.
-    /// Output: Ok once the folder is complete at its destination, or a code;
+    /// disks, and out of iCloud Drive, whose folders a launchd agent cannot
+    /// rename out (EDEADLK), it copies, checks the copy and only then deletes
+    /// the source. Output: Ok once the folder is complete at its destination,
+    /// or a code (`home_icloud_not_downloaded` for a file still only in
+    /// iCloud, `home_permission_denied` when macOS or permissions refuse);
     /// on failure the source is left as it was and no partial folder shows.
     pub fn run(self) -> Result<(), EngineError> {
         if fs::symlink_metadata(&self.destination).is_ok() {
@@ -82,7 +85,11 @@ impl AddPlan {
                 Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                     move_within(&self.source, &self.destination, self.bounds)
                 }
-                Err(_) => Err(refused("home_move_failed")),
+                Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
+                    eprintln!("home_move_by_copy cause=edeadlk");
+                    move_within(&self.source, &self.destination, self.bounds)
+                }
+                Err(e) => Err(failed_step("rename", &e, "home_move_failed")),
             },
             AddMode::Copy => copy_into(
                 &self.source,
@@ -200,7 +207,7 @@ fn restore(copy: &Path, source: &Path) -> Result<(), EngineError> {
 /// Output: Ok, or the refusal codes of `copy_tree`; entries still in `target`
 /// are kept for `verify_tree` to compare.
 fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
-    let failed = |_| refused("home_copy_failed");
+    let failed = |e: std::io::Error| failed_step("refill", &e, "home_copy_failed");
     if fs::symlink_metadata(target).is_err() {
         return copy_tree(copy, target);
     }
@@ -290,13 +297,30 @@ fn copy_into(
         if fs::symlink_metadata(destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
-        fs::rename(&staging, destination).map_err(|_| refused("home_copy_failed"))
+        fs::rename(&staging, destination).map_err(|e| failed_step("place", &e, "home_copy_failed"))
     });
     if result.is_err() && fs::symlink_metadata(&staging).is_ok() {
         let _ = make_writable(&staging);
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// The refusal for one failed step of an add, logged by step and errno, never by path: a
+/// file still only in iCloud (EDEADLK, what macOS answers a launchd agent that may not
+/// download it), a folder macOS privacy or its permissions keep CrazyAgent from (EPERM,
+/// EACCES), or else the step's own code. Inputs: the step, the error and that code.
+/// Output: the refusal.
+fn failed_step(step: &str, error: &std::io::Error, other: &'static str) -> EngineError {
+    assert!(!step.is_empty() && other.starts_with("home_"));
+    let code = match error.kind() {
+        std::io::ErrorKind::Deadlock => "home_icloud_not_downloaded",
+        std::io::ErrorKind::PermissionDenied => "home_permission_denied",
+        _ => other,
+    };
+    let errno = error.raw_os_error().unwrap_or(0);
+    eprintln!("home_add_step_failed step={step} code={code} errno={errno}");
+    refused(code)
 }
 
 fn make_writable(root: &Path) -> std::io::Result<()> {
@@ -407,7 +431,7 @@ fn copy_entries(
     skip: &dyn Fn(&Path, fs::FileType) -> bool,
     bounds: CopyBounds,
 ) -> Result<(), EngineError> {
-    let failed = |_| refused("home_copy_failed");
+    let failed = |e: std::io::Error| failed_step("copy", &e, "home_copy_failed");
     let root = fs::symlink_metadata(source).map_err(failed)?;
     if !root.is_dir() || root.file_type().is_symlink() {
         return Err(refused("home_source_not_folder"));
@@ -545,12 +569,21 @@ fn same_bytes(left: &Path, right: &Path) -> Result<bool, EngineError> {
     }
 }
 
-/// Adds up the bytes of the files in a folder without following links.
-/// Input: the owner's path text and the time by which to give up. Output:
-/// the total file bytes, `folder_size_unsafe` for `/`, the user's home folder
-/// or any folder holding it, `folder_size_unreadable`, `folder_size_timeout`
-/// or `folder_size_too_large` past the entry bound.
-pub fn folder_size(path: &str, deadline: Instant) -> Result<u64, EngineError> {
+/// What `folder_size` found in a folder: the bytes of its files and how many of its
+/// entries are placeholders whose data lives only in iCloud, counted without listing a
+/// placeholder folder, so a folder inside one counts once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Measured {
+    pub bytes: u64,
+    pub placeholders: u64,
+}
+
+/// Adds up the bytes of the files in a folder without following links, and counts its
+/// iCloud placeholders. Input: the owner's path text and the time by which to give up.
+/// Output: the measure, `folder_size_unsafe` for `/`, the user's home folder or any folder
+/// holding it, `folder_size_unreadable`, `folder_size_timeout` or `folder_size_too_large`
+/// past the entry bound.
+pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineError> {
     path_text(path, "folder_size_path_invalid")?;
     let root = real_folder(
         Path::new(path),
@@ -561,6 +594,7 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<u64, EngineError> {
         return Err(refused("folder_size_unsafe"));
     }
     let mut bytes = 0u64;
+    let mut placeholders = 0u64;
     let mut entries = 0u64;
     let mut stack = vec![root];
     while let Some(folder) = stack.pop() {
@@ -576,7 +610,11 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<u64, EngineError> {
             let entry = entry.map_err(|_| refused("folder_size_unreadable"))?;
             let metadata = fs::symlink_metadata(entry.path())
                 .map_err(|_| refused("folder_size_unreadable"))?;
-            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let placeholder = super::icloud::dataless(&metadata);
+            if placeholder {
+                placeholders += 1;
+            }
+            if metadata.is_dir() && !metadata.file_type().is_symlink() && !placeholder {
                 stack.push(entry.path());
             } else if metadata.is_file() {
                 bytes = bytes.saturating_add(metadata.len());
@@ -584,5 +622,9 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<u64, EngineError> {
         }
     }
     assert!(entries <= ENTRIES_MAX);
-    Ok(bytes)
+    assert!(placeholders <= entries);
+    Ok(Measured {
+        bytes,
+        placeholders,
+    })
 }

@@ -705,14 +705,16 @@ fn folder_size_adds_file_bytes_without_following_links() {
     .unwrap();
     symlink(&case.root, folder.join("root-link")).unwrap();
     let later = Instant::now() + Duration::from_secs(30);
-    assert_eq!(folder_size(text(&folder), later).unwrap(), 2010);
+    let measured = folder_size(text(&folder), later).unwrap();
+    assert_eq!(measured.bytes, 2010);
+    assert_eq!(measured.placeholders, 0);
 
     let many = case.sources.join("many");
     fs::create_dir(&many).unwrap();
     for index in 0..1100 {
         fs::write(many.join(format!("{index}.txt")), "x").unwrap();
     }
-    assert_eq!(folder_size(text(&many), later).unwrap(), 1100);
+    assert_eq!(folder_size(text(&many), later).unwrap().bytes, 1100);
     assert_eq!(
         folder_size(text(&many), Instant::now()).unwrap_err().0,
         "folder_size_timeout"
@@ -1678,13 +1680,61 @@ fn an_unreadable_file_keeps_a_move_across_disks_from_removing_the_source() {
         .unwrap()
         .run()
         .unwrap_err();
-        assert_eq!(refused.0, "home_copy_failed", "{overrides:?}");
+        assert_eq!(refused.0, "home_permission_denied", "{overrides:?}");
+        assert!(plain_problem(&refused.0).is_some());
         assert_eq!(names(&source), before);
         assert!(fs::symlink_metadata(&secret).is_ok());
         assert_eq!(names(&home), Vec::<String>::new());
     }
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(fs::read_to_string(&secret).unwrap(), "kept\n");
+}
+
+#[test]
+fn a_folder_permissions_keep_from_moving_or_copying_is_refused_as_permission_denied() {
+    let case = case();
+    let parent = case.sources.join("locked-parent");
+    let source = parent.join("shop");
+    sample(&source);
+    let secret = source.join("src").join("secret.txt");
+    fs::write(&secret, "kept\n").unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let before = names(&source);
+    let moved = plan_add(
+        &case.home,
+        &case.engine,
+        text(&source),
+        AddMode::Move,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+    assert_eq!(moved.0, "home_permission_denied");
+    assert_eq!(names(&source), before);
+    assert_eq!(names(&case.home), Vec::<String>::new());
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    let copied = plan_add(
+        &case.home,
+        &case.engine,
+        text(&source),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+    assert_eq!(copied.0, "home_permission_denied");
+    assert_eq!(names(&source), before);
+    assert_eq!(names(&case.home), Vec::<String>::new());
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "kept\n");
+    for code in ["home_permission_denied", "home_icloud_not_downloaded"] {
+        assert!(plain_problem(code).is_some(), "{code}");
+    }
 }
 
 #[test]
