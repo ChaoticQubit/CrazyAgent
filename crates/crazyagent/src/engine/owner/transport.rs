@@ -2558,8 +2558,10 @@ struct Tasks {
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, Usage requests, which read and write the usage store, and iCloud
-/// downloads, which wait for macOS to bring a folder's files to this Mac. Each
+/// copy skill folders, Usage requests, which read and write the usage store, harness
+/// version, update and install requests, which wait for a harness, Homebrew, npm or a
+/// vendor's release pointer, and iCloud downloads, which wait for macOS to bring a
+/// folder's files to this Mac. Each
 /// carries the admission, and the projects home its validated request; the others read
 /// the request frame.
 enum Deferred {
