@@ -2,7 +2,7 @@ use super::{
     check_owner_admission, check_owner_host, native_profile_connection, owner_lookup, owner_record,
     owner_revision, persist_event_ids, random_id, settings,
 };
-use crate::config::{EffectiveConfig, ModelAuthentication, ModelConnection, ModelEndpoint};
+use crate::config::{EffectiveConfig, ModelAuthentication, ModelConnection};
 use crate::conversation::ConversationMutation;
 use crate::coordination::Role;
 use crate::engine::bootstrap::{
@@ -5431,6 +5431,7 @@ mod sessions_tests;
 #[cfg(all(test, unix))]
 mod rcli_configured_tests {
     use super::*;
+    use crate::config::ModelEndpoint;
 
     mod stop_settlement_tests {
         include!("master_session/stop_settlement_tests.rs");
