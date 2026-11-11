@@ -194,7 +194,8 @@ impl RegisteredNativeAuthHost {
 
     /// The host while its entry still leads to the pinned file and that file verifies;
     /// a fresh capture when the entry leads to another path or a new inode, as after a
-    /// harness update. A rewrite in place of the pinned inode stays refused. Input: the
+    /// harness update, or when only the pinned inode's metadata changed and its bytes still
+    /// hash to the pin. A rewrite in place of the pinned inode stays refused. Input: the
     /// shared host. Output: the host to use, `native_auth_host_executable_changed`, the
     /// verify error for a host with no entry, or `native_auth_host_unavailable`.
     pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
@@ -212,6 +213,7 @@ impl RegisteredNativeAuthHost {
         if fresh.path == self.path
             && (fresh.identity.device, fresh.identity.inode)
                 == (self.identity.device, self.identity.inode)
+            && fresh.digest != self.digest
         {
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
