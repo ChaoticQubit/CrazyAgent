@@ -100,6 +100,7 @@ impl Engine {
             &Asker::Master(1),
             &Ask {
                 question: question.into(),
+                kind: crate::questions::QuestionKind::Single,
                 options: options.iter().map(|option| (*option).to_owned()).collect(),
                 recommended: Some(recommended.into()),
                 context: Some("The shop keeps orders and stock.".into()),
@@ -274,7 +275,14 @@ async fn answer_sends_the_version_read() {
     assert_eq!(
         engine
             .controller
-            .questions_answer(region, 0, Answer::Option(1))
+            .questions_answer(
+                region,
+                0,
+                Answer {
+                    picks: vec![1],
+                    comment: None
+                }
+            )
             .await
             .unwrap(),
         Settlement::Settled,
@@ -289,7 +297,10 @@ async fn answer_sends_the_version_read() {
             project: engine.project.clone(),
             id: region,
             version: 0,
-            answer: Answer::Text("Europe, close to the owner.".into()),
+            answer: Answer {
+                picks: Vec::new(),
+                comment: Some("Europe, close to the owner.".into())
+            },
         }
     );
     assert_eq!(
@@ -324,7 +335,10 @@ async fn answer_sends_the_version_read() {
             project: engine.project.clone(),
             id: payment,
             version: 0,
-            answer: Answer::Option(0),
+            answer: Answer {
+                picks: vec![0],
+                comment: None
+            },
         },
         "Enter with nothing typed sends the recommended option"
     );
@@ -446,6 +460,7 @@ async fn a_long_question_is_marked_cut_reads_whole_on_v_and_keeps_its_options_in
         &Asker::Master(2),
         &Ask {
             question,
+            kind: crate::questions::QuestionKind::Single,
             options: vec![
                 "Keep it".into(),
                 "Change it".into(),

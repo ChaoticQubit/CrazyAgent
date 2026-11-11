@@ -487,7 +487,10 @@ fn unclear_points_become_planning_questions() {
     let roadmap = fs::read_to_string(state.join(ROADMAP)).unwrap();
     assert!(notes(&db, &project).is_empty());
 
-    let stripe = Answer::Text("Stripe".into());
+    let stripe = Answer {
+        picks: Vec::new(),
+        comment: Some("Stripe".into()),
+    };
     assert_eq!(
         questions::answer(&db, pending[0].id, pending[0].version, &stripe).unwrap(),
         Settlement::Settled
@@ -496,7 +499,10 @@ fn unclear_points_become_planning_questions() {
         questions::dismiss(&db, pending[1].id, pending[1].version).unwrap(),
         Settlement::Settled
     );
-    let adyen = Answer::Text("Adyen".into());
+    let adyen = Answer {
+        picks: Vec::new(),
+        comment: Some("Adyen".into()),
+    };
     assert_eq!(
         questions::answer(&db, pending[0].id, pending[0].version, &adyen).unwrap(),
         Settlement::Stale,
@@ -598,7 +604,10 @@ fn a_planted_owner_answers_section_cannot_pass_for_engine_text() {
         logged[0], 1,
         "the planted marker names the real question's id"
     );
-    let stripe = Answer::Text("Stripe".into());
+    let stripe = Answer {
+        picks: Vec::new(),
+        comment: Some("Stripe".into()),
+    };
     assert_eq!(
         questions::answer(&engine.db, 1, 0, &stripe).unwrap(),
         Settlement::Settled

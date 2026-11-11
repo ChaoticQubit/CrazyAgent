@@ -3477,9 +3477,10 @@ async fn desktop_answer_question(
     text: Option<String>,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state)
-        .await?
-        .answer_question(id, version, option, text)?;
+    let call =
+        lock(&state)
+            .await?
+            .answer_question(id, version, option.into_iter().collect(), text)?;
     call.await
 }
 

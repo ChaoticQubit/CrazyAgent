@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::project_setup::CONTEXT_DIRECTORY;
 use crate::protocol::ProjectId;
-use crate::questions::{Ask, EngineSource};
+use crate::questions::{Ask, EngineSource, QuestionKind};
 use std::path::Path;
 
 pub mod prompt;
@@ -322,6 +322,7 @@ pub fn raise(database: &Path, project: &str, plan: &Plan) -> Result<Vec<u64>, En
     for question in plan.questions() {
         let ask = Ask {
             question,
+            kind: QuestionKind::Text,
             options: Vec::new(),
             recommended: None,
             context: Some(QUESTION_CONTEXT.to_owned()),

@@ -5326,6 +5326,7 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
 
     let ask = crate::questions::Ask {
         question: "Which database should the service use?".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: vec![],
         recommended: None,
         context: None,
@@ -5343,7 +5344,10 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
             &fixture.connection,
             question,
             0,
-            &crate::questions::Answer::Text(answer.into()),
+            &crate::questions::Answer {
+                picks: Vec::new(),
+                comment: Some(answer.into())
+            },
         )
         .unwrap(),
         crate::questions::Settlement::Settled
@@ -5432,7 +5436,10 @@ fn a_sub_agent_s_question_is_logged_on_a_tick_and_the_owner_s_answer_is_typed_ba
             &fixture.connection,
             pending[0].id,
             pending[0].version,
-            &crate::questions::Answer::Text(answer.into()),
+            &crate::questions::Answer {
+                picks: Vec::new(),
+                comment: Some(answer.into())
+            },
         )
         .unwrap(),
         crate::questions::Settlement::Settled
@@ -5466,6 +5473,7 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
     for earlier in 1..crate::questions::PENDING_PER_ASKER_MAX {
         let ask = Ask {
             question: format!("Earlier question {earlier}?"),
+            kind: crate::questions::QuestionKind::Text,
             options: vec![],
             recommended: None,
             context: None,

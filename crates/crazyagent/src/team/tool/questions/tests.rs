@@ -89,6 +89,7 @@ fn shipping() -> Value {
 fn shipped() -> Call {
     Call::Ask {
         question: "Ship the release on Friday?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Friday".into(), "Monday".into()],
         recommended: Some("Friday".into()),
         context: Some("Every check passes today.".into()),
@@ -195,6 +196,7 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
     planted.push(b'\n');
     let unchecked = Call::Ask {
         question: "Which day?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Friday".into()],
         recommended: Some("Sunday".into()),
         context: None,
@@ -253,6 +255,7 @@ fn a_sub_agent_hears_why_its_question_was_not_logged() {
     let asker = Asker::Agent(AGENT);
     let ask = crate::questions::Ask {
         question: "Ship the release on Friday?".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: None,
@@ -324,6 +327,7 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
 fn asked(case: &Case, asker: &Asker, question: &str) -> u64 {
     let ask = crate::questions::Ask {
         question: question.into(),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: None,

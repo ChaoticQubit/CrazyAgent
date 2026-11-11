@@ -134,6 +134,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         &EngineSource::Mapping,
         &Ask {
             question: "Which database should the app use?\nIt stores recipes.".into(),
+            kind: crazyagent::questions::QuestionKind::Single,
             options: vec!["Postgres".into(), "SQLite".into()],
             recommended: Some("SQLite".into()),
             context: Some("It runs on one laptop.".into()),
@@ -145,6 +146,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         &EngineSource::Mapping,
         &Ask {
             question: "Should recipes be public?".into(),
+            kind: crazyagent::questions::QuestionKind::Text,
             options: vec![],
             recommended: None,
             context: None,
@@ -184,17 +186,17 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
 
     assert_eq!(
         bridge
-            .answer_question(asked.id, asked.version, None, None)
+            .answer_question(asked.id, asked.version, Vec::new(), None)
             .err()
             .map(|error| error.code),
         Some("questions_answer_invalid")
     );
     bridge
-        .answer_question(asked.id, asked.version, Some(1), None)?
+        .answer_question(asked.id, asked.version, vec![1], None)?
         .await?;
     assert_eq!(
         bridge
-            .answer_question(asked.id, asked.version, Some(0), None)?
+            .answer_question(asked.id, asked.version, vec![0], None)?
             .await
             .unwrap_err()
             .code,

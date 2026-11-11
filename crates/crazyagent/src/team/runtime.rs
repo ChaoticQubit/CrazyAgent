@@ -1307,7 +1307,7 @@ impl TeamRuntime {
     /// scan. Every master is served before the first failure or log refusal is returned.
     fn watch_master_questions(&mut self) -> Result<(), EngineError> {
         use super::screen_questions::{Change, Pending};
-        use crate::questions::{Ask, Asker};
+        use crate::questions::{Ask, Asker, QuestionKind};
         let Some(host) = self.terminal.clone() else {
             return Ok(());
         };
@@ -1362,6 +1362,7 @@ impl TeamRuntime {
                 } => {
                     let ask = Ask {
                         question: text.clone(),
+                        kind: QuestionKind::Text,
                         options: Vec::new(),
                         recommended: None,
                         context: None,

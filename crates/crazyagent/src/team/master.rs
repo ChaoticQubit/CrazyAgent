@@ -1137,12 +1137,14 @@ fn answer(
         }
         Call::Ask {
             question,
+            kind,
             options,
             recommended,
             context,
         } => {
             let ask = crate::questions::Ask {
                 question,
+                kind,
                 options,
                 recommended,
                 context,

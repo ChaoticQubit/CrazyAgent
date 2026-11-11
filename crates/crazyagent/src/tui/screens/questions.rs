@@ -293,9 +293,15 @@ impl ProjectQuestions {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let typed = input.value().trim();
                 let answer = if !typed.is_empty() {
-                    Answer::Text(typed.to_owned())
+                    Answer {
+                        picks: Vec::new(),
+                        comment: Some(typed.to_owned()),
+                    }
                 } else if let Some(at) = *option {
-                    Answer::Option(u8::try_from(at).expect("options stay below OPTIONS_MAX"))
+                    Answer {
+                        picks: vec![u8::try_from(at).expect("options stay below OPTIONS_MAX")],
+                        comment: None,
+                    }
                 } else {
                     self.notice = Some(Notice::problem("Type an answer or pick an option."));
                     return;

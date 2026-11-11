@@ -1550,6 +1550,7 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         &crate::questions::Asker::Master(1),
         &crate::questions::Ask {
             question: "Ship on Friday?".into(),
+            kind: crate::questions::QuestionKind::Text,
             options: Vec::new(),
             recommended: None,
             context: None,

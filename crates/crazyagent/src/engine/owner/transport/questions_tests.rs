@@ -59,8 +59,9 @@ fn settled(reply: Result<Reply, EngineError>) -> Settlement {
 fn asked(question: &str) -> Ask {
     Ask {
         question: question.into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Yes".into(), "No".into()],
-        recommended: None,
+        recommended: Some("Yes".into()),
         context: None,
     }
 }
@@ -104,11 +105,11 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
         )
     };
     assert_eq!(
-        settled(answer(first, 0, json!({"option": 0}))),
+        settled(answer(first, 0, json!({"picks": [0]}))),
         Settlement::Settled
     );
     assert_eq!(
-        settled(answer(first, 0, json!({"text": "No"}))),
+        settled(answer(first, 0, json!({"comment": "No"}))),
         Settlement::Stale
     );
     assert_eq!(settled(dismiss(second, 1)), Settlement::Stale);
@@ -130,8 +131,10 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
         other => panic!("expected counts, got {other:?}"),
     }
     let refused = [
-        answer(second + 1, 0, json!({"text": "Yes"})).unwrap_err().0,
-        answer(first, 1, json!({"option": 0, "text": "Yes"}))
+        answer(second + 1, 0, json!({"comment": "Yes"}))
+            .unwrap_err()
+            .0,
+        answer(first, 1, json!({"picks": [], "comment": null}))
             .unwrap_err()
             .0,
         answer(first, 1, json!({})).unwrap_err().0,
@@ -146,15 +149,17 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
     );
     let third = questions::ask(&db, &project, &master, &asked("Use Postgres?")).unwrap();
     let refused = [
-        answer(third, 0, json!({"option": 2})).unwrap_err().0,
-        answer(third, 0, json!({"text": "   "})).unwrap_err().0,
-        answer(third, 0, json!({"text": "yes\u{202e}no"}))
+        answer(third, 0, json!({"picks": [2]})).unwrap_err().0,
+        answer(third, 0, json!({"picks": [0, 1]})).unwrap_err().0,
+        answer(third, 0, json!({"comment": "   "})).unwrap_err().0,
+        answer(third, 0, json!({"picks": [0], "comment": "yes\u{202e}no"}))
             .unwrap_err()
             .0,
     ];
     assert_eq!(
         refused,
         [
+            "questions_option_invalid",
             "questions_option_invalid",
             "questions_answer_invalid",
             "questions_text_invalid"
@@ -185,6 +190,18 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
             ),
         ]
     );
+    assert_eq!(
+        settled(answer(
+            third,
+            0,
+            json!({"picks": [1], "comment": "Not yet."})
+        )),
+        Settlement::Settled
+    );
+    assert_eq!(
+        listed(&root, None).items[0].answer.as_deref(),
+        Some("No\nComment: Not yet.")
+    );
     for code in &refused {
         assert!(QUESTIONS_CODES.contains(&code.as_str()), "{code}");
     }
@@ -199,6 +216,7 @@ fn a_full_page_of_the_largest_questions_fits_one_owner_frame() {
     for n in 0..questions::PENDING_PER_PROJECT_MAX {
         let largest = Ask {
             question: format!("{n} {}", "\\".repeat(questions::QUESTION_BYTES_MAX - 4)),
+            kind: crate::questions::QuestionKind::Single,
             options: ["a", "b", "c", "d", "e", "f"]
                 .iter()
                 .map(|letter| letter.repeat(questions::OPTION_BYTES_MAX))
@@ -229,13 +247,16 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
     for body in [
         r#"{"questions":{"kind":"list"}}"#,
         r#"{"questions":{"kind":"list","project":"alpha","pending_only":true}}"#,
-        r#"{"questions":{"kind":"answer","id":1,"text":"x"}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"comment":"x"}}"#,
         r#"{"questions":{"kind":"list","project":"a b","after":null}}"#,
         r#"{"questions":{"kind":"dismiss","id":1,"version":-1}}"#,
         r#"{"questions":{"kind":"dismiss","id":1,"version":0,"force":true}}"#,
-        r#"{"questions":{"kind":"answer","id":1,"version":0,"option":256}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"picks":[256]}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"picks":0}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"option":1}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"text":"x"}}"#,
         r#"{"questions":{"kind":"ask","project":"alpha","question":"x"}}"#,
-        r#"{"questions":{"kind":"answer","id":"1","version":0,"text":"x"}}"#,
+        r#"{"questions":{"kind":"answer","id":"1","version":0,"comment":"x"}}"#,
         r#"{"questions":{"kind":"counts","project":"alpha"}}"#,
     ] {
         assert_eq!(
@@ -252,7 +273,7 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
         parse(long.as_bytes()).unwrap_err().0,
         "questions_request_bounds"
     );
-    let largest = json!({"questions": {"kind": "answer", "id": u64::MAX, "version": u64::MAX, "text": "\\".repeat(questions::ANSWER_BYTES_MAX)}});
+    let largest = json!({"questions": {"kind": "answer", "id": u64::MAX, "version": u64::MAX, "picks": [0, 1, 2, 3, 4, 5], "comment": "\\".repeat(questions::ANSWER_BYTES_MAX)}});
     let bytes = serde_json::to_vec(&largest).unwrap();
     assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
     assert!(parse(&bytes).is_ok());
