@@ -33,6 +33,9 @@ const RUNNING: &str = "Running a command";
 const PLANNING: &str = "Updating its plan";
 const WORKING: &str = "Working";
 const READ_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
+/// Folders that hold machine credentials by convention, kept out of activity lines though
+/// their names carry no secret word.
+const CREDENTIAL_FOLDERS: [&str; 6] = [".ssh", ".aws", ".kube", ".docker", ".azure", ".gcloud"];
 
 /// What a master turn's activity lines may name: paths below the master's worktree, never
 /// one in the project's hidden folders (kept relative to the project). `blind` names no path
@@ -124,7 +127,11 @@ impl Screen {
             path
         };
         let text = relative.to_str()?;
-        if text.is_empty() || text.len() > PATH_BYTES_MAX || text.chars().any(char::is_control) {
+        if text.is_empty()
+            || text.len() > PATH_BYTES_MAX
+            || text.chars().any(char::is_control)
+            || crate::memory::hidden_text(text)
+        {
             return None;
         }
         let parts: Vec<&str> = text.split('/').collect();
@@ -135,6 +142,9 @@ impl Screen {
                 || secret_like(part)
                 || part.eq_ignore_ascii_case(".git")
                 || part.eq_ignore_ascii_case(CRAZYAGENT_DIRECTORY)
+                || CREDENTIAL_FOLDERS
+                    .iter()
+                    .any(|folder| part.eq_ignore_ascii_case(folder))
         };
         if parts.iter().any(refused) || self.hidden.iter().any(|folder| below(&parts, folder)) {
             return None;
@@ -151,11 +161,17 @@ fn below(parts: &[&str], folder: &Path) -> bool {
             .iter()
             .zip(parts)
             .all(|(component, part)| match component {
-                Component::Normal(name) => name
-                    .to_str()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(part)),
+                Component::Normal(name) => name.to_str().is_some_and(|name| same_name(name, part)),
                 _ => false,
             })
+}
+
+/// Whether a path part may name the same folder as a hidden folder's part on a case- and
+/// normalization-insensitive file system: equal ignoring ASCII case, or both holding a
+/// character past ASCII, since no Unicode normalization table is at hand; that fails closed.
+/// Inputs: the hidden folder's part and the path's part. Output: true when they may match.
+fn same_name(hidden: &str, part: &str) -> bool {
+    hidden.eq_ignore_ascii_case(part) || (!hidden.is_ascii() && !part.is_ascii())
 }
 
 fn engine_tool(name: &str) -> Option<&'static str> {
@@ -219,15 +235,16 @@ pub(crate) struct Board {
 impl Board {
     /// Starts keeping one turn's activity, empty. Inputs: the conversation and the turn.
     /// Output: the watch that records the turn's lines and forgets them when dropped, or
-    /// none when `TURNS_MAX` other turns are kept, so the turn runs without lines.
+    /// none when the turn is watched already or `TURNS_MAX` turns are kept, so the turn
+    /// runs without lines and never takes or drops another watch's lines.
     pub(crate) fn watch(&self, session: &SessionId, turn: &RequestId) -> Option<Watch<'_>> {
         let key = (session.clone(), turn.clone());
         let mut turns = self.turns.lock().ok()?;
-        if turns.len() >= TURNS_MAX && !turns.contains_key(&key) {
+        if turns.contains_key(&key) || turns.len() >= TURNS_MAX {
             return None;
         }
-        turns.insert(key.clone(), VecDeque::new());
-        assert!(turns.len() <= TURNS_MAX);
+        let replaced = turns.insert(key.clone(), VecDeque::new());
+        assert!(replaced.is_none() && turns.len() <= TURNS_MAX);
         Some(Watch { board: self, key })
     }
 
@@ -284,20 +301,20 @@ impl Drop for Watch<'_> {
 }
 
 impl Engine {
-    /// Adds each outstanding master turn's live activity lines to a read of master turns;
-    /// any other read passes unchanged. Input: the read. Output: the read.
+    /// Adds the live activity lines of the first outstanding master turn (a conversation has
+    /// at most one) to a read of master turns, so one page carries at most `LINES_MAX` lines
+    /// as the frame bound counts; any other read passes unchanged. Input: the read. Output:
+    /// the read.
     pub(crate) fn with_master_activity(&self, read: OwnerReadReply) -> OwnerReadReply {
         with_lines(&self.master_activity, read)
     }
 }
 
 fn with_lines(board: &Board, mut read: OwnerReadReply) -> OwnerReadReply {
-    if let OwnerData::ProjectMasterTurns { page } = &mut read.data {
-        for turn in page.turns.iter_mut() {
-            if turn.phase.outstanding() {
-                turn.activity = board.lines(&page.session_id, &turn.id);
-            }
-        }
+    if let OwnerData::ProjectMasterTurns { page } = &mut read.data
+        && let Some(turn) = page.turns.iter_mut().find(|turn| turn.phase.outstanding())
+    {
+        turn.activity = board.lines(&page.session_id, &turn.id);
     }
     read
 }

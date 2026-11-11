@@ -96,6 +96,14 @@ fn a_path_that_could_tell_a_secret_or_leave_the_worktree_is_never_named() {
         json!({"file_path": "/w/tree/client-x/contract.md"}),
         json!({"file_path": "/w/tree/Client-X/notes/a.md"}),
         json!({"file_path": "/w/tree/docs/bell\u{7}.md"}),
+        json!({"file_path": "/w/tree/docs/invoice\u{202e}dm.exe"}),
+        json!({"file_path": "/w/tree/docs/a\u{200b}b.md"}),
+        json!({"file_path": "/w/tree/.ssh/config"}),
+        json!({"file_path": "/w/tree/.AWS/config"}),
+        json!({"file_path": "/w/tree/deploy/.kube/config"}),
+        json!({"file_path": "/w/tree/.docker/config.json"}),
+        json!({"file_path": "/w/tree/.azure/profile.json"}),
+        json!({"file_path": "/w/tree/.gcloud/settings.json"}),
         json!({"file_path": format!("{}.md", "a".repeat(PATH_BYTES_MAX - 2))}),
         json!({"file_path": 7}),
         json!({"omitted_bytes": 90000}),
@@ -117,6 +125,19 @@ fn a_path_that_could_tell_a_secret_or_leave_the_worktree_is_never_named() {
             .as_deref(),
         Some("Editing a file")
     );
+    let accented = Screen::new(
+        Path::new("/w/tree"),
+        Path::new("/p/repo"),
+        &[PathBuf::from("/p/repo/Caf\u{e9}")],
+    );
+    let read = |path: &str| {
+        accented
+            .label(&tool_use("Read", json!({ "file_path": path })))
+            .unwrap()
+    };
+    assert_eq!(read("/w/tree/Cafe\u{301}/menu.md"), "Reading a file");
+    assert_eq!(read("/w/tree/CAF\u{c9}/menu.md"), "Reading a file");
+    assert_eq!(read("/w/tree/docs/menu.md"), "Reading docs/menu.md");
     let outside = Screen::new(
         Path::new("/w/tree"),
         Path::new("/p/repo"),
@@ -349,18 +370,27 @@ fn the_board_refuses_a_turn_past_its_bound_and_frees_a_place_when_a_turn_ends() 
     let watch = board.watch(&session, &late).unwrap();
     watch.record("Thinking".into(), 1);
     assert_eq!(board.lines(&session, &late).len(), 1);
+    watches.pop();
+    assert!(board.watch(&session, &late).is_none());
+    assert_eq!(board.lines(&session, &late).len(), 1);
+    drop(watch);
+    assert!(board.lines(&session, &late).is_empty());
+    assert!(board.watch(&session, &late).is_some());
 }
 
 #[test]
-fn a_read_of_master_turns_gets_lines_on_its_outstanding_turn_only() {
+fn a_read_of_master_turns_gets_lines_on_its_first_outstanding_turn_only() {
     let board = Board::default();
     let session = SessionId::new("session-1").unwrap();
     let running = turn(2, MasterTurnPhase::Running);
     let settled = turn(1, MasterTurnPhase::Succeeded);
+    let later = turn(3, MasterTurnPhase::WaitingApproval);
     let watch = board.watch(&session, &running.id).unwrap();
     let ended = board.watch(&session, &settled.id).unwrap();
+    let second = board.watch(&session, &later.id).unwrap();
     watch.record("Reading src/x.ts".into(), 7);
     ended.record("Writing a reply".into(), 3);
+    second.record("Waiting for approval".into(), 9);
     let read = OwnerReadReply {
         revision: Cursor::new(4),
         config_id: ConfigId::new("c".repeat(64)).unwrap(),
@@ -368,7 +398,7 @@ fn a_read_of_master_turns_gets_lines_on_its_outstanding_turn_only() {
             page: MasterTurnPage {
                 project_id: ProjectId::new("alpha").unwrap(),
                 session_id: session.clone(),
-                turns: vec![settled, running],
+                turns: vec![settled, running, later],
                 next: None,
             },
         },
@@ -384,6 +414,7 @@ fn a_read_of_master_turns_gets_lines_on_its_outstanding_turn_only() {
             text: "Reading src/x.ts".into(),
         }]
     );
+    assert!(page.turns[2].activity.is_empty());
     let other = OwnerReadReply {
         revision: Cursor::new(4),
         config_id: ConfigId::new("c".repeat(64)).unwrap(),
