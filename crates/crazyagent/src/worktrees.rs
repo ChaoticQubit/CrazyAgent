@@ -18,7 +18,10 @@ use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
-const METADATA_ENTRIES_MAX: usize = 8192;
+/// The most entries of a repository's .git outside its object store that the metadata walk
+/// reads, each one checked. A long-used repository holds thousands in its rerere cache and
+/// ref logs, so the bound leaves room for those and still ends the walk on a planted tree.
+const METADATA_ENTRIES_MAX: usize = 65_536;
 const OBJECT_ENTRIES_MAX: usize = 262_144;
 const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
 const SHOWN_ENTRY_BYTES_MAX: usize = 160;
