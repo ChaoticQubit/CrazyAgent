@@ -1610,7 +1610,7 @@ fn confirming_links_the_found_files_unless_the_owner_turns_them_off() {
         )))));
         shell.key(Key::Tab);
         keys(&mut shell, "Keeps notes.");
-        for _ in 0..4 {
+        for _ in 0..3 {
             shell.key(Key::Tab);
         }
         if turn_off {
@@ -1637,6 +1637,116 @@ fn confirming_links_the_found_files_unless_the_owner_turns_them_off() {
         Some(vec![ROADMAP.to_owned(), "docs/rivals.md".to_owned()])
     );
     assert_eq!(sent(true), Some(Vec::new()));
+}
+
+#[test]
+fn planning_a_roadmap_is_off_and_skipped_while_the_found_roadmap_is_linked() {
+    const ROADMAP: &str = "docs/roadmap.md";
+    const PLAN: &str = "[x] Plan a roadmap after research";
+    const NOTE: &str = "Not planned while the found roadmap is linked.";
+    let sent = |shell: &mut Shell| {
+        shell.key(Key::Enter);
+        let Some(Request::Setup(SetupQuery::Change { action, .. })) =
+            shell.ctx.next_screen_request()
+        else {
+            panic!("confirm sends the setup change");
+        };
+        let SetupAction::Update { setup, kept, .. } = action else {
+            panic!("confirm updates the project setup");
+        };
+        (
+            setup.research.contains(&ResearchKind::RoadmapPlanning),
+            kept,
+        )
+    };
+    let opened = |planned: bool| {
+        let (mut shell, project) = review_with(|view| {
+            view.facts.roadmap = vec![ROADMAP.into()];
+            if planned {
+                view.draft.research = vec![ResearchKind::RoadmapPlanning];
+            }
+        });
+        while shell.ctx.next_request().is_some() {}
+        let stored = crate::project_setup::StoredSetup {
+            project_id: project.clone(),
+            name: "notes".into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: true,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 1,
+            },
+            documents: vec![],
+            folder: "/Users/owner/Projects/notes".into(),
+            created_ms: 0,
+            revision: 7,
+        };
+        shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+            SetupEvent {
+                query: SetupQuery::Setup { project },
+                result: Ok(crate::project_setup::SetupView::Setup(Some(Box::new(
+                    stored,
+                )))),
+            },
+        )))));
+        shell.key(Key::Tab);
+        keys(&mut shell, "Keeps notes.");
+        for _ in 0..3 {
+            shell.key(Key::Tab);
+        }
+        shell
+    };
+
+    let mut linked = opened(true);
+    let rows = render(&mut linked, 100, 80);
+    assert!(!shows(&rows, PLAN), "{rows:#?}");
+    assert!(shows(&rows, NOTE), "{rows:#?}");
+    linked.key(Key::BackTab);
+    linked.key(Key::Char(' '));
+    linked.key(Key::Tab);
+    linked.key(Key::Tab);
+    assert_eq!(
+        sent(&mut linked),
+        (false, Some(vec![ROADMAP.to_owned()])),
+        "the toggle is skipped, so no planning is asked for beside the linked roadmap"
+    );
+
+    let mut unlinked = opened(false);
+    unlinked.key(Key::Char(' '));
+    unlinked.key(Key::BackTab);
+    unlinked.key(Key::Char(' '));
+    let rows = render(&mut unlinked, 100, 80);
+    assert!(shows(&rows, PLAN), "{rows:#?}");
+    assert!(!shows(&rows, NOTE), "{rows:#?}");
+    unlinked.key(Key::Tab);
+    unlinked.key(Key::Tab);
+    assert_eq!(
+        sent(&mut unlinked),
+        (true, Some(Vec::new())),
+        "with the files turned off the owner can ask for a planned roadmap"
+    );
+
+    let mut again = opened(false);
+    again.key(Key::Char(' '));
+    again.key(Key::BackTab);
+    again.key(Key::Char(' '));
+    again.key(Key::Tab);
+    again.key(Key::Char(' '));
+    let rows = render(&mut again, 100, 80);
+    assert!(!shows(&rows, PLAN), "{rows:#?}");
+    assert!(shows(&rows, NOTE), "{rows:#?}");
+    again.key(Key::Tab);
+    assert_eq!(
+        sent(&mut again),
+        (false, Some(vec![ROADMAP.to_owned()])),
+        "linking the files again takes the planning back off"
+    );
 }
 
 #[test]

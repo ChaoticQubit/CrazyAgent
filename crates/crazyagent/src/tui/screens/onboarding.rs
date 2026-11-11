@@ -30,6 +30,7 @@ const STACK_ITEMS_MAX: usize = 32;
 const PLATFORMS_PER_ROW: usize = 3;
 const LINKED_LABEL: &str = "Use these files";
 const LINKED_NOTE: &str = "CrazyAgent reads them from your repo; edits go to those files.";
+const ROADMAP_LINKED_NOTE: &str = "Not planned while the found roadmap is linked.";
 const GRAPH_OFF: &str = "Graphify is off in Setup, so no code graph is built.";
 const GRAPH_MISSING: &str =
     "Graphify isn't installed, so no code graph is built. Install it in Setup.";
@@ -116,9 +117,9 @@ impl Review {
     }
 
     /// Moves the focus on, past the roadmap and linked files toggles once the setup is
-    /// saved, since planning after research and linking belong to the first setup, and past
-    /// the linked files toggle when the mapping found no file. Takes the direction. Returns
-    /// the focus.
+    /// saved, since planning after research and linking belong to the first setup, past the
+    /// roadmap toggle while the found roadmap is linked, and past the linked files toggle
+    /// when the mapping found no file. Takes the direction. Returns the focus.
     fn step(&self, forward: bool) -> Focus {
         let mut next = self.focus.step(forward);
         while self.skipped(next) {
@@ -129,10 +130,35 @@ impl Review {
 
     fn skipped(&self, focus: Focus) -> bool {
         match focus {
-            Focus::Roadmap => self.onboarding.finished,
+            Focus::Roadmap => self.onboarding.finished || self.roadmap_linked(),
             Focus::Linked => self.onboarding.finished || self.found().is_empty(),
             _ => false,
         }
+    }
+
+    /// Whether the found roadmap is linked on this confirm: the linked files toggle is on
+    /// and one of the found files is one the engine links as the roadmap, a roadmap file or
+    /// a roadmap planning file that the links store takes. The engine then plans no
+    /// roadmap, so the roadmap toggle shows off and is skipped. Returns the answer.
+    fn roadmap_linked(&self) -> bool {
+        let facts = &self.onboarding.facts;
+        let planned = |path: &String| {
+            facts.research.iter().any(|found| {
+                found.kind == ResearchKind::RoadmapPlanning && found.files.contains(path)
+            })
+        };
+        !self.onboarding.finished
+            && self.linked
+            && self.found().iter().any(|path| {
+                crate::project_setup::links::below_folder(path)
+                    && (facts.roadmap.contains(path) || planned(path))
+            })
+    }
+
+    /// Whether this confirm asks for a roadmap planned after research: the roadmap toggle
+    /// is on and no found roadmap is linked in its place. Returns the answer.
+    fn plans_roadmap(&self) -> bool {
+        self.roadmap && !self.roadmap_linked()
     }
 
     /// The repository files the mapping found to link, its roadmap files first, each once
@@ -201,7 +227,7 @@ impl Review {
         setup
             .research
             .retain(|kind| *kind != ResearchKind::RoadmapPlanning);
-        if self.roadmap {
+        if self.plans_roadmap() {
             setup.research.push(ResearchKind::RoadmapPlanning);
         }
         let found = self.found();
@@ -806,12 +832,19 @@ impl OnboardingPage {
         }
         lines.push(Line::default());
         if !review.onboarding.finished {
-            let text = checkbox(review.roadmap, ROADMAP_LABEL);
+            let text = checkbox(review.plans_roadmap(), ROADMAP_LABEL);
             lines.push(Line::from(if editing && review.focus == Focus::Roadmap {
                 Span::styled(text, theme.selection)
             } else {
                 Span::raw(text)
             }));
+            if review.roadmap_linked() {
+                lines.extend(
+                    wrap(ROADMAP_LINKED_NOTE, limit)
+                        .into_iter()
+                        .map(|line| styled(line, Role::Muted, theme)),
+                );
+            }
             lines.push(Line::default());
         }
         let facts = &review.onboarding.facts;
