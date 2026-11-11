@@ -878,6 +878,45 @@ fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
 }
 
 #[test]
+fn a_competitor_report_as_long_as_the_runner_allows_reads_and_a_longer_one_does_not() {
+    use crate::project_setup::links::LINK_BYTES_MAX;
+    use crate::research::runner::REPORT_BYTES_MAX;
+    const LINE: &str = "Gamma leads.\n";
+    let (db, project, folder) = case();
+    let long = LINE.repeat(LINK_BYTES_MAX as usize / LINE.len() + 1);
+    assert!(long.len() as u64 > LINK_BYTES_MAX);
+    assert!(long.len() as u64 <= REPORT_BYTES_MAX);
+    let stored = job_report(&db, folder.path(), &long);
+    let report = folder.path().join(".crazyagent").join(&stored);
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Report {
+            path: stored.clone()
+        },
+        "a report over the linked file bound and within the runner's is the report"
+    );
+    assert_eq!(report_text(folder.path(), &stored), Some(long));
+
+    std::fs::write(&report, "x".repeat(REPORT_BYTES_MAX as usize)).unwrap();
+    assert_eq!(
+        report_text(folder.path(), &stored).map(|text| text.len() as u64),
+        Some(REPORT_BYTES_MAX)
+    );
+    std::fs::write(&report, "x".repeat(REPORT_BYTES_MAX as usize + 1)).unwrap();
+    assert_eq!(report_text(folder.path(), &stored), None);
+    assert_eq!(
+        read(&db, &project, folder.path(), 1).unwrap().competitors,
+        Competitors::Missing,
+        "a report longer than the runner writes is not read"
+    );
+    assert_eq!(
+        crate::research::runner::ResearchLimits::default().report_bytes_max,
+        REPORT_BYTES_MAX,
+        "the runner writes under the bound the Overview reads under"
+    );
+}
+
+#[test]
 fn no_run_of_tildes_in_the_data_of_a_prompt_leaves_a_fence() {
     for run in [3, 4, 5, 6, 7, 9, 30, 31] {
         let tildes = "~".repeat(run);

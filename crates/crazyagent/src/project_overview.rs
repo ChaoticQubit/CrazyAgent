@@ -942,10 +942,17 @@ fn present(db: &Connection, table: &str) -> Result<bool, EngineError> {
 
 /// The text of a research job's report. The stored path is relative to the project's
 /// state folder, where the research runner writes it, and is opened with no link followed
-/// from that folder down. Inputs: the project folder and the stored path. Output: the
-/// text, or none for a report that is missing or that the links reader refuses.
+/// from that folder down, within the bound the runner writes a report under, so every
+/// report the runner stored reads. Inputs: the project folder and the stored path. Output:
+/// the text, or none for a report that is missing, longer than
+/// [`REPORT_BYTES_MAX`](crate::research::runner::REPORT_BYTES_MAX) or that the links
+/// reader refuses.
 pub(crate) fn report_text(folder: &Path, path: &str) -> Option<String> {
-    links::read_linked(&crate::projects_home::state_folder(folder), path)
+    links::read_within(
+        &crate::projects_home::state_folder(folder),
+        path,
+        crate::research::runner::REPORT_BYTES_MAX,
+    )
 }
 
 /// What the Competitors tab can build on: the report of the project's newest finished
