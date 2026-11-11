@@ -156,6 +156,17 @@ test("a master turn names its account, and a turn no account could run names eac
     "work-codex is ready on codex: change the master to codex to use it.",
   ]);
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [blocked]), "Not signed in");
+  const names = [{ id: "claude-a", name: "Work Claude" }, { id: "codex-c", name: "Work Codex" }];
+  assert.deepEqual(research.accountLines({ ...running, attempt: { connection: { id: "claude-a", account_ref: "work-claude" } } }, names), ["On account Work Claude"],
+    "the account a turn runs on goes by its name (OB-4)");
+  assert.deepEqual(research.accountLines({ ...running, attempt: { connection: { id: "claude-z", account_ref: "gone-claude" } } }, names), ["On account gone-claude"],
+    "an account with no name falls back to the reference");
+  assert.deepEqual(research.accountLines(blocked, names), [
+    "Work Claude: not signed in",
+    "home-claude: rate limited, paused for a few minutes",
+    "spare-claude: sign-in could not be renewed just now, available again in a minute",
+    "Work Codex is ready on codex: change the master to codex to use it.",
+  ]);
 });
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { loadTeamGraph, nextGeneration, setLiveMaster, setTeamStopped } from "../../api";
+import { listAccounts, loadTeamGraph, nextGeneration, setLiveMaster, setTeamStopped } from "../../api";
 import type { Result } from "../../api";
+import { useLoad } from "../../state";
 import { failureCopy, openMasterProject, readMaster, receiptState, startMaster } from "../../api-projects";
 import type { GraphNode, IntentReceipt, MasterState, TeamStatus } from "../../engine-client";
 import { Button, Icon } from "../../ui";
@@ -11,6 +12,7 @@ import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
 import { ConversationTab, MasterSettingsButton, MasterSettingsDrawer } from "./conversation";
+import { accountName } from "./research";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
@@ -374,6 +376,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
   const own = useMasterSessions(data.id, held === undefined);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
   const sessions = held ?? own;
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
@@ -390,7 +393,8 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     data.reloadTeam();
   };
   const state = liveWord(live);
-  const account = live.kind === "running" ? live.node?.account : null;
+  const accountId = live.kind === "running" ? live.node?.account ?? null : null;
+  const account = accountId === null ? null : accountName(accounts.kind === "ok" ? accounts.value : [], accountId);
   const head = masterHead(harness, live.kind === "running" && live.node ? runningHarness(data.team.result, data.id, live.node.agent) : null, name);
   return <div className="pj-master-live pj-console">
     <div className="pj-console-head">

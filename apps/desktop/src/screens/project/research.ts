@@ -656,14 +656,17 @@ export function delegating(turns: MasterTurn[]): boolean {
 }
 
 /** The account a master turn runs on or, for a turn no account could run, each account
- * of the pool with why, and other harnesses that are ready. Input: the turn. Output: the
- * lines, empty when the turn has not reached an account yet. */
-export function accountLines(turn: MasterTurn): string[] {
-  const account = turn.attempt?.connection.account_ref;
-  if (account) return [`On account ${account}`];
+ * of the pool with why, and other harnesses that are ready. Each account goes by the name
+ * the owner gave it in Accounts, and by the engine's reference only when no name is known.
+ * Inputs: the turn and the owner's account names. Output: the lines, empty when the turn
+ * has not reached an account yet. */
+export function accountLines(turn: MasterTurn, accounts: { id: string; name: string }[] = []): string[] {
+  const named = (id: string | undefined, reference: string) => accounts.find((item) => item.id === id)?.name ?? reference;
+  const attempt = turn.attempt?.connection;
+  if (attempt?.account_ref) return [`On account ${named(attempt.id, attempt.account_ref)}`];
   return (turn.accounts ?? []).map((item) => item.reason === null
-    ? `${item.account_ref} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
-    : `${item.account_ref}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
+    ? `${named(item.connection, item.account_ref)} is ready on ${item.harness}: change the master to ${item.harness} to use it.`
+    : `${named(item.connection, item.account_ref)}: ${accountReasons[item.reason] ?? item.reason.replaceAll("_", " ")}`);
 }
 
 /** The Thinking line for a master turn, with the time since this window sent the message.
