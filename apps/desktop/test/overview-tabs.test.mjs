@@ -356,3 +356,75 @@ test("a shell block on a tab without commands shows whole, with no actions", () 
   assert.match(html, /<pre><code>cargo install alpha\nalpha init<\/code><\/pre>/);
   assert.doesNotMatch(html, />Copy</);
 });
+
+const settings = await import("../src/screens/project/settings.tsx");
+const ok = (value) => ({ kind: "ok", value });
+
+function settingsPage({ overview = {}, runMode = "type_and_run", read, mode, loading = false, note = "" } = {}) {
+  return renderToStaticMarkup(createElement(settings.OverviewSettingsRows, {
+    overview: loading ? undefined : read ?? ok({ ...base(), ...overview }), runMode: loading ? undefined : mode ?? ok(runMode),
+    busy: false, note, onRefresh: () => {}, onApply: () => {}, onRunMode: () => {}, onMove: () => {},
+  }));
+}
+const checked = (label) => new RegExp(`role="radio" aria-checked="true"[^>]*>${label}<`);
+
+test("Project settings lists the three Overview settings with every option", () => {
+  const html = settingsPage({ overview: { refresh: "after_landing", apply: "always_ask" }, runMode: "type_and_run" });
+  for (const word of ["After each landed change set and Refresh", "Refresh only", "Off", "Always ask me", "Apply when I have not edited the tab", "Type and run", "Type only", "Off, Copy only"]) assert.match(html, new RegExp(`>${word}<`));
+  for (const group of ["Overview tabs", "Refreshed tabs", "Run in project terminal"]) assert.match(html, new RegExp(`role="radiogroup" aria-label="${group}"`));
+  assert.equal((html.match(/role="radio"/g) ?? []).length, 8);
+  for (const label of ["After each landed change set and Refresh", "Always ask me", "Type and run"]) assert.match(html, checked(label));
+  assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 3);
+});
+
+test("each Overview setting shows the saved choice", () => {
+  const html = settingsPage({ overview: { refresh: "refresh_only", apply: "when_unedited" }, runMode: "type_only" });
+  for (const label of ["Refresh only", "Apply when I have not edited the tab", "Type only"]) assert.match(html, checked(label));
+  const off = settingsPage({ overview: { refresh: "off" }, runMode: "off" });
+  assert.match(off, checked("Off"));
+  assert.match(off, checked("Off, Copy only"));
+});
+
+test("each Overview setting says what it does, what a refresh costs and the recommended choice", () => {
+  const html = settingsPage();
+  assert.match(html, /A refresh costs one agent run on this project&#x27;s pool\./);
+  assert.match(html, /Recommended: After each landed change set and Refresh\./);
+  assert.match(html, /Recommended: Always ask me\./);
+  assert.match(html, /Recommended: Type and run\./);
+  assert.match(html, /you confirm/);
+});
+
+test("the Overview settings of a project outside the CrazyAgent folder say the tabs need it there and offer the move", () => {
+  const html = settingsPage({ overview: { needs_home: true } });
+  assert.match(html, /Overview tabs need this project in the CrazyAgent folder\./);
+  assert.match(html, /<button[^>]*>Move into CrazyAgent folder<\/button>/);
+  assert.equal((html.match(/role="radio"/g) ?? []).length, 8, "the settings stay");
+  assert.doesNotMatch(settingsPage(), /Overview tabs need this project/);
+});
+
+test("the Overview settings say Loading, and a failed read of one keeps the other", () => {
+  assert.match(settingsPage({ loading: true }), /Loading\.\.\./);
+  assert.doesNotMatch(settingsPage({ loading: true }), /role="radio"/);
+  const lost = settingsPage({ read: { kind: "error", code: "overview_unavailable" } });
+  assert.match(lost, /Couldn&#x27;t load the Overview settings\. The Overview tabs can&#x27;t be read right now\. Try again in a moment\./);
+  assert.equal((lost.match(/role="radio"/g) ?? []).length, 3, "the Run setting still shows");
+  const early = settingsPage({ read: { kind: "not_ready" }, mode: { kind: "not_ready" } });
+  assert.match(early, /the Overview tabs aren&#x27;t in this build\./);
+  assert.match(early, /Run in project terminal isn&#x27;t in this build\./);
+  assert.doesNotMatch(early, /role="radio"/);
+  const half = settingsPage({ mode: { kind: "error", code: "ide_unavailable" } });
+  assert.match(half, /Couldn&#x27;t load the Run in project terminal setting\./);
+  assert.equal((half.match(/role="radio"/g) ?? []).length, 5, "the Overview settings still show");
+});
+
+test("a refused Overview setting shows why", () => {
+  assert.match(settingsPage({ note: "Overview tabs are off for this project." }), /role="status"[^>]*>Overview tabs are off for this project\./);
+});
+
+test("Project settings has an Overview section between General and Pool", () => {
+  assert.equal(settings.settingsSection("overview"), "overview");
+  const html = renderToStaticMarkup(createElement(settings.SettingsTab, { data: projectData(), section: "overview" }));
+  assert.match(html, /<button[^>]*aria-current="page"[^>]*>Overview<\/button>/);
+  assert.match(html, />General<\/button><button[^>]*>Overview<\/button><button[^>]*>Pool<\/button>/);
+  assert.match(html, /<h2[^>]*>Overview<\/h2>/);
+});
