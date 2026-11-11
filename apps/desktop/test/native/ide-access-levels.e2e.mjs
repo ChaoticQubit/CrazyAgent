@@ -36,7 +36,7 @@ const MENU_ROWS = `(() => {
 })()`;
 const TRUST = `(() => ({
   asked: [...document.querySelectorAll(".monaco-dialog-box")].some((box) => (box.textContent ?? "").includes("Do you trust the authors of the files in this")),
-  restricted: [...document.querySelectorAll(".part.banner")].some((banner) => (banner.textContent ?? "").includes("Restricted Mode is intended for safe code browsing.")),
+  restricted: (document.getElementById("status.workspaceTrust")?.textContent ?? "").includes("Restricted Mode"),
 }))()`;
 const TRUST_TERMINAL = `(() => {
   ${CENTRE}
@@ -182,7 +182,7 @@ async function atLevel(t, level, shared) {
 
     if (level.access === "full") {
       await t.test("Full access: workspace trust is on, the IDE opens in Restricted Mode and the extension's views load there", async () => {
-        await ide.until("the Restricted Mode banner", `${TRUST}.restricted`);
+        await ide.until("the Restricted Mode status entry", `${TRUST}.restricted`);
         assert.deepEqual(await page.evaluate(TRUST), { asked: false, restricted: true }, "the pinned build asks nothing at start");
         await me.capture("level-full-restricted-at-start");
         await ide.run("View: Show CrazyAgent");
@@ -287,6 +287,7 @@ async function atLevel(t, level, shared) {
           for (const deadline = Date.now() + STEP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
             assert.ok(Date.now() < deadline, "the Full access server kept running after its level was lowered");
           }
+          assert.doesNotThrow(() => process.kill(Number(pid), 0), `${pid} ended with the server, so nothing was left running`);
           await setLevel(bridge, project, "full", next);
           const reopened = await value(bridge, "e2e_ide_open", { projectId: project });
           writeFileSync(join(evidence, "level-full-left.txt"), `${reopened.left ?? "none"}\n`);
