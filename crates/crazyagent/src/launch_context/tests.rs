@@ -4222,6 +4222,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         transcripts: true,
         off_tools: Vec::new(),
         native_team: None,
+        native_threads: None,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
