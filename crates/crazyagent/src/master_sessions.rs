@@ -2431,29 +2431,35 @@ fn absorb(connection: &Connection, project: &str, session: &str) -> Result<(), E
 }
 
 /// Moves a session's engine-run turns into the store, oldest first: what was asked, the
-/// owner's message or the engine's line, then the reply when one came. Takes the
+/// owner's message or the engine's line, then the reply when one came. A database without
+/// the owner conversation still gets the turns, without the owner's words. Takes the
 /// connection, project and session. Returns whether the session has such turns.
 fn absorb_turns(
     connection: &Connection,
     project: &str,
     session: &str,
 ) -> Result<bool, EngineError> {
-    if !table_exists(connection, "master_turns")?
-        || !table_exists(connection, "conversation_entries")?
-    {
+    if !table_exists(connection, "master_turns")? {
         return Ok(false);
     }
     let backend = session_backend(connection, session)?;
+    let (owner, joined) = if table_exists(connection, "conversation_entries")? {
+        (
+            "CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END",
+            "LEFT JOIN conversation_entries c
+                  ON c.event_cursor=t.input AND c.kind='message' AND c.project=?2",
+        )
+    } else {
+        ("CASE WHEN ?2 IS NULL THEN NULL END", "")
+    };
     let mut statement = connection
-        .prepare(
-            "SELECT CASE WHEN length(CAST(t.id AS BLOB))<=128 THEN t.id END,
-                    CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END,
+        .prepare(&format!(
+            "SELECT CASE WHEN length(CAST(t.id AS BLOB))<=128 THEN t.id END,{owner},
                     CASE WHEN length(CAST(t.body AS BLOB))<=16384 AND json_valid(t.body) THEN json_extract(t.body,'$.engine_request.line') END,
                     CASE WHEN length(CAST(t.body AS BLOB))<=16384 AND json_valid(t.body) THEN json_extract(t.body,'$.reply.text') END
-             FROM master_turns t LEFT JOIN conversation_entries c
-                  ON c.event_cursor=t.input AND c.kind='message' AND c.project=?2
-             WHERE t.session=?1 ORDER BY t.ordinal LIMIT 1024",
-        )
+             FROM master_turns t {joined}
+             WHERE t.session=?1 ORDER BY t.ordinal LIMIT 1024"
+        ))
         .map_err(error)?;
     type Row = (
         Option<String>,

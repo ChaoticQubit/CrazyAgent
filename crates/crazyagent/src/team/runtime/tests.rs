@@ -4197,7 +4197,8 @@ fn noted(fixture: &Fixture, text: &str) -> usize {
 /// project's one live master in its worktree, a session it ran before continues by its
 /// stored id and reads only turns added after the resume, and a session whose conversation
 /// cannot continue, kept on another account than this endpoint or with its record gone,
-/// starts a fresh conversation seeded with what could be read, with a note saying so.
+/// starts a fresh conversation seeded with the session's stored messages, with a note
+/// saying so: the engine's message store outlives the harness record.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
@@ -4329,9 +4330,9 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     switch_session(&fixture.connection, "s-one");
     fixture.until(
         &mut team,
-        "a session whose record is gone starts fresh",
+        "a session whose record is gone starts fresh from the messages the engine stored",
         |f| {
-            noted(f, crate::master_sessions::LOST_NOTE) == 1
+            noted(f, crate::master_sessions::FRESH_NOTE) == 2
                 && launches(f, master).len() == 5
                 && live_agent(&f.connection).is_some()
         },
