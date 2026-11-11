@@ -78,7 +78,7 @@ test("every release, dev or stable, builds only after the whole CI workflow pass
 
 const GUARD = "github.event_name == 'push'";
 const RUNNERS = Object.freeze({
-  linux: `\${{ fromJSON(${GUARD} && '["self-hosted","Linux","X64","oracle"]' || '"ubuntu-22.04"') }}`,
+  linux: "ubuntu-22.04",
   macos: `\${{ fromJSON(${GUARD} && '["self-hosted","macOS","badal"]' || '"macos-15"') }}`,
   windows: "windows-2022",
 });
