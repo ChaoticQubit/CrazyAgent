@@ -217,7 +217,7 @@ test("a harness kind no sub-agent runs on keeps its rows, each saying why instea
     for (const [markup, label] of [[lead, `${name} sub-agents`], [per, `Messages to ${name} agents`]]) {
       const row = markup.slice(markup.indexOf(`data-setting="${label}"`));
       assert.ok(markup.includes(`data-setting="${label}"`), `${label} keeps its row`);
-      assert.equal(row.slice(0, row.indexOf("</div>")).includes("Not available"), !live, label);
+      assert.equal(row.slice(0, row.indexOf("</div>")).includes(sentence[1]), !live, `${label} shows the TUI's words`);
     }
   }
 });

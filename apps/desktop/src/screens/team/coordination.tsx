@@ -87,7 +87,7 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 /** Each coordination harness id with the name the app shows for it. */
 export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
-const NO_SUB_AGENTS = "Not available: it runs only as a project's master, so no sub-agent runs on it yet. The choice applies once one can.";
+const NO_SUB_AGENTS = "Not available: runs only as a master";
 const SUB_AGENT_HARNESSES: readonly CoordHarness[] = ["claude-code", "codex"];
 
 /** Tells why no sub-agent runs on a harness kind: a kind the engine launches no team agent on,

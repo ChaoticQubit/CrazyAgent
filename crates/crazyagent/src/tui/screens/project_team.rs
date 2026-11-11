@@ -2391,8 +2391,8 @@ impl TeamView {
         if let CoordRow::Mode(kind) | CoordRow::Delivery(kind) = row
             && let Some(reason) = crate::team::sub_agents_unavailable(kind)
         {
-            let name = harness_name(kind.as_str(), None);
-            self.notice = Some(Notice::plain(format!("{name} sub-agents: {reason}")));
+            let label = harness_row_label(matches!(row, CoordRow::Delivery(_)), kind);
+            self.notice = Some(Notice::plain(format!("{label} - {reason}")));
             return TeamReply::Handled;
         }
         let (action, done) = match row {
@@ -2703,20 +2703,17 @@ impl TeamView {
         for (index, row) in COORD_ROWS.into_iter().enumerate() {
             let found = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
             let (label, value, note) = match row {
-                CoordRow::Mode(kind) if crate::team::sub_agents_unavailable(kind).is_some() => (
-                    format!("{} sub-agents", harness_name(kind.as_str(), None)),
-                    "Not available".to_owned(),
-                    "  runs only as a master",
-                ),
-                CoordRow::Delivery(kind) if crate::team::sub_agents_unavailable(kind).is_some() => {
+                CoordRow::Mode(kind) | CoordRow::Delivery(kind)
+                    if crate::team::sub_agents_unavailable(kind).is_some() =>
+                {
                     (
-                        format!("Messages to {} agents", harness_name(kind.as_str(), None)),
-                        "Not available".to_owned(),
-                        "  runs only as a master",
+                        harness_row_label(matches!(row, CoordRow::Delivery(_)), kind),
+                        crate::team::NO_SUB_AGENTS.to_owned(),
+                        "",
                     )
                 }
                 CoordRow::Mode(kind) => (
-                    format!("{} sub-agents", harness_name(kind.as_str(), None)),
+                    harness_row_label(false, kind),
                     found(kind)
                         .map_or("", |row| mode_words(row.mode))
                         .to_owned(),
@@ -2727,7 +2724,7 @@ impl TeamView {
                     },
                 ),
                 CoordRow::Delivery(kind) => (
-                    format!("Messages to {} agents", harness_name(kind.as_str(), None)),
+                    harness_row_label(true, kind),
                     found(kind)
                         .map_or("", |row| delivery_words(row.delivery))
                         .to_owned(),
@@ -3707,6 +3704,17 @@ fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
         (at + all.len() - 1) % all.len()
     };
     all[next]
+}
+
+/// The words a per-harness Coordination row goes by, the same as the desktop's: "rcli
+/// sub-agents" for its mode, "Messages to rcli agents" for its message delivery. Inputs:
+/// whether the row is the delivery row and its harness kind. Output: the label.
+fn harness_row_label(delivery: bool, kind: HarnessKind) -> String {
+    let name = harness_name(kind.as_str(), None);
+    match delivery {
+        true => format!("Messages to {name} agents"),
+        false => format!("{name} sub-agents"),
+    }
 }
 
 fn mode_words(mode: SubagentMode) -> &'static str {

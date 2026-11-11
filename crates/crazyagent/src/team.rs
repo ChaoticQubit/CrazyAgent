@@ -365,8 +365,9 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
 }
 
 /// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
-/// control (DEC-141 PA-15), in the TUI and the desktop alike.
-pub const NO_SUB_AGENTS: &str = "Not available: it runs only as a project's master, so no sub-agent runs on it yet. The choice applies once one can.";
+/// control (DEC-141 PA-15), word for word in the TUI and the desktop (PALOW-L2), short enough
+/// for a TUI row at 80 columns.
+pub const NO_SUB_AGENTS: &str = "Not available: runs only as a master";
 
 /// Tells why no sub-agent runs on a harness kind: a kind no launch adapter starts as a team
 /// agent, today rcli, keeps its Coordination rows, which say so (DEC-141 PA-15).

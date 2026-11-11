@@ -3220,19 +3220,20 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
             .find(|line| line.contains(label))
             .unwrap_or_else(|| panic!("{label} keeps its row: {shown:?}"));
         assert!(
-            line.contains("Not available"),
-            "{label} says it cannot apply: {line}"
+            line.contains(crate::team::NO_SUB_AGENTS),
+            "{label} says it cannot apply in the desktop's words: {line}"
         );
     }
     let before = harness_row(&view, HarnessKind::Rcli);
-    for row in [5, 6] {
+    for (row, label) in [(5, "rcli sub-agents"), (6, "Messages to rcli agents")] {
         view.key(press(KeyCode::Down));
         assert_eq!(view.coord.as_ref().unwrap().row, row);
         assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+        let said = format!("{label} - {}", crate::team::NO_SUB_AGENTS);
         assert!(
             view.notice
                 .as_ref()
-                .is_some_and(|notice| notice.text.contains(crate::team::NO_SUB_AGENTS)),
+                .is_some_and(|notice| notice.text == said),
             "row {row}: {:?}",
             view.notice
         );
