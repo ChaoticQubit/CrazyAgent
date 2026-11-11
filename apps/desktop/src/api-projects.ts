@@ -227,6 +227,13 @@ const copy: Record<string, string> = {
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
   planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
+  roadmap_status_off: "Roadmap status is off in Project settings.",
+  roadmap_status_unavailable: "The roadmap status could not be read or saved. Try again.",
+  roadmap_status_invalid: "That roadmap status request could not be read.",
+  roadmap_status_request_invalid: "That roadmap status request could not be read.",
+  roadmap_status_project_missing: "This project no longer exists.",
+  roadmap_status_changed: "The roadmap status changed while it was being read. Try again.",
+  roadmap_status_outcome_unknown: "The engine did not confirm that roadmap status request. Check the status and try again.",
   setup_unconfirmed: "Confirm this project's setup first. Its setup review has the roadmap switch.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
@@ -823,4 +830,73 @@ export function cancelMasterTurn(ticket: string, session: string, turn: string, 
 
 export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => submitMaster(ticket, session, text, generation));
+}
+
+/** The most roadmap items one status holds, the engine's `ITEMS_MAX`. */
+export const ROADMAP_ITEMS_MAX = 200;
+
+export type RoadmapItemStatus = "pending" | "in_progress" | "done" | "tested";
+export type RoadmapRefresh = "after_landing" | "refresh_only" | "off";
+
+/** One roadmap item with where it stands and the evidence line that decided it. */
+export interface RoadmapItemState {
+  item: { section: string; text: string };
+  status: RoadmapItemStatus;
+  evidence: string;
+}
+
+/** A project's roadmap status: the items of the last check, when it ran, whether one runs now
+ * or is due after a landing, the refresh setting, the roadmap file read and why the last check
+ * failed, if it did. */
+export interface RoadmapStatus {
+  items: RoadmapItemState[];
+  checked_ms: number | null;
+  running: boolean;
+  stale: boolean;
+  refresh: RoadmapRefresh;
+  source: string | null;
+  problem: string | null;
+}
+
+const ROADMAP_STATUSES: readonly string[] = ["pending", "in_progress", "done", "tested"];
+const ROADMAP_REFRESHES: readonly string[] = ["after_landing", "refresh_only", "off"];
+
+/** Whether a bridge reply is a roadmap status this window can show: every field of its type,
+ * known status and refresh names, at most `ROADMAP_ITEMS_MAX` items. Input: the reply.
+ * Output: the answer. */
+export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
+  if (typeof value !== "object" || value === null) return false;
+  const status = value as Record<string, unknown>;
+  const text = (field: unknown) => field === null || typeof field === "string";
+  const items = status.items;
+  if (!Array.isArray(items) || items.length > ROADMAP_ITEMS_MAX) return false;
+  const listed = items.every((entry) => typeof entry === "object" && entry !== null
+    && typeof entry.item === "object" && entry.item !== null
+    && typeof entry.item.section === "string" && typeof entry.item.text === "string"
+    && ROADMAP_STATUSES.includes(entry.status) && typeof entry.evidence === "string");
+  return listed && (status.checked_ms === null || typeof status.checked_ms === "number")
+    && typeof status.running === "boolean" && typeof status.stale === "boolean"
+    && typeof status.refresh === "string" && ROADMAP_REFRESHES.includes(status.refresh)
+    && text(status.source) && text(status.problem);
+}
+
+/** Reads a project's roadmap status. Input: the project id. Output: the status, or
+ * `invalid_response` for a reply that is not one. */
+export async function roadmapStatus(id: string): Promise<Result<RoadmapStatus>> {
+  const result = await call<RoadmapStatus>("desktop_roadmap_status", { id });
+  if (result.kind !== "ok" || isRoadmapStatus(result.value)) return result;
+  return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+}
+
+/** Asks the engine to check a project's roadmap status now, without the wait after a landing.
+ * Input: the project id. Output: done, or the engine's refusal, `roadmap_status_off` when the
+ * project's setting is Off. */
+export function refreshRoadmapStatus(id: string): Promise<Result<void>> {
+  return call<void>("desktop_refresh_roadmap_status", { id });
+}
+
+/** Saves when a project's roadmap status is checked. Inputs: the project id and the choice.
+ * Output: done, or the engine's refusal. */
+export function setRoadmapRefresh(id: string, refresh: RoadmapRefresh): Promise<Result<void>> {
+  return call<void>("desktop_set_roadmap_refresh", { id, refresh });
 }
